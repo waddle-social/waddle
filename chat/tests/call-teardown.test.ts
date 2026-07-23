@@ -88,6 +88,25 @@ async function flushCallSideEffects(): Promise<void> {
   }
 }
 
+async function switchToReadyTestRoom(
+  client: BrowserXmppClient,
+  roomJid: string,
+): Promise<void> {
+  const channelId = "__call-teardown-ready-room__";
+  const internals = client as unknown as {
+    connected: boolean;
+    joinedMucs: Map<string, Promise<void>>;
+    joinedMucReady: Set<string>;
+    stopSelfPing: () => void;
+  };
+  internals.connected = true;
+  client.rememberRoomJidForChannel(channelId, roomJid);
+  internals.joinedMucs.set(roomJid, Promise.resolve());
+  internals.joinedMucReady.add(roomJid);
+  await client.switchRoom("w1", channelId);
+  internals.stopSelfPing();
+}
+
 function firstMockCallArg(fn: unknown, index: number): unknown {
   return (fn as { mock: { calls: unknown[][] } }).mock.calls[0]?.[index];
 }
@@ -2650,12 +2669,9 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
       currentRoom: string | null;
-      joinedMucs: Map<string, Promise<void>>;
-      performRoomSwitch: (roomJid: string) => Promise<void>;
     };
     Object.assign(client.xmpp, xmpp);
     client.currentRoom = "old@muc.test";
-    client.joinedMucs.set("new@muc.test", Promise.resolve());
     $callState.set({
       phase: "active",
       peer: "old@muc.test",
@@ -2666,7 +2682,7 @@ describe("MUC group call", () => {
       selfNick: "alice",
     });
 
-    await client.performRoomSwitch("new@muc.test");
+    await switchToReadyTestRoom(events.client, "new@muc.test");
 
     expect(operationOrder).toEqual([]);
     expect(xmpp.leave_room).not.toHaveBeenCalled();
@@ -2678,7 +2694,7 @@ describe("MUC group call", () => {
     });
   });
 
-  test("room switch bails out cleanly when a concurrent disconnect races the join", async () => {
+  test("room switch rejects cleanly when a concurrent disconnect races the join", async () => {
     const events = wireClientEvents();
     let releaseJoin: (() => void) | null = null;
     let joinStarted: (() => void) | null = null;
@@ -2701,18 +2717,22 @@ describe("MUC group call", () => {
     const xmpp = { leave_room, join_room, disconnect };
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
+      connected: boolean;
       currentRoom: string | null;
-      performRoomSwitch: (roomJid: string) => Promise<void>;
+      rememberRoomJidForChannel: (channelId: string, roomJid: string) => void;
+      switchRoom: (spaceId: string, channelId: string) => Promise<void>;
       disconnect: () => Promise<void>;
     };
     Object.assign(client.xmpp, xmpp);
+    client.connected = true;
     client.currentRoom = "old@muc.test";
+    client.rememberRoomJidForChannel("new", "new@muc.test");
 
-    const switched = client.performRoomSwitch("new@muc.test");
+    const switched = client.switchRoom("w1", "new");
     await joinStartedWait;
     const disconnected = client.disconnect();
     releaseJoin?.();
-    await switched;
+    await expect(switched).rejects.toThrow("XMPP disconnected while switching rooms");
     await disconnected;
 
     expect(join_room).toHaveBeenCalledTimes(1);
@@ -2755,8 +2775,6 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
       currentRoom: string | null;
-      joinedMucs: Map<string, Promise<void>>;
-      performRoomSwitch: (roomJid: string) => Promise<void>;
     };
     Object.assign(client.xmpp, xmpp);
     const wiredXmpp = client.xmpp;
@@ -2769,9 +2787,7 @@ describe("MUC group call", () => {
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
     const attemptSid = firstMockCallArg(send_muji_session_initiate, 1);
     expect(attemptSid).not.toBe("old@muc.test");
-    client.joinedMucs.set("new@muc.test", Promise.resolve());
-
-    await client.performRoomSwitch("new@muc.test");
+    await switchToReadyTestRoom(events.client, "new@muc.test");
 
     events.emitCall({
       kind: "session-accept",
@@ -2825,8 +2841,6 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
       currentRoom: string | null;
-      joinedMucs: Map<string, Promise<void>>;
-      performRoomSwitch: (roomJid: string) => Promise<void>;
     };
     Object.assign(client.xmpp, xmpp);
     const wiredXmpp = client.xmpp;
@@ -2837,9 +2851,7 @@ describe("MUC group call", () => {
     await flushCallSideEffects();
     expect($callState.get().phase).toBe("muc-pending");
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(0);
-    client.joinedMucs.set("new@muc.test", Promise.resolve());
-
-    await client.performRoomSwitch("new@muc.test");
+    await switchToReadyTestRoom(events.client, "new@muc.test");
 
     events.emitPresence({
       from: "old@muc.test/alice",

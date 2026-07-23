@@ -222,8 +222,18 @@ type MamPagerDeps = {
   events: TypedEventBus<ClientEvents>;
   emitError: (event: XmppErrorEvent) => void;
   requireConnectedXmpp: () => Promise<MamWasmClient>;
-  /** Connect + switch/join so room history queries target a ready room. */
-  ensureRoomReady: (spaceId: string, channelId: string) => Promise<void>;
+  /**
+   * Connect + switch/join and return the exact validated room generation.
+   *
+   * A public room switch may resolve when a newer navigation supersedes it;
+   * room-scoped IQ callers must therefore receive the post-switch handle and
+   * room JID from the same readiness check instead of reacquiring a merely
+   * connected session afterward.
+   */
+  ensureRoomReady: (
+    spaceId: string,
+    channelId: string,
+  ) => Promise<{ xmpp: MamWasmClient; roomJid: string }>;
   roomJidForChannel: (channelId: string) => string;
   /** Identity + liveness gate for a specific WASM handle mid-pagination. */
   isCurrentConnected: (xmpp: MamWasmClient, sessionJid: string) => boolean;
@@ -435,9 +445,8 @@ export class MamPager {
   }
 
   async queryMamPage(spaceId: string, channelId: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> {
-    await this.deps.ensureRoomReady(spaceId, channelId);
-    const xmpp = await this.deps.requireConnectedXmpp();
-    const page = await xmpp.fetch_room_history_page?.(this.deps.roomJidForChannel(channelId), max, pageParam);
+    const { xmpp, roomJid } = await this.deps.ensureRoomReady(spaceId, channelId);
+    const page = await xmpp.fetch_room_history_page?.(roomJid, max, pageParam);
     if (!page) return { messages: [], complete: true };
     const result = this.roomPageToMessages(page);
     this.recordRoomWatermarks(result.messages);
@@ -445,9 +454,8 @@ export class MamPager {
   }
 
   async queryMamByThread(spaceId: string, channelId: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> {
-    await this.deps.ensureRoomReady(spaceId, channelId);
-    const xmpp = await this.deps.requireConnectedXmpp();
-    const page = await xmpp.fetch_room_history_by_thread?.(this.deps.roomJidForChannel(channelId), threadId, max, null);
+    const { xmpp, roomJid } = await this.deps.ensureRoomReady(spaceId, channelId);
+    const page = await xmpp.fetch_room_history_by_thread?.(roomJid, threadId, max, null);
     if (!page) return [];
     const result = this.roomPageToMessages(page);
     this.recordRoomWatermarks(result.messages);
@@ -456,9 +464,8 @@ export class MamPager {
 
   async queryMamThreadPage(spaceId: string, channelId: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> {
     if (!threadId) return { messages: [], complete: true };
-    await this.deps.ensureRoomReady(spaceId, channelId);
-    const xmpp = await this.deps.requireConnectedXmpp();
-    const page = await xmpp.fetch_room_history_by_thread?.(this.deps.roomJidForChannel(channelId), threadId, max, pageParam.type === "before" ? pageParam.before : null);
+    const { xmpp, roomJid } = await this.deps.ensureRoomReady(spaceId, channelId);
+    const page = await xmpp.fetch_room_history_by_thread?.(roomJid, threadId, max, pageParam.type === "before" ? pageParam.before : null);
     if (!page) return { messages: [], complete: true };
     const result = this.roomPageToMessages(page);
     this.recordRoomWatermarks(result.messages);

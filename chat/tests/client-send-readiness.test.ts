@@ -4,7 +4,17 @@ import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
-import { BrowserXmppClient, roomBareJidFor, type DmConversationScope, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
+import {
+  BrowserXmppClient,
+  MUC_JOIN_RETRY_DELAYS_MS,
+  MucJoinRejectedError,
+  MucJoinSelfPresenceTimeoutError,
+  roomBareJidFor,
+  type DmConversationScope,
+  type InboxEntry,
+  type LiveDmMessage,
+  type RoomActivityEvent,
+} from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
@@ -94,6 +104,26 @@ function dmMessage(partial: Partial<LiveDmMessage> = {}): LiveDmMessage {
 
 async function settleReconnectCatchup(turns = 6): Promise<void> {
   for (let i = 0; i < turns; i += 1) await Promise.resolve();
+}
+
+async function settleUntil(predicate: () => boolean, turns = 20): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error("condition did not settle");
+}
+
+function markReadyTestRoom(client: BrowserXmppClient, roomJid: string): void {
+  const roomKey = roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+  const internals = client as unknown as {
+    currentRoom: string | null;
+    joinedMucs: Map<string, Promise<void>>;
+    joinedMucReady: Set<string>;
+  };
+  internals.currentRoom = roomJid;
+  internals.joinedMucs.set(roomKey, Promise.resolve());
+  internals.joinedMucReady.add(roomKey);
 }
 
 const originalWindow = globalThis.window;
@@ -541,20 +571,1204 @@ describe("client send readiness", () => {
     expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
   });
 
-  test("room join rejects on XEP-0045 MUC error presence instead of timing out", async () => {
+  test("expected MUC access denial is non-pageable and does not retry", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     const errors: XmppErrorEvent[] = [];
     const staleJoinVisibleAtEmit: boolean[] = [];
+    const retryDelays: number[] = [];
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = async (delayMs) => {
+      retryDelays.push(delayMs);
+    };
     client.onError((event) => {
       errors.push(event);
-      // A listener that synchronously retries the join must NOT observe
-      // the doomed promise still cached in joinedMucs (the emit is
-      // deferred one microtask so ensureJoined's catch cleans up first).
+      // A listener that synchronously retries a terminal join must NOT
+      // observe the rejected single-flight promise.
       staleJoinVisibleAtEmit.push(
         (client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid),
       );
     });
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      error_text?: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> })
+      .ensureJoined(roomJid)
+      .catch((error: unknown) => error);
+    await Promise.resolve();
+    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(1);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "registration-required",
+      error_type: "auth",
+      error_text: "Membership required to join managed channel.",
+    });
+
+    const rejection = await joined;
+    expect(rejection).toBeInstanceOf(MucJoinRejectedError);
+    expect(rejection).toMatchObject({
+      condition: "registration-required",
+      errorType: "auth",
+      text: "Membership required to join managed channel.",
+    });
+    expect(normalizeError(rejection)).toContain("Channel presence was rejected");
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
+    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
+    expect(xmpp.join_room).toHaveBeenCalledTimes(1);
+    expect(retryDelays).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].kind).toBe("muc-join");
+    expect(errors[0].recoverable).toBe(true);
+    expect(errors[0].condition).toBe("registration-required");
+    expect(errors[0].errorType).toBe("auth");
+    expect(errors[0].errorText).toBe("Membership required to join managed channel.");
+    expect(errors[0].roomLocalpart).toBe("c1");
+    expect(staleJoinVisibleAtEmit).toEqual([false]);
+  });
+
+  test("access-denial conditions remain terminal even with a wait stanza type", async () => {
+    for (const condition of [
+      "forbidden",
+      "not-allowed",
+      "not-authorized",
+      "registration-required",
+    ]) {
+      const client = new BrowserXmppClient(session());
+      const roomJid = roomBareJidFor(session(), `denied-${condition}`);
+      const errors: XmppErrorEvent[] = [];
+      const retryDelays: number[] = [];
+      client.onError((event) => errors.push(event));
+      (client as unknown as {
+        waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+      }).waitBeforeMucJoinRetry = async (delayMs) => {
+        retryDelays.push(delayMs);
+      };
+      let onPresence: ((presence: {
+        from?: string;
+        presence_type: string;
+        error_condition?: string;
+        error_type?: string;
+      }) => void) | null = null;
+      const xmpp = {
+        join_room: mock(async () => undefined),
+        set_on_presence(cb: NonNullable<typeof onPresence>) {
+          onPresence = cb;
+        },
+      };
+      (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+      (client as unknown as { connected: boolean }).connected = true;
+      (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+      const joined = (client as unknown as {
+        ensureJoined: (roomJid: string) => Promise<void>;
+      }).ensureJoined(roomJid).catch((error: unknown) => error);
+      await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+      onPresence?.({
+        from: `${roomJid}/alice`,
+        presence_type: "error",
+        error_condition: condition,
+        error_type: "wait",
+      });
+
+      await expect(joined).resolves.toBeInstanceOf(MucJoinRejectedError);
+      expect(xmpp.join_room).toHaveBeenCalledTimes(1);
+      expect(retryDelays).toEqual([]);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({
+        kind: "muc-join",
+        recoverable: true,
+        condition,
+        errorType: "wait",
+      });
+    }
+  });
+
+  test("switching from a ready room never self-pings a denied room before status 110", async () => {
+    const client = new BrowserXmppClient(session());
+    const readyRoomJid = roomBareJidFor(session(), "c1");
+    const deniedRoomJid = roomBareJidFor(session(), "c2");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      send_raw_iq: mock(async () => "<iq type='result'/>"),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const readySwitch = client.switchRoom("w1", "c1");
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${readyRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    await readySwitch;
+    expect((client as unknown as { selfPingTimer: unknown }).selfPingTimer).not.toBeNull();
+
+    const deniedSwitch = client.switchRoom("w1", "c2").catch((error: unknown) => error);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    expect((client as unknown as { selfPingTimer: unknown }).selfPingTimer).toBeNull();
+    await (client as unknown as { doSelfPing: () => Promise<void> }).doSelfPing();
+    expect(xmpp.send_raw_iq).not.toHaveBeenCalled();
+
+    onPresence?.({
+      from: `${deniedRoomJid}/alice`,
+      presence_type: "error",
+      error_condition: "registration-required",
+      error_type: "auth",
+    });
+
+    await expect(deniedSwitch).resolves.toBeInstanceOf(MucJoinRejectedError);
+    await (client as unknown as { doSelfPing: () => Promise<void> }).doSelfPing();
+    expect(xmpp.send_raw_iq).not.toHaveBeenCalled();
+    expect(
+      (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(deniedRoomJid),
+    ).toBe(false);
+  });
+
+  test("switching rooms detaches a transient join retry without cancelling shared room readiness", async () => {
+    const client = new BrowserXmppClient(session());
+    const retryingRoomJid = roomBareJidFor(session(), "c1");
+    const nextRoomJid = roomBareJidFor(session(), "c2");
+    const errors: XmppErrorEvent[] = [];
+    client.onError((event) => errors.push(event));
+    let markRetryStarted!: () => void;
+    let releaseRetry!: () => void;
+    const retryStarted = new Promise<void>((resolve) => {
+      markRetryStarted = resolve;
+    });
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    (client as unknown as {
+      waitBeforeMucJoinRetry: () => Promise<void>;
+    }).waitBeforeMucJoinRetry = async () => {
+      markRetryStarted();
+      await retryGate;
+    };
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      send_raw_iq: mock(async () => "<iq type='result'/>"),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const obsoleteSwitch = client.switchRoom("w1", "c1");
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${retryingRoomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await retryStarted;
+    const retryingJoin = (client as unknown as {
+      joinedMucs: Map<string, Promise<void>>;
+    }).joinedMucs.get(retryingRoomJid);
+    expect(retryingJoin).toBeDefined();
+
+    const nextSwitch = client.switchRoom("w1", "c2");
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    expect(xmpp.join_room.mock.calls[1]?.[0]).toBe(nextRoomJid);
+    expect(
+      (client as unknown as {
+        joinedMucs: Map<string, Promise<void>>;
+      }).joinedMucs.get(retryingRoomJid),
+    ).toBe(retryingJoin);
+
+    onPresence?.({
+      from: `${nextRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    await expect(nextSwitch).resolves.toBeUndefined();
+    await expect(obsoleteSwitch).resolves.toBeUndefined();
+    expect((client as unknown as { currentRoom: string }).currentRoom).toBe(nextRoomJid);
+
+    // A delayed success from the superseded room may accurately restore that
+    // room's background occupancy, but it must not steal focus or the ping.
+    onPresence?.({
+      from: `${retryingRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    releaseRetry();
+    await expect(retryingJoin).resolves.toBeUndefined();
+    await (client as unknown as { doSelfPing: () => Promise<void> }).doSelfPing();
+    expect(xmpp.send_raw_iq).toHaveBeenCalledTimes(1);
+    expect(xmpp.send_raw_iq.mock.calls[0]?.[0]).toContain(`to="${nextRoomJid}/alice"`);
+    expect((client as unknown as { currentRoom: string }).currentRoom).toBe(nextRoomJid);
+    expect(errors).toEqual([]);
+    (client as unknown as { stopSelfPing: () => void }).stopSelfPing();
+  });
+
+  test("concurrent switches to the same target keep one join single-flight", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const first = client.switchRoom("w1", "c1");
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    const second = client.switchRoom("w1", "c1");
+    await settleReconnectCatchup();
+    expect(xmpp.join_room).toHaveBeenCalledTimes(1);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(xmpp.join_room).toHaveBeenCalledTimes(1);
+    (client as unknown as { stopSelfPing: () => void }).stopSelfPing();
+  });
+
+  test("a superseded A-B-A switch cannot send before A readiness is confirmed", async () => {
+    const client = new BrowserXmppClient(session());
+    const firstRoomJid = roomBareJidFor(session(), "c1");
+    const secondRoomJid = roomBareJidFor(session(), "c2");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      send_reaction: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const staleSend = client
+      .sendReaction("w1", "c1", "message-1", ["👍"])
+      .then(() => "sent", normalizeError);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+
+    // Queue both newer selections in the same task. Their connect()
+    // continuations run B then A, before the superseded first A switch
+    // resumes its caller.
+    const awaySwitch = client.switchRoom("w1", "c2");
+    const freshSwitch = client.switchRoom("w1", "c1");
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+
+    expect(xmpp.join_room.mock.calls.map((call) => call[0])).toEqual([
+      firstRoomJid,
+      secondRoomJid,
+    ]);
+    expect(await staleSend).toBe(`Room is not ready: ${firstRoomJid}`);
+    expect(xmpp.send_reaction).not.toHaveBeenCalled();
+    await expect(awaySwitch).resolves.toBeUndefined();
+
+    // The detached B membership join remains valid background work too.
+    onPresence?.({
+      from: `${secondRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    onPresence?.({
+      from: `${firstRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(freshSwitch).resolves.toBeUndefined();
+    expect(xmpp.send_reaction).not.toHaveBeenCalled();
+    (client as unknown as { stopSelfPing: () => void }).stopSelfPing();
+  });
+
+  test("a superseded A-B MAM load cannot query the room selected before navigation", async () => {
+    const client = new BrowserXmppClient(session());
+    const firstRoomJid = roomBareJidFor(session(), "c1");
+    const secondRoomJid = roomBareJidFor(session(), "c2");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const fetchRoomHistoryPage = mock(async () => ({
+      messages: [],
+      is_complete: true,
+    }));
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      fetch_room_history_page: fetchRoomHistoryPage,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const staleMam = client
+      .queryMamPage("w1", "c1", 100, { type: "latest" })
+      .then(() => "queried", normalizeError);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+
+    const awaySwitch = client.switchRoom("w1", "c2");
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+
+    expect(await staleMam).toBe(`Room is not ready: ${firstRoomJid}`);
+    expect(fetchRoomHistoryPage).not.toHaveBeenCalled();
+
+    // Complete both detached membership joins so no attempt timer survives
+    // the test. Neither completion may resurrect the superseded MAM caller.
+    onPresence?.({
+      from: `${firstRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    onPresence?.({
+      from: `${secondRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(awaySwitch).resolves.toBeUndefined();
+    await settleReconnectCatchup();
+    expect(fetchRoomHistoryPage).not.toHaveBeenCalled();
+    (client as unknown as { stopSelfPing: () => void }).stopSelfPing();
+  });
+
+  test("MAM joins and queries the same canonical room when topology lands during connect", async () => {
+    const client = new BrowserXmppClient(session());
+    const canonicalRoomJid = "canonical@rooms.example.com";
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const fetchRoomHistoryPage = mock(async () => ({
+      messages: [],
+      is_complete: true,
+    }));
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      fetch_room_history_page: fetchRoomHistoryPage,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    const internals = client as unknown as {
+      connect: () => Promise<void>;
+      xmpp: typeof xmpp;
+      connected: boolean;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internals.connect = mock(async () => {
+      internals.xmpp = xmpp;
+      internals.connected = true;
+      client.rememberRoomJidForChannel("c1", canonicalRoomJid);
+      internals.wireEvents(xmpp);
+    });
+
+    const page = client.queryMamPage("w1", "c1", 100, { type: "latest" });
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${canonicalRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(page).resolves.toEqual({
+      messages: [],
+      complete: true,
+    });
+    expect(xmpp.join_room).toHaveBeenCalledWith(canonicalRoomJid, "alice");
+    expect(fetchRoomHistoryPage).toHaveBeenCalledWith(
+      canonicalRoomJid,
+      100,
+      { type: "latest" },
+    );
+    (client as unknown as { stopSelfPing: () => void }).stopSelfPing();
+  });
+
+  test("a superseded A-B-A MAM load cannot query before the fresh A join is ready", async () => {
+    const client = new BrowserXmppClient(session());
+    const firstRoomJid = roomBareJidFor(session(), "c1");
+    const secondRoomJid = roomBareJidFor(session(), "c2");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const fetchRoomHistoryPage = mock(async () => ({
+      messages: [],
+      is_complete: true,
+    }));
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      fetch_room_history_page: fetchRoomHistoryPage,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const staleMam = client
+      .queryMamPage("w1", "c1", 100, { type: "latest" })
+      .then(() => "queried", normalizeError);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+
+    // Supersede the first A selection with B, then immediately select A
+    // again. Both background memberships remain valid work, but only the
+    // fresh A switch may authorize A's room-scoped MAM IQ.
+    const awaySwitch = client.switchRoom("w1", "c2");
+    const freshMam = client.queryMamPage("w1", "c1", 100, { type: "latest" });
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+
+    expect(xmpp.join_room.mock.calls.map((call) => call[0])).toEqual([
+      firstRoomJid,
+      secondRoomJid,
+    ]);
+    expect(await staleMam).toBe(`Room is not ready: ${firstRoomJid}`);
+    expect(fetchRoomHistoryPage).not.toHaveBeenCalled();
+    await expect(awaySwitch).resolves.toBeUndefined();
+
+    onPresence?.({
+      from: `${secondRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    await settleReconnectCatchup();
+    expect(fetchRoomHistoryPage).not.toHaveBeenCalled();
+
+    onPresence?.({
+      from: `${firstRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(freshMam).resolves.toEqual({
+      messages: [],
+      complete: true,
+    });
+    expect(fetchRoomHistoryPage).toHaveBeenCalledTimes(1);
+    expect(fetchRoomHistoryPage).toHaveBeenCalledWith(
+      firstRoomJid,
+      100,
+      { type: "latest" },
+    );
+    (client as unknown as { stopSelfPing: () => void }).stopSelfPing();
+  });
+
+  test("a handle lost immediately after connect rejects the room switch boundary", async () => {
+    const client = new BrowserXmppClient(session());
+    const internals = client as unknown as {
+      connect: () => Promise<void>;
+      xmpp: null;
+      connected: boolean;
+      roomSwitchPromise: Promise<void> | null;
+    };
+    internals.connect = mock(async () => {
+      internals.xmpp = null;
+      internals.connected = false;
+    });
+
+    await expect(client.switchRoom("w1", "c1")).rejects.toThrow(
+      "XMPP connection changed while switching rooms",
+    );
+    expect(internals.roomSwitchPromise).toBeNull();
+  });
+
+  test("connection replacement rejects a completed room switch boundary and rejoins on the fresh handle", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onOldPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const oldXmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onOldPresence>) {
+        onOldPresence = cb;
+      },
+      get_resume_state: () => null,
+      get_resume_state_handle: () => null,
+    };
+    (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof oldXmpp) => void }).wireEvents(oldXmpp);
+
+    const staleSwitch = client.switchRoom("w1", "c1");
+    await settleUntil(() => oldXmpp.join_room.mock.calls.length === 1);
+    // Resolve the room boundary, then replace the handle in the same callback
+    // turn before the switch continuation can issue MAM/member/pin work.
+    onOldPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    (client as unknown as {
+      handleDisconnected: (xmpp: typeof oldXmpp) => void;
+    }).handleDisconnected(oldXmpp);
+    (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
+
+    await expect(staleSwitch).rejects.toThrow(
+      "XMPP disconnected while switching rooms",
+    );
+
+    let onFreshPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const freshXmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onFreshPresence>) {
+        onFreshPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof freshXmpp; connected: boolean }).xmpp = freshXmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof freshXmpp) => void }).wireEvents(freshXmpp);
+
+    const freshSwitch = client.switchRoom("w1", "c1");
+    await settleUntil(() => freshXmpp.join_room.mock.calls.length === 1);
+    onFreshPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(freshSwitch).resolves.toBeUndefined();
+    expect(oldXmpp.join_room).toHaveBeenCalledTimes(1);
+    expect(freshXmpp.join_room).toHaveBeenCalledTimes(1);
+    expect((client as unknown as { currentRoom: string }).currentRoom).toBe(roomJid);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+    (client as unknown as { stopSelfPing: () => void }).stopSelfPing();
+  });
+
+  test("disconnect during the post-join queue flush rejects the room switch boundary", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    let markFlushStarted!: () => void;
+    let releaseFlush!: () => void;
+    const flushStarted = new Promise<void>((resolve) => {
+      markFlushStarted = resolve;
+    });
+    const flushGate = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+      get_resume_state: () => null,
+      get_resume_state_handle: () => null,
+    };
+    const internals = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      wireEvents: (xmpp: typeof xmpp) => void;
+      flushQueuedRoomMessages: () => Promise<void>;
+      handleDisconnected: (xmpp: typeof xmpp) => void;
+      clearReconnectTimer: () => void;
+    };
+    internals.xmpp = xmpp;
+    internals.connected = true;
+    internals.flushQueuedRoomMessages = mock(async () => {
+      markFlushStarted();
+      await flushGate;
+    });
+    internals.wireEvents(xmpp);
+
+    const switched = client.switchRoom("w1", "c1");
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    await flushStarted;
+
+    internals.handleDisconnected(xmpp);
+    internals.clearReconnectTimer();
+    await expect(switched).rejects.toThrow(
+      "XMPP disconnected while switching rooms",
+    );
+    releaseFlush();
+  });
+
+  test("disconnect cancels an already-ready room switch before its flush settles", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let markFlushStarted!: () => void;
+    let releaseFlush!: () => void;
+    const flushStarted = new Promise<void>((resolve) => {
+      markFlushStarted = resolve;
+    });
+    const flushGate = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const xmpp = {
+      get_resume_state: () => null,
+      get_resume_state_handle: () => null,
+    };
+    const internals = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      currentRoom: string;
+      joinedMucReady: Set<string>;
+      flushQueuedRoomMessages: () => Promise<void>;
+      handleDisconnected: (xmpp: typeof xmpp) => void;
+      clearReconnectTimer: () => void;
+    };
+    internals.xmpp = xmpp;
+    internals.connected = true;
+    internals.currentRoom = roomJid;
+    internals.joinedMucReady.add(roomJid);
+    internals.flushQueuedRoomMessages = mock(async () => {
+      markFlushStarted();
+      await flushGate;
+    });
+
+    const switched = client.switchRoom("w1", "c1");
+    await flushStarted;
+    internals.handleDisconnected(xmpp);
+    internals.clearReconnectTimer();
+
+    await expect(switched).rejects.toThrow(
+      "XMPP disconnected while switching rooms",
+    );
+    releaseFlush();
+  });
+
+  test("wait-type MUC join rejection retries and eventually succeeds", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const errors: XmppErrorEvent[] = [];
+    const retryDelays: number[] = [];
+    client.onError((event) => errors.push(event));
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = async (delayMs) => {
+      retryDelays.push(delayMs);
+    };
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(joined).resolves.toBeUndefined();
+    expect(xmpp.join_room).toHaveBeenCalledTimes(2);
+    expect(retryDelays).toEqual([250]);
+    expect(errors).toEqual([]);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("self-presence timeout retries an ambiguous commit without an intermediate Faro error", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const errors: XmppErrorEvent[] = [];
+    const retryDelays: number[] = [];
+    client.onError((event) => errors.push(event));
+    (client as unknown as { roomSelfPresenceTimeoutMs: number })
+      .roomSelfPresenceTimeoutMs = 1;
+
+    let markRetryStarted!: () => void;
+    let releaseRetry!: () => void;
+    const retryStarted = new Promise<void>((resolve) => {
+      markRetryStarted = resolve;
+    });
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = (delayMs) => {
+      retryDelays.push(delayMs);
+      markRetryStarted();
+      return new Promise<void>((resolve) => {
+        releaseRetry = resolve;
+      });
+    };
+
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined(roomJid);
+    await retryStarted;
+    expect(xmpp.join_room).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([]);
+
+    // Keep the second attempt open long enough to inject the owner-built
+    // status-110 response deterministically.
+    (client as unknown as { roomSelfPresenceTimeoutMs: number })
+      .roomSelfPresenceTimeoutMs = 1_000;
+    releaseRetry();
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(joined).resolves.toBeUndefined();
+    expect(retryDelays).toEqual([250]);
+    expect(errors).toEqual([]);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("self-presence timeouts exhaust the shared bounded retry budget and emit once", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const errors: XmppErrorEvent[] = [];
+    const retryDelays: number[] = [];
+    client.onError((event) => errors.push(event));
+    (client as unknown as { roomSelfPresenceTimeoutMs: number })
+      .roomSelfPresenceTimeoutMs = 1;
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = async (delayMs) => {
+      retryDelays.push(delayMs);
+    };
+    const xmpp = {
+      join_room: mock(async () => undefined),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const rejection = await (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined(roomJid).catch((error: unknown) => error);
+
+    expect(rejection).toBeInstanceOf(MucJoinSelfPresenceTimeoutError);
+    expect(xmpp.join_room).toHaveBeenCalledTimes(MUC_JOIN_RETRY_DELAYS_MS.length + 1);
+    expect(retryDelays).toEqual([...MUC_JOIN_RETRY_DELAYS_MS]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      kind: "connect-timeout",
+      recoverable: true,
+      detail: `Timed out waiting for self-presence in ${roomJid}`,
+      roomLocalpart: "c1",
+    });
+    expect(errors[0].cause).toBe(rejection);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
+  });
+
+  test("late self-presence during backoff suppresses a duplicate join", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let releaseRetry!: () => void;
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = () => new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await settleUntil(() => typeof releaseRetry === "function");
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    releaseRetry();
+
+    await expect(joined).resolves.toBeUndefined();
+    expect(xmpp.join_room).toHaveBeenCalledTimes(1);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("own unavailable during backoff preserves the canonical join single-flight", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let releaseRetry!: () => void;
+    let markRetryStarted!: () => void;
+    const retryStarted = new Promise<void>((resolve) => {
+      markRetryStarted = resolve;
+    });
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = () => {
+      markRetryStarted();
+      return new Promise<void>((resolve) => {
+        releaseRetry = resolve;
+      });
+    };
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const ensureJoined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined.bind(client);
+    const first = ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "unavailable",
+      muc_status_codes: [110],
+    });
+    await retryStarted;
+    const second = ensureJoined(roomJid);
+    await settleReconnectCatchup();
+    expect(xmpp.join_room).toHaveBeenCalledTimes(1);
+
+    releaseRetry();
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(xmpp.join_room).toHaveBeenCalledTimes(2);
+  });
+
+  test("a superseded retry cannot borrow a fresh join's in-flight marker", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let releaseRetry!: () => void;
+    let markRetryStarted!: () => void;
+    const retryStarted = new Promise<void>((resolve) => {
+      markRetryStarted = resolve;
+    });
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = () => {
+      markRetryStarted();
+      return new Promise<void>((resolve) => {
+        releaseRetry = resolve;
+      });
+    };
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const ensureJoined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined.bind(client);
+    const first = ensureJoined(roomJid).then(() => "resolved", normalizeError);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await retryStarted;
+
+    // A delayed success immediately followed by own-unavailable revokes the
+    // sleeping sequence's token. A fresh caller may now start a new join
+    // before the old retry delay expires.
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "unavailable",
+      muc_status_codes: [110],
+    });
+    const second = ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+
+    releaseRetry();
+    await expect(first).resolves.toBe("Room became unavailable while retrying join");
+    expect(xmpp.join_room).toHaveBeenCalledTimes(2);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(true);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    await expect(second).resolves.toBeUndefined();
+    expect(xmpp.join_room).toHaveBeenCalledTimes(2);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("back-to-back self-presence and unavailable cannot restore stale room readiness", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const ensureJoined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined.bind(client);
+    const first = ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "unavailable",
+      muc_status_codes: [110],
+    });
+
+    await expect(first).rejects.toThrow("Room became unavailable while joining");
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
+
+    const second = ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(second).resolves.toBeUndefined();
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("synchronous self-presence and unavailable cannot resurrect a rejected join tracker", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let joinAttempt = 0;
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => {
+        joinAttempt += 1;
+        if (joinAttempt !== 1) return;
+        // The WASM binding may synchronously drain queued callbacks before
+        // returning its Promise. The tracker must already be published when
+        // this available -> unavailable transition revokes the join.
+        onPresence?.({
+          from: `${roomJid}/alice`,
+          presence_type: "available",
+          muc_status_codes: [110],
+        });
+        onPresence?.({
+          from: `${roomJid}/alice`,
+          presence_type: "unavailable",
+          muc_status_codes: [110],
+        });
+      }),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const ensureJoined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined.bind(client);
+    await expect(ensureJoined(roomJid)).rejects.toThrow("Room became unavailable while joining");
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(false);
+
+    const second = ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(second).resolves.toBeUndefined();
+    expect(xmpp.join_room).toHaveBeenCalledTimes(2);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("wait-type MUC join rejection exhausts its bounded retry budget", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const errors: XmppErrorEvent[] = [];
+    const retryDelays: number[] = [];
+    client.onError((event) => errors.push(event));
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = async (delayMs) => {
+      retryDelays.push(delayMs);
+    };
     let onPresence: ((presence: {
       from?: string;
       presence_type: string;
@@ -571,27 +1785,83 @@ describe("client send readiness", () => {
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
-    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
-    await Promise.resolve();
-    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(1);
+    const joined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined(roomJid).catch((error: unknown) => error);
+    const totalAttempts = MUC_JOIN_RETRY_DELAYS_MS.length + 1;
+    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      await settleUntil(() => xmpp.join_room.mock.calls.length === attempt);
+      onPresence?.({
+        from: `${roomJid}/alice`,
+        presence_type: "error",
+        error_condition: "resource-constraint",
+        error_type: "wait",
+      });
+    }
 
+    const rejection = await joined;
+    expect(rejection).toBeInstanceOf(MucJoinRejectedError);
+    expect(rejection).toMatchObject({
+      condition: "resource-constraint",
+      errorType: "wait",
+    });
+    expect(xmpp.join_room).toHaveBeenCalledTimes(totalAttempts);
+    expect(retryDelays).toEqual([...MUC_JOIN_RETRY_DELAYS_MS]);
+    expect(errors.map((error) => error.recoverable)).toEqual([true]);
+    expect(errors.every((error) => error.condition === "resource-constraint")).toBe(true);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
+  });
+
+  test("concurrent room join callers share one transient retry sequence", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const retryDelays: number[] = [];
+    (client as unknown as {
+      waitBeforeMucJoinRetry: (delayMs: number) => Promise<void>;
+    }).waitBeforeMucJoinRetry = async (delayMs) => {
+      retryDelays.push(delayMs);
+    };
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const ensureJoined = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined.bind(client);
+    const first = ensureJoined(roomJid);
+    const second = ensureJoined(roomJid);
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 1);
     onPresence?.({
       from: `${roomJid}/alice`,
       presence_type: "error",
-      error_condition: "registration-required",
-      error_type: "auth",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await settleUntil(() => xmpp.join_room.mock.calls.length === 2);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
     });
 
-    await expect(joined).rejects.toThrow("Channel presence was rejected");
-    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
-    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
-    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
-    expect(errors).toHaveLength(1);
-    expect(errors[0].kind).toBe("muc-join");
-    expect(errors[0].condition).toBe("registration-required");
-    expect(errors[0].errorType).toBe("auth");
-    expect(errors[0].roomLocalpart).toBe("c1");
-    expect(staleJoinVisibleAtEmit).toEqual([false]);
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(xmpp.join_room).toHaveBeenCalledTimes(2);
+    expect(retryDelays).toEqual([250]);
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
   });
 
   test("room join ignores unrelated room presence errors while waiting for self-presence", async () => {
@@ -722,6 +1992,84 @@ describe("client send readiness", () => {
     expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
   });
 
+  test("connection replacement during join backoff cannot send a stale retry", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+
+    let onOldPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+    }) => void) | null = null;
+    const oldXmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onOldPresence>) {
+        onOldPresence = cb;
+      },
+      get_resume_state: () => null,
+      get_resume_state_handle: () => null,
+    };
+    (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof oldXmpp) => void }).wireEvents(oldXmpp);
+
+    const oldJoin = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined(roomJid).catch((error: unknown) => error);
+    await settleUntil(() => oldXmpp.join_room.mock.calls.length === 1);
+    onOldPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await settleUntil(() =>
+      (client as unknown as {
+        mucJoinRetryCancellers: Set<(error: Error) => void>;
+      }).mucJoinRetryCancellers.size === 1
+    );
+
+    (client as unknown as {
+      handleDisconnected: (xmpp: typeof oldXmpp) => void;
+    }).handleDisconnected(oldXmpp);
+    (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
+
+    let onFreshPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const freshXmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onFreshPresence>) {
+        onFreshPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof freshXmpp; connected: boolean }).xmpp = freshXmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof freshXmpp) => void }).wireEvents(freshXmpp);
+
+    const freshJoin = (client as unknown as {
+      ensureJoined: (roomJid: string) => Promise<void>;
+    }).ensureJoined(roomJid);
+    await settleUntil(() => freshXmpp.join_room.mock.calls.length === 1);
+    await settleReconnectCatchup();
+
+    expect(normalizeError(await oldJoin)).toBe("XMPP disconnected while retrying room join");
+    expect(oldXmpp.join_room).toHaveBeenCalledTimes(1);
+    expect(freshXmpp.join_room).toHaveBeenCalledTimes(1);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(true);
+
+    onFreshPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    await expect(freshJoin).resolves.toBeUndefined();
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
   test("disconnect clears room join tokens so stale join resolution cannot mark ready", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
@@ -745,7 +2093,7 @@ describe("client send readiness", () => {
     expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.size).toBe(0);
 
     resolveOldJoin();
-    await oldJoin;
+    await expect(oldJoin).rejects.toThrow("XMPP connection changed while joining room");
 
     expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(false);
     expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
@@ -865,7 +2213,7 @@ describe("client send readiness", () => {
       presence_type: "available",
       muc_jid: (client as unknown as { fullJid: string }).fullJid,
     });
-    await settleReconnectCatchup();
+    await settleUntil(() => xmpp.send_groupchat_message.mock.calls.length === 1);
     expect(xmpp.send_groupchat_message).toHaveBeenCalledWith(
       roomJid,
       "after unavailable",
@@ -2359,6 +3707,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
     (client as unknown as { switchRoom: () => Promise<void> }).switchRoom = async () => undefined;
     (client as unknown as { connected: boolean }).connected = true;
+    markReadyTestRoom(client, roomJid);
     (client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted();
     const fetchRoomHistoryByThread = mock(async () => ({
       messages: [roomWasmMessage({
@@ -2446,6 +3795,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
     (client as unknown as { switchRoom: () => Promise<void> }).switchRoom = async () => undefined;
     (client as unknown as { connected: boolean }).connected = true;
+    markReadyTestRoom(client, roomJid);
     (client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted();
     const fetchRoomHistoryByThread = mock(async () => ({
       messages: [roomWasmMessage({
@@ -2710,6 +4060,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
     (client as unknown as { switchRoom: () => Promise<void> }).switchRoom = async () => undefined;
     (client as unknown as { connected: boolean }).connected = true;
+    markReadyTestRoom(client, roomJid);
     const catchup = (client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup;
     catchup.onSessionStarted();
     const roomHandler = mock(() => undefined);

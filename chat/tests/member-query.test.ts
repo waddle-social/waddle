@@ -23,9 +23,16 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
 
 function clientWithXmpp(xmpp: TestXmpp) {
   const client = new BrowserXmppClient(session());
-  (client as unknown as { connect: () => Promise<void>; xmpp: TestXmpp; connected: boolean }).connect = mock(async () => {});
-  (client as unknown as { connect: () => Promise<void>; xmpp: TestXmpp; connected: boolean }).xmpp = xmpp;
-  (client as unknown as { connect: () => Promise<void>; xmpp: TestXmpp; connected: boolean }).connected = true;
+  const internals = client as unknown as {
+    connect: () => Promise<void>;
+    requireReadyRoomXmpp: (roomJid: string) => Promise<TestXmpp>;
+    xmpp: TestXmpp;
+    connected: boolean;
+  };
+  internals.connect = mock(async () => {});
+  internals.requireReadyRoomXmpp = mock(async () => xmpp);
+  internals.xmpp = xmpp;
+  internals.connected = true;
   return client;
 }
 

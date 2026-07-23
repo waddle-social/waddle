@@ -3,6 +3,11 @@ import {
   withSpan,
 } from "@/lib/telemetry";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
+import {
+  MUC_JOIN_RETRY_DELAYS_MS,
+  MucJoinRejectedError,
+  MucJoinSelfPresenceTimeoutError,
+} from "@/lib/xmpp/muc-join-retry";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
 import type { BroadcastShow } from "@/presence/effective-show";
@@ -208,6 +213,25 @@ type InboundWasmMessage = WasmMessage & {
 // take several seconds to deliver the roster. 110 is the definitive
 // resolve signal; this timeout only bounds genuinely stuck joins.
 const ROOM_SELF_PRESENCE_TIMEOUT_MS = 15_000;
+
+const EXPECTED_MUC_ACCESS_DENIAL_CONDITIONS = new Set([
+  "forbidden",
+  "not-allowed",
+  "not-authorized",
+  "registration-required",
+]);
+
+function isExpectedMucAccessDenial(error: MucJoinRejectedError): boolean {
+  return !!error.condition
+    && EXPECTED_MUC_ACCESS_DENIAL_CONDITIONS.has(error.condition);
+}
+
+class RoomSwitchSupersededError extends Error {
+  constructor() {
+    super("Room switch superseded");
+    this.name = "RoomSwitchSupersededError";
+  }
+}
 
 type XmppStreamErrorPayload = string | {
   detail?: string | null;
@@ -434,10 +458,15 @@ export class BrowserXmppClient {
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
+  private roomSwitchToken: symbol | null = null;
+  private roomSwitchCanceller: ((error: Error) => void) | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private readonly joinedMucs = new Map<string, Promise<void>>();
   private readonly joinedMucJoinTokens = new Map<string, symbol>();
   private readonly joinedMucReady = new Set<string>();
+  private readonly mucJoinInFlightKeys = new Set<string>();
+  private readonly mucJoinRetryCancellers = new Map<symbol, (error: Error) => void>();
+  private roomSelfPresenceTimeoutMs = ROOM_SELF_PRESENCE_TIMEOUT_MS;
   private retainedJoinedRoomJids = new Set<string>();
   private autoJoinRoomJids: ReadonlyArray<string> = [];
   // Self-presence-confirmed (XEP-0045 status 110) room keys captured at
@@ -578,10 +607,8 @@ export class BrowserXmppClient {
       events: this.events,
       emitError: (event) => this.emitError(event),
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
-      ensureRoomReady: async (spaceId, channelId) => {
-        await this.connect();
-        await this.switchRoom(spaceId, channelId);
-      },
+      ensureRoomReady: (spaceId, channelId) =>
+        this.requireJoinedRoom(spaceId, channelId),
       roomJidForChannel: (channelId) => this.roomJidForChannel(channelId),
       isCurrentConnected: (xmpp, sessionJid) =>
         this.xmpp === xmpp && this.connected && !this.destroying && this.session.jid === sessionJid,
@@ -593,6 +620,7 @@ export class BrowserXmppClient {
     });
     this.mucAdmin = new MucAdmin({
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
+      requireReadyRoomXmpp: (roomJid) => this.requireReadyRoomXmpp(roomJid),
       roomJidForChannel: (channelId) => this.roomJidForChannel(channelId),
       emitError: (event) => this.emitError(event),
     });
@@ -610,12 +638,19 @@ export class BrowserXmppClient {
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
       handleMucPresenceError: (presence) => this.handleMucPresenceError(presence),
       onOwnSelfPresence: (roomJid) => {
-        this.roomJoinWaiters.get(this.roomJoinKey(roomJid))?.resolve();
+        const key = this.roomJoinKey(roomJid);
+        // Self-presence is the synchronous phase boundary: once it lands,
+        // a following own-unavailable stanza must revoke the completed join
+        // instead of preserving it as still in flight. Promise continuations
+        // run later, so clear this before resolving the waiter.
+        this.mucJoinInFlightKeys.delete(key);
+        this.roomJoinWaiters.get(key)?.resolve();
         this.markMucReadyFromSelfPresence(roomJid);
       },
       onOwnUnavailable: (roomJid) => {
+        const key = this.roomJoinKey(roomJid);
         this.revokeMucReadiness(roomJid, {
-          keepPendingJoin: this.roomJoinWaiters.has(this.roomJoinKey(roomJid)),
+          keepPendingJoin: this.mucJoinInFlightKeys.has(key),
         });
       },
     });
@@ -673,6 +708,21 @@ export class BrowserXmppClient {
       waiter.reject(error);
     }
     this.roomJoinWaiters.clear();
+  }
+
+  private cancelMucJoinRetryWaiters(error: Error): void {
+    for (const cancel of [...this.mucJoinRetryCancellers.values()]) {
+      cancel(error);
+    }
+  }
+
+  private cancelRoomSwitch(error: Error): void {
+    const cancel = this.roomSwitchCanceller;
+    this.roomSwitchPromise = null;
+    this.roomSwitchTarget = null;
+    this.roomSwitchToken = null;
+    this.roomSwitchCanceller = null;
+    cancel?.(error);
   }
 
   private ownFullJidCandidates(): Set<string> {
@@ -744,25 +794,27 @@ export class BrowserXmppClient {
     if (!waiter) return false;
     if (errorNick !== waiter.requestedNick) return false;
 
-    waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
-    // Fully revoke — including the pending joinedMucs promise and its
-    // token — BEFORE emitting, so an error listener that synchronously
-    // retries the join starts a fresh one instead of awaiting the doomed
-    // rejected entry (ensureJoined's own catch cleanup only lands several
-    // microtasks later and its token guard makes this early delete safe).
-    this.revokeMucReadiness(room);
+    waiter.reject(new MucJoinRejectedError(stanzaErrorContext({
+      condition: presence.error_condition,
+      errorType: presence.error_type,
+      text: presence.error_text,
+    })));
+    return true;
+  }
+
+  private emitMucJoinRejection(
+    roomJid: string,
+    error: MucJoinRejectedError,
+    recoverable: boolean,
+  ): void {
     this.emitError({
       kind: "muc-join",
-      recoverable: true,
-      detail: `room join rejected — ${room}`,
-      roomLocalpart: jidLocalpart(room),
-      ...stanzaErrorContext({
-        condition: presence.error_condition,
-        errorType: presence.error_type,
-        text: presence.error_text,
-      }),
+      recoverable,
+      detail: `room join rejected — ${roomJid}`,
+      cause: error,
+      roomLocalpart: jidLocalpart(roomJid),
+      ...stanzaErrorContext(error),
     });
-    return true;
   }
 
   private revokeMucReadiness(roomJid: string, options: { keepPendingJoin?: boolean } = {}): void {
@@ -1109,9 +1161,10 @@ export class BrowserXmppClient {
     this.connected = false;
     this.connectPromise = null;
     this.currentRoom = null;
-    this.roomSwitchPromise = null;
-    this.roomSwitchTarget = null;
+    this.cancelRoomSwitch(new Error("XMPP disconnected while switching rooms"));
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
+    this.cancelMucJoinRetryWaiters(new Error("XMPP disconnected while retrying room join"));
+    this.mucJoinInFlightKeys.clear();
     this.uploadServiceJid = null;
     this.clearRoomPresenceCaches();
     this.retainedJoinedRoomJids.clear();
@@ -1170,10 +1223,8 @@ export class BrowserXmppClient {
     });
     const timeout = setTimeout(() => {
       this.roomJoinWaiters.delete(key);
-      const detail = `Timed out waiting for self-presence in ${roomJid}`;
-      this.emitError({ kind: "connect-timeout", recoverable: true, detail });
-      rejectJoin(new Error("Channel presence did not finish syncing. Try again in a moment."));
-    }, ROOM_SELF_PRESENCE_TIMEOUT_MS);
+      rejectJoin(new MucJoinSelfPresenceTimeoutError());
+    }, this.roomSelfPresenceTimeoutMs);
     this.roomJoinWaiters.set(key, {
       promise,
       requestedNick,
@@ -1203,7 +1254,11 @@ export class BrowserXmppClient {
     this.presence.dispatchFocusedRoom();
   }
 
-  async ensureJoined(roomJid: string): Promise<void> {
+  ensureJoined(roomJid: string): Promise<void> {
+    return this.ensureJoinedWithToken(roomJid);
+  }
+
+  private async ensureJoinedWithToken(roomJid: string): Promise<void> {
     // Every join tracker keys on the canonical `roomJoinKey` (lowercased
     // bare JID) so case variants from topology vs. retained-room replay
     // resolve to a single entry (#1221). The raw `roomJid` still goes on
@@ -1222,10 +1277,21 @@ export class BrowserXmppClient {
       this.rememberJoinedRoom(roomJid);
       return;
     }
-    const promise = this.performMucJoin(roomJid);
     const joinToken = Symbol(key);
-    this.joinedMucs.set(key, promise);
     this.joinedMucJoinTokens.set(key, joinToken);
+    this.mucJoinInFlightKeys.add(key);
+    let resolveJoin!: () => void;
+    let rejectJoin!: (error: unknown) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveJoin = resolve;
+      rejectJoin = reject;
+    });
+    // Publish the canonical single-flight promise before entering the WASM
+    // binding. A binding may synchronously deliver queued presence callbacks
+    // while `join_room` is being invoked; those callbacks must be able to
+    // revoke this exact tracker without a later `set` resurrecting it.
+    this.joinedMucs.set(key, promise);
+    void this.performMucJoin(roomJid, joinToken).then(resolveJoin, rejectJoin);
     try {
       await promise;
       if (this.joinedMucJoinTokens.get(key) === joinToken) {
@@ -1234,11 +1300,45 @@ export class BrowserXmppClient {
       }
     } catch (err) {
       if (this.joinedMucJoinTokens.get(key) === joinToken) {
+        this.mucJoinInFlightKeys.delete(key);
         this.joinedMucs.delete(key);
         this.joinedMucJoinTokens.delete(key);
         this.joinedMucReady.delete(key);
+        if (err instanceof MucJoinRejectedError) {
+          // No retry remains (or the stanza type was terminal). Emit only
+          // after clearing the owning token so a listener-triggered explicit
+          // retry cannot inherit the rejected single-flight promise.
+          // Expected access-control denials are terminal for this join, but
+          // they are normal user-visible authorization outcomes rather than
+          // operator-pageable failures. Retryability remains driven solely by
+          // the stanza error type in `performMucJoin`.
+          this.emitMucJoinRejection(
+            roomJid,
+            err,
+            err.errorType === "wait"
+              || isExpectedMucAccessDenial(err),
+          );
+        } else if (err instanceof MucJoinSelfPresenceTimeoutError) {
+          // An ambiguous remote commit receives the same bounded retry budget
+          // as an explicit wait error. Emit only once that budget is
+          // exhausted; intermediate attempt timeouts are not Faro errors.
+          // The final event remains recoverable because a later explicit
+          // retry can succeed and must not be treated as a pageable terminal
+          // failure.
+          this.emitError({
+            kind: "connect-timeout",
+            recoverable: true,
+            detail: `Timed out waiting for self-presence in ${roomJid}`,
+            cause: err,
+            roomLocalpart: jidLocalpart(roomJid),
+          });
+        }
       }
       throw err;
+    } finally {
+      if (this.joinedMucJoinTokens.get(key) === joinToken) {
+        this.mucJoinInFlightKeys.delete(key);
+      }
     }
   }
 
@@ -1254,12 +1354,58 @@ export class BrowserXmppClient {
     this.resumePersistence.saveJoinedRooms([...this.retainedJoinedRoomJids]);
   }
 
-  private async performMucJoin(roomJid: string): Promise<void> {
+  private async performMucJoin(roomJid: string, joinToken: symbol): Promise<void> {
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
     if (!xmpp.join_room && !xmpp.joinRoom) {
       throw new Error("XMPP client missing join_room binding");
     }
+
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.performMucJoinAttempt(xmpp, roomJid);
+        return;
+      } catch (error) {
+        const retryable =
+          error instanceof MucJoinSelfPresenceTimeoutError
+          || (
+            error instanceof MucJoinRejectedError
+            && error.errorType === "wait"
+            && !isExpectedMucAccessDenial(error)
+          );
+        if (!retryable) {
+          throw error;
+        }
+        const retryDelayMs = MUC_JOIN_RETRY_DELAYS_MS[attempt];
+        if (retryDelayMs === undefined) throw error;
+
+        await this.waitBeforeMucJoinRetry(retryDelayMs, joinToken);
+        if (!this.isCurrentXmpp(xmpp)) {
+          throw new Error("XMPP connection changed while retrying room join");
+        }
+        // A wait-type rejection can race with delayed status-110 delivery
+        // from a remote room owner. If the first attempt did complete, do not
+        // send a duplicate join after the backoff.
+        const joinKey = this.roomJoinKey(roomJid);
+        if (this.joinedMucReady.has(joinKey)) return;
+        // Self-presence followed by own-unavailable can both arrive while
+        // this retry timer is asleep. The synchronous self-presence boundary
+        // clears the in-flight key; do not let the superseded sequence send a
+        // duplicate join after unavailable revoked its token.
+        if (
+          this.joinedMucJoinTokens.get(joinKey) !== joinToken
+          || !this.mucJoinInFlightKeys.has(joinKey)
+        ) {
+          throw new Error("Room became unavailable while retrying join");
+        }
+      }
+    }
+  }
+
+  private async performMucJoinAttempt(
+    xmpp: XmppClientInstance,
+    roomJid: string,
+  ): Promise<void> {
     const ready = this.waitForRoomSelfPresence(roomJid, this.session.username);
     const joinKey = this.roomJoinKey(roomJid);
     const joinWaiter = this.roomJoinWaiters.get(joinKey);
@@ -1281,9 +1427,37 @@ export class BrowserXmppClient {
     }
     if (!this.isCurrentXmpp(xmpp)) {
       await ready.catch(() => undefined);
-      return;
+      throw new Error("XMPP connection changed while joining room");
     }
     await ready;
+    if (
+      !this.isCurrentXmpp(xmpp)
+      || !this.joinedMucReady.has(joinKey)
+    ) {
+      throw new Error("Room became unavailable while joining");
+    }
+  }
+
+  private waitBeforeMucJoinRetry(delayMs: number, joinToken: symbol): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (outcome: "resolve" | "reject", error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.mucJoinRetryCancellers.get(joinToken) === cancel) {
+          this.mucJoinRetryCancellers.delete(joinToken);
+        }
+        if (outcome === "resolve") {
+          resolve();
+        } else {
+          reject(error ?? new Error("XMPP room join retry cancelled"));
+        }
+      };
+      const cancel = (error: Error) => finish("reject", error);
+      const timer = setTimeout(() => finish("resolve"), delayMs);
+      this.mucJoinRetryCancellers.set(joinToken, cancel);
+    });
   }
 
   async fanOutAutoJoin(roomJids: ReadonlyArray<string>, concurrency = 6): Promise<void> {
@@ -1323,48 +1497,126 @@ export class BrowserXmppClient {
   async switchRoom(_spaceId: string, channelId: string) {
     await this.connect();
     const nextRoom = this.roomJidForChannel(channelId);
+    await this.switchRoomTarget(nextRoom);
+  }
+
+  /**
+   * Switch to one already-resolved room JID.
+   *
+   * Callers that need a room-scoped handle resolve the channel mapping only
+   * after `connect()` and pass that exact snapshot through this boundary. This
+   * prevents topology discovery completing during connect from making the
+   * switch join one JID while the caller validates or queries another.
+   */
+  private async switchRoomTarget(nextRoom: string): Promise<void> {
     if (this.roomSwitchPromise) {
       if (this.roomSwitchTarget === nextRoom) return this.roomSwitchPromise;
-      await this.roomSwitchPromise.catch(() => undefined);
+      // Only detach the obsolete navigation. The canonical room join may
+      // also be awaited by autojoin, member-list readiness, or an outbound
+      // queue flush, so canceling it here would strand independent work.
+      this.cancelRoomSwitch(new RoomSwitchSupersededError());
     }
-    if (this.currentRoom === nextRoom) {
-      await this.ensureJoined(nextRoom);
-      this.dispatchFocusedRoomHandlers();
-      await this.flushQueuedRoomMessages(nextRoom);
-      return;
-    }
-    const promise = this.performRoomSwitch(nextRoom);
+    const switchToken = Symbol(nextRoom);
+    let cancelSwitch!: (error: Error) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      cancelSwitch = reject;
+    });
+    let resolveSwitch!: () => void;
+    let rejectSwitch!: (error: unknown) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveSwitch = resolve;
+      rejectSwitch = reject;
+    });
     this.roomSwitchPromise = promise;
     this.roomSwitchTarget = nextRoom;
+    this.roomSwitchToken = switchToken;
+    this.roomSwitchCanceller = cancelSwitch;
+    // Publish the switch generation before entering the join binding. Presence
+    // callbacks may synchronously trigger another selection; that newer switch
+    // must be able to supersede this one without the old invocation restoring
+    // its promise or focus state afterward.
+    void this.performRoomSwitch(
+      nextRoom,
+      switchToken,
+      cancelled,
+    ).then(
+      resolveSwitch,
+      rejectSwitch,
+    );
     try {
       await promise;
     } finally {
       if (this.roomSwitchPromise === promise) {
         this.roomSwitchPromise = null;
         this.roomSwitchTarget = null;
+        this.roomSwitchToken = null;
+        this.roomSwitchCanceller = null;
       }
     }
   }
 
-  private async performRoomSwitch(nextRoom: string) {
+  private async performRoomSwitch(
+    nextRoom: string,
+    switchToken: symbol,
+    cancelled: Promise<never>,
+  ) {
     const xmpp = this.xmpp;
-    if (!xmpp) return;
+    if (!xmpp) {
+      throw new Error("XMPP connection changed while switching rooms");
+    }
+    // The existing timer belongs to the previously confirmed room. Stop it
+    // before publishing the new focus so it cannot ping `nextRoom/nick`
+    // while that room is still awaiting status 110 (or after the join is
+    // rejected). A successful join installs a fresh timer below.
+    this.stopSelfPing();
     this.currentRoom = nextRoom;
     this.dispatchFocusedRoomHandlers();
     try {
-      await withSpan(
-        "xmpp.room_switch",
-        { "conversation.kind": "room" },
-        () => this.ensureJoined(nextRoom),
-      );
+      await Promise.race([
+        withSpan(
+          "xmpp.room_switch",
+          { "conversation.kind": "room" },
+          () =>
+            this.ensureJoinedWithToken(nextRoom).catch((error: unknown) => {
+              if (error instanceof RoomSwitchSupersededError) return;
+              throw error;
+            }),
+        ),
+        cancelled,
+      ]);
+      if (!this.isCurrentXmpp(xmpp)) {
+        throw new Error("XMPP connection changed while switching rooms");
+      }
+      if (
+        this.roomSwitchToken !== switchToken
+        || this.currentRoom !== nextRoom
+      ) {
+        return;
+      }
+      this.dispatchFocusedRoomHandlers();
+      this.startSelfPing();
+      // Keep the public switch boundary cancellable through the queue flush.
+      // A disconnect or newer selection after status 110 must not leave
+      // downstream MAM/action callers waiting for stale transport work.
+      await Promise.race([
+        this.flushQueuedRoomMessages(nextRoom),
+        cancelled,
+      ]);
+      if (!this.isCurrentXmpp(xmpp)) {
+        throw new Error("XMPP connection changed while switching rooms");
+      }
+      if (
+        this.roomSwitchToken !== switchToken
+        || this.currentRoom !== nextRoom
+      ) {
+        return;
+      }
     } catch (err) {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (err instanceof RoomSwitchSupersededError) return;
+      if (!this.isCurrentXmpp(xmpp)) throw err;
+      if (this.roomSwitchToken !== switchToken) return;
       throw err;
     }
-    if (!this.isCurrentXmpp(xmpp)) return;
-    this.dispatchFocusedRoomHandlers();
-    this.startSelfPing();
-    await this.flushQueuedRoomMessages(nextRoom);
   }
 
   private canUseConnectedSession(): boolean {
@@ -1448,10 +1700,32 @@ export class BrowserXmppClient {
     return this.xmpp;
   }
 
-  private async requireJoinedRoom(spaceId: string, channelId: string): Promise<{ xmpp: XmppClientInstance; roomJid: string }> {
+  private async requireReadyRoomXmpp(roomJid: string): Promise<XmppClientInstance> {
+    const xmpp = await this.requireConnectedXmpp();
+    await this.ensureJoined(roomJid);
+    if (
+      !this.isCurrentXmpp(xmpp)
+      || !this.connected
+      || !this.joinedMucReady.has(this.roomJoinKey(roomJid))
+    ) {
+      throw new Error(`Room is not ready on the current XMPP connection: ${roomJid}`);
+    }
+    return xmpp;
+  }
+
+  private async requireJoinedRoom(_spaceId: string, channelId: string): Promise<{ xmpp: XmppClientInstance; roomJid: string }> {
+    await this.connect();
     const roomJid = this.roomJidForChannel(channelId);
-    await this.switchRoom(spaceId, channelId);
-    if (!this.xmpp || !this.connected || this.destroying || this.currentRoom !== roomJid) throw new Error(`Room is not ready: ${roomJid}`);
+    await this.switchRoomTarget(roomJid);
+    if (
+      !this.xmpp
+      || !this.connected
+      || this.destroying
+      || this.currentRoom !== roomJid
+      || !this.joinedMucReady.has(this.roomJoinKey(roomJid))
+    ) {
+      throw new Error(`Room is not ready: ${roomJid}`);
+    }
     return { xmpp: this.xmpp, roomJid };
   }
 
@@ -2267,7 +2541,21 @@ export class BrowserXmppClient {
 
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
   private stopSelfPing() { if (this.selfPingTimer) { clearInterval(this.selfPingTimer); this.selfPingTimer = null; } }
-  private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.events.emit("roomDisconnect"); } }
+  private async doSelfPing() {
+    const roomJid = this.currentRoom;
+    if (
+      !this.xmpp?.send_raw_iq
+      || !roomJid
+      || !this.joinedMucReady.has(this.roomJoinKey(roomJid))
+    ) {
+      return;
+    }
+    try {
+      await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${roomJid}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`);
+    } catch {
+      this.events.emit("roomDisconnect");
+    }
+  }
   private handleMessageAck(id: string) { this.outboundQueue.handleAck(id); }
   private handleMessageFailed(id: string) { this.outboundQueue.handleFailed(id); }
   // `lifecycle` is the bare kind here — the emitted
@@ -2518,6 +2806,9 @@ export class BrowserXmppClient {
     clearAllLiveCallParticipants();
     void useCallEngine().engine.disconnect();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
+    this.cancelMucJoinRetryWaiters(new Error("XMPP disconnected while retrying room join"));
+    this.mucJoinInFlightKeys.clear();
+    this.cancelRoomSwitch(new Error("XMPP disconnected while switching rooms"));
     // `joinedMucs` keys are already canonical `roomJoinKey`s (#1221).
     this.retainedJoinedRoomJids = new Set([
       ...this.retainedJoinedRoomJids,

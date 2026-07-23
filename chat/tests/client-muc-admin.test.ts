@@ -5,7 +5,7 @@
  * failure classification, and the snake_case translation of the admin
  * V2 wrappers — exercised against a fake WASM client.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import {
   MucAdmin,
   RoomMemberListUnavailableError,
@@ -13,10 +13,14 @@ import {
 } from "../src/lib/xmpp/client-muc-admin";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 
-function createAdmin(xmpp: MucAdminWasmClient) {
+function createAdmin(
+  xmpp: MucAdminWasmClient,
+  requireReadyRoomXmpp: (roomJid: string) => Promise<MucAdminWasmClient> = async () => xmpp,
+) {
   const errors: XmppErrorEvent[] = [];
   const admin = new MucAdmin({
     requireConnectedXmpp: async () => xmpp,
+    requireReadyRoomXmpp,
     roomJidForChannel: (channelId) => `${channelId}@muc.example.com`,
     emitError: (event) => errors.push(event),
   });
@@ -24,6 +28,49 @@ function createAdmin(xmpp: MucAdminWasmClient) {
 }
 
 describe("MucAdmin.listRoomMembers", () => {
+  test("waits for canonical room readiness before sending affiliation queries", async () => {
+    let releaseRoom: (() => void) | undefined;
+    const roomReady = new Promise<void>((resolve) => {
+      releaseRoom = resolve;
+    });
+    const requireReadyRoomXmpp = mock(async () => {
+      await roomReady;
+      return { list_room_members: listRoomMembers };
+    });
+    const listRoomMembers = mock(async () => []);
+    const { admin } = createAdmin(
+      { list_room_members: listRoomMembers },
+      requireReadyRoomXmpp,
+    );
+
+    const members = admin.listRoomMembers("general", {
+      roomJid: "room-123@muc.example.com",
+    });
+    await Promise.resolve();
+
+    expect(requireReadyRoomXmpp).toHaveBeenCalledWith("room-123@muc.example.com");
+    expect(listRoomMembers).not.toHaveBeenCalled();
+
+    releaseRoom?.();
+    await expect(members).resolves.toEqual([]);
+    expect(listRoomMembers).toHaveBeenCalledTimes(4);
+  });
+
+  test("propagates join rejection without sending affiliation queries", async () => {
+    const rejection = new Error("join rejected");
+    const listRoomMembers = mock(async () => []);
+    const { admin, errors } = createAdmin(
+      { list_room_members: listRoomMembers },
+      async () => {
+        throw rejection;
+      },
+    );
+
+    await expect(admin.listRoomMembers("general")).rejects.toBe(rejection);
+    expect(listRoomMembers).not.toHaveBeenCalled();
+    expect(errors).toEqual([]);
+  });
+
   test("aggregates members across all four affiliation queries", async () => {
     const queried: string[] = [];
     const { admin, errors } = createAdmin({

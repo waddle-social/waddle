@@ -156,7 +156,7 @@ export const XMPP_ERROR_CONDITIONS = new Set([
 
 export interface XmppErrorEvent {
   kind: XmppErrorKind;
-  /** Whether the client expects to recover on its own without UI intervention. */
+  /** Whether the failure is transient or expected and should not page operators. */
   recoverable: boolean;
   /** Short, human-readable reason for local UI/debugging; sanitize before telemetry. */
   detail: string;

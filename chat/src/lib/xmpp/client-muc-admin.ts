@@ -80,6 +80,7 @@ export type MucAdminWasmClient = {
 
 type MucAdminDeps = {
   requireConnectedXmpp: () => Promise<MucAdminWasmClient>;
+  requireReadyRoomXmpp: (roomJid: string) => Promise<MucAdminWasmClient>;
   roomJidForChannel: (channelId: string) => string;
   emitError: (event: XmppErrorEvent) => void;
 };
@@ -88,8 +89,8 @@ export class MucAdmin {
   constructor(private readonly deps: MucAdminDeps) {}
 
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> {
-    const xmpp = await this.deps.requireConnectedXmpp();
     const roomJid = options?.roomJid ?? this.deps.roomJidForChannel(channelId);
+    const xmpp = await this.deps.requireReadyRoomXmpp(roomJid);
     const listMembers = xmpp.list_room_members
       ? async (affiliation: "owner" | "admin" | "member" | "outcast") => await xmpp.list_room_members?.(roomJid, affiliation)
       : null;

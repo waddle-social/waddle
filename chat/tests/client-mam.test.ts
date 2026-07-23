@@ -79,7 +79,10 @@ function createPager(
     events,
     emitError: (event) => errors.push(event),
     requireConnectedXmpp: async () => xmpp,
-    ensureRoomReady: async () => undefined,
+    ensureRoomReady: async (_spaceId, channelId) => ({
+      xmpp,
+      roomJid: `${channelId}@muc.example.com`,
+    }),
     roomJidForChannel: (channelId) => `${channelId}@muc.example.com`,
     isCurrentConnected: (candidate) =>
       overrides.currentXmpp ? overrides.currentXmpp() === candidate : xmpp === candidate,

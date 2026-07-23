@@ -9,6 +9,11 @@ export type {
 } from "./client-pubsub";
 export { RoomMemberListUnavailableError } from "./client-muc-admin";
 export type { AdminUserEntry, AdminUsersPage } from "./client-muc-admin";
+export {
+  MUC_JOIN_RETRY_DELAYS_MS,
+  MucJoinRejectedError,
+  MucJoinSelfPresenceTimeoutError,
+} from "./muc-join-retry";
 // Admin V2 — types re-exported for consumption by SpacesPanel,
 // ChannelsPanel, and their detail drawers. The `*Ref` /
 // `*SetRoleResult` / `*SetAffiliationResult` / `*KickResult` shapes
