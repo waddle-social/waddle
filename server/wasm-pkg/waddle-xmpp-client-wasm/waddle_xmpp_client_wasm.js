@@ -9,7 +9,7 @@ export default async function init() {
   if (!initPromise) {
     initPromise = (async () => {
       // In dev mode bypass the browser HTTP/WebAssembly cache so that a fresh
-      // REBUILD_WASM=1 build is picked up without a manual hard-refresh.
+      // WASM rebuild is picked up without a manual hard-refresh.
       // In production the URL is content-hashed, so "default" is fine.
       const cache = import.meta.env.DEV ? "no-store" : "default";
       const response = await fetch(wasmUrl, { cache });

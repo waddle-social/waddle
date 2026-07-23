@@ -7,6 +7,7 @@ on:
     branches:
     - main
     paths:
+    - .cargo/**
     - .github/workflows/waddle-chat-default.yml
     - bun.lock
     - bun.lock/**
@@ -14,6 +15,7 @@ on:
     - chat/astro.config.mjs/**
     - chat/dist/**
     - chat/env.cue
+    - chat/env.cue/**
     - chat/package.json
     - chat/package.json/**
     - chat/public/**
@@ -34,14 +36,22 @@ on:
     - cue.mod/**
     - env.cue
     - env.cue/**
+    - flake.lock
+    - flake.lock/**
+    - flake.nix
+    - flake.nix/**
     - package.json
     - package.json/**
+    - server/.cargo/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
     - server/crates/waddle-xmpp-client-wasm/**
     - server/crates/waddle-xmpp-client/**
+    - server/crates/waddle-xmpp-core/**
+    - server/rust-toolchain.toml
+    - server/rust-toolchain.toml/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
