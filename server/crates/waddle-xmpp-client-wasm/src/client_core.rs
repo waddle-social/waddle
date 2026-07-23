@@ -4,14 +4,16 @@ use super::*;
 impl WaddleClient {
     #[wasm_bindgen(constructor)]
     pub fn new(config: WaddleConfig) -> WaddleClient {
+        let command_owner = Rc::new(RefCell::new(None));
         WaddleClient {
             inner: Rc::new(RefCell::new(WaddleClientInner {
                 config: StoredConfig::from(&config),
-                cmd_tx: None,
+                command_owner: Rc::downgrade(&command_owner),
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
                 on_session_lifecycle: None,
+                on_stream_management: None,
                 on_disconnected: None,
                 on_error: None,
                 on_message_delivery_acked: None,
@@ -21,6 +23,7 @@ impl WaddleClient {
                 on_call: None,
                 resume_state: None,
             })),
+            _command_owner: command_owner,
         }
     }
 
@@ -55,6 +58,10 @@ impl WaddleClient {
 
     pub fn set_on_session_lifecycle(&mut self, cb: Function) {
         self.inner.borrow_mut().on_session_lifecycle = Some(cb);
+    }
+
+    pub fn set_on_stream_management(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_stream_management = Some(cb);
     }
 
     pub fn set_on_disconnected(&mut self, cb: Function) {
@@ -101,7 +108,8 @@ impl WaddleClient {
     pub fn connect(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            if inner.borrow().cmd_tx.is_some() {
+            let command_owner = command_owner(&inner)?;
+            if command_owner.borrow().is_some() {
                 return Err(js_error("client is already connected"));
             }
 
@@ -112,7 +120,7 @@ impl WaddleClient {
             let (cmd_tx, cmd_rx) = mpsc::channel(64);
             let (event_tx, event_rx) = mpsc::channel(256);
 
-            inner.borrow_mut().cmd_tx = Some(cmd_tx);
+            *command_owner.borrow_mut() = Some(cmd_tx);
 
             spawn_local(event_dispatch_loop(inner.clone(), event_rx));
             spawn_local(driver_loop(config, ws, cmd_rx, event_tx, inner.clone()));
@@ -125,6 +133,17 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             disconnect_client(inner).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Best-effort XEP-0198 acknowledgement request for page lifecycle
+    /// handoff. The shared runtime suppresses duplicates while another
+    /// request is already awaiting `<a/>`.
+    pub fn request_stream_management_ack(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            request_stream_management_ack(inner).await?;
             Ok(JsValue::UNDEFINED)
         })
     }

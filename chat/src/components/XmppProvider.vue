@@ -2,8 +2,14 @@
 import { onMounted, onUnmounted } from "vue";
 import { useSessionAuth } from "@/auth/session";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
+import { suspendCallForPageHide } from "@/lib/calls/call-controls";
 import { connectionStore } from "@/lib/connection-store";
+import { reportError } from "@/lib/telemetry";
 import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
+import {
+  installXmppPagehideLifecycle,
+  type XmppPageLifecycleFailure,
+} from "@/lib/xmpp/pagehide-lifecycle";
 import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
 import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
 import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
@@ -15,6 +21,15 @@ const props = defineProps<{
 }>();
 
 const auth = useSessionAuth(props.serverBaseUrl);
+let disconnectPagehideLifecycle: (() => void) | null = null;
+
+function reportPageLifecycleFailure(failure: XmppPageLifecycleFailure): void {
+  reportError("xmpp.stream", failure.cause, {
+    recoverable: true,
+    detail: "page-lifecycle-failed",
+    operation: failure.operation,
+  });
+}
 
 function syncStoreFromAuth() {
   connectionStore.appState = auth.appState.value;
@@ -67,10 +82,20 @@ connectionStore.logout = async () => {
 connectionStore.bootstrap = bootstrap;
 
 onMounted(() => {
+  if (typeof window !== "undefined") {
+    disconnectPagehideLifecycle = installXmppPagehideLifecycle(
+      window,
+      () => connectionStore.client,
+      suspendCallForPageHide,
+      reportPageLifecycleFailure,
+    );
+  }
   void bootstrap();
 });
 
 onUnmounted(() => {
+  disconnectPagehideLifecycle?.();
+  disconnectPagehideLifecycle = null;
   connectionStore.client?.disconnect().catch(() => undefined);
   connectionStore.client = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);

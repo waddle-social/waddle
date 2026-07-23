@@ -212,11 +212,11 @@ async fn concrete_transport_connects_and_emits_typed_frames() {
     );
 
     let outbound = TransportMessage::Open(StreamOpen::from_config(&live_config));
-    transport.send(outbound.clone()).await.unwrap();
-    assert!(matches!(
-        transport.next_event().await.unwrap(),
-        Some(TransportEvent::MessageSent(message)) if message == outbound
-    ));
+    transport.send(outbound).await.unwrap();
+    assert!(
+        transport.drain_events().is_empty(),
+        "the transport adapter must not own MessageSent confirmation"
+    );
 
     assert!(matches!(
         transport.next_event().await.unwrap(),

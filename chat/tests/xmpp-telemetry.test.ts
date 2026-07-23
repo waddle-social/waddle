@@ -739,8 +739,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     // added an inflight entry plus a pending timestamp, then emit ack.
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: { on: (name: string, fn: (msg: unknown) => void) => void; emit: (name: string, msg: unknown) => void };
       wireEvents: (xmpp: unknown) => void;
@@ -758,8 +757,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     };
     internal.xmpp = stubXmpp as never;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("room-1");
-    internal.outboundQueue.notePendingSend("room-1", "room");
+    internal.outboundQueue.beginAttempt("room-1", "room");
 
     stubXmpp.emit("message:acked", { id: "room-1" });
 
@@ -779,8 +777,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
@@ -801,10 +798,9 @@ describe("BrowserXmppClient telemetry hooks", () => {
     };
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("dm-9");
-    internal.outboundQueue.notePendingSend("dm-9", "dm");
+    internal.outboundQueue.beginAttempt("dm-9", "dm");
     // Record the pending kind so the failure hook reports it truthfully.
-    internal.outboundQueue.notePendingSend("live-1", "dm");
+    internal.outboundQueue.beginAttempt("live-1", "dm");
 
     // Ack → Faro event + measurement
     (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "dm-9" });
@@ -1375,8 +1371,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
@@ -1394,7 +1389,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     };
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.notePendingSend("m-bad", "dm");
+    internal.outboundQueue.beginAttempt("m-bad", "dm");
 
     expect(() => {
       (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "m-bad" });
@@ -1411,8 +1406,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
@@ -1430,8 +1424,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
     };
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("dm-fail-1");
-    internal.outboundQueue.notePendingSend("dm-fail-1", "dm");
+    internal.outboundQueue.beginAttempt("dm-fail-1", "dm");
+    depths.length = 0;
 
     stubXmpp.emit("message:failed", { id: "dm-fail-1" });
 

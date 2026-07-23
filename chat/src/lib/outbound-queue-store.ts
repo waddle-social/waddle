@@ -276,9 +276,11 @@ export function enqueueQueuedMessage(
   writeQueue(accountKey, next);
 }
 
-export function removeQueuedMessage(accountKey: string, messageId: string): void {
-  const next = readQueue(accountKey).filter((message) => message.id !== messageId);
+export function removeQueuedMessage(accountKey: string, messageId: string): boolean {
+  const current = readQueue(accountKey);
+  const next = current.filter((message) => message.id !== messageId);
   writeQueue(accountKey, next);
+  return next.length !== current.length;
 }
 
 export function countQueuedMessages(accountKey: string): number {

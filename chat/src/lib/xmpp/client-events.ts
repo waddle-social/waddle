@@ -37,7 +37,11 @@ import type {
 } from "./types";
 import type { InboxEntry } from "./inbox-types";
 import type { TerminalMucJoinCondition } from "./room-auto-join-policy";
-import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
+import type {
+  WasmPinEvent,
+  WasmPubsubEvent,
+  WasmStreamManagementTelemetry,
+} from "./wasm-types";
 
 /** Event name → payload tuple. */
 export type ClientEventMap = Record<string, ReadonlyArray<unknown>>;
@@ -91,6 +95,13 @@ export type RoomAccessChangedEvent =
       state: "available";
     };
 
+export type QueueDepthTelemetry = {
+  kind: "room" | "dm";
+  persisted: number;
+  inflight: number;
+  oldestAgeMs?: number;
+};
+
 /**
  * Event map for `BrowserXmppClient`'s internal bus.
  *
@@ -139,7 +150,8 @@ export type ClientEvents = {
   sessionLifecycleHook: [event: SessionLifecycleEvent];
   statusHook: [status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }];
   sendEnqueued: [info: { kind: "room" | "dm"; reason: string }];
-  queueDepthChange: [depth: { kind: "room" | "dm"; persisted: number; inflight: number }];
+  queueDepthChange: [depth: QueueDepthTelemetry];
+  streamManagement: [event: WasmStreamManagementTelemetry];
   error: [event: XmppErrorEvent];
   reconnectScheduled: [info: { attempt: number; delayMs: number }];
   catchup: [info: CatchupHookInfo];

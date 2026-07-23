@@ -28,6 +28,8 @@ pub enum ClientError {
     EmptyResource,
     #[error("stanza id must not be empty")]
     EmptyStanzaId,
+    #[error("stream management session id must not be empty")]
+    EmptyStreamManagementSessionId,
     #[error("request correlation ids are exhausted")]
     RequestIdExhausted,
     #[error("request {request_id} is already pending")]
@@ -60,6 +62,8 @@ pub enum ClientError {
     InvalidWebSocketRequest(#[source] tokio_tungstenite::tungstenite::http::Error),
     #[error("websocket connection timed out after {timeout:?}")]
     WebSocketConnectTimeout { timeout: Duration },
+    #[error("websocket transport write timed out after {timeout:?}")]
+    WebSocketWriteTimeout { timeout: Duration },
     #[error("iq request timed out after {timeout:?}")]
     IqTimeout { timeout: Duration },
     #[error("websocket transport failed")]

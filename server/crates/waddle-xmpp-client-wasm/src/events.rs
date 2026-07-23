@@ -10,9 +10,12 @@ pub(crate) async fn event_dispatch_loop(
             DriverEvent::ResumeState(state) => {
                 inner.borrow_mut().resume_state = state;
             }
-            DriverEvent::Error(description) => emit_error_callback(&inner, &description),
+            DriverEvent::Error(error) => emit_error_callback(&inner, &error),
             DriverEvent::Disconnected => {
-                inner.borrow_mut().cmd_tx = None;
+                let command_owner = inner.borrow().command_owner.upgrade();
+                if let Some(command_owner) = command_owner {
+                    command_owner.borrow_mut().take();
+                }
                 // Clone the callback before invoking it so a JS handler that
                 // synchronously re-enters the WaddleClient via a `send_*`
                 // method (which takes `borrow_mut`) does not panic on an
@@ -56,6 +59,44 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 let _ = callback.call1(&JsValue::NULL, &JsValue::from_str("resumed"));
             }
         }
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestSent { attempt, unacked },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::Request { attempt, unacked },
+        ),
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckObserved {
+                progressed,
+                latency_ms,
+                unacked,
+            },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::Observed {
+                progressed,
+                latency_ms,
+                unacked,
+            },
+        ),
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestTimedOut { unacked },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::RequestTimeout { unacked },
+        ),
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckProgressStalled {
+                unacked,
+                elapsed_ms,
+            },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::ProgressStalled {
+                unacked,
+                elapsed_ms,
+            },
+        ),
         ClientEvent::Connection(ConnectionEvent::StreamError { condition, detail }) => {
             emit_stream_error_callback(inner, condition, detail);
         }
@@ -157,10 +198,39 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
     }
 }
 
-pub(crate) fn emit_error_callback(inner: &Rc<RefCell<WaddleClientInner>>, description: &str) {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum JsStreamManagementTelemetry {
+    #[serde(rename = "ack-request")]
+    Request { attempt: u32, unacked: u32 },
+    #[serde(rename = "ack-observed")]
+    Observed {
+        progressed: bool,
+        latency_ms: Option<u64>,
+        unacked: u32,
+    },
+    #[serde(rename = "ack-request-timeout")]
+    RequestTimeout { unacked: u32 },
+    #[serde(rename = "ack-progress-stalled")]
+    ProgressStalled { unacked: u32, elapsed_ms: u64 },
+}
+
+fn emit_stream_management_callback(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    event: JsStreamManagementTelemetry,
+) {
+    let callback = inner.borrow().on_stream_management.clone();
+    if let Some(callback) = callback {
+        if let Ok(value) = to_js_value(&event) {
+            let _ = callback.call1(&JsValue::NULL, &value);
+        }
+    }
+}
+
+pub(crate) fn emit_error_callback(inner: &Rc<RefCell<WaddleClientInner>>, error: &WasmDriverError) {
     let callback = inner.borrow().on_error.clone();
     if let Some(callback) = callback {
-        let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(description));
+        let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(&error.to_string()));
     }
 }
 

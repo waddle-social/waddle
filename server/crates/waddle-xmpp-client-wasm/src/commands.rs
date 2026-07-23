@@ -37,6 +37,7 @@ pub(crate) fn send_failure_outcome(error: &ClientError) -> WaddleSendMessageOutc
         ClientError::InvalidTransportScheme { .. }
         | ClientError::MissingWebSocketHost
         | ClientError::WebSocketConnectTimeout { .. }
+        | ClientError::WebSocketWriteTimeout { .. }
         | ClientError::TransportClosed
         | ClientError::EmptyTransportFrame
         | ClientError::TransportFrameTooLarge { .. }
@@ -132,6 +133,20 @@ pub(crate) async fn cancel_iq_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
+pub(crate) async fn request_stream_management_ack(
+    inner: Rc<RefCell<WaddleClientInner>>,
+) -> Result<(), JsValue> {
+    let mut cmd_tx = command_sender(&inner)?;
+    let (responder, rx) = oneshot::channel();
+    cmd_tx
+        .send(WasmCommand::RequestStreamManagementAck { responder })
+        .await
+        .map_err(|_| js_error("client is disconnected"))?;
+    rx.await
+        .map_err(|_| js_error("client is disconnected"))?
+        .map_err(|err| js_error(err.to_string()))
+}
+
 /// Variant of [`send_iq_command`] that surfaces RFC 6120 §8.3 stanza
 /// errors as a typed [`waddle_xmpp_client::StanzaError`] on the Rust
 /// side instead of rejecting the Promise. Transport / disconnect
@@ -220,7 +235,8 @@ pub(crate) async fn send_inbox_query_command(
 pub(crate) async fn disconnect_client(
     inner: Rc<RefCell<WaddleClientInner>>,
 ) -> Result<(), JsValue> {
-    let mut cmd_tx = match inner.borrow().cmd_tx.clone() {
+    let command_owner = command_owner(&inner)?;
+    let mut cmd_tx = match command_owner.borrow().clone() {
         Some(cmd_tx) => cmd_tx,
         None => return Ok(()),
     };
@@ -230,8 +246,7 @@ pub(crate) async fn disconnect_client(
         .send(WasmCommand::Disconnect { responder })
         .await
         .map_err(|_| js_error("client is disconnected"))?;
-    inner.borrow_mut().cmd_tx = None;
-    inner.borrow_mut().resume_state = None;
+    command_owner.borrow_mut().take();
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))
@@ -240,17 +255,76 @@ pub(crate) async fn disconnect_client(
 pub(crate) fn command_sender(
     inner: &Rc<RefCell<WaddleClientInner>>,
 ) -> Result<mpsc::Sender<WasmCommand>, JsValue> {
+    let command_owner = command_owner(inner)?;
+    let sender = command_owner
+        .borrow()
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| js_error("client is not connected"));
+    sender
+}
+
+pub(crate) fn command_owner(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+) -> Result<Rc<RefCell<Option<mpsc::Sender<WasmCommand>>>>, JsValue> {
     inner
         .borrow()
-        .cmd_tx
-        .clone()
-        .ok_or_else(|| js_error("client is not connected"))
+        .command_owner
+        .upgrade()
+        .ok_or_else(|| js_error("client wrapper was released"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
     use waddle_xmpp_client::error::{StanzaError, StanzaErrorType};
+
+    #[test]
+    fn public_disconnect_hides_sender_but_preserves_resume_until_clean_completion() {
+        block_on(async {
+            let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+            let command_owner = Rc::new(RefCell::new(Some(cmd_tx)));
+            let resume_state = waddle_xmpp_client::SmResumeState::new("public-disconnect", 2, 3)
+                .expect("resume state");
+            let inner = Rc::new(RefCell::new(WaddleClientInner {
+                config: StoredConfig {
+                    server_url: "wss://xmpp.example.test/ws".to_string(),
+                    jid: "alice@example.test".to_string(),
+                    access_token: "token".to_string(),
+                    resource: "web".to_string(),
+                    resume_state: Some(resume_state.clone()),
+                },
+                command_owner: Rc::downgrade(&command_owner),
+                on_message: None,
+                on_presence: None,
+                on_connected: None,
+                on_session_lifecycle: None,
+                on_stream_management: None,
+                on_disconnected: None,
+                on_error: None,
+                on_message_delivery_acked: None,
+                on_message_delivery_failed: None,
+                on_mds_displayed: None,
+                on_pubsub_event: None,
+                on_call: None,
+                resume_state: Some(resume_state.clone()),
+            }));
+
+            let acknowledge_driver = async {
+                let Some(WasmCommand::Disconnect { responder }) = cmd_rx.next().await else {
+                    panic!("expected disconnect command");
+                };
+                let _ = responder.send(Ok(()));
+            };
+            let (result, ()) = futures::join!(disconnect_client(inner.clone()), acknowledge_driver);
+
+            assert!(result.is_ok());
+            assert!(command_owner.borrow().is_none());
+            assert_eq!(inner.borrow().resume_state, Some(resume_state));
+            assert!(disconnect_client(inner.clone()).await.is_ok());
+        });
+    }
 
     fn stanza_error(
         error_type: StanzaErrorType,

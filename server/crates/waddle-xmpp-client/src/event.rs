@@ -11,7 +11,7 @@ use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
 use crate::state::{SessionBinding, SessionSnapshot};
-use crate::stream_management::SmResumeState;
+use crate::stream_management::{SmResumeState, SmSessionId};
 use crate::transport::{StreamOpen, TransportEvent, TransportMessage};
 
 /// Public event surface emitted by the client runtime.
@@ -105,10 +105,39 @@ pub enum ConnectionEvent {
 /// XEP-0198 stream management lifecycle notifications.
 #[derive(Debug, Clone)]
 pub enum StreamManagementEvent {
-    Enabled { previd: Option<String> },
-    AckReceived { h: u32 },
+    Enabled {
+        previd: Option<SmSessionId>,
+    },
+    AckReceived {
+        h: u32,
+    },
+    /// The client emitted `<r/>` for its outstanding client-to-server
+    /// stanza window. Carries counters only; no stanza or stream identity.
+    AckRequestSent {
+        attempt: u32,
+        unacked: u32,
+    },
+    /// A valid server `<a/>` released the request-in-flight latch.
+    AckObserved {
+        progressed: bool,
+        latency_ms: Option<u64>,
+        unacked: u32,
+    },
+    /// The server did not answer `<r/>` within the bounded response window.
+    AckRequestTimedOut {
+        unacked: u32,
+    },
+    /// The server's handled count has not advanced for the bounded progress
+    /// window. Drivers use this typed signal to abort the XML stream
+    /// uncleanly so normal reconnect/resume can take over.
+    AckProgressStalled {
+        unacked: u32,
+        elapsed_ms: u64,
+    },
     AckRequested,
-    Resumed { h: u32 },
+    Resumed {
+        h: u32,
+    },
     Failed,
 }
 

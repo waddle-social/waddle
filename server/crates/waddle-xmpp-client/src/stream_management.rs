@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use minidom::Element;
@@ -9,17 +9,128 @@ use crate::request::StanzaId;
 pub const NS_SM: &str = "urn:xmpp:sm:3";
 const NS_DELAY: &str = "urn:xmpp:delay";
 
+const ACK_RETRY_DELAYS_MS: [u64; 5] = [250, 500, 1_000, 2_000, 5_000];
+const ACK_RESPONSE_TIMEOUT_MS: u64 = 5_000;
+const ACK_PROGRESS_TIMEOUT_MS: u64 = 30_000;
+
+/// Opaque XEP-0198 resumption identifier carried in `id` / `previd`.
+///
+/// The inner wire string is exposed only through the existing persistence
+/// accessor and XML serialization boundary; runtime/event state carries this
+/// dedicated type.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct SmSessionId(String);
+
+impl SmSessionId {
+    pub fn new(value: impl Into<String>) -> ClientResult<Self> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(ClientError::EmptyStreamManagementSessionId);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SmSessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("SmSessionId").field(&self.0).finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmAckHandledCountTooHigh {
+    pub h: u32,
+    pub send_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SentStanzaKind {
+    NotCountable,
+    New,
+    Replay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AckRequest {
+    pub attempt: u32,
+    pub unacked: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SentStanzaResult {
+    pub kind: SentStanzaKind,
+    pub request: Option<AckRequest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AckObservation {
+    pub progressed: bool,
+    pub latency_ms: Option<u64>,
+    pub unacked: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessAckResult {
+    pub acked: Vec<StanzaId>,
+    pub observation: AckObservation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AckTimerPoll {
+    pub request: Option<AckRequest>,
+    pub request_timed_out: bool,
+    pub progress_stalled_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AckCadence {
+    request_pending_confirmation: bool,
+    request_sent_at_ms: Option<u64>,
+    next_request_at_ms: Option<u64>,
+    progress_started_at_ms: Option<u64>,
+    retry_index: usize,
+    request_attempt: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueuedOutboundStanza {
-    element: Element,
+    entry: SmResumeEntry,
     message_stanza_id: Option<StanzaId>,
+}
+
+/// One typed outbound stanza retained for XEP-0198 resume/fallback retry.
+///
+/// `sent_at` is the original transport-confirmed send instant. It survives
+/// persistence independently of the XML so XEP-0203 fallback delivery can add
+/// the original timestamp after a page reload without mutating normal replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmResumeEntry {
+    element: Element,
     sent_at: DateTime<Utc>,
+}
+
+impl SmResumeEntry {
+    pub fn new(element: Element, sent_at: DateTime<Utc>) -> Self {
+        Self { element, sent_at }
+    }
+
+    pub fn element(&self) -> &Element {
+        &self.element
+    }
+
+    pub fn sent_at(&self) -> DateTime<Utc> {
+        self.sent_at
+    }
 }
 
 /// In-memory XEP-0198 resume snapshot carried across a reconnect attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmResumeState {
-    previd: String,
+    previd: SmSessionId,
     inbound_h: u32,
     outbound_h: u32,
     max_resume_seconds: Option<u32>,
@@ -28,13 +139,8 @@ pub struct SmResumeState {
 
 impl SmResumeState {
     pub fn new(previd: impl Into<String>, inbound_h: u32, outbound_h: u32) -> ClientResult<Self> {
-        let previd = previd.into();
-        if previd.trim().is_empty() {
-            return Err(ClientError::EmptyStanzaId);
-        }
-
         Ok(Self {
-            previd,
+            previd: SmSessionId::new(previd)?,
             inbound_h,
             outbound_h,
             max_resume_seconds: None,
@@ -48,14 +154,18 @@ impl SmResumeState {
     }
 
     fn from_outbound_queue(
-        previd: impl Into<String>,
+        previd: SmSessionId,
         inbound_h: u32,
         outbound_h: u32,
         outbound_queue: VecDeque<QueuedOutboundStanza>,
     ) -> ClientResult<Self> {
-        let mut state = Self::new(previd, inbound_h, outbound_h)?;
-        state.outbound_queue = outbound_queue;
-        Ok(state)
+        Ok(Self {
+            previd,
+            inbound_h,
+            outbound_h,
+            max_resume_seconds: None,
+            outbound_queue,
+        })
     }
 
     pub fn from_unhandled_outbound_stanzas(
@@ -66,16 +176,43 @@ impl SmResumeState {
     ) -> ClientResult<Self> {
         let outbound_queue = stanzas
             .into_iter()
-            .map(|element| QueuedOutboundStanza {
-                message_stanza_id: message_delivery_stanza_id(&element),
-                sent_at: existing_delay_stamp(&element).unwrap_or_else(Utc::now),
-                element,
+            .map(|element| {
+                let sent_at = existing_delay_stamp(&element).unwrap_or_else(Utc::now);
+                SmResumeEntry::new(element, sent_at)
             })
+            .map(QueuedOutboundStanza::from_entry)
             .collect();
-        Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
+        Self::from_outbound_queue(
+            SmSessionId::new(previd)?,
+            inbound_h,
+            outbound_h,
+            outbound_queue,
+        )
+    }
+
+    pub fn from_unhandled_outbound_entries(
+        previd: impl Into<String>,
+        inbound_h: u32,
+        outbound_h: u32,
+        entries: impl IntoIterator<Item = SmResumeEntry>,
+    ) -> ClientResult<Self> {
+        let outbound_queue = entries
+            .into_iter()
+            .map(QueuedOutboundStanza::from_entry)
+            .collect();
+        Self::from_outbound_queue(
+            SmSessionId::new(previd)?,
+            inbound_h,
+            outbound_h,
+            outbound_queue,
+        )
     }
 
     pub fn previd(&self) -> &str {
+        self.previd.as_str()
+    }
+
+    pub fn session_id(&self) -> &SmSessionId {
         &self.previd
     }
 
@@ -96,7 +233,13 @@ impl SmResumeState {
     }
 
     pub fn unhandled_outbound_stanzas(&self) -> impl Iterator<Item = &Element> {
-        self.outbound_queue.iter().map(|queued| &queued.element)
+        self.outbound_queue
+            .iter()
+            .map(|queued| queued.entry.element())
+    }
+
+    pub fn unhandled_outbound_entries(&self) -> impl Iterator<Item = &SmResumeEntry> {
+        self.outbound_queue.iter().map(|queued| &queued.entry)
     }
 
     pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
@@ -123,7 +266,7 @@ pub struct SmState {
     /// Last `h` value acknowledged by the server.
     pub server_h: u32,
     /// Resumption token (`previd`) set after `<enabled/>` or `<resumed/>`.
-    pub previd: Option<String>,
+    pub previd: Option<SmSessionId>,
     /// Advertised server resumption window in seconds, when the server supplied one.
     pub max_resume_seconds: Option<u32>,
     /// Whether the outbound stanza counter has started for this session.
@@ -136,6 +279,7 @@ pub struct SmState {
     pub enabled: bool,
     outbound_queue: VecDeque<QueuedOutboundStanza>,
     replay_in_flight: VecDeque<Element>,
+    ack_cadence: AckCadence,
 }
 
 impl SmState {
@@ -150,7 +294,7 @@ impl SmState {
             outbound_count: resume_state.outbound_h(),
             inbound_count: resume_state.inbound_h(),
             server_h: resume_state.outbound_h().wrapping_sub(queue_len),
-            previd: Some(resume_state.previd().to_string()),
+            previd: Some(resume_state.session_id().clone()),
             max_resume_seconds: resume_state.max_resume_seconds(),
             outbound_queue: resume_state.outbound_queue.clone(),
             ..Self::default()
@@ -177,16 +321,38 @@ impl SmState {
 
     /// Record a newly sent outbound stanza unless it is a queued replay.
     pub fn record_sent_stanza(&mut self, element: &Element) {
-        if self.suppress_replay_sent_record(element) {
-            return;
+        let _ = self.record_sent_stanza_at(element, 0);
+    }
+
+    /// Record a transport-confirmed outbound element and update the
+    /// client-to-server acknowledgement cadence.
+    ///
+    /// The caller supplies a monotonic millisecond timestamp. Keeping time
+    /// numeric and injected makes this state identical on native and WASM and
+    /// lets tests advance every timeout without sleeping.
+    pub fn record_sent_stanza_at(&mut self, element: &Element, now_ms: u64) -> SentStanzaResult {
+        if !self.outbound_enabled || !matches!(element.name(), "iq" | "message" | "presence") {
+            return SentStanzaResult {
+                kind: SentStanzaKind::NotCountable,
+                request: None,
+            };
         }
 
-        self.record_sent(1);
-        self.outbound_queue.push_back(QueuedOutboundStanza {
-            message_stanza_id: message_delivery_stanza_id(element),
-            element: element.clone(),
-            sent_at: existing_delay_stamp(element).unwrap_or_else(Utc::now),
-        });
+        let kind = if self.suppress_replay_sent_record(element) {
+            SentStanzaKind::Replay
+        } else {
+            self.record_sent(1);
+            let sent_at = existing_delay_stamp(element).unwrap_or_else(Utc::now);
+            self.outbound_queue
+                .push_back(QueuedOutboundStanza::from_entry(SmResumeEntry::new(
+                    element.clone(),
+                    sent_at,
+                )));
+            SentStanzaKind::New
+        };
+
+        let request = self.arm_after_outbound_at(now_ms);
+        SentStanzaResult { kind, request }
     }
 
     /// Start a fresh inbound SM sequence after receiving `<enabled/>`.
@@ -210,12 +376,14 @@ impl SmState {
         self.outbound_enabled = true;
         self.outbound_queue.clear();
         self.replay_in_flight.clear();
+        self.ack_cadence = AckCadence::default();
     }
 
     /// Stop all SM counters after `<failed/>` or stream termination.
     pub fn stop(&mut self) {
         self.outbound_enabled = false;
         self.enabled = false;
+        self.ack_cadence = AckCadence::default();
     }
 
     /// Increment the inbound stanza counter by `count`.
@@ -224,7 +392,23 @@ impl SmState {
     }
 
     /// Update `server_h` from an `<a h='...'/>` ack.
-    pub fn process_ack(&mut self, h: u32) -> Vec<StanzaId> {
+    pub fn process_ack(&mut self, h: u32) -> Result<Vec<StanzaId>, SmAckHandledCountTooHigh> {
+        self.process_ack_at(h, 0).map(|processed| processed.acked)
+    }
+
+    /// Process a valid server acknowledgement at `now_ms`.
+    ///
+    /// Every valid `<a/>`, including a duplicate `h`, releases the current
+    /// request. If work remains, the next request is scheduled instead of
+    /// emitted synchronously so a non-progress response cannot create an
+    /// `<r/>`/`<a/>` ping-pong loop.
+    pub fn process_ack_at(
+        &mut self,
+        h: u32,
+        now_ms: u64,
+    ) -> Result<ProcessAckResult, SmAckHandledCountTooHigh> {
+        self.validate_ack(h)?;
+        let previous_h = self.server_h;
         let handled_since_last_ack = h.wrapping_sub(self.server_h);
         self.server_h = h;
         let mut acked = Vec::new();
@@ -238,11 +422,224 @@ impl SmState {
                 }
             }
         }
-        acked
+
+        let request_pending_confirmation = self.ack_cadence.request_pending_confirmation;
+        let latency_ms = self
+            .ack_cadence
+            .request_sent_at_ms
+            .take()
+            .map(|sent_at| now_ms.saturating_sub(sent_at));
+        let progressed = h != previous_h;
+        let unacked = self.unacked_count();
+        if unacked == 0 {
+            let pending_attempt = self.ack_cadence.request_attempt;
+            self.ack_cadence = AckCadence::default();
+            if request_pending_confirmation {
+                self.ack_cadence.request_pending_confirmation = true;
+                self.ack_cadence.request_attempt = pending_attempt;
+            }
+        } else {
+            if progressed {
+                self.ack_cadence.retry_index = 0;
+                self.ack_cadence.request_attempt = 0;
+                self.ack_cadence.progress_started_at_ms = Some(now_ms);
+            } else if self.ack_cadence.progress_started_at_ms.is_none() {
+                self.ack_cadence.progress_started_at_ms = Some(now_ms);
+            }
+            if request_pending_confirmation {
+                // This acknowledgement cannot answer an `<r/>` whose write
+                // has not been confirmed. Keep that exact generation fenced
+                // and let its transport disposition own the next transition.
+                self.ack_cadence.next_request_at_ms = None;
+            } else {
+                self.schedule_retry_at(now_ms);
+            }
+        }
+
+        Ok(ProcessAckResult {
+            acked,
+            observation: AckObservation {
+                progressed,
+                latency_ms,
+                unacked,
+            },
+        })
+    }
+
+    /// Request an acknowledgement immediately when SM has outstanding work
+    /// and no request is awaiting a response. Used by the pagehide handoff;
+    /// regular sends and timers use the same state transition.
+    pub fn request_ack_now_at(&mut self, _now_ms: u64) -> Option<AckRequest> {
+        if !self.enabled
+            || !self.outbound_enabled
+            || self.outbound_queue.is_empty()
+            || self.ack_cadence.request_pending_confirmation
+            || self.ack_cadence.request_sent_at_ms.is_some()
+        {
+            return None;
+        }
+        self.ack_cadence.next_request_at_ms = None;
+        Some(self.mark_ack_request_generated())
+    }
+
+    /// Confirm that the exact generated `<r/>` reached the transport.
+    ///
+    /// Generation and transport confirmation are deliberately separate. A
+    /// slow or permanently pending write must not consume the five-second
+    /// response budget before the peer could possibly have received the
+    /// request.
+    pub fn confirm_ack_request_sent_at(&mut self, now_ms: u64) -> bool {
+        if !self.ack_cadence.request_pending_confirmation {
+            return false;
+        }
+        self.ack_cadence.request_pending_confirmation = false;
+        self.ack_cadence.next_request_at_ms = None;
+        if !self.enabled || !self.outbound_enabled || self.outbound_queue.is_empty() {
+            self.ack_cadence = AckCadence::default();
+            return true;
+        }
+        self.ack_cadence.request_sent_at_ms = Some(now_ms);
+        true
+    }
+
+    /// Dispose the exact generated `<r/>` after the transport proves that it
+    /// accepted no bytes. No response clock starts; outstanding work receives
+    /// the next bounded retry rung.
+    pub fn ack_request_definitely_not_written_at(&mut self, now_ms: u64) -> bool {
+        if !self.ack_cadence.request_pending_confirmation {
+            return false;
+        }
+        self.ack_cadence.request_pending_confirmation = false;
+        self.ack_cadence.request_sent_at_ms = None;
+        if !self.enabled || !self.outbound_enabled || self.outbound_queue.is_empty() {
+            self.ack_cadence = AckCadence::default();
+            return true;
+        }
+        if self.ack_cadence.next_request_at_ms.is_none() {
+            self.schedule_retry_at(now_ms);
+        }
+        true
+    }
+
+    /// Poll response/retry/progress deadlines without performing I/O.
+    pub fn poll_ack_timer_at(&mut self, now_ms: u64) -> AckTimerPoll {
+        if !self.enabled || !self.outbound_enabled || self.outbound_queue.is_empty() {
+            self.ack_cadence = AckCadence::default();
+            return AckTimerPoll::default();
+        }
+
+        if let Some(started_at) = self.ack_cadence.progress_started_at_ms {
+            let stalled_ms = now_ms.saturating_sub(started_at);
+            if stalled_ms >= ACK_PROGRESS_TIMEOUT_MS {
+                return AckTimerPoll {
+                    progress_stalled_ms: Some(stalled_ms),
+                    ..AckTimerPoll::default()
+                };
+            }
+        }
+
+        if let Some(sent_at) = self.ack_cadence.request_sent_at_ms {
+            if now_ms.saturating_sub(sent_at) >= ACK_RESPONSE_TIMEOUT_MS {
+                self.ack_cadence.request_sent_at_ms = None;
+                return AckTimerPoll {
+                    request: Some(self.mark_ack_request_generated()),
+                    request_timed_out: true,
+                    progress_stalled_ms: None,
+                };
+            }
+            return AckTimerPoll::default();
+        }
+
+        if self.ack_cadence.request_pending_confirmation {
+            return AckTimerPoll::default();
+        }
+
+        if self
+            .ack_cadence
+            .next_request_at_ms
+            .is_some_and(|deadline| now_ms >= deadline)
+        {
+            self.ack_cadence.next_request_at_ms = None;
+            return AckTimerPoll {
+                request: Some(self.mark_ack_request_generated()),
+                ..AckTimerPoll::default()
+            };
+        }
+
+        AckTimerPoll::default()
+    }
+
+    /// Milliseconds until the next SM timer action, if any.
+    pub fn next_ack_wakeup_in_ms(&self, now_ms: u64) -> Option<u64> {
+        if !self.enabled || !self.outbound_enabled || self.outbound_queue.is_empty() {
+            return None;
+        }
+
+        let progress_deadline = self
+            .ack_cadence
+            .progress_started_at_ms
+            .map(|started_at| started_at.saturating_add(ACK_PROGRESS_TIMEOUT_MS));
+        let response_deadline = self
+            .ack_cadence
+            .request_sent_at_ms
+            .map(|sent_at| sent_at.saturating_add(ACK_RESPONSE_TIMEOUT_MS));
+        [
+            progress_deadline,
+            response_deadline,
+            self.ack_cadence.next_request_at_ms,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|deadline| deadline.saturating_sub(now_ms))
     }
 
     pub fn handled_count_too_high(&self, h: u32) -> bool {
-        h.wrapping_sub(self.server_h) > self.outbound_count.wrapping_sub(self.server_h)
+        self.validate_ack(h).is_err()
+    }
+
+    pub fn validate_ack(&self, h: u32) -> Result<(), SmAckHandledCountTooHigh> {
+        let handled_delta = h.wrapping_sub(self.server_h);
+        let sent_delta = self.outbound_count.wrapping_sub(self.server_h);
+        if handled_delta > sent_delta {
+            return Err(SmAckHandledCountTooHigh {
+                h,
+                send_count: self.outbound_count,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn unacked_count(&self) -> u32 {
+        self.outbound_count.wrapping_sub(self.server_h)
+    }
+
+    /// Prepare the surviving outbound queue for XEP-0198 retransmission after
+    /// applying a successful `<resumed h='…'/>` response.
+    ///
+    /// Treating `<resumed/>` exactly like a normal `<a/>` first is important:
+    /// it trims handled stanzas and establishes the no-progress deadline.
+    /// Unlike an ordinary ack, however, the protocol requires the remaining
+    /// queue to be retransmitted immediately. Clear the delayed retry/request
+    /// latch so the first replay's transport-confirmed `MessageSent` arms an
+    /// immediate `<r/>` without resetting counters or recounting the stanza.
+    pub fn begin_replay_transition_at(&mut self, now_ms: u64) {
+        if self.outbound_queue.is_empty() {
+            self.ack_cadence = AckCadence::default();
+            return;
+        }
+
+        let progress_started_at_ms = self.ack_cadence.progress_started_at_ms.unwrap_or(now_ms);
+        self.ack_cadence.request_sent_at_ms = None;
+        self.ack_cadence.request_pending_confirmation = false;
+        self.ack_cadence.next_request_at_ms = None;
+        self.ack_cadence.progress_started_at_ms = Some(progress_started_at_ms);
+        // A successful resume starts a new request ladder for the replayed
+        // queue. Preserve the original no-progress epoch, but make the
+        // immediate replay request attempt 1 and its first unchanged-ack retry
+        // use the 250 ms rung.
+        self.ack_cadence.retry_index = 0;
+        self.ack_cadence.request_attempt = 0;
     }
 
     /// Mark currently unhandled outbound stanzas for replay and return them.
@@ -250,7 +647,7 @@ impl SmState {
         let replay: Vec<Element> = self
             .outbound_queue
             .iter()
-            .map(|queued| queued.element.clone())
+            .map(|queued| queued.entry.element().clone())
             .collect();
         self.replay_in_flight.extend(replay.iter().cloned());
         replay
@@ -280,6 +677,44 @@ impl SmState {
             return true;
         }
         false
+    }
+
+    fn arm_after_outbound_at(&mut self, now_ms: u64) -> Option<AckRequest> {
+        if !self.enabled || self.outbound_queue.is_empty() {
+            return None;
+        }
+        if self.ack_cadence.progress_started_at_ms.is_none() {
+            self.ack_cadence.progress_started_at_ms = Some(now_ms);
+        }
+        if self.ack_cadence.request_sent_at_ms.is_some()
+            || self.ack_cadence.request_pending_confirmation
+            || self.ack_cadence.next_request_at_ms.is_some()
+        {
+            return None;
+        }
+        Some(self.mark_ack_request_generated())
+    }
+
+    fn mark_ack_request_generated(&mut self) -> AckRequest {
+        debug_assert!(!self.ack_cadence.request_pending_confirmation);
+        debug_assert!(self.ack_cadence.request_sent_at_ms.is_none());
+        self.ack_cadence.request_pending_confirmation = true;
+        self.ack_cadence.request_attempt = self.ack_cadence.request_attempt.saturating_add(1);
+        AckRequest {
+            attempt: self.ack_cadence.request_attempt,
+            unacked: self.unacked_count(),
+        }
+    }
+
+    fn schedule_retry_at(&mut self, now_ms: u64) {
+        let retry_index = self
+            .ack_cadence
+            .retry_index
+            .min(ACK_RETRY_DELAYS_MS.len() - 1);
+        self.ack_cadence.next_request_at_ms =
+            Some(now_ms.saturating_add(ACK_RETRY_DELAYS_MS[retry_index]));
+        self.ack_cadence.retry_index =
+            (self.ack_cadence.retry_index + 1).min(ACK_RETRY_DELAYS_MS.len() - 1);
     }
 
     /// Build `<enable xmlns='urn:xmpp:sm:3' resume='true'/>`.
@@ -323,12 +758,12 @@ impl SmState {
     }
 
     /// Extract the resumption `id` from an `<enabled/>` element, if present.
-    pub fn parse_enabled(element: &Element) -> Option<String> {
+    pub fn parse_enabled(element: &Element) -> Option<SmSessionId> {
         if element.name() == "enabled" && element.ns() == NS_SM {
             if !matches!(element.attr("resume"), Some("true") | Some("1")) {
                 return None;
             }
-            element.attr("id").map(|s| s.to_string())
+            element.attr("id").and_then(|id| SmSessionId::new(id).ok())
         } else {
             None
         }
@@ -359,16 +794,26 @@ impl SmState {
 }
 
 impl QueuedOutboundStanza {
-    fn element_for_fallback_retry(&self) -> Element {
-        if self.element.name() != "message" {
-            return self.element.clone();
+    fn from_entry(entry: SmResumeEntry) -> Self {
+        Self {
+            message_stanza_id: message_delivery_stanza_id(entry.element()),
+            entry,
         }
-        if self.element.get_child("delay", NS_DELAY).is_some() {
-            return self.element.clone();
+    }
+
+    fn element_for_fallback_retry(&self) -> Element {
+        if self.entry.element().name() != "message" {
+            return self.entry.element().clone();
+        }
+        if self.entry.element().get_child("delay", NS_DELAY).is_some() {
+            return self.entry.element().clone();
         }
 
-        let stamp = self.sent_at.to_rfc3339_opts(SecondsFormat::Millis, true);
-        let mut element = self.element.clone();
+        let stamp = self
+            .entry
+            .sent_at()
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        let mut element = self.entry.element().clone();
         element.append_child(
             Element::builder("delay", NS_DELAY)
                 .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp)
@@ -446,7 +891,10 @@ mod tests {
             .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
             .attr(minidom::rxml::xml_ncname!("max").to_owned(), "300")
             .build();
-        assert_eq!(SmState::parse_enabled(&el), Some("abc123".to_string()));
+        assert_eq!(
+            SmState::parse_enabled(&el),
+            Some(SmSessionId::new("abc123").unwrap())
+        );
         assert_eq!(SmState::parse_enabled_max(&el), Some(300));
     }
 
@@ -557,10 +1005,37 @@ mod tests {
     #[test]
     fn process_ack_updates_server_h() {
         let mut state = SmState::new();
-        state.process_ack(10);
+        state.outbound_count = 15;
+        state.process_ack(10).unwrap();
         assert_eq!(state.server_h, 10);
-        state.process_ack(15);
+        state.process_ack(15).unwrap();
         assert_eq!(state.server_h, 15);
+    }
+
+    #[test]
+    fn invalid_wrapping_ack_is_rejected_before_any_state_mutation() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        state.enabled = true;
+        state.server_h = u32::MAX - 1;
+        state.outbound_count = u32::MAX - 1;
+        state.record_sent_stanza(&message("last-before-wrap"));
+        state.record_sent_stanza(&message("first-after-wrap"));
+
+        let error = state
+            .process_ack(1)
+            .expect_err("peer cannot acknowledge three stanzas when only two were sent");
+
+        assert_eq!(
+            error,
+            SmAckHandledCountTooHigh {
+                h: 1,
+                send_count: 0,
+            }
+        );
+        assert_eq!(state.server_h, u32::MAX - 1);
+        assert_eq!(state.outbound_queue.len(), 2);
+        assert_eq!(state.unacked_count(), 2);
     }
 
     #[test]
@@ -588,7 +1063,7 @@ mod tests {
         );
 
         assert!(!state.handled_count_too_high(0));
-        let acked = state.process_ack(0);
+        let acked = state.process_ack(0).unwrap();
 
         assert_eq!(
             acked
@@ -604,7 +1079,7 @@ mod tests {
     fn from_resume_state_restores_prior_server_ack_position() {
         let mut state = SmState::new();
         state.start_outbound();
-        state.previd = Some("previous-stream".to_string());
+        state.previd = Some(SmSessionId::new("previous-stream").unwrap());
         for id in 1..=10 {
             state.record_sent_stanza(
                 &Element::builder("message", "jabber:client")
@@ -616,7 +1091,7 @@ mod tests {
             );
         }
 
-        let acked = state.process_ack(8);
+        let acked = state.process_ack(8).unwrap();
         assert_eq!(acked.len(), 8);
 
         let resume_state = state.resume_state().expect("resume state");
@@ -624,7 +1099,7 @@ mod tests {
 
         assert_eq!(restored.server_h, 8);
         assert!(!restored.handled_count_too_high(9));
-        let acked_after_resume = restored.process_ack(9);
+        let acked_after_resume = restored.process_ack(9).unwrap();
         assert_eq!(
             acked_after_resume
                 .iter()
@@ -647,7 +1122,7 @@ mod tests {
     fn resume_state_reports_unhandled_outbound_queue_presence() {
         let mut state = SmState::new();
         state.start_outbound();
-        state.previd = Some("previous-stream".to_string());
+        state.previd = Some(SmSessionId::new("previous-stream").unwrap());
         state.record_sent_stanza(
             &Element::builder("message", "jabber:client")
                 .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
@@ -657,7 +1132,7 @@ mod tests {
         let resume_state = state.resume_state().expect("resume state");
         assert!(resume_state.has_unhandled_outbound_stanzas());
 
-        state.process_ack(1);
+        state.process_ack(1).unwrap();
         let resume_state = state.resume_state().expect("resume state");
         assert!(!resume_state.has_unhandled_outbound_stanzas());
     }
@@ -666,7 +1141,7 @@ mod tests {
     fn unchanged_server_h_replays_a_timed_out_outbound_stanza() {
         let mut state = SmState::new();
         state.start_outbound();
-        state.previd = Some("timed-out-stream".to_string());
+        state.previd = Some(SmSessionId::new("timed-out-stream").unwrap());
         let timed_out = Element::builder("message", "jabber:client")
             .attr(
                 minidom::rxml::xml_ncname!("id").to_owned(),
@@ -677,7 +1152,7 @@ mod tests {
 
         // The server ended the transport without advancing h, so processing
         // its last acknowledgement must leave the stanza sender-owned.
-        assert!(state.process_ack(0).is_empty());
+        assert!(state.process_ack(0).unwrap().is_empty());
         let resume_state = state.resume_state().expect("resume state");
         let mut resumed = SmState::from_resume_state(&resume_state);
 
@@ -687,7 +1162,7 @@ mod tests {
     #[test]
     fn resume_state_carries_advertised_max_resume_window() {
         let mut state = SmState::new();
-        state.previd = Some("previous-stream".to_string());
+        state.previd = Some(SmSessionId::new("previous-stream").unwrap());
         state.max_resume_seconds = Some(300);
 
         let resume_state = state.resume_state().expect("resume state");
@@ -718,6 +1193,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![&stanza],
         );
+    }
+
+    #[test]
+    fn persisted_resume_entry_keeps_original_send_time_for_failed_resume_fallback() {
+        let sent_at = DateTime::parse_from_rfc3339("2026-07-16T08:09:10.123Z")
+            .expect("T0")
+            .with_timezone(&Utc);
+        let stanza = Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "persisted-t0")
+            .build();
+        let persisted = SmResumeState::from_unhandled_outbound_entries(
+            "previous-stream",
+            4,
+            9,
+            [SmResumeEntry::new(stanza, sent_at)],
+        )
+        .expect("persisted resume state");
+
+        let reloaded = SmState::from_resume_state(&persisted);
+        let fallback = reloaded
+            .unhandled_stanzas_for_fallback_retry()
+            .into_iter()
+            .next()
+            .expect("fallback after failed resume");
+        let delay = fallback
+            .get_child("delay", NS_DELAY)
+            .expect("XEP-0203 delay");
+
+        assert_eq!(delay.attr("stamp"), Some("2026-07-16T08:09:10.123Z"));
     }
 
     #[test]
@@ -752,5 +1256,389 @@ mod tests {
 
         assert_eq!(delays.len(), 1);
         assert_eq!(delays[0].attr("stamp"), Some("2024-01-15T10:00:00Z"));
+    }
+
+    fn enabled_state() -> SmState {
+        let mut state = SmState::new();
+        state.start_outbound();
+        state.enabled = true;
+        state
+    }
+
+    fn message(id: &str) -> Element {
+        Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .build()
+    }
+
+    fn confirm_generated_request(state: &mut SmState, now_ms: u64) {
+        assert!(
+            state.confirm_ack_request_sent_at(now_ms),
+            "expected one generated acknowledgement request awaiting confirmation"
+        );
+    }
+
+    #[test]
+    fn first_countable_stanza_requests_ack_and_burst_coalesces() {
+        let mut state = enabled_state();
+
+        let first = state.record_sent_stanza_at(&message("one"), 100);
+        let second = state.record_sent_stanza_at(&message("two"), 101);
+
+        assert_eq!(first.kind, SentStanzaKind::New);
+        assert_eq!(
+            first.request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+        assert_eq!(second.kind, SentStanzaKind::New);
+        assert_eq!(second.request, None);
+        assert_eq!(state.unacked_count(), 2);
+    }
+
+    #[test]
+    fn valid_non_progress_ack_releases_request_and_schedules_retry() {
+        let mut state = enabled_state();
+        state.record_sent_stanza_at(&message("one"), 100);
+        confirm_generated_request(&mut state, 100);
+
+        let processed = state.process_ack_at(0, 120).unwrap();
+
+        assert!(!processed.observation.progressed);
+        assert_eq!(processed.observation.latency_ms, Some(20));
+        assert_eq!(state.next_ack_wakeup_in_ms(120), Some(250));
+        assert_eq!(state.poll_ack_timer_at(369), AckTimerPoll::default());
+        assert_eq!(
+            state.poll_ack_timer_at(370).request,
+            Some(AckRequest {
+                attempt: 2,
+                unacked: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn unsolicited_ack_preserves_pending_request_until_late_transport_confirmation() {
+        let mut state = enabled_state();
+        let generated = state.record_sent_stanza_at(&message("one"), 100);
+        assert_eq!(generated.request.map(|request| request.attempt), Some(1));
+
+        let unsolicited = state.process_ack_at(0, 120).unwrap();
+
+        assert!(!unsolicited.observation.progressed);
+        assert_eq!(unsolicited.observation.latency_ms, None);
+        assert_eq!(
+            state.next_ack_wakeup_in_ms(120),
+            Some(29_980),
+            "an uncorrelated ack cannot schedule over the generated request token"
+        );
+        assert!(
+            state.confirm_ack_request_sent_at(200),
+            "late transport confirmation must still own the generated request"
+        );
+        assert_eq!(state.next_ack_wakeup_in_ms(200), Some(5_000));
+        assert_eq!(state.poll_ack_timer_at(5_199), AckTimerPoll::default());
+        assert_eq!(
+            state.poll_ack_timer_at(5_200).request,
+            Some(AckRequest {
+                attempt: 2,
+                unacked: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn definitely_not_written_request_clears_pending_and_schedules_retry() {
+        let mut state = enabled_state();
+        state.record_sent_stanza_at(&message("one"), 100);
+
+        assert!(state.ack_request_definitely_not_written_at(110));
+        assert!(
+            !state.confirm_ack_request_sent_at(111),
+            "definite failure must dispose the exact generated request"
+        );
+        assert_eq!(state.next_ack_wakeup_in_ms(110), Some(250));
+        assert_eq!(state.poll_ack_timer_at(359), AckTimerPoll::default());
+        assert_eq!(
+            state.poll_ack_timer_at(360).request,
+            Some(AckRequest {
+                attempt: 2,
+                unacked: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn progress_resets_retry_backoff_while_work_remains() {
+        let mut state = enabled_state();
+        state.record_sent_stanza_at(&message("one"), 0);
+        state.record_sent_stanza_at(&message("two"), 1);
+        confirm_generated_request(&mut state, 1);
+        state.process_ack_at(0, 10).unwrap();
+        let retry = state.poll_ack_timer_at(260);
+        assert_eq!(retry.request.map(|request| request.attempt), Some(2));
+        confirm_generated_request(&mut state, 260);
+
+        let progressed = state.process_ack_at(1, 300).unwrap();
+
+        assert!(progressed.observation.progressed);
+        assert_eq!(progressed.observation.unacked, 1);
+        assert_eq!(state.next_ack_wakeup_in_ms(300), Some(250));
+        assert_eq!(
+            state.poll_ack_timer_at(550).request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn non_progress_retry_schedule_reaches_and_repeats_five_second_cap() {
+        let mut state = enabled_state();
+        state.record_sent_stanza_at(&message("one"), 0);
+        confirm_generated_request(&mut state, 0);
+        let mut now_ms = 0;
+
+        for (expected_delay_ms, expected_attempt) in [
+            (250, 2),
+            (500, 3),
+            (1_000, 4),
+            (2_000, 5),
+            (5_000, 6),
+            (5_000, 7),
+        ] {
+            let observation = state.process_ack_at(0, now_ms).unwrap();
+            assert!(!observation.observation.progressed);
+            assert_eq!(state.next_ack_wakeup_in_ms(now_ms), Some(expected_delay_ms));
+            assert_eq!(
+                state.poll_ack_timer_at(now_ms + expected_delay_ms - 1),
+                AckTimerPoll::default()
+            );
+            now_ms += expected_delay_ms;
+            assert_eq!(
+                state.poll_ack_timer_at(now_ms).request,
+                Some(AckRequest {
+                    attempt: expected_attempt,
+                    unacked: 1,
+                })
+            );
+            confirm_generated_request(&mut state, now_ms);
+        }
+    }
+
+    #[test]
+    fn missing_ack_response_times_out_and_reissues_request() {
+        let mut state = enabled_state();
+        state.record_sent_stanza_at(&message("one"), 1_000);
+        confirm_generated_request(&mut state, 1_000);
+
+        assert_eq!(state.next_ack_wakeup_in_ms(1_000), Some(5_000));
+        let poll = state.poll_ack_timer_at(6_000);
+
+        assert!(poll.request_timed_out);
+        assert_eq!(
+            poll.request,
+            Some(AckRequest {
+                attempt: 2,
+                unacked: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn ack_response_clock_starts_only_after_transport_confirmation() {
+        let mut state = enabled_state();
+        let generated = state.record_sent_stanza_at(&message("one"), 100);
+        assert_eq!(generated.request.map(|request| request.attempt), Some(1));
+
+        assert_eq!(
+            state.next_ack_wakeup_in_ms(100),
+            Some(30_000),
+            "only the original no-progress epoch runs while <r/> is pending"
+        );
+        assert_eq!(state.poll_ack_timer_at(4_099), AckTimerPoll::default());
+        assert!(state.confirm_ack_request_sent_at(4_100));
+        assert!(!state.confirm_ack_request_sent_at(4_101));
+        assert_eq!(state.next_ack_wakeup_in_ms(4_100), Some(5_000));
+        assert_eq!(state.poll_ack_timer_at(9_099), AckTimerPoll::default());
+
+        let observed = state.process_ack_at(0, 4_200).unwrap();
+        assert_eq!(observed.observation.latency_ms, Some(100));
+        assert!(!observed.observation.progressed);
+        assert_eq!(state.next_ack_wakeup_in_ms(4_200), Some(250));
+    }
+
+    #[test]
+    fn thirty_seconds_without_h_progress_requests_unclean_reconnect() {
+        let mut state = enabled_state();
+        state.record_sent_stanza_at(&message("one"), 5_000);
+
+        let poll = state.poll_ack_timer_at(35_000);
+
+        assert_eq!(poll.progress_stalled_ms, Some(30_000));
+        assert_eq!(poll.request, None);
+    }
+
+    #[test]
+    fn replay_arms_ack_request_without_incrementing_counter() {
+        let replay = message("replay");
+        let resume =
+            SmResumeState::from_unhandled_outbound_stanzas("previous", 0, 1, [replay.clone()])
+                .expect("resume state");
+        let mut state = SmState::from_resume_state(&resume);
+        state.enabled = true;
+        state.outbound_enabled = true;
+        assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
+
+        let sent = state.record_sent_stanza_at(&replay, 50);
+
+        assert_eq!(sent.kind, SentStanzaKind::Replay);
+        assert_eq!(sent.request.map(|request| request.unacked), Some(1));
+        assert_eq!(state.outbound_count, 1);
+    }
+
+    #[test]
+    fn resumed_replay_transition_supersedes_delayed_retry_but_keeps_progress_deadline() {
+        let replay = message("replay");
+        let resume =
+            SmResumeState::from_unhandled_outbound_stanzas("previous", 0, 1, [replay.clone()])
+                .expect("resume state");
+        let mut state = SmState::from_resume_state(&resume);
+        state.enabled = true;
+        state.outbound_enabled = true;
+
+        state.process_ack_at(0, 10_000).unwrap();
+        assert_eq!(state.next_ack_wakeup_in_ms(10_000), Some(250));
+
+        state.begin_replay_transition_at(10_000);
+        assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
+        let sent = state.record_sent_stanza_at(&replay, 10_001);
+
+        assert_eq!(sent.kind, SentStanzaKind::Replay);
+        assert_eq!(
+            sent.request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+        assert_eq!(state.outbound_count, 1);
+        assert_eq!(
+            state.poll_ack_timer_at(40_000).progress_stalled_ms,
+            Some(30_000)
+        );
+    }
+
+    #[test]
+    fn successful_resume_restarts_full_retry_ladder_without_moving_progress_epoch() {
+        let replay = message("replay");
+        let resume =
+            SmResumeState::from_unhandled_outbound_stanzas("previous", 0, 1, [replay.clone()])
+                .expect("resume state");
+        let mut state = SmState::from_resume_state(&resume);
+        state.enabled = true;
+        state.outbound_enabled = true;
+
+        // Establish a no-progress epoch and consume earlier cadence state so
+        // the resume transition has stale attempts/backoff to reset.
+        state.process_ack_at(0, 10_000).unwrap();
+        assert_eq!(
+            state.poll_ack_timer_at(10_250).request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+        confirm_generated_request(&mut state, 10_250);
+        state.process_ack_at(0, 10_260).unwrap();
+        assert_eq!(
+            state.poll_ack_timer_at(10_760).request,
+            Some(AckRequest {
+                attempt: 2,
+                unacked: 1,
+            })
+        );
+        confirm_generated_request(&mut state, 10_760);
+
+        state.begin_replay_transition_at(11_000);
+        assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
+        let replay_sent = state.record_sent_stanza_at(&replay, 11_001);
+        assert_eq!(replay_sent.kind, SentStanzaKind::Replay);
+        assert_eq!(
+            replay_sent.request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+        assert_eq!(state.outbound_count, 1, "replay must not be recounted");
+        confirm_generated_request(&mut state, 11_001);
+
+        let mut now_ms = 11_010;
+        for (delay_ms, attempt) in [
+            (250, 2),
+            (500, 3),
+            (1_000, 4),
+            (2_000, 5),
+            (5_000, 6),
+            (5_000, 7),
+        ] {
+            let ack = state.process_ack_at(0, now_ms).unwrap();
+            assert!(!ack.observation.progressed);
+            assert_eq!(state.next_ack_wakeup_in_ms(now_ms), Some(delay_ms));
+            now_ms += delay_ms;
+            assert_eq!(
+                state.poll_ack_timer_at(now_ms).request,
+                Some(AckRequest {
+                    attempt,
+                    unacked: 1,
+                })
+            );
+            confirm_generated_request(&mut state, now_ms);
+            now_ms += 1;
+        }
+
+        assert_eq!(
+            state.poll_ack_timer_at(40_000).progress_stalled_ms,
+            Some(30_000),
+            "the 30s reconnect deadline remains anchored to the original no-progress epoch"
+        );
+    }
+
+    #[test]
+    fn resumed_replay_transition_cancels_cadence_when_ack_handles_everything() {
+        let resume =
+            SmResumeState::from_unhandled_outbound_stanzas("previous", 0, 1, [message("one")])
+                .expect("resume state");
+        let mut state = SmState::from_resume_state(&resume);
+        state.enabled = true;
+        state.outbound_enabled = true;
+
+        let processed = state.process_ack_at(1, 500).unwrap();
+        assert_eq!(processed.observation.unacked, 0);
+        state.begin_replay_transition_at(500);
+
+        assert!(state.mark_unhandled_for_replay().is_empty());
+        assert_eq!(state.next_ack_wakeup_in_ms(500), None);
+        assert_eq!(state.poll_ack_timer_at(u64::MAX), AckTimerPoll::default());
+    }
+
+    #[test]
+    fn sm_disabled_and_ack_request_elements_never_request_recursively() {
+        let mut state = SmState::new();
+        state.start_outbound();
+        let disabled = state.record_sent_stanza_at(&message("one"), 0);
+        assert_eq!(disabled.kind, SentStanzaKind::New);
+        assert_eq!(disabled.request, None);
+
+        state.enabled = true;
+        let before = state.outbound_count;
+        let request = state.record_sent_stanza_at(&SmState::build_request_ack(), 1);
+        assert_eq!(request.kind, SentStanzaKind::NotCountable);
+        assert_eq!(request.request, None);
+        assert_eq!(state.outbound_count, before);
     }
 }

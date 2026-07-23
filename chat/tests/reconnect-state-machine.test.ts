@@ -28,7 +28,8 @@ type StubXmpp = {
 type PrivateState = {
   xmpp: unknown;
   connected: boolean;
-  wireEvents: (xmpp: StubXmpp) => void;
+  connectEpoch: number;
+  wireEvents: (xmpp: StubXmpp, generation?: number) => void;
   reconnect: { clearTimer: () => void };
   connectWithFreshBudget: () => Promise<void>;
   connectFromScheduler: () => Promise<void>;
@@ -221,6 +222,7 @@ describe("exhaustion recovery (C2)", () => {
     state.reconnect.clearTimer();
     state.xmpp = stub;
     state.connected = true;
+    state.wireEvents(stub, state.connectEpoch);
     fireDisconnected();
 
     expect(scheduled).toHaveLength(11);
@@ -282,6 +284,7 @@ describe("exhaustion recovery (C2)", () => {
       state.reconnect.clearTimer();
       state.xmpp = stub;
       state.connected = true;
+      state.wireEvents(stub, state.connectEpoch);
       fireDisconnected();
       expect(scheduled).toHaveLength(11);
       expect(scheduled.at(-1)?.attempt).toBe(1);
@@ -466,6 +469,44 @@ describe("disconnect() cancels the pending connect attempt (F3)", () => {
   });
 });
 
+describe("connection generation callback fencing", () => {
+  test("callbacks registered by an older generation cannot mutate a reused handle", () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    const statuses: XmppStatusSnapshot[] = [];
+    const errorCallbacks: Array<(payload: StreamErrorPayload) => void> = [];
+    const disconnectCallbacks: Array<() => void> = [];
+    client.setStatusHandler((snapshot) => statuses.push(snapshot));
+
+    const reusedHandle: StubXmpp = {
+      set_on_error(callback) {
+        errorCallbacks.push(callback);
+      },
+      set_on_disconnected(callback) {
+        disconnectCallbacks.push(callback);
+      },
+      get_resume_state: () => null,
+    };
+    state.xmpp = reusedHandle;
+    state.connected = true;
+    state.connectEpoch = 1;
+    state.wireEvents(reusedHandle, 1);
+    state.connectEpoch = 2;
+    state.wireEvents(reusedHandle, 2);
+
+    errorCallbacks[0]?.({ condition: "not-authorized", detail: "stale" });
+    disconnectCallbacks[0]?.();
+
+    expect(state.xmpp).toBe(reusedHandle);
+    expect(state.connected).toBe(true);
+    expect(statuses).toEqual([]);
+
+    errorCallbacks[1]?.({ condition: "not-authorized", detail: "current" });
+    disconnectCallbacks[1]?.();
+    expect(statuses.at(-1)?.state).toBe("error");
+  });
+});
+
 describe("stalled WASM load cannot double-connect (C3)", () => {
   test("a module load resolving after timeout + second connect yields exactly one live handle", async () => {
     const client = new BrowserXmppClient(session());
@@ -626,6 +667,7 @@ describe("stale terminalDisconnectDetail must not survive disconnect()", () => {
     state.reconnect.clearTimer();
     state.xmpp = stub;
     state.connected = true;
+    state.wireEvents(stub, state.connectEpoch);
     fireDisconnected();
 
     expect(statuses.at(-1)?.state).toBe("reconnecting");

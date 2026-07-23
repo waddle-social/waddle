@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use futures::channel::{mpsc, oneshot};
 use futures::{pin_mut, select, FutureExt, SinkExt, StreamExt};
@@ -42,9 +42,7 @@ use waddle_xmpp_client::pep::{
 use waddle_xmpp_client::pin::{
     build_pin_list_iq, parse_pin_list_response, PinEntry, PinEvent, PinEventAction, PinPreview,
 };
-use waddle_xmpp_client::transport::{
-    StreamClose, TransportEvent, TransportMessage, TransportState,
-};
+use waddle_xmpp_client::transport::{TransportEvent, TransportMessage, TransportState};
 use waddle_xmpp_client::xep::{
     reply::{FallbackRange, ReplyMarker},
     thread::ThreadRef,

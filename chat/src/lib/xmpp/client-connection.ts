@@ -35,8 +35,13 @@ export type XmppResumeState = {
   outboundH: number;
   maxResumeSeconds?: number;
   hasUnackedOutbound?: boolean;
-  unhandledOutboundStanzas?: string[];
+  unhandledOutboundEntries?: XmppResumeEntry[];
   resource?: string;
+};
+
+type XmppResumeEntry = {
+  stanza: string;
+  sentAt: string;
 };
 
 export type XmppResumeStateHandle = import("@waddle/xmpp-client-wasm").WaddleResumeState;
@@ -101,18 +106,18 @@ function validResumeMaxSeconds(value: number | undefined): number | undefined {
 
 export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppResumeState): void {
   const wasmConfig = config as {
-    with_resume_state_stanzas_with_max?: (
+    with_resume_state_entries_with_max?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      stanzas: string[],
+      entries: XmppResumeEntry[],
       maxResumeSeconds: number,
     ) => void;
-    with_resume_state_stanzas?: (
+    with_resume_state_entries?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      stanzas: string[],
+      entries: XmppResumeEntry[],
     ) => void;
     with_resume_state_with_max?: (
       previd: string,
@@ -124,30 +129,33 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
   };
   const maxResumeSeconds = validResumeMaxSeconds(resumeState.maxResumeSeconds);
   if (
-    resumeState.unhandledOutboundStanzas?.length
+    resumeState.unhandledOutboundEntries?.length
     && maxResumeSeconds !== undefined
-    && typeof wasmConfig.with_resume_state_stanzas_with_max === "function"
+    && typeof wasmConfig.with_resume_state_entries_with_max === "function"
   ) {
-    wasmConfig.with_resume_state_stanzas_with_max(
+    wasmConfig.with_resume_state_entries_with_max(
       resumeState.previd,
       resumeState.inboundH,
       resumeState.outboundH,
-      resumeState.unhandledOutboundStanzas,
+      resumeState.unhandledOutboundEntries,
       maxResumeSeconds,
     );
     return;
   }
   if (
-    resumeState.unhandledOutboundStanzas?.length
-    && typeof wasmConfig.with_resume_state_stanzas === "function"
+    resumeState.unhandledOutboundEntries?.length
+    && typeof wasmConfig.with_resume_state_entries === "function"
   ) {
-    wasmConfig.with_resume_state_stanzas(
+    wasmConfig.with_resume_state_entries(
       resumeState.previd,
       resumeState.inboundH,
       resumeState.outboundH,
-      resumeState.unhandledOutboundStanzas,
+      resumeState.unhandledOutboundEntries,
     );
     return;
+  }
+  if (resumeState.unhandledOutboundEntries?.length) {
+    throw new Error("WASM client cannot restore timestamped XEP-0198 resume entries");
   }
   if (maxResumeSeconds !== undefined && typeof wasmConfig.with_resume_state_with_max === "function") {
     wasmConfig.with_resume_state_with_max(
@@ -337,7 +345,7 @@ export class ResumeStateStore {
     const state = liveState ?? this.stateValue;
     this.persistence.preparePagehideHandoff();
     if (state) {
-      if (state.hasUnackedOutbound && !state.unhandledOutboundStanzas?.length) {
+      if (state.hasUnackedOutbound && !state.unhandledOutboundEntries?.length) {
         this.stateValue = null;
         this.persistence.clearSm();
         persistJoinedRooms();
@@ -348,6 +356,10 @@ export class ResumeStateStore {
       this.persistence.saveSm(snapshot);
     }
     persistJoinedRooms();
+  }
+
+  reclaimAfterPageShow(): void {
+    this.persistence.reclaimPagehideOwnership();
   }
 }
 
@@ -374,6 +386,10 @@ type OfflineSendQueueDeps = {
   ) => Promise<string | null>;
 };
 
+type NativeQueueOwnership =
+  | { kind: "resume-replay" }
+  | { kind: "fresh-fallback" };
+
 /**
  * Persisted offline outbound queue + drain logic. Owns in-flight and
  * resume-replay id tracking, the pending-send latency map behind the
@@ -382,7 +398,12 @@ type OfflineSendQueueDeps = {
  */
 export class OfflineSendQueue {
   private readonly inflightQueuedIds = new Set<string>();
-  private readonly resumeReplayQueuedIds = new Set<string>();
+  /**
+   * Stanzas whose next wire attempt is owned by the native XEP-0198 runtime.
+   * A failed resume transfers them to the runtime's fresh-stream fallback;
+   * the browser must retain the durable row without racing a second send.
+   */
+  private readonly nativeQueueOwnership = new Map<string, NativeQueueOwnership>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
@@ -393,20 +414,46 @@ export class OfflineSendQueue {
     return countQueuedMessages(this.deps.queueScope());
   }
 
-  /** Mark a stanza id as an in-flight queued send awaiting its ack. */
-  markInflight(id: string): void {
+  /**
+   * Mark a stable stanza id in-flight before the send promise can yield.
+   * WASM may deliver the matching SM acknowledgement synchronously while
+   * resolving that promise, so both persistence ownership and latency state
+   * must already exist when the callback runs.
+   */
+  beginAttempt(id: string, kind: "room" | "dm"): void {
+    const wasInflight = this.inflightQueuedIds.has(id);
     this.inflightQueuedIds.add(id);
+    this.pendingSendAt.set(id, { at: performance.now(), kind });
+    if (!wasInflight) this.emitQueueDepth();
+  }
+
+  /** A rejected or null send did not transfer responsibility to XEP-0198. */
+  rollbackAttempt(id: string): void {
+    const wasInflight = this.inflightQueuedIds.delete(id);
+    this.pendingSendAt.delete(id);
+    if (wasInflight) {
+      this.deps.events.emit("queuedMessageStatus", id, "queued");
+      this.emitQueueDepth();
+    }
   }
 
   /** Fresh session: pre-resume in-flight sends will never be acked. */
   clearInflight(): void {
+    const hadInflight = this.inflightQueuedIds.size > 0;
     this.inflightQueuedIds.clear();
-  }
-
-  /** Record send time for ack-latency telemetry. */
-  notePendingSend(id: string | null, kind: "room" | "dm"): void {
-    if (!id) return;
-    this.pendingSendAt.set(id, { at: performance.now(), kind });
+    this.pendingSendAt.clear();
+    let releasedResumeReplay = false;
+    // A plain fresh bind (for example when the new server advertises no SM)
+    // never emits a resume `<failed/>`; release only those never-transferred
+    // replay claims so the durable browser queue can recover them. Explicit
+    // fresh-fallback ownership remains fenced until the native retry settles.
+    for (const [id, ownership] of this.nativeQueueOwnership) {
+      if (ownership.kind === "resume-replay") {
+        this.nativeQueueOwnership.delete(id);
+        releasedResumeReplay = true;
+      }
+    }
+    if (hadInflight || releasedResumeReplay) this.emitQueueDepth();
   }
 
   /**
@@ -414,44 +461,84 @@ export class OfflineSendQueue {
    * on resume are tracked so their acks clear the persisted queue copy.
    */
   seedFromResumeState(state: XmppResumeState | null | undefined): void {
-    for (const xml of state?.unhandledOutboundStanzas ?? []) {
-      const id = messageStanzaIdFromSerializedXml(xml);
+    for (const entry of state?.unhandledOutboundEntries ?? []) {
+      const id = messageStanzaIdFromSerializedXml(entry.stanza);
       if (id) {
         this.inflightQueuedIds.add(id);
-        this.resumeReplayQueuedIds.add(id);
+        this.nativeQueueOwnership.set(id, { kind: "resume-replay" });
       }
     }
   }
 
+  /**
+   * Reconcile browser fencing with the native snapshot captured at a
+   * terminal transport disconnect. A surviving entry proves the next native
+   * runtime still owns that stanza; absence releases stale fallback ownership
+   * so the durable browser row can make one at-least-once attempt next session.
+   */
+  reconcileNativeOwnershipAfterDisconnect(
+    state: XmppResumeState | null | undefined,
+  ): void {
+    const survivingNativeIds = new Set<string>();
+    for (const entry of state?.unhandledOutboundEntries ?? []) {
+      const id = messageStanzaIdFromSerializedXml(entry.stanza);
+      if (id) survivingNativeIds.add(id);
+    }
+
+    let ownershipChanged = false;
+    for (const id of this.nativeQueueOwnership.keys()) {
+      if (!survivingNativeIds.has(id)) {
+        this.nativeQueueOwnership.delete(id);
+        ownershipChanged = true;
+      }
+    }
+
+    this.seedFromResumeState(state);
+    if (ownershipChanged) this.emitQueueDepth();
+  }
+
   handleAck(id: string): void {
     const wasQueued = this.inflightQueuedIds.delete(id);
-    this.resumeReplayQueuedIds.delete(id);
-    if (wasQueued) removeQueuedMessage(this.deps.queueScope(), id);
+    const wasNativeOwned = this.nativeQueueOwnership.delete(id);
+    // The callback can arrive after a reload or synchronously inside the
+    // awaited send. Persisted identity is authoritative; ephemeral Set
+    // membership is never a prerequisite for deleting the durable copy.
+    const wasPersisted = removeQueuedMessage(this.deps.queueScope(), id);
     this.deps.events.emit("messageAck", id);
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
       this.deps.events.emitSafe("messageAcked", id, { kind: pending.kind, latencyMs: performance.now() - pending.at });
     }
-    if (wasQueued) this.emitQueueDepth();
+    if (wasQueued || wasNativeOwned || wasPersisted) this.emitQueueDepth();
   }
 
   handleFailed(id: string): void {
     const wasQueued = this.inflightQueuedIds.delete(id);
-    const wasResumeReplay = this.resumeReplayQueuedIds.delete(id);
-    if (wasResumeReplay) removeQueuedMessage(this.deps.queueScope(), id);
+    const nativeOwnership = this.nativeQueueOwnership.get(id);
+    if (nativeOwnership?.kind === "resume-replay") {
+      // `<failed/>` ends only the resume attempt. The native runtime now owns
+      // the same stanza id on its conformant fresh-stream fallback. Keep the
+      // browser row crash-durable and keep browser flushing fenced off until
+      // the native path acks it or reports a subsequent terminal failure.
+      this.nativeQueueOwnership.set(id, { kind: "fresh-fallback" });
+      this.deps.events.emit("queuedMessageStatus", id, "sending");
+      if (wasQueued) this.emitQueueDepth();
+      return;
+    }
+    const wasNativeOwned = this.nativeQueueOwnership.delete(id);
     this.deps.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
       this.deps.events.emitSafe("messageDeliveryFailed", id, { kind: pending.kind });
     }
-    if (wasQueued || wasResumeReplay) this.emitQueueDepth();
+    if (wasQueued || wasNativeOwned) this.emitQueueDepth();
   }
 
   discardNonRetryable(id: string): void {
     this.inflightQueuedIds.delete(id);
-    this.resumeReplayQueuedIds.delete(id);
+    this.nativeQueueOwnership.delete(id);
     removeQueuedMessage(this.deps.queueScope(), id);
     this.deps.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
@@ -561,28 +648,33 @@ export class OfflineSendQueue {
       const entries = listQueuedMessages(this.deps.queueScope()).filter((entry): entry is PersistedQueuedDmMessage => entry.kind === "dm");
       for (const entry of entries) {
         if (!this.deps.canUseConnectedSession()) break;
-        if (this.inflightQueuedIds.has(entry.id)) continue;
+        if (this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id)) continue;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
+        this.beginAttempt(entry.id, "dm");
         let messageId: string | null;
         try {
           messageId = await this.deps.sendDirect(entry.mucPm ? entry.peerJid : barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.mucPm ? { mucPm: true } : {}), id: entry.id });
         } catch (error) {
+          this.rollbackAttempt(entry.id);
           if (isNonRetryableWasmSendFailure(error)) {
             this.discardNonRetryable(entry.id);
             continue;
           }
           throw error;
         }
-        if (messageId) {
-          this.inflightQueuedIds.add(entry.id);
-          this.notePendingSend(entry.id, "dm");
+        if (!messageId) {
+          this.rollbackAttempt(entry.id);
+        } else if (messageId !== entry.id) {
+          this.rollbackAttempt(entry.id);
+          throw new Error("XMPP send returned a different stanza id");
         }
       }
     })();
-    this.directFlushPromise = promise.finally(() => {
-      if (this.directFlushPromise === promise) this.directFlushPromise = null;
+    const trackedPromise = promise.finally(() => {
+      if (this.directFlushPromise === trackedPromise) this.directFlushPromise = null;
     });
-    return this.directFlushPromise;
+    this.directFlushPromise = trackedPromise;
+    return trackedPromise;
   }
 
   async flushRoom(roomJid: string): Promise<void | undefined> {
@@ -593,38 +685,54 @@ export class OfflineSendQueue {
       const entries = listQueuedRoomMessages(this.deps.queueScope(), roomJid);
       for (const entry of entries) {
         if (!this.deps.roomIsReady(roomJid)) break;
-        if (this.inflightQueuedIds.has(entry.id)) continue;
+        if (this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id)) continue;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
+        this.beginAttempt(entry.id, "room");
         let messageId: string | null;
         try {
           messageId = await this.deps.sendRoom(roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.deps.roomMemberJids(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
         } catch (error) {
+          this.rollbackAttempt(entry.id);
           if (isNonRetryableWasmSendFailure(error)) {
             this.discardNonRetryable(entry.id);
             continue;
           }
           throw error;
         }
-        if (messageId) {
-          this.inflightQueuedIds.add(entry.id);
-          this.notePendingSend(entry.id, "room");
+        if (!messageId) {
+          this.rollbackAttempt(entry.id);
+        } else if (messageId !== entry.id) {
+          this.rollbackAttempt(entry.id);
+          throw new Error("XMPP send returned a different stanza id");
         }
       }
     })();
-    this.roomFlushes.set(roomJid, promise.finally(() => {
-      if (this.roomFlushes.get(roomJid) === promise) this.roomFlushes.delete(roomJid);
-    }));
-    return this.roomFlushes.get(roomJid);
+    const trackedPromise = promise.finally(() => {
+      if (this.roomFlushes.get(roomJid) === trackedPromise) this.roomFlushes.delete(roomJid);
+    });
+    this.roomFlushes.set(roomJid, trackedPromise);
+    return trackedPromise;
   }
 
   private emitQueueDepth(): void {
     const entries = listQueuedMessages(this.deps.queueScope());
     for (const kind of ["dm", "room"] as const) {
       const kindEntries = entries.filter((entry) => entry.kind === kind);
+      const oldestCreatedAt = kindEntries.reduce<number | undefined>((oldest, entry) => {
+        const createdAt = Date.parse(entry.createdAt);
+        if (!Number.isFinite(createdAt)) return oldest;
+        return oldest === undefined ? createdAt : Math.min(oldest, createdAt);
+      }, undefined);
       this.deps.events.emitSafe("queueDepthChange", {
         kind,
         persisted: kindEntries.length,
-        inflight: kindEntries.filter((entry) => this.inflightQueuedIds.has(entry.id)).length,
+        inflight: kindEntries.filter(
+          (entry) =>
+            this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id),
+        ).length,
+        ...(oldestCreatedAt === undefined
+          ? {}
+          : { oldestAgeMs: Math.max(0, Date.now() - oldestCreatedAt) }),
       });
     }
   }

@@ -35,7 +35,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "ErrorEvent", "Event", "MessageEvent", "WebSocket", "console"], optional = true }
+web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "ErrorEvent", "Event", "MessageEvent", "Performance", "WebSocket", "console"], optional = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 xmpp-parsers = { workspace = true }
 
@@ -65,6 +65,7 @@ rustls = { version = "0.23", default-features = false, features = [
 webpki-roots = { version = "0.26", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 # Test-only TLS server pieces for the certificate-rejection transport test.
 # Both pin `ring` explicitly so dev builds never pull rustls' default
 # `aws-lc-rs` provider into the workspace graph.

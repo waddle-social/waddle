@@ -8,6 +8,7 @@ import { BrowserXmppClient, roomBareJidFor, type DmConversationScope, type Inbox
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
+import type { QueueDepthTelemetry } from "../src/lib/xmpp/client-events";
 import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
@@ -346,6 +347,84 @@ describe("client send readiness", () => {
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 
+  test("a live MUC ack delivered before the send promise resolves clears the durable copy", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const xmpp = {
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => {
+        (client as unknown as { handleMessageAck: (id: string) => void })
+          .handleMessageAck(opts.stanza_id!);
+        return opts.stanza_id;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    const result = await client.sendGroupMessage("w1", "c1", "fast ack", { id: "room-fast-live" });
+
+    expect(result).toEqual({ id: "room-fast-live", state: "sending" });
+    expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
+  });
+
+  test("live MUC rejection, null, and mismatched IDs all roll back before a later acked retry", async () => {
+    let attempt = 0;
+    const xmpp = {
+      send_groupchat_message: mock(async (
+        _room: string,
+        _body: string,
+        opts: { stanza_id?: string },
+      ) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("room socket unavailable");
+        if (attempt === 2) return null;
+        if (attempt === 3) return "wrong-live-room-id";
+        return opts.stanza_id;
+      }),
+    };
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const depths: QueueDepthTelemetry[] = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    client.onQueueDepthChange((depth) => {
+      if (depth.kind === "room") depths.push(depth);
+    });
+    client.setQueuedMessageStatusHandler((id, status) => statuses.push({ id, status }));
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+    const queuedIds = () => listQueuedRoomMessages("alice@example.com", roomJid)
+      .map((message) => message.id);
+
+    await expect(client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
+      .rejects.toThrow("room socket unavailable");
+    expect(queuedIds()).toEqual(["room-live-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-live-retry", status: "queued" });
+
+    expect(await client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
+      .toEqual({ id: null, state: "queued" });
+    expect(queuedIds()).toEqual(["room-live-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-live-retry", status: "queued" });
+
+    await expect(client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
+      .rejects.toThrow("XMPP send returned a different stanza id");
+    expect(queuedIds()).toEqual(["room-live-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-live-retry", status: "queued" });
+
+    expect(await client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
+      .toEqual({ id: "room-live-retry", state: "sending" });
+    expect(attempt).toBe(4);
+    (client as unknown as { handleMessageAck: (id: string) => void })
+      .handleMessageAck("room-live-retry");
+    expect(queuedIds()).toEqual([]);
+    expect(depths.at(-1)).toEqual({ kind: "room", persisted: 0, inflight: 0 });
+  });
+
   test("room send rejects typed WASM failures instead of returning a null sending id", async () => {
     const xmpp = { send_groupchat_message: mock(async () => ({ kind: "not-connected" })) };
     const client = new BrowserXmppClient(session());
@@ -442,7 +521,10 @@ describe("client send readiness", () => {
 
     await expect((client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid)).rejects.toThrow("XMPP send failed: transport-error");
     expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id)).toEqual(["room-replay-1"]);
-    expect(statuses).toEqual([["room-replay-1", "sending"]]);
+    expect(statuses).toEqual([
+      ["room-replay-1", "sending"],
+      ["room-replay-1", "queued"],
+    ]);
   });
 
   test("room join readiness waits for this resource's MUC self-presence", async () => {
@@ -787,6 +869,107 @@ describe("client send readiness", () => {
         state: "available",
       },
     ]);
+  });
+
+  test("terminal MUC denial does not release native SM fallback ownership", async () => {
+    const roomJid = roomBareJidFor(session(), "private");
+    const messageId = "room-native-fallback";
+    const client = new BrowserXmppClient(session(), nullResumePersistence);
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+      muc_jid?: string;
+    }) => void) | null = null;
+    const sendGroupMessage = mock(async (
+      _room: string,
+      _body: string,
+      opts: { stanza_id?: string },
+    ) => opts.stanza_id);
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      send_groupchat_message: sendGroupMessage,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    const state = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      fullJid: string;
+      wireEvents: (xmpp: typeof xmpp) => void;
+      handleMessageFailed: (id: string) => void;
+      flushQueuedRoomMessages: (roomJid: string) => Promise<void>;
+      outboundQueue: {
+        seedFromResumeState: (resumeState: {
+          previd: string;
+          inboundH: number;
+          outboundH: number;
+          unhandledOutboundEntries: Array<{ stanza: string; sentAt: string }>;
+        }) => void;
+        reconcileNativeOwnershipAfterDisconnect: (resumeState: null) => void;
+        clearInflight: () => void;
+      };
+    };
+    state.xmpp = xmpp;
+    state.connected = true;
+    state.wireEvents(xmpp);
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "room",
+      id: messageId,
+      createdAt: "2026-07-24T12:00:00.000Z",
+      roomJid,
+      body: "native fallback",
+    });
+    state.outboundQueue.seedFromResumeState({
+      previd: "previous-stream",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{
+        stanza: `<message xmlns="jabber:client" type="groupchat" id="${messageId}"/>`,
+        sentAt: "2026-07-24T12:00:00.000Z",
+      }],
+    });
+    state.handleMessageFailed(messageId);
+
+    const rejected = client.fanOutAutoJoin([roomJid]);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "forbidden",
+      error_type: "auth",
+    });
+    await rejected;
+
+    const explicitRetry = client.retryRoomAccess("", "private");
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+      muc_jid: state.fullJid,
+    });
+    await explicitRetry;
+    await settleReconnectCatchup();
+
+    // Clearing the room block must not make the browser race the native
+    // fresh-stream fallback that already owns this stanza.
+    expect(sendGroupMessage).not.toHaveBeenCalled();
+    expect(listQueuedRoomMessages("alice@example.com", roomJid).map((entry) => entry.id))
+      .toEqual([messageId]);
+
+    // Only a terminal native disconnect with no surviving replay snapshot
+    // releases the fence for one durable browser retry.
+    state.outboundQueue.reconcileNativeOwnershipAfterDisconnect(null);
+    state.outboundQueue.clearInflight();
+    await state.flushQueuedRoomMessages(roomJid);
+
+    expect(sendGroupMessage).toHaveBeenCalledTimes(1);
+    expect(listQueuedRoomMessages("alice@example.com", roomJid).map((entry) => entry.id))
+      .toEqual([messageId]);
   });
 
   test("wait-type MUC rejection remains eligible for a later auto-join epoch", async () => {
@@ -1326,6 +1509,7 @@ describe("client send readiness", () => {
       saveSm: () => undefined,
       clearSm: () => undefined,
       preparePagehideHandoff: () => undefined,
+      reclaimPagehideOwnership: () => undefined,
       loadJoinedRooms: () => [roomJid],
       saveJoinedRooms: () => undefined,
       clearJoinedRooms: () => undefined,
@@ -1410,6 +1594,76 @@ describe("client send readiness", () => {
 
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+  });
+
+  test("a live DM ack delivered before the send promise resolves clears the durable copy", async () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
+        (client as unknown as { handleMessageAck: (id: string) => void })
+          .handleMessageAck(opts.stanza_id!);
+        return opts.stanza_id;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const result = await client.sendDirectMessage("bob@example.com", "fast ack", { id: "dm-fast-live" });
+
+    expect(result).toEqual({ id: "dm-fast-live", state: "sending" });
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+  });
+
+  test("live DM rejection, null, and mismatched IDs all roll back before a later retry", async () => {
+    let attempt = 0;
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("socket unavailable");
+        if (attempt === 2) return null;
+        if (attempt === 3) return "wrong-live-id";
+        return opts.stanza_id;
+      }),
+    };
+    const client = new BrowserXmppClient(session());
+    const depths: QueueDepthTelemetry[] = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    client.onQueueDepthChange((depth) => {
+      if (depth.kind === "dm") depths.push(depth);
+    });
+    client.setQueuedMessageStatusHandler((id, status) => statuses.push({ id, status }));
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    const queuedIds = () => listQueuedDmMessages(
+      "alice@example.com",
+      "bob@example.com",
+      "account",
+    ).map((message) => message.id);
+
+    await expect(client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
+      .rejects.toThrow("socket unavailable");
+    expect(queuedIds()).toEqual(["dm-live-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-live-retry", status: "queued" });
+
+    expect(await client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
+      .toEqual({ id: null, state: "queued" });
+    expect(queuedIds()).toEqual(["dm-live-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-live-retry", status: "queued" });
+
+    await expect(client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
+      .rejects.toThrow("XMPP send returned a different stanza id");
+    expect(queuedIds()).toEqual(["dm-live-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-live-retry", status: "queued" });
+
+    expect(await client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
+      .toEqual({ id: "dm-live-retry", state: "sending" });
+    expect(attempt).toBe(4);
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-retry");
+    expect(queuedIds()).toEqual([]);
+    expect(depths.at(-1)).toEqual({ kind: "dm", persisted: 0, inflight: 0 });
   });
 
   test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {
@@ -1531,27 +1785,82 @@ describe("client send readiness", () => {
     messaging.disconnect();
   });
 
-  test("native failed-resume fallback owns resend for live unacked DM sends", async () => {
-    const xmpp = {
-      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+  test("terminal no-SM disconnect releases native fallback ownership for one reconnect retry", async () => {
+    const firstSend = mock(async (
+      _peer: string,
+      _body: string,
+      opts: { stanza_id?: string },
+    ) => opts.stanza_id);
+    const firstXmpp = {
+      send_chat_message: firstSend,
       get_resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+        unhandledOutboundEntries: [{
+          stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
+          sentAt: "2026-07-16T08:09:10.123Z",
+        }],
       }),
     };
     const client = new BrowserXmppClient(session());
-    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { xmpp: typeof firstXmpp; connected: boolean }).xmpp = firstXmpp;
     (client as unknown as { connected: boolean }).connected = true;
 
     await client.sendDirectMessage("bob@example.com", "hello", { id: "dm-live-1" });
-    (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
+    (client as unknown as {
+      handleDisconnected: (xmpp: typeof firstXmpp) => void;
+    }).handleDisconnected(firstXmpp);
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+    const fallbackSend = mock(async (
+      _peer: string,
+      _body: string,
+      opts: { stanza_id?: string },
+    ) => opts.stanza_id);
+    const fallbackXmpp = {
+      send_chat_message: fallbackSend,
+      get_resume_state: () => null,
+    };
+    const sessionReadyClient = client as unknown as {
+      xmpp: typeof fallbackXmpp;
+      connected: boolean;
+      handleSessionReady: (
+        xmpp: typeof fallbackXmpp,
+        lifecycle: { type: "fresh" },
+      ) => void;
+      handleDisconnected: (xmpp: typeof fallbackXmpp) => void;
+      clearReconnectTimer: () => void;
+    };
+    sessionReadyClient.xmpp = fallbackXmpp;
+    sessionReadyClient.handleSessionReady(fallbackXmpp, { type: "fresh" });
+    await settleReconnectCatchup();
+
+    expect(fallbackSend).not.toHaveBeenCalled();
+
+    sessionReadyClient.handleDisconnected(fallbackXmpp);
+    sessionReadyClient.clearReconnectTimer();
+
+    const reconnectSend = mock(async (
+      _peer: string,
+      _body: string,
+      opts: { stanza_id?: string },
+    ) => opts.stanza_id);
+    const reconnectXmpp = {
+      send_chat_message: reconnectSend,
+      get_resume_state: () => null,
+    };
+    sessionReadyClient.xmpp = reconnectXmpp;
+    sessionReadyClient.handleSessionReady(reconnectXmpp, { type: "fresh" });
+    sessionReadyClient.handleSessionReady(reconnectXmpp, { type: "fresh" });
+    await settleReconnectCatchup();
+
+    expect(firstSend).toHaveBeenCalledTimes(1);
+    expect(reconnectSend).toHaveBeenCalledTimes(1);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((entry) => entry.id))
+      .toEqual(["dm-live-1"]);
   });
 });
 

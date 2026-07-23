@@ -41,6 +41,7 @@ import type {
   ClientEvents,
   MdsDisplayedEntry,
   PubsubEvent,
+  QueueDepthTelemetry,
   RoomAccessChangedEvent,
 } from "./client-events";
 import {
@@ -192,6 +193,7 @@ import type {
   WasmRosterContact,
   WasmSendMessageOutcome,
   WasmServerVersion,
+  WasmStreamManagementTelemetry,
   WasmThreadsPage,
   WasmUserSearchResult,
 } from "./wasm-types";
@@ -343,11 +345,13 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
   set_on_call?: (cb: (event: CallEvent) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
+  set_on_stream_management?: (cb: (event: WasmStreamManagementTelemetry) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
+  request_stream_management_ack?: () => Promise<void>;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
@@ -692,6 +696,10 @@ export class BrowserXmppClient {
     return this.xmpp === xmpp && !this.destroying;
   }
 
+  private isCurrentConnection(xmpp: XmppClientInstance, generation: number): boolean {
+    return generation === this.connectEpoch && this.isCurrentXmpp(xmpp);
+  }
+
   private rejectRoomJoinWaiters(error: Error): void {
     for (const waiter of this.roomJoinWaiters.values()) {
       waiter.reject(error);
@@ -860,7 +868,8 @@ export class BrowserXmppClient {
   onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
   onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
   onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
-  onQueueDepthChange(hook: (depth: { kind: "room" | "dm"; persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
+  onQueueDepthChange(hook: (depth: QueueDepthTelemetry) => void) { this.events.on("queueDepthChange", hook); }
+  onStreamManagement(hook: (event: WasmStreamManagementTelemetry) => void) { this.events.on("streamManagement", hook); }
   onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
   listRoomAccessRequirements(): ReadonlyArray<Extract<RoomAccessChangedEvent, { state: "required" }>> {
     return [...this.terminallyDeniedAutoJoinRooms.values()].map((block) => ({
@@ -935,6 +944,39 @@ export class BrowserXmppClient {
     );
   }
 
+  prepareForPageHide(): void {
+    const xmpp = this.xmpp;
+    const generation = this.connectEpoch;
+    try {
+      const request = xmpp?.request_stream_management_ack?.();
+      if (request) {
+        void Promise.resolve(request).catch((cause) => {
+          if (!xmpp || !this.isCurrentConnection(xmpp, generation)) return;
+          this.emitError({
+            kind: "stream",
+            recoverable: true,
+            detail: "sm-ack-request-failed",
+            cause,
+          });
+        });
+      }
+    } catch (cause) {
+      if (xmpp && this.isCurrentConnection(xmpp, generation)) {
+        this.emitError({
+          kind: "stream",
+          recoverable: true,
+          detail: "sm-ack-request-failed",
+          cause,
+        });
+      }
+    }
+    this.persistResumeStateForPageHide();
+  }
+
+  resumeAfterPageShow(): void {
+    this.resume.reclaimAfterPageShow();
+  }
+
   private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
     if (xmpp.enableCarbons) {
       try { await xmpp.enableCarbons(); } catch {}
@@ -955,8 +997,7 @@ export class BrowserXmppClient {
    * resource and trigger a self-inflicted terminal `conflict`. */
   private connectEpoch = 0;
 
-  private async doConnect(): Promise<void> {
-    const epoch = ++this.connectEpoch;
+  private async doConnect(epoch: number): Promise<void> {
     const websocketUrl = websocketUrlWithTraceparent(this.session.xmpp_websocket_url);
     const mod = await this.loadModule();
     // Stale continuation: a newer connect attempt started (or the
@@ -979,7 +1020,7 @@ export class BrowserXmppClient {
     }
     const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
     this.xmpp = xmpp;
-    this.wireEvents(xmpp);
+    this.wireEvents(xmpp, epoch);
     await xmpp.connect?.();
   }
 
@@ -1065,11 +1106,13 @@ export class BrowserXmppClient {
     this.destroying = false;
     this.disarmOnlineRecovery();
     this.clearReconnectTimer();
+    const generation = ++this.connectEpoch;
     this.connectPromise = withSpan(
       "xmpp.connect",
       { "waddle.xmpp.transport": "websocket" },
       () => new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
+          if (generation !== this.connectEpoch) return;
           // C1: the connect budget measures to session-ready, not to
           // catch-up completion. `connect()`'s promise still resolves
           // only after the resume barrier (callers rely on "connected
@@ -1120,7 +1163,8 @@ export class BrowserXmppClient {
         };
         this.onceConnected = () => done(resolve);
         this.onceConnectFailed = (error) => done(() => reject(error));
-        void this.doConnect().catch((error) => {
+        void this.doConnect(generation).catch((error) => {
+          if (generation !== this.connectEpoch) return;
           if (this.onceConnectFailed) {
             const fail = this.onceConnectFailed;
             this.onceConnectFailed = null;
@@ -1590,15 +1634,23 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
       this.outboundQueue.persistPendingRoomSend(roomJid, body, sendOpts);
+      this.outboundQueue.beginAttempt(outboundId, "room");
       let id: string | null;
       try {
         id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
       } catch (error) {
+        this.outboundQueue.rollbackAttempt(outboundId);
         if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
         throw error;
       }
-      if (id) this.outboundQueue.markInflight(id);
-      this.outboundQueue.notePendingSend(id, "room");
+      if (!id) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        return { id: null, state: "queued" };
+      }
+      if (id !== outboundId) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        throw new Error("XMPP send returned a different stanza id");
+      }
       return { id, state: "sending" };
     }
     const queued = this.outboundQueue.queueRoomMessage(roomJid, body, opts);
@@ -1637,15 +1689,23 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, ...(mucPm ? { mucPm: true } : {}) };
       this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
+      this.outboundQueue.beginAttempt(outboundId, "dm");
       let id: string | null;
       try {
         id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
       } catch (error) {
+        this.outboundQueue.rollbackAttempt(outboundId);
         if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
         throw error;
       }
-      if (id) this.outboundQueue.markInflight(id);
-      this.outboundQueue.notePendingSend(id, "dm");
+      if (!id) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        return { id: null, state: "queued" };
+      }
+      if (id !== outboundId) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        throw new Error("XMPP send returned a different stanza id");
+      }
       return { id, state: "sending" };
     }
     return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
@@ -2771,7 +2831,7 @@ export class BrowserXmppClient {
     // `ResumeStateStore.captureFromDisconnect` for the pagehide-handoff
     // rationale.
     const resumeState = this.resume.captureFromDisconnect(xmpp, this.resource);
-    this.outboundQueue.seedFromResumeState(resumeState);
+    this.outboundQueue.reconcileNativeOwnershipAfterDisconnect(resumeState);
     this.emitStatus({ state: "reconnecting", detail: this.outboundQueue.persistedCount() > 0 ? "Connection lost — queued messages will send when reconnected" : (error?.message ?? "Connection lost, reconnecting...") });
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }
     this.reconnect.schedule();
@@ -3041,19 +3101,32 @@ export class BrowserXmppClient {
   ) {
     return this.mam.runReconnectCatchup(xmpp, entries, lifecycle);
   }
-  private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
+  private wireEvents(
+    xmpp: XmppClientInstance & {
+      enableKeepAlive?: (opts: { interval: number; timeout: number }) => void;
+      disableKeepAlive?: () => void;
+    },
+    generation = this.connectEpoch,
+  ) {
     if (!this.xmpp && !this.destroying) this.xmpp = xmpp;
     // #754: carbons enable lives in the fresh branch of `runSessionReady`
     // only — enabling from `on_connected` too doubled the IQ on every
     // fresh connect and re-enabled on XEP-0198 resume, where the server
     // already preserves carbon state for the resumed session.
     xmpp.set_on_session_lifecycle?.((event: string) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" });
     });
-    xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
+    xmpp.set_on_stream_management?.((event: WasmStreamManagementTelemetry) => {
+      if (!this.isCurrentConnection(xmpp, generation)) return;
+      this.events.emitSafe("streamManagement", event);
+    });
+    xmpp.set_on_disconnected?.(() => {
+      if (!this.isCurrentConnection(xmpp, generation)) return;
+      this.handleDisconnected(xmpp);
+    });
     xmpp.set_on_error?.((payload: XmppStreamErrorPayload) => {
-      if (this.xmpp !== xmpp) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       const streamError = normalizeXmppStreamErrorPayload(payload);
       const terminalDetail = terminalDisconnectDetail(terminalConditionFromPayload(payload));
       if (terminalDetail) this.terminalDisconnectDetail = terminalDetail;
@@ -3068,11 +3141,11 @@ export class BrowserXmppClient {
       });
     });
     xmpp.set_on_message?.((message: WasmMessage) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.handleMessage(message);
     });
     xmpp.set_on_presence?.((presence: WasmPresence) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.handlePresence(presence);
       // Side-effect track: MUC presence carrying the call extension
       // populates the per-room participants store so any consumer
@@ -3086,23 +3159,23 @@ export class BrowserXmppClient {
       applyMutePresence(presence);
     });
     xmpp.set_on_message_delivery_acked?.((id: string) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.handleMessageAck(id);
     });
     xmpp.set_on_message_delivery_failed?.((id: string) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.handleMessageFailed(id);
     });
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.events.emit("mdsDisplayed", { chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
     });
     xmpp.set_on_pubsub_event?.((event: WasmPubsubEvent) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.events.emit("pubsubEvent", event);
     });
     xmpp.set_on_call?.((event: CallEvent) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       const prev = $callState.get();
       const selfBare = barePeerJid(this.session.jid);
       const isSelfOriginated = barePeerJid(event.from) === selfBare;
@@ -3165,24 +3238,34 @@ export class BrowserXmppClient {
       }
     });
     xmpp.on?.("session:started", () => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       xmpp.disableKeepAlive?.();
       xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 });
       this.handleSessionReady(xmpp, { type: "fresh" });
     });
     xmpp.on?.("stream:management:resumed", () => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.handleSessionReady(xmpp, { type: "resumed" });
     });
-    xmpp.on?.("disconnected", (error?: Error) => { xmpp.disableKeepAlive?.(); this.handleDisconnected(xmpp, error); });
-    xmpp.on?.("message:acked", (msg: { id?: string }) => { if (!this.isCurrentXmpp(xmpp)) return; if (msg?.id) this.handleMessageAck(msg.id); });
-    xmpp.on?.("message:failed", (msg: { id?: string }) => { if (!this.isCurrentXmpp(xmpp)) return; if (msg?.id) this.handleMessageFailed(msg.id); });
+    xmpp.on?.("disconnected", (error?: Error) => {
+      if (!this.isCurrentConnection(xmpp, generation)) return;
+      xmpp.disableKeepAlive?.();
+      this.handleDisconnected(xmpp, error);
+    });
+    xmpp.on?.("message:acked", (msg: { id?: string }) => {
+      if (!this.isCurrentConnection(xmpp, generation)) return;
+      if (msg?.id) this.handleMessageAck(msg.id);
+    });
+    xmpp.on?.("message:failed", (msg: { id?: string }) => {
+      if (!this.isCurrentConnection(xmpp, generation)) return;
+      if (msg?.id) this.handleMessageFailed(msg.id);
+    });
     xmpp.on?.("message", (message: WasmMessage) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.handleMessage(message);
     });
     xmpp.on?.("presence", (presence: WasmPresence) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
+      if (!this.isCurrentConnection(xmpp, generation)) return;
       this.handlePresence(presence);
       applyMucCallPresence(presence);
       applyRaisedHandPresence(presence);

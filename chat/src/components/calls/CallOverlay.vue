@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, watch } from "vue";
+import { onBeforeUnmount, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
@@ -12,7 +12,6 @@ import { iceServersFromExternalServices } from "@/lib/calls/ice-servers";
 import { connectionStore } from "@/lib/connection-store";
 import {
   $callConnecting,
-  installCallPagehideSuspension,
   resetCallControls,
   seedCallControlsFromEngine,
 } from "@/lib/calls/call-controls";
@@ -30,14 +29,14 @@ import { resetCallViewState } from "@/lib/calls/call-view-state";
  *   - `CallExpandedSurface.vue` — fills the chat content pane.
  *
  * What stays here: the LiveKit connect/disconnect plumbing tied to
- * `$callState` transitions, and the pagehide cleanup hook. The mic /
- * cam / hangup plumbing moved into `call-controls.ts` (nanostore
+ * `$callState` transitions. Persistent page lifecycle ownership lives in
+ * `XmppProvider`, which snapshots XEP-0198 state before suspending media.
+ * The mic / cam / hangup plumbing moved into `call-controls.ts` (nanostore
  * atoms + control functions) so every surface reads one source of
  * truth. This component renders nothing visible.
  */
 const state = useStore($callState);
 const { engine } = useCallEngine();
-let disconnectPagehideSuspension: (() => void) | null = null;
 
 function getSender(): CallWireSender | null {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -116,19 +115,11 @@ watch(
   { immediate: true },
 );
 
-onMounted(() => {
-  if (typeof window !== "undefined") {
-    disconnectPagehideSuspension = installCallPagehideSuspension(window);
-  }
-});
-
 onBeforeUnmount(() => {
   // Component lifecycle is not a call lifecycle. Route changes and
   // browser refreshes must not emit XMPP call-ending stanzas; explicit
   // hangup/logout own that path.
   void engine.disconnect();
-  disconnectPagehideSuspension?.();
-  disconnectPagehideSuspension = null;
 });
 </script>
 

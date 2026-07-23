@@ -14,8 +14,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import { BrowserXmppClient } from "../src/lib/xmpp/client";
 import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection";
+import { installXmppPagehideLifecycle } from "../src/lib/xmpp/pagehide-lifecycle";
 import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
+import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import {
   createLocalStorageResumePersistence,
   nullResumePersistence,
@@ -37,6 +39,7 @@ import {
 // path; a leaked shim would activate localStorage in those tests
 // and corrupt state across runs.
 const WINDOW_SENTINEL = Symbol("test-installed-window");
+const RESUME_SENT_AT = "2026-07-16T08:09:10.123Z";
 type ShimmedGlobal = typeof globalThis & {
   window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
@@ -104,6 +107,7 @@ function inMemoryPersistence(): ResumePersistence & {
     saveSm: (state) => { sm = state; },
     clearSm: () => { smClears += 1; sm = null; },
     preparePagehideHandoff: () => undefined,
+    reclaimPagehideOwnership: () => undefined,
     loadJoinedRooms: () => [...joinedRooms],
     saveJoinedRooms: (rooms) => { joinedRooms = [...rooms]; },
     clearJoinedRooms: () => { joinedRooms = []; },
@@ -289,10 +293,10 @@ describe("applyResumeStateToWasmConfig", () => {
     return { config, calls };
   }
 
-  test("uses max-aware stanza resume when both unhandled stanzas and max are available", () => {
+  test("uses max-aware timestamped resume entries when unhandled work and max are available", () => {
     const { config, calls } = configWith([
-      "with_resume_state_stanzas_with_max",
-      "with_resume_state_stanzas",
+      "with_resume_state_entries_with_max",
+      "with_resume_state_entries",
       "with_resume_state_with_max",
       "with_resume_state",
     ]);
@@ -302,13 +306,13 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 7,
       outboundH: 11,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message/>"],
+      unhandledOutboundEntries: [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas_with_max",
-        args: ["prev-1", 7, 11, ["<message/>"], 300],
+        method: "with_resume_state_entries_with_max",
+        args: ["prev-1", 7, 11, [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }], 300],
       },
     ]);
   });
@@ -331,23 +335,33 @@ describe("applyResumeStateToWasmConfig", () => {
     ]);
   });
 
-  test("falls back to old stanza resume when generated WASM lacks max-aware stanza support", () => {
-    const { config, calls } = configWith(["with_resume_state_stanzas", "with_resume_state"]);
+  test("uses timestamped resume entries without a max-aware entry method", () => {
+    const { config, calls } = configWith(["with_resume_state_entries", "with_resume_state"]);
 
     applyResumeStateToWasmConfig(config, {
       previd: "prev-3",
       inboundH: 1,
       outboundH: 2,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<presence/>"],
+      unhandledOutboundEntries: [{ stanza: "<presence/>", sentAt: RESUME_SENT_AT }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas",
-        args: ["prev-3", 1, 2, ["<presence/>"]],
+        method: "with_resume_state_entries",
+        args: ["prev-3", 1, 2, [{ stanza: "<presence/>", sentAt: RESUME_SENT_AT }]],
       },
     ]);
+  });
+
+  test("fails closed instead of dropping timestamped unhandled entries", () => {
+    const { config } = configWith(["with_resume_state"]);
+    expect(() => applyResumeStateToWasmConfig(config, {
+      previd: "prev-missing-entry-api",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }],
+    })).toThrow("cannot restore timestamped XEP-0198 resume entries");
   });
 
   test("falls back to old plain resume when generated WASM has only the legacy method", () => {
@@ -386,7 +400,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='m1'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='m1'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     };
     persistence.saveSm(state);
     // Round-trip strips the internal `savedAt` so the caller gets
@@ -486,6 +503,115 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
 
     expect(reloadedPage.consumeSm()).toEqual(state);
+  });
+
+  test("BFCache pagehide persists before eviction and pageshow reclaims owner handoff", () => {
+    const ownerId = "bfcache-owner";
+    const persistence = createLocalStorageResumePersistence("alice@example.com", ownerId);
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const activeResource = (client as unknown as { resource: string }).resource;
+    (client as unknown as {
+      xmpp: {
+        request_stream_management_ack: () => Promise<void>;
+        get_resume_state: () => PersistedSmResumeState & { hasUnackedOutbound: boolean };
+      };
+    }).xmpp = {
+      request_stream_management_ack: async () => undefined,
+      get_resume_state: () => ({
+        previd: "bfcache-stream",
+        inboundH: 12,
+        outboundH: 8,
+        maxResumeSeconds: 300,
+        resource: "web-bfcache",
+        hasUnackedOutbound: false,
+      }),
+    };
+
+    const listeners = new Map<string, EventListener>();
+    const target = {
+      addEventListener: (type: string, listener: EventListener) => listeners.set(type, listener),
+      removeEventListener: (type: string) => listeners.delete(type),
+    };
+    const remove = installXmppPagehideLifecycle(
+      target as unknown as Window,
+      () => client,
+      () => {
+        throw new Error("BFCache pagehide must not suspend call media");
+      },
+    );
+    const dispatch = (type: "pagehide" | "pageshow") => {
+      listeners.get(type)?.({ persisted: true } as PageTransitionEvent);
+    };
+
+    dispatch("pagehide");
+    expect(persistence.loadSm()).toMatchObject({
+      previd: "bfcache-stream",
+      inboundH: 12,
+      outboundH: 8,
+    });
+    expect(window.localStorage.getItem(`waddle.chat.sm-resume.owner-handoff.${ownerId}`))
+      .not.toBeNull();
+
+    dispatch("pageshow");
+    expect(window.localStorage.getItem(`waddle.chat.sm-resume.owner-handoff.${ownerId}`))
+      .toBeNull();
+
+    // A later BFCache eviction creates a fresh JS context. The synchronous
+    // pagehide snapshot remains consumable and preserves the bound resource.
+    dispatch("pagehide");
+    const reloaded = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      createLocalStorageResumePersistence("alice@example.com", ownerId),
+    );
+    expect((reloaded as unknown as { resource: string }).resource).toBe(activeResource);
+    remove();
+  });
+
+  test("ack rejection is observed once without delaying the synchronous pagehide snapshot", async () => {
+    const ownerId = "ack-rejection-owner";
+    const persistence = createLocalStorageResumePersistence("alice@example.com", ownerId);
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const errors: XmppErrorEvent[] = [];
+    client.onError((error) => errors.push(error));
+    (client as unknown as {
+      xmpp: {
+        request_stream_management_ack: () => Promise<void>;
+        get_resume_state: () => PersistedSmResumeState & { hasUnackedOutbound: boolean };
+      };
+    }).xmpp = {
+      request_stream_management_ack: () => Promise.reject(new Error("socket unavailable")),
+      get_resume_state: () => ({
+        previd: "ack-rejection-stream",
+        inboundH: 4,
+        outboundH: 6,
+        hasUnackedOutbound: false,
+      }),
+    };
+
+    client.prepareForPageHide();
+
+    expect(persistence.loadSm()).toMatchObject({
+      previd: "ack-rejection-stream",
+      inboundH: 4,
+      outboundH: 6,
+    });
+    expect(errors).toEqual([]);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      kind: "stream",
+      recoverable: true,
+      detail: "sm-ack-request-failed",
+    });
   });
 
   test("a slow same-tab reload keeps the owner until the prior lease expires", () => {
@@ -588,7 +714,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           outboundH: number;
           maxResumeSeconds: number;
           hasUnackedOutbound: boolean;
-          unhandledOutboundStanzas: string[];
+          unhandledOutboundEntries: Array<{ stanza: string; sentAt: string }>;
         };
       };
     }).xmpp = {
@@ -598,7 +724,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         outboundH: 9,
         maxResumeSeconds: 300,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+        unhandledOutboundEntries: [{
+          stanza: "<message xmlns='jabber:client' id='unacked'/>",
+          sentAt: RESUME_SENT_AT,
+        }],
       }),
     };
 
@@ -609,7 +738,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       inboundH: 4,
       outboundH: 9,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='unacked'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     });
   });
 
@@ -619,7 +751,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -639,13 +774,16 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
-  test("BrowserXmppClient removes restored SM queue entries when native fallback retry owns resend", () => {
+  test("BrowserXmppClient retains restored SM queue entries while native fallback retry owns resend", () => {
     const persistence = inMemoryPersistence();
     persistence.saveSm({
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -662,7 +800,8 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
 
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((entry) => entry.id))
+      .toEqual(["dm-live-1"]);
   });
 
   test("BrowserXmppClient persists SM state when the native replay queue is empty", () => {

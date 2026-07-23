@@ -13,9 +13,17 @@ use crate::runtime::XmppRuntime;
 use crate::state::{ClientState, SessionSnapshot};
 use crate::stream_management::SmResumeState;
 use crate::transport::{
-    DefaultTransportFactory, TransportEvent, TransportMessage, TransportState, WebSocketTransport,
+    DefaultTransportFactory, TransportEvent, TransportMessage, TransportState,
+    TransportWriteFailure, TransportWriteResponsibility, WebSocketTransport,
     WebSocketTransportFactory,
 };
+
+const UNCLEAN_ABORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// A native frame or close may occupy at most one sixth of the XEP-0198
+/// no-progress budget. Expiry is conservatively `PossiblyWritten`: once the
+/// transport future has been polled, the driver cannot prove that zero bytes
+/// reached the peer.
+const NATIVE_TRANSPORT_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Async control plane for a live XMPP session.
 ///
@@ -184,6 +192,8 @@ where
             pending_iqs: HashMap::new(),
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
+            websocket_close_started: false,
+            commands_closed: false,
             last_resume_state: None,
         };
 
@@ -207,6 +217,14 @@ struct DriverTask {
     /// broadcast state to `None` from that point on — mirroring the
     /// wasm driver's `explicit_disconnect` flag.
     explicit_disconnect: bool,
+    /// Ensures the RFC 6455 closing handshake starts exactly once, and only
+    /// after both typed RFC 7395 `<close/>` frames are confirmed.
+    websocket_close_started: bool,
+    /// Receiver closure is terminal before a close starts, but once the local
+    /// RFC 7395 half is confirmed the driver—not the handle lifetime—owns the
+    /// peer wait and five-second deadline. The disabled select branch avoids
+    /// polling a permanently-ready closed channel.
+    commands_closed: bool,
     /// Last broadcast XEP-0198 resume snapshot; publishing is deduped
     /// against it so subscribers only see actual state transitions.
     last_resume_state: Option<SmResumeState>,
@@ -218,6 +236,57 @@ enum DeferredXmppCommand {
         stanza: Element,
         responder: oneshot::Sender<ClientResult<Element>>,
     },
+}
+
+/// Private attribution for one ordered native write pump failure.
+///
+/// Callers must distinguish a failed initiating application stanza from a
+/// failed runtime-generated follow-up. The latter still terminates the stream,
+/// but cannot roll back or emit `MessageDelivery::Failed` for an initiating
+/// stanza whose transport write was already confirmed.
+#[derive(Debug)]
+enum TransportPumpFailure {
+    Write {
+        failed_message: TransportMessage,
+        initiating_message_confirmed: bool,
+        failure: TransportWriteFailure,
+    },
+    Runtime {
+        confirmed_message: TransportMessage,
+        initiating_message_confirmed: bool,
+        failure: TransportWriteFailure,
+    },
+}
+
+impl TransportPumpFailure {
+    fn initiating_message_confirmed(&self) -> bool {
+        match self {
+            Self::Write {
+                initiating_message_confirmed,
+                ..
+            }
+            | Self::Runtime {
+                initiating_message_confirmed,
+                ..
+            } => *initiating_message_confirmed,
+        }
+    }
+
+    fn responsibility(&self) -> TransportWriteResponsibility {
+        match self {
+            Self::Write { failure, .. } => failure.responsibility(),
+            Self::Runtime { failure, .. } => failure.responsibility(),
+        }
+    }
+
+    fn attributed_message(&self) -> &TransportMessage {
+        match self {
+            Self::Write { failed_message, .. } => failed_message,
+            Self::Runtime {
+                confirmed_message, ..
+            } => confirmed_message,
+        }
+    }
 }
 
 impl DriverTask {
@@ -235,6 +304,12 @@ impl DriverTask {
         }
 
         loop {
+            let now_ms = crate::runtime::monotonic_now_ms();
+            let sm_wakeup_ms = self.runtime.next_stream_management_wakeup_in_ms(now_ms);
+            let close_wakeup_ms = self.runtime.next_stream_close_wakeup_in_ms(now_ms);
+            let driver_wakeup_ms = minimum_wakeup(sm_wakeup_ms, close_wakeup_ms);
+            let close_deadline_scheduled =
+                close_wakeup_ms.is_some_and(|close| sm_wakeup_ms.is_none_or(|sm| close <= sm));
             tokio::select! {
                 result = self.transport.next_event() => {
                     match result {
@@ -257,18 +332,72 @@ impl DriverTask {
                         }
                     }
                 }
-                cmd = self.commands.recv() => {
+                cmd = self.commands.recv(), if !self.commands_closed => {
                     match cmd {
                         Some(command) => {
                             if !self.handle_command(command).await {
                                 return;
                             }
                         }
-                        None => return,
+                        None => {
+                            if !self.handle_command_channel_closed().await {
+                                return;
+                            }
+                        }
+                    }
+                }
+                _ = wait_for_driver_wakeup(driver_wakeup_ms) => {
+                    if !self.handle_driver_timer(close_deadline_scheduled).await {
+                        return;
                     }
                 }
             }
         }
+    }
+
+    async fn handle_driver_timer(&mut self, close_deadline_scheduled: bool) -> bool {
+        if close_deadline_scheduled {
+            self.terminate_uncleanly().await;
+            return false;
+        }
+        self.handle_stream_management_timer_at(crate::runtime::monotonic_now_ms())
+            .await
+    }
+
+    async fn handle_command_channel_closed(&mut self) -> bool {
+        self.commands_closed = true;
+        if self.runtime.stream_close_sent_confirmed() {
+            return true;
+        }
+        self.terminate_uncleanly().await;
+        false
+    }
+
+    async fn handle_stream_management_timer_at(&mut self, now_ms: u64) -> bool {
+        let events = self.runtime.poll_stream_management_at(now_ms);
+        let progress_stalled = events.iter().any(|event| {
+            matches!(
+                event,
+                ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                    StreamManagementEvent::AckProgressStalled { .. }
+                ))
+            )
+        });
+
+        for event in events {
+            if let Some(message) = self.dispatch_client_event(event) {
+                if self.send_transport_message(message).await.is_err() {
+                    self.terminate_uncleanly().await;
+                    return false;
+                }
+            }
+        }
+
+        if progress_stalled {
+            self.terminate_uncleanly().await;
+            return false;
+        }
+        true
     }
 
     async fn handle_command(&mut self, command: XmppCommand) -> bool {
@@ -280,7 +409,10 @@ impl DriverTask {
                     return true;
                 }
 
-                self.send_stanza_command(stanza).await;
+                if self.send_stanza_command(stanza).await.is_err() {
+                    self.terminate_uncleanly().await;
+                    return false;
+                }
                 true
             }
             XmppCommand::SendIq { stanza, responder } => {
@@ -290,77 +422,108 @@ impl DriverTask {
                     return true;
                 }
 
-                self.send_iq_command(stanza, responder).await;
+                if self.send_iq_command(stanza, responder).await.is_err() {
+                    self.terminate_uncleanly().await;
+                    return false;
+                }
                 true
             }
             XmppCommand::Disconnect => {
-                // Pin the resume snapshot to `None` BEFORE closing:
-                // XEP-0198 resume must not be attempted across an
-                // explicit `</stream>` close (wasm driver parity).
-                self.explicit_disconnect = true;
-                self.publish_resume_state_snapshot();
-                let _ = self.transport.close().await;
-                // Drain close events so state reaches Disconnected before we exit.
-                for event in self.transport.drain_events() {
-                    self.apply_transport_event(event).await;
+                let events = match self.runtime.request_stream_close() {
+                    Ok(events) => events,
+                    Err(_) => {
+                        self.terminate_uncleanly().await;
+                        return false;
+                    }
+                };
+                for event in events {
+                    if let Some(message) = self.dispatch_client_event(event) {
+                        if self.send_transport_message(message).await.is_err() {
+                            // The close was not confirmed. Treat the stream as
+                            // unfinished and keep its resume snapshot eligible.
+                            self.terminate_uncleanly().await;
+                            return false;
+                        }
+                    }
                 }
-                false
+                // RFC 7395 considers the stream closed only after the peer's
+                // corresponding `<close/>` arrives. Keep driving the socket;
+                // SM state remains resumable until both directions confirm.
+                true
             }
         }
     }
 
-    async fn send_stanza_command(&mut self, stanza: Element) {
+    async fn send_stanza_command(&mut self, stanza: Element) -> Result<(), TransportPumpFailure> {
         let maybe_message_id = message_delivery_stanza_id(&stanza);
-        if self
-            .send_transport_message(TransportMessage::Element(stanza))
-            .await
-            .is_err()
-        {
-            if let Some(stanza_id) = maybe_message_id {
-                self.emit_message_delivery_failed(stanza_id);
+        let initiating_message = TransportMessage::Element(stanza.clone());
+        let result = self
+            .send_transport_message(initiating_message.clone())
+            .await;
+        if let Err(failure) = &result {
+            if !failure.initiating_message_confirmed()
+                && failure.attributed_message() == &initiating_message
+                && failure.responsibility() == TransportWriteResponsibility::DefinitelyNotWritten
+            {
+                if let Some(stanza_id) = maybe_message_id {
+                    self.emit_message_delivery_failed(stanza_id);
+                }
             }
         }
+        result
     }
 
     async fn send_iq_command(
         &mut self,
         stanza: Element,
         responder: oneshot::Sender<ClientResult<Element>>,
-    ) {
+    ) -> Result<(), TransportPumpFailure> {
         let id = stanza.attr("id").map(|s| s.to_string());
         match self
             .send_transport_message(TransportMessage::Element(stanza))
             .await
         {
-            Err(_) => {
-                let _ = responder.send(Err(ClientError::Disconnected));
-            }
-            Ok(()) => match id {
-                Some(id) => {
-                    self.pending_iqs.insert(id, responder);
-                }
-                None => {
+            Err(failure) => {
+                if failure.initiating_message_confirmed() {
+                    if let Some(id) = id {
+                        self.pending_iqs.insert(id, responder);
+                    } else {
+                        let _ = responder.send(Err(ClientError::Disconnected));
+                    }
+                } else {
                     let _ = responder.send(Err(ClientError::Disconnected));
                 }
-            },
+                Err(failure)
+            }
+            Ok(()) => {
+                match id {
+                    Some(id) => {
+                        self.pending_iqs.insert(id, responder);
+                    }
+                    None => {
+                        let _ = responder.send(Err(ClientError::Disconnected));
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
-    async fn flush_deferred_commands(&mut self) {
+    async fn flush_deferred_commands(&mut self) -> Result<(), TransportPumpFailure> {
         while self.runtime.can_send_app_stanza() {
             let Some(command) = self.deferred_commands.pop_front() else {
-                return;
+                return Ok(());
             };
 
-            match command {
-                DeferredXmppCommand::SendStanza(stanza) => {
-                    self.send_stanza_command(stanza).await;
-                }
+            let result = match command {
+                DeferredXmppCommand::SendStanza(stanza) => self.send_stanza_command(stanza).await,
                 DeferredXmppCommand::SendIq { stanza, responder } => {
-                    self.send_iq_command(stanza, responder).await;
+                    self.send_iq_command(stanza, responder).await
                 }
-            }
+            };
+            result?;
         }
+        Ok(())
     }
 
     /// Apply one transport event; returns `false` when the session is fully closed.
@@ -379,16 +542,68 @@ impl DriverTask {
         for evt in client_events {
             if let Some(msg) = self.dispatch_client_event(evt) {
                 if self.send_transport_message(msg).await.is_err() {
-                    *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                    self.terminate_uncleanly().await;
                     return false;
                 }
             }
         }
 
-        self.flush_deferred_commands().await;
+        if self.runtime.stream_close_complete() && !self.begin_websocket_close().await {
+            self.terminate_uncleanly().await;
+            return false;
+        }
+
+        if self.flush_deferred_commands().await.is_err() {
+            self.terminate_uncleanly().await;
+            return false;
+        }
 
         *self.state.write().unwrap() = self.runtime.snapshot().clone();
         !is_terminal
+    }
+
+    /// End an unfinished XEP-0198 stream without ever sending RFC 7395
+    /// `<close/>`. Transport abort is best effort and bounded; runtime
+    /// observers still receive explicit Failed and Closed transitions when
+    /// the sink errors, hangs, or neglects to queue terminal events.
+    async fn terminate_uncleanly(&mut self) {
+        self.apply_terminal_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+            .await;
+
+        let _ = tokio::time::timeout(UNCLEAN_ABORT_TIMEOUT, self.transport.abort()).await;
+        let queued = self.transport.drain_events();
+        let mut saw_closed_state = false;
+        let mut saw_closed = false;
+        for event in queued {
+            if matches!(event, TransportEvent::StateChanged(TransportState::Failed)) {
+                continue;
+            }
+            saw_closed_state |=
+                matches!(event, TransportEvent::StateChanged(TransportState::Closed));
+            saw_closed |= matches!(event, TransportEvent::Closed);
+            self.apply_terminal_transport_event(event).await;
+        }
+        if !saw_closed_state {
+            self.apply_terminal_transport_event(TransportEvent::StateChanged(
+                TransportState::Closed,
+            ))
+            .await;
+        }
+        if !saw_closed {
+            self.apply_terminal_transport_event(TransportEvent::Closed)
+                .await;
+        }
+        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+    }
+
+    async fn apply_terminal_transport_event(&mut self, event: TransportEvent) {
+        let Ok(events) = self.runtime.apply_transport_event(event) else {
+            return;
+        };
+        self.publish_resume_state_snapshot();
+        for event in events {
+            let _ = self.dispatch_client_event(event);
+        }
     }
 
     /// Dispatch one client event.
@@ -467,17 +682,144 @@ impl DriverTask {
         }
     }
 
-    async fn send_transport_message(&mut self, message: TransportMessage) -> ClientResult<()> {
-        match message {
-            TransportMessage::Close(_) => self.transport.close().await,
-            TransportMessage::Element(element) => {
-                self.transport
-                    .send(TransportMessage::Element(element.clone()))
-                    .await?;
-                Ok(())
-            }
-            other => self.transport.send(other).await,
+    /// Write one message and every runtime-generated follow-up in strict order.
+    /// A successful transport write is applied to the runtime immediately; the
+    /// transport adapter never owns a delayed `MessageSent` event.
+    async fn send_transport_message(
+        &mut self,
+        message: TransportMessage,
+    ) -> Result<(), TransportPumpFailure> {
+        enum PumpItem {
+            Message(TransportMessage),
+            Event(ClientEvent),
         }
+
+        let mut pending = VecDeque::from([PumpItem::Message(message)]);
+        let mut initiating_message_confirmed = false;
+        while let Some(item) = pending.pop_front() {
+            match item {
+                PumpItem::Message(message) => {
+                    let result = self.write_transport_message(&message).await;
+                    if let Err(failure) = result {
+                        if failure.responsibility()
+                            == TransportWriteResponsibility::DefinitelyNotWritten
+                            && is_stream_management_ack_request(&message)
+                            && self
+                                .runtime
+                                .stream_management_ack_definitely_not_written_at(
+                                    crate::runtime::monotonic_now_ms(),
+                                )
+                        {
+                            // The initiating stanza (if any) was already
+                            // confirmed. The exact control write remains
+                            // locally owned and the runtime has scheduled its
+                            // bounded retry without starting a response clock.
+                            continue;
+                        }
+                        if failure.responsibility() == TransportWriteResponsibility::PossiblyWritten
+                        {
+                            self.reconcile_possibly_written(message.clone());
+                        }
+                        return Err(TransportPumpFailure::Write {
+                            failed_message: message,
+                            initiating_message_confirmed,
+                            failure,
+                        });
+                    }
+
+                    if !initiating_message_confirmed {
+                        initiating_message_confirmed = true;
+                    }
+
+                    let events = match self
+                        .runtime
+                        .apply_transport_event(TransportEvent::MessageSent(message.clone()))
+                    {
+                        Ok(events) => events,
+                        Err(source) => {
+                            return Err(TransportPumpFailure::Runtime {
+                                confirmed_message: message,
+                                initiating_message_confirmed,
+                                failure: TransportWriteFailure::possibly_written(source),
+                            });
+                        }
+                    };
+                    self.publish_resume_state_snapshot();
+                    *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                    if self.runtime.stream_close_complete() && !self.begin_websocket_close().await {
+                        return Err(TransportPumpFailure::Write {
+                            failed_message: message,
+                            initiating_message_confirmed,
+                            failure: TransportWriteFailure::possibly_written(
+                                ClientError::TransportClosed,
+                            ),
+                        });
+                    }
+                    for event in events.into_iter().rev() {
+                        pending.push_front(PumpItem::Event(event));
+                    }
+                }
+                PumpItem::Event(event) => {
+                    if let Some(follow_up) = self.dispatch_client_event(event) {
+                        pending.push_front(PumpItem::Message(follow_up));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn write_transport_message(
+        &mut self,
+        message: &TransportMessage,
+    ) -> Result<(), TransportWriteFailure> {
+        let write = self.transport.send(message.clone());
+        tokio::time::timeout(NATIVE_TRANSPORT_WRITE_DEADLINE, write)
+            .await
+            .unwrap_or_else(|_| {
+                Err(TransportWriteFailure::possibly_written(
+                    ClientError::WebSocketWriteTimeout {
+                        timeout: NATIVE_TRANSPORT_WRITE_DEADLINE,
+                    },
+                ))
+            })
+    }
+
+    async fn begin_websocket_close(&mut self) -> bool {
+        if self.websocket_close_started {
+            return true;
+        }
+        self.websocket_close_started = true;
+        self.explicit_disconnect = true;
+        self.publish_resume_state_snapshot();
+        matches!(
+            tokio::time::timeout(
+                NATIVE_TRANSPORT_WRITE_DEADLINE,
+                self.transport.close_websocket(),
+            )
+            .await,
+            Ok(Ok(()))
+        )
+    }
+
+    /// Assume responsibility for an uncertain native write exactly once.
+    /// Applying the typed message updates XEP-0198 queue state, but generated
+    /// follow-up writes and public `MessageSent`/`AckRequestSent` events are
+    /// deliberately suppressed because the transport did not confirm them.
+    fn reconcile_possibly_written(&mut self, message: TransportMessage) {
+        if !matches!(
+            &message,
+            TransportMessage::Element(element)
+                if matches!(element.name(), "iq" | "message" | "presence")
+        ) {
+            return;
+        }
+        let _ = self
+            .runtime
+            .apply_transport_event(TransportEvent::MessageSent(message));
+        self.publish_resume_state_snapshot();
+        *self.state.write().unwrap() = self.runtime.snapshot().clone();
     }
 
     /// Broadcast the current XEP-0198 resume snapshot when it differs
@@ -510,12 +852,35 @@ impl DriverTask {
     }
 }
 
+fn minimum_wakeup(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
+async fn wait_for_driver_wakeup(delay_ms: Option<u64>) {
+    match delay_ms {
+        Some(delay_ms) => tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
     if element.name() != "message" {
         return None;
     }
 
     element.attr("id").and_then(|id| StanzaId::new(id).ok())
+}
+
+fn is_stream_management_ack_request(message: &TransportMessage) -> bool {
+    matches!(
+        message,
+        TransportMessage::Element(element)
+            if crate::stream_management::SmState::is_request_ack(element)
+    )
 }
 
 #[cfg(test)]

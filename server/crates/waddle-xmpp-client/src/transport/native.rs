@@ -16,9 +16,56 @@ use crate::config::ClientConfig;
 use crate::error::{ClientError, ClientResult};
 
 use super::{
-    decode_message, encode_message, StreamClose, TransportCapabilities, TransportEvent,
-    TransportKind, TransportMessage, TransportState,
+    decode_message, encode_message, TransportCapabilities, TransportEvent, TransportKind,
+    TransportMessage, TransportState,
 };
+
+/// Whether a failed native transport write can still have transferred the
+/// typed XMPP frame to the peer.
+///
+/// Once a WebSocket sink starts a write, an error cannot prove that zero bytes
+/// reached the network. XEP-0198 therefore has to retain responsibility for a
+/// countable stanza after [`Self::PossiblyWritten`]. Encoding and preflight
+/// failures happen before the sink is touched and are
+/// [`Self::DefinitelyNotWritten`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportWriteResponsibility {
+    DefinitelyNotWritten,
+    PossiblyWritten,
+}
+
+/// Typed failure returned by the native write boundary.
+#[derive(Debug)]
+pub struct TransportWriteFailure {
+    responsibility: TransportWriteResponsibility,
+    source: ClientError,
+}
+
+impl TransportWriteFailure {
+    pub fn definitely_not_written(source: ClientError) -> Self {
+        Self {
+            responsibility: TransportWriteResponsibility::DefinitelyNotWritten,
+            source,
+        }
+    }
+
+    pub fn possibly_written(source: ClientError) -> Self {
+        Self {
+            responsibility: TransportWriteResponsibility::PossiblyWritten,
+            source,
+        }
+    }
+
+    pub fn responsibility(&self) -> TransportWriteResponsibility {
+        self.responsibility
+    }
+
+    pub fn source(&self) -> &ClientError {
+        &self.source
+    }
+}
+
+pub type TransportWriteResult<T> = Result<T, TransportWriteFailure>;
 
 /// Runtime-owned factory for a WebSocket transport implementation.
 pub trait WebSocketTransportFactory: Send + Sync {
@@ -40,11 +87,25 @@ pub trait WebSocketTransport: Send + Sync {
 
     fn drain_events(&mut self) -> Vec<TransportEvent>;
 
-    fn send<'a>(&'a mut self, message: TransportMessage) -> BoxFuture<'a, ClientResult<()>>;
+    /// Write one typed transport message.
+    ///
+    /// Implementations must not enqueue `TransportEvent::MessageSent`; the
+    /// owning driver applies that event exactly once after this future confirms
+    /// success. This keeps transport responsibility and XEP-0198 queue state in
+    /// one ordered pump.
+    fn send<'a>(&'a mut self, message: TransportMessage)
+        -> BoxFuture<'a, TransportWriteResult<()>>;
 
     fn next_event<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<Option<TransportEvent>>>;
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
+    /// Begin the RFC 6455 closing handshake after the typed RFC 7395
+    /// `<close/>` exchange has completed. This method never writes XML.
+    fn close_websocket<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>>;
+
+    /// Terminate the WebSocket without sending RFC 7395 `<close/>`.
+    /// XEP-0198 treats this as an unclean XML-stream loss, so the runtime's
+    /// resume snapshot remains eligible for the reconnecting owner.
+    fn abort<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
 }
 
 /// Default runtime factory for the concrete WebSocket transport.
@@ -125,20 +186,27 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
         self.pending_events.drain(..).collect()
     }
 
-    fn send<'a>(&'a mut self, message: TransportMessage) -> BoxFuture<'a, ClientResult<()>> {
+    fn send<'a>(
+        &'a mut self,
+        message: TransportMessage,
+    ) -> BoxFuture<'a, TransportWriteResult<()>> {
         Box::pin(async move {
             if self.state == TransportState::Closed {
-                return Err(ClientError::TransportClosed);
+                return Err(TransportWriteFailure::definitely_not_written(
+                    ClientError::TransportClosed,
+                ));
             }
 
-            let frame = encode_message(&message)?;
-            self.sink.send(Message::Text(frame.into())).await?;
+            let frame =
+                encode_message(&message).map_err(TransportWriteFailure::definitely_not_written)?;
+            self.sink
+                .send(Message::Text(frame.into()))
+                .await
+                .map_err(|error| TransportWriteFailure::possibly_written(error.into()))?;
 
             if matches!(message, TransportMessage::Close(_)) {
                 self.queue_state_change(TransportState::Closing);
             }
-            self.pending_events
-                .push_back(TransportEvent::MessageSent(message));
             Ok(())
         })
     }
@@ -188,24 +256,34 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
         })
     }
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+    fn close_websocket<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>> {
         Box::pin(async move {
             if self.state == TransportState::Closed {
                 return Ok(());
             }
 
-            if self.state != TransportState::Closing {
-                self.queue_state_change(TransportState::Closing);
-                let frame = encode_message(&TransportMessage::Close(StreamClose))?;
-                self.sink.send(Message::Text(frame.into())).await?;
-                self.pending_events.push_back(TransportEvent::MessageSent(
-                    TransportMessage::Close(StreamClose),
-                ));
-            }
-
-            self.sink.close().await?;
+            self.queue_state_change(TransportState::Closing);
+            self.sink
+                .close()
+                .await
+                .map_err(|error| TransportWriteFailure::possibly_written(error.into()))?;
             self.queue_closed();
             Ok(())
+        })
+    }
+
+    fn abort<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            if self.state == TransportState::Closed {
+                return Ok(());
+            }
+            self.queue_state_change(TransportState::Closing);
+            let result: ClientResult<()> = self.sink.close().await.map_err(Into::into);
+            if result.is_err() {
+                self.queue_state_change(TransportState::Failed);
+            }
+            self.queue_closed();
+            result
         })
     }
 }

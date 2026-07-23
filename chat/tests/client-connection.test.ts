@@ -6,7 +6,11 @@
  * persistence — all exercised without constructing the full client.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events";
+import {
+  TypedEventBus,
+  type ClientEvents,
+  type QueueDepthTelemetry,
+} from "../src/lib/xmpp/client-events";
 import {
   OfflineSendQueue,
   ReconnectScheduler,
@@ -152,7 +156,7 @@ describe("OfflineSendQueue drain ordering", () => {
     queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
     queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
     queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
-    queue.markInflight("dm-1");
+    queue.beginAttempt("dm-1", "dm");
 
     await queue.flushDirect();
 
@@ -162,7 +166,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("ack removes the persisted copy and reports queue depth + latency", async () => {
     const { queue, events } = createQueue();
-    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const acked: Array<{ id: string; kind: "room" | "dm" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("messageAcked", (id, meta) => acked.push({ id, kind: meta.kind }));
@@ -177,6 +181,219 @@ describe("OfflineSendQueue drain ordering", () => {
       { kind: "dm", persisted: 0, inflight: 0 },
       { kind: "room", persisted: 0, inflight: 0 },
     ]);
+  });
+
+  test("a synchronous ack inside send clears persistence before the promise resolves", async () => {
+    let queue!: OfflineSendQueue;
+    const created = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        queue.handleAck(opts.id);
+        return opts.id;
+      },
+    });
+    queue = created.queue;
+    const acked: string[] = [];
+    created.events.on("messageAcked", (id) => acked.push(id));
+
+    queue.queueDirectMessage("bob@example.com", "fast ack", { id: "dm-fast" });
+    await queue.flushDirect();
+
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(acked).toEqual(["dm-fast"]);
+  });
+
+  test("a synchronous room ack inside send clears persistence before the promise resolves", async () => {
+    let queue!: OfflineSendQueue;
+    const created = createQueue({
+      sendRoom: async (_room, _body, opts) => {
+        queue.handleAck(opts.id);
+        return opts.id;
+      },
+    });
+    queue = created.queue;
+
+    queue.queueRoomMessage("general@muc.example.com", "fast ack", { id: "room-fast" });
+    await queue.flushRoom("general@muc.example.com");
+
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+  });
+
+  test("a rejected attempt rolls back so the persisted message can retry", async () => {
+    let attempt = 0;
+    const { queue, events } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("socket unavailable");
+        return opts.id;
+      },
+    });
+    const depths: QueueDepthTelemetry[] = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    events.on("queueDepthChange", (depth) => {
+      if (depth.kind === "dm") depths.push(depth);
+    });
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
+    queue.queueDirectMessage("bob@example.com", "retry me", { id: "dm-retry" });
+
+    await expect(queue.flushDirect()).rejects.toThrow("socket unavailable");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["dm-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-retry", status: "queued" });
+
+    await queue.flushDirect();
+    queue.handleAck("dm-retry");
+    expect(attempt).toBe(2);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ kind: "dm", persisted: 0, inflight: 0 });
+  });
+
+  test("a confirmed WASM send stays inflight when its control follow-up disconnects", async () => {
+    let connected = true;
+    let attempts = 0;
+    const { queue, events } = createQueue({
+      canUseConnectedSession: () => connected,
+      sendDirect: async (_peer, _body, opts) => {
+        attempts += 1;
+        const id = compatWasmSendResult({ kind: "sent", stanza_id: opts.id });
+        connected = false;
+        return id;
+      },
+    });
+    const depths: QueueDepthTelemetry[] = [];
+    const failures: string[] = [];
+    events.on("queueDepthChange", (depth) => {
+      if (depth.kind === "dm") depths.push(depth);
+    });
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    queue.queueDirectMessage("bob@example.com", "confirmed before control failure", {
+      id: "dm-confirmed-control-failure",
+    });
+
+    await queue.flushDirect();
+    await queue.flushDirect();
+
+    expect(attempts).toBe(1);
+    expect(failures).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((message) => message.id))
+      .toEqual(["dm-confirmed-control-failure"]);
+    expect(depths.at(-1)).toMatchObject({
+      kind: "dm",
+      persisted: 1,
+      inflight: 1,
+    });
+    expect(depths.at(-1)?.oldestAgeMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test("null and mismatched queued DM attempts roll back before a later acked retry", async () => {
+    let attempt = 0;
+    const { queue, events } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) return null;
+        if (attempt === 2) return "wrong-dm-id";
+        return opts.id;
+      },
+    });
+    const depths: QueueDepthTelemetry[] = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    const queuedIds = () => listQueuedMessages(SCOPE).map((message) => message.id);
+    events.on("queueDepthChange", (depth) => {
+      if (depth.kind === "dm") depths.push(depth);
+    });
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
+    queue.queueDirectMessage("bob@example.com", "retry DM", { id: "dm-null-mismatch" });
+
+    await queue.flushDirect();
+    expect(queuedIds()).toEqual(["dm-null-mismatch"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-null-mismatch", status: "queued" });
+
+    await expect(queue.flushDirect())
+      .rejects.toThrow("XMPP send returned a different stanza id");
+    expect(queuedIds()).toEqual(["dm-null-mismatch"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-null-mismatch", status: "queued" });
+
+    await queue.flushDirect();
+    queue.handleAck("dm-null-mismatch");
+    expect(attempt).toBe(3);
+    expect(queuedIds()).toEqual([]);
+    expect(depths.at(-1)).toEqual({ kind: "dm", persisted: 0, inflight: 0 });
+  });
+
+  test("a rejected queued room attempt stays retryable before a later acked retry", async () => {
+    let attempt = 0;
+    const { queue, events } = createQueue({
+      sendRoom: async (_room, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("room socket unavailable");
+        return opts.id;
+      },
+    });
+    const depths: QueueDepthTelemetry[] = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    events.on("queueDepthChange", (depth) => {
+      if (depth.kind === "room") depths.push(depth);
+    });
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
+    queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-rejected" });
+
+    await expect(queue.flushRoom("general@muc.example.com"))
+      .rejects.toThrow("room socket unavailable");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-rejected"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-rejected", status: "queued" });
+
+    await queue.flushRoom("general@muc.example.com");
+    queue.handleAck("room-rejected");
+    expect(attempt).toBe(2);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ kind: "room", persisted: 0, inflight: 0 });
+  });
+
+  test("null and mismatched queued room attempts roll back and the coalescer later retries", async () => {
+    let attempt = 0;
+    const { queue, events } = createQueue({
+      sendRoom: async (_room, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) return null;
+        if (attempt === 2) return "wrong-room-id";
+        return opts.id;
+      },
+    });
+    const depths: QueueDepthTelemetry[] = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    events.on("queueDepthChange", (depth) => {
+      if (depth.kind === "room") depths.push(depth);
+    });
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
+    queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-retry" });
+
+    await queue.flushRoom("general@muc.example.com");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-retry", status: "queued" });
+
+    await expect(queue.flushRoom("general@muc.example.com"))
+      .rejects.toThrow("XMPP send returned a different stanza id");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-retry", status: "queued" });
+
+    await queue.flushRoom("general@muc.example.com");
+    queue.handleAck("room-retry");
+    expect(attempt).toBe(3);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ kind: "room", persisted: 0, inflight: 0 });
+  });
+
+  test("an ack after reload deletes persistence without ephemeral inflight state", () => {
+    const { queue } = createQueue();
+    queue.queueDirectMessage("bob@example.com", "already handled", { id: "dm-reloaded" });
+
+    queue.handleAck("dm-reloaded");
+
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
   });
 
   test("non-retryable send failures are discarded instead of retried forever", async () => {
@@ -247,7 +464,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("seedFromResumeState tracks XEP-0198 replayed stanza ids so acks clear the store", () => {
     const { queue, events } = createQueue();
-    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
     queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-native" });
@@ -255,7 +472,10 @@ describe("OfflineSendQueue drain ordering", () => {
       previd: "p",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundStanzas: ['<message id="dm-native" to="bob@example.com"><body>native replay</body></message>'],
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-native" to="bob@example.com"><body>native replay</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
     });
 
     queue.handleAck("dm-native");
@@ -265,6 +485,140 @@ describe("OfflineSendQueue drain ordering", () => {
       { kind: "dm", persisted: 0, inflight: 0 },
       { kind: "room", persisted: 0, inflight: 0 },
     ]);
+  });
+
+  test("failed resume transfers retry ownership without deleting or browser-flushing the durable row", async () => {
+    const sent: string[] = [];
+    const { queue, events } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        sent.push(opts.id);
+        return opts.id;
+      },
+    });
+    const failures: string[] = [];
+    const depths: QueueDepthTelemetry[] = [];
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    events.on("queueDepthChange", (depth) => {
+      if (depth.kind === "dm") depths.push(depth);
+    });
+
+    queue.queueDirectMessage("bob@example.com", "native fallback", { id: "dm-native-fallback" });
+    queue.seedFromResumeState({
+      previd: "p",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-native-fallback" to="bob@example.com"><body>native fallback</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
+    });
+
+    queue.handleFailed("dm-native-fallback");
+    queue.clearInflight();
+    await queue.flushDirect();
+
+    expect(sent).toEqual([]);
+    expect(failures).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-native-fallback"]);
+    expect(depths.at(-1)).toMatchObject({ kind: "dm", persisted: 1, inflight: 1 });
+
+    queue.handleAck("dm-native-fallback");
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ kind: "dm", persisted: 0, inflight: 0 });
+  });
+
+  test("terminal no-SM disconnect releases stale fallback ownership for exactly one queued retry", async () => {
+    const sent: string[] = [];
+    const { queue } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        sent.push(opts.id);
+        return opts.id;
+      },
+    });
+    const resumeState: XmppResumeState = {
+      previd: "previous-stream",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-terminal-fallback" to="bob@example.com"><body>retry once</body></message>',
+        sentAt: "2026-07-24T10:00:00.000Z",
+      }],
+    };
+
+    queue.queueDirectMessage("bob@example.com", "retry once", {
+      id: "dm-terminal-fallback",
+    });
+    queue.seedFromResumeState(resumeState);
+    queue.handleFailed("dm-terminal-fallback");
+
+    queue.reconcileNativeOwnershipAfterDisconnect(resumeState);
+    await queue.flushDirect();
+    expect(sent).toEqual([]);
+
+    queue.reconcileNativeOwnershipAfterDisconnect(null);
+    queue.clearInflight();
+    await queue.flushDirect();
+    await queue.flushDirect();
+
+    expect(sent).toEqual(["dm-terminal-fallback"]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id))
+      .toEqual(["dm-terminal-fallback"]);
+  });
+
+  test("a plain fresh bind releases an unattempted resume replay claim to the durable browser queue", async () => {
+    const sent: string[] = [];
+    const { queue } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        sent.push(opts.id);
+        return opts.id;
+      },
+    });
+    queue.queueDirectMessage("bob@example.com", "fresh without SM", { id: "dm-no-resume" });
+    queue.seedFromResumeState({
+      previd: "p",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-no-resume" to="bob@example.com"><body>fresh without SM</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
+    });
+
+    queue.clearInflight();
+    await queue.flushDirect();
+
+    expect(sent).toEqual(["dm-no-resume"]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-no-resume"]);
+  });
+
+  test("a reconstructed queue reclaims a retained failed-resume row after an immediate or mid-write crash", async () => {
+    const original = createQueue().queue;
+    original.queueDirectMessage("bob@example.com", "survive fallback crash", { id: "dm-crash-fallback" });
+    original.seedFromResumeState({
+      previd: "p",
+      inboundH: 3,
+      outboundH: 4,
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-crash-fallback" to="bob@example.com"><body>survive fallback crash</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
+    });
+    original.handleFailed("dm-crash-fallback");
+
+    const reclaimed: string[] = [];
+    const reconstructed = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        reclaimed.push(opts.id);
+        return opts.id;
+      },
+    }).queue;
+
+    await reconstructed.flushDirect();
+
+    expect(reclaimed).toEqual(["dm-crash-fallback"]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-crash-fallback"]);
+    reconstructed.handleAck("dm-crash-fallback");
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
   });
 });
 
@@ -361,6 +715,7 @@ function createRecordingPersistence() {
       saved = null;
     },
     preparePagehideHandoff: () => calls.push("preparePagehideHandoff"),
+    reclaimPagehideOwnership: () => calls.push("reclaimPagehideOwnership"),
     loadJoinedRooms: () => [],
     saveJoinedRooms: () => undefined,
     clearJoinedRooms: () => calls.push("clearJoinedRooms"),

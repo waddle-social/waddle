@@ -71,9 +71,16 @@ impl XmppRuntime {
     pub(super) fn handle_sm_element(
         &mut self,
         element: &minidom::Element,
+        now_ms: u64,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         if crate::stream_management::SmState::is_request_ack(element) {
+            // RFC 7395 permits no XML after our confirmed close half. The
+            // final peer `<a/>` remains useful below, but a late `<r/>`
+            // cannot be answered without violating the close fence.
+            if self.stream_close_sent_confirmed() {
+                return Ok(());
+            }
             let h = self.sm_state.inbound_count;
             let ack = crate::stream_management::SmState::build_ack(h);
             events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
@@ -83,18 +90,28 @@ impl XmppRuntime {
                 StreamManagementEvent::AckRequested,
             )));
         } else if let Some(h) = crate::stream_management::SmState::parse_ack_h(element) {
-            if self.sm_state.handled_count_too_high(h) {
-                self.handle_sm_handled_count_too_high(h, events);
-                return Ok(());
-            }
-            let acked = self.sm_state.process_ack(h);
+            let processed = match self.sm_state.process_ack_at(h, now_ms) {
+                Ok(processed) => processed,
+                Err(_) => {
+                    self.handle_sm_handled_count_too_high(h, events);
+                    return Ok(());
+                }
+            };
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::AckReceived { h },
             )));
-            events.extend(acked.into_iter().map(|stanza_id| {
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckObserved {
+                    progressed: processed.observation.progressed,
+                    latency_ms: processed.observation.latency_ms,
+                    unacked: processed.observation.unacked,
+                },
+            )));
+            events.extend(processed.acked.into_iter().map(|stanza_id| {
                 ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
             }));
         } else if element.name() == "enabled" {
+            self.pending_ack_request = None;
             // <enabled/> is only legal as the answer to <enable/>. A
             // duplicate on a live SM session is a protocol violation
             // (mirroring unexpected <resumed/>): silently re-running the
@@ -119,26 +136,32 @@ impl XmppRuntime {
             )));
             self.flush_pending_fallback_retries(events);
         } else if element.name() == "resumed" {
+            self.pending_ack_request = None;
             let Some(h) = element.attr("h").and_then(|v| v.parse().ok()) else {
                 self.handle_sm_protocol_violation(events);
                 return Ok(());
             };
-            let Some(previd) = element.attr("previd") else {
+            let Some(previd) = element
+                .attr("previd")
+                .and_then(|value| crate::stream_management::SmSessionId::new(value).ok())
+            else {
                 self.handle_sm_protocol_violation(events);
                 return Ok(());
             };
             if !matches!(self.bootstrap, BootstrapState::AwaitingResume)
-                || self.sm_state.previd.as_deref() != Some(previd)
+                || self.sm_state.previd.as_ref() != Some(&previd)
             {
                 self.handle_sm_protocol_violation(events);
                 return Ok(());
             }
-            if self.sm_state.handled_count_too_high(h) {
-                self.handle_sm_handled_count_too_high(h, events);
-                return Ok(());
-            }
-            let acked = self.sm_state.process_ack(h);
-            self.sm_state.previd = Some(previd.to_string());
+            let processed = match self.sm_state.process_ack_at(h, now_ms) {
+                Ok(processed) => processed,
+                Err(_) => {
+                    self.handle_sm_handled_count_too_high(h, events);
+                    return Ok(());
+                }
+            };
+            self.sm_state.previd = Some(previd);
             self.sm_state.enabled = true;
             self.sm_state.outbound_enabled = true;
             self.snapshot.binding = Some(self.resumed_session_binding()?);
@@ -147,23 +170,34 @@ impl XmppRuntime {
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Resumed { h },
             )));
-            events.extend(acked.into_iter().map(|stanza_id| {
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckObserved {
+                    progressed: processed.observation.progressed,
+                    latency_ms: processed.observation.latency_ms,
+                    unacked: processed.observation.unacked,
+                },
+            )));
+            events.extend(processed.acked.into_iter().map(|stanza_id| {
                 ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
             }));
+            self.sm_state.begin_replay_transition_at(now_ms);
             for replay in self.sm_state.mark_unhandled_for_replay() {
                 events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                     TransportMessage::Element(replay),
                 )));
             }
         } else if element.name() == "failed" {
+            self.pending_ack_request = None;
             let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
             if let Some(h) = element.attr("h").and_then(|value| value.parse().ok()) {
-                if self.sm_state.handled_count_too_high(h) {
-                    self.handle_sm_handled_count_too_high(h, events);
-                    return Ok(());
-                }
-                let acked = self.sm_state.process_ack(h);
-                events.extend(acked.into_iter().map(|stanza_id| {
+                let processed = match self.sm_state.process_ack_at(h, now_ms) {
+                    Ok(processed) => processed,
+                    Err(_) => {
+                        self.handle_sm_handled_count_too_high(h, events);
+                        return Ok(());
+                    }
+                };
+                events.extend(processed.acked.into_iter().map(|stanza_id| {
                     ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
                 }));
             }
@@ -242,7 +276,11 @@ impl XmppRuntime {
             .map_err(|_| ClientError::InvalidBindResponse)?;
         Ok(SessionBinding {
             jid,
-            stream_id: self.sm_state.previd.as_ref().map(StreamId::new),
+            stream_id: self
+                .sm_state
+                .previd
+                .as_ref()
+                .map(|previd| StreamId::new(previd.as_str())),
             resumable: self.sm_state.previd.is_some(),
         })
     }

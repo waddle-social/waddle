@@ -122,6 +122,7 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
 function telemetryStreamFallbackDetail(detail: string): string {
   const normalized = detail.trim().toLowerCase();
   if (!normalized || normalized === "stream error") return "stream-error";
+  if (normalized === "sm-ack-request-failed") return normalized;
   if (normalized === "handled-count-too-high") return "stream-handled-count-too-high";
   if (
     normalized.includes("websocket transport error") ||
