@@ -64,21 +64,17 @@ function taskBlock(name: string): string {
 }
 
 describe("UI WASM build contract", () => {
-  test("every direct UI command starts from a fresh WASM build", () => {
-    for (const name of [
-      "dev",
-      "build",
-      "preview",
-      "astro",
-      "deploy",
-      "lint",
-      "lint:fix",
-    ]) {
+  test("every direct UI command routes through a fresh WASM build", () => {
+    for (const name of ["dev", "build", "astro", "lint", "lint:fix"]) {
       expect(scripts[name], `${name} must rebuild WASM first`).toStartWith(
         "bun run wasm:build && ",
       );
     }
     expect(scripts.build).toContain("astro check && astro build");
+    expect(scripts.preview).toBe("bun run build && astro preview");
+    expect(scripts.deploy).toBe(
+      "bun run build && bun run sourcemaps:strip && wrangler deploy",
+    );
   });
 
   test("invokes wasm-pack even when an installed artifact has a newer mtime", () => {
@@ -155,11 +151,16 @@ describe("UI WASM build contract", () => {
     expect(pipelineTrigger).not.toContain("inputs:");
 
     const build = taskBlock("build");
-    expect(build).toContain('args: ["run", "build"]');
+    expect(build).toContain('command: "bash"');
+    expect(build).toContain(
+      "./node_modules/.bin/astro check && ./node_modules/.bin/astro build",
+    );
+    expect(build).not.toContain("wasm:build");
     expect(build).toContain("dependsOn: [buildWasm, generateTypes]");
 
     const lint = taskBlock("lint");
-    expect(lint).toContain('args: ["run", "lint"]');
+    expect(lint).toContain('args: ["run", "knip"]');
+    expect(lint).not.toContain("wasm:build");
     expect(lint).toContain("dependsOn: [buildWasm, generateTypes]");
 
     const publish = taskBlock("buildAndPublishWasm");

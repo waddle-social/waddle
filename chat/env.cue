@@ -171,7 +171,7 @@ schema.#Project & {
 
 		lint: schema.#Task & {
 			command: "bun"
-			args: ["run", "lint"]
+			args: ["run", "knip"]
 			dependsOn: [buildWasm, generateTypes]
 			inputs: [
 				"../package.json",
@@ -220,8 +220,8 @@ schema.#Project & {
 		}
 
 		build: schema.#Task & {
-			command: "bun"
-			args: ["run", "build"]
+			command: "bash"
+			args: ["-c", "bun run generate-service-worker && bun run copy-background-assets && ./node_modules/.bin/astro check && ./node_modules/.bin/astro build"]
 			dependsOn: [buildWasm, generateTypes]
 			inputs: [
 				"../env.cue",
