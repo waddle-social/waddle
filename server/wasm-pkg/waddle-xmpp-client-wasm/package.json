@@ -22,9 +22,5 @@
   "sideEffects": [
     "./waddle_xmpp_client_wasm.js",
     "./snippets/*"
-  ],
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "public"
-  }
+  ]
 }

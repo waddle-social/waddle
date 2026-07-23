@@ -34,7 +34,6 @@ execFileSync(
 const pkgJsonPath = resolve(outDir, "package.json");
 const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
 pkg.name = "@waddle/xmpp-client-wasm";
-pkg.publishConfig = { registry: "https://npm.pkg.github.com", access: "public" };
 writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
 
 // Replace the wasm-pack bundler entry point with a Vite-compatible one that

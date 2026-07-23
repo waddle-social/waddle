@@ -77,6 +77,12 @@ describe("UI WASM build contract", () => {
     );
   });
 
+  test("keeps the generated WASM package local to UI builds", () => {
+    expect(buildScript).not.toContain("publishConfig");
+    expect(envSource).not.toContain("publishWasm");
+    expect(envSource).not.toContain("buildAndPublishWasm");
+  });
+
   test("invokes wasm-pack even when an installed artifact has a newer mtime", () => {
     fixtureRoot = mkdtempSync(resolve(tmpdir(), "waddle-wasm-ui-build-"));
     const fixtureScript = resolve(
@@ -162,11 +168,5 @@ describe("UI WASM build contract", () => {
     expect(lint).toContain('args: ["run", "knip"]');
     expect(lint).not.toContain("wasm:build");
     expect(lint).toContain("dependsOn: [buildWasm, generateTypes]");
-
-    const publish = taskBlock("buildAndPublishWasm");
-    expect(publish).toContain("dependsOn: [wasmPipelineTrigger]");
-    expect(publish).toContain(
-      "inputs: list.Concat([_WasmSourceInputs",
-    );
   });
 });

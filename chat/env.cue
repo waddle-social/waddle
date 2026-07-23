@@ -89,17 +89,6 @@ schema.#Project & {
 	}
 
 	ci: pipelines: {
-		publishWasm: {
-			when: {
-				branch: ["main"]
-				defaultBranch: true
-			}
-			provider: github: permissions: {
-				contents: "read"
-				packages: "write"
-			}
-			"tasks": [tasks.buildAndPublishWasm]
-		}
 		default: {
 			environment: "production"
 			when: {
@@ -107,7 +96,11 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			provider: github: permissions: "id-token": "write"
+			provider: github: permissions: {
+				"id-token":      "write"
+				packages:        "none"
+				"pull-requests": "none"
+			}
 			"tasks": [tasks.deploy]
 		}
 		pullRequest: {
@@ -117,6 +110,7 @@ schema.#Project & {
 			provider: github: permissions: {
 				contents:   "read"
 				"id-token": "write"
+				packages:   "none"
 			}
 			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
 		}
@@ -129,18 +123,6 @@ schema.#Project & {
 		// its dependency edge keeps a triggered WASM workflow from being skipped.
 		wasmPipelineTrigger: schema.#Task & {
 			command: "true"
-		}
-
-		// Builds WASM from Rust source and publishes to GitHub Packages.
-		// Runs on every merge to main.
-		buildAndPublishWasm: schema.#Task & {
-			command: "bun"
-			args: ["run", "scripts/build-and-publish-wasm.mjs"]
-			dependsOn: [wasmPipelineTrigger]
-			inputs: list.Concat([_WasmSourceInputs, [
-				"env.cue",
-				"scripts/build-and-publish-wasm.mjs",
-			]])
 		}
 
 		// Builds WASM from Rust source for the PR lint/build pipelines.

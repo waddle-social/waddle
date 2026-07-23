@@ -59,8 +59,8 @@ concurrency:
 permissions:
   contents: read
   checks: write
-  pull-requests: write
-  packages: write
+  pull-requests: none
+  packages: none
   id-token: write
 jobs:
   waddle-chat-default:
