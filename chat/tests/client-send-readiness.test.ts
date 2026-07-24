@@ -1203,7 +1203,11 @@ describe("client send readiness", () => {
 
     const returnSwitch = client.switchRoom("", "busy");
     await Promise.resolve();
-    expect(joinRoom).toHaveBeenCalledTimes(2);
+    expect(joinRoom.mock.calls.map(([room]) => room)).toEqual([
+      busyRoomJid,
+      busyRoomJid,
+      nextRoomJid,
+    ]);
     onPresence?.({
       from: `${busyRoomJid}/alice`,
       presence_type: "error",
@@ -1227,7 +1231,12 @@ describe("client send readiness", () => {
     });
     await recovered;
 
-    expect(joinRoom).toHaveBeenCalledTimes(3);
+    expect(joinRoom.mock.calls.map(([room]) => room)).toEqual([
+      busyRoomJid,
+      busyRoomJid,
+      nextRoomJid,
+      busyRoomJid,
+    ]);
     expect(retryTimer.pendingCount).toBe(0);
   });
 

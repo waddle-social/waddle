@@ -1532,14 +1532,7 @@ export class BrowserXmppClient {
     const xmpp = this.xmpp;
     if (!xmpp) return;
     if (this.currentRoom && this.roomJoinKey(this.currentRoom) !== this.roomJoinKey(nextRoom)) {
-      const currentRoom = this.currentRoom;
-      const currentRoomKey = this.roomJoinKey(currentRoom);
-      const cancelledCurrentRetry = this.roomJoinRetry.cancel(currentRoomKey);
-      if (cancelledCurrentRetry) {
-        const cancellation = new Error("Room join retry cancelled");
-        this.revokeMucReadiness(currentRoom);
-        this.cancelRoomJoinWaiter(currentRoom, cancellation);
-      }
+      this.roomJoinRetry.cancel(this.roomJoinKey(this.currentRoom));
     }
     this.currentRoom = nextRoom;
     this.dispatchFocusedRoomHandlers();
