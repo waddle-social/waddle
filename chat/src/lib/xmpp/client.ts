@@ -122,6 +122,7 @@ import {
 import {
   hasCompleteRoomCatalogFingerprintAuthority,
   reconcileAutoJoinBlocks,
+  ROOM_CATALOG_FINGERPRINT_FIELDS,
   roomCatalogFingerprint,
   terminalMucJoinCondition,
   type RoomAutoJoinBlock,
@@ -465,8 +466,11 @@ export class BrowserXmppClient {
   // out of automatic fan-out while still allowing `switchRoom` to retry
   // explicitly when the user navigates back.
   private terminallyDeniedAutoJoinRooms = new Map<string, RoomAutoJoinBlock>();
-  private roomCatalogFingerprints = new Map<string, string>();
-  private hasDiscoveredRoomCatalog = false;
+  private currentRoomCatalogFingerprintEvidence = new Map<
+    string,
+    Pick<RoomAutoJoinBlock, "catalogFingerprint" | "catalogFingerprintFields">
+  >();
+  private roomDiscoveryGeneration = 0;
   private uploadServiceJid: string | null = null;
   private mucServiceJid = "";
   private discoveredRoomJids = new Map<string, string>();
@@ -784,12 +788,12 @@ export class BrowserXmppClient {
     // microtasks later and its token guard makes this early delete safe).
     this.revokeMucReadiness(room);
     if (terminalAuthorizationCondition) {
+      const catalogFingerprintEvidence =
+        this.currentRoomCatalogFingerprintEvidence.get(key);
       this.terminallyDeniedAutoJoinRooms.set(key, {
         roomJid: key,
         condition: terminalAuthorizationCondition,
-        ...(this.hasDiscoveredRoomCatalog
-          ? { catalogFingerprint: this.roomCatalogFingerprints.get(key) ?? null }
-          : {}),
+        ...catalogFingerprintEvidence,
       });
       this.persistAutoJoinBlocks();
       this.events.emit("roomAccessChanged", {
@@ -1130,6 +1134,8 @@ export class BrowserXmppClient {
 
   async disconnect() {
     this.destroying = true;
+    this.roomDiscoveryGeneration += 1;
+    this.currentRoomCatalogFingerprintEvidence.clear();
     this.disarmOnlineRecovery();
     this.clearReconnectTimer();
     // F3: cancel the pending connect attempt outright. Bump the epoch
@@ -2330,7 +2336,20 @@ export class BrowserXmppClient {
   }
   async discoverTopology(): Promise<DiscoveredTopology> {
     const xmpp = await this.requireConnectedXmpp();
+    const discoveryGeneration = ++this.roomDiscoveryGeneration;
+    // A new refresh invalidates the previous observation until this run
+    // proves each room's complete fingerprint again. A terminal denial
+    // arriving while discovery is degraded or in flight must not inherit
+    // an older pre-denial membership snapshot.
+    this.currentRoomCatalogFingerprintEvidence.clear();
     const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    if (
+      this.destroying
+      || this.xmpp !== xmpp
+      || discoveryGeneration !== this.roomDiscoveryGeneration
+    ) {
+      return topology;
+    }
     const authoritativeFingerprintFields = new Map(
       topology.roomReconciliationAuthority.roomFingerprints.map(
         ({ roomKey, fields }) => [roomKey, new Set(fields)] as const,
@@ -2384,38 +2403,28 @@ export class BrowserXmppClient {
     const discoveredRoomEntries = topology.rooms.flatMap((room) =>
       room.jid ? [[room.id, room.jid] as const] : []
     );
-    const freshRoomKeys = new Set(
-      discoveredRoomEntries.map(([, roomJid]) => this.roomJoinKey(roomJid)),
-    );
     const authoritativeRooms = topology.rooms.filter((room) => {
       const key = room.jid ? this.roomJoinKey(room.jid) : "";
       return !!key && !!authoritativeFingerprintFields.get(key)?.size;
     });
 
-    if (topology.roomCatalogComplete) {
-      this.roomCatalogFingerprints = new Map(
-        topology.rooms.flatMap((room) => {
-          const key = room.jid ? this.roomJoinKey(room.jid) : "";
-          return key ? [[key, roomCatalogFingerprint(room)] as const] : [];
-        }),
-      );
-      this.hasDiscoveredRoomCatalog = true;
-    } else {
-      const fingerprints = new Map(this.roomCatalogFingerprints);
-      if (absentRoomKeysAuthoritative) {
-        for (const key of fingerprints.keys()) {
-          if (!freshRoomKeys.has(key)) fingerprints.delete(key);
-        }
-      }
-      for (const room of authoritativeRooms) {
+    this.currentRoomCatalogFingerprintEvidence = new Map(
+      authoritativeRooms.flatMap((room) => {
         const key = this.roomJoinKey(room.jid!);
         const fields = authoritativeFingerprintFields.get(key)!;
-        if (hasCompleteRoomCatalogFingerprintAuthority(fields)) {
-          fingerprints.set(key, roomCatalogFingerprint(room));
-        }
-      }
-      this.roomCatalogFingerprints = fingerprints;
-    }
+        return [[key, {
+          catalogFingerprint: roomCatalogFingerprint(room),
+          ...(hasCompleteRoomCatalogFingerprintAuthority(fields)
+            ? {}
+            : {
+              catalogFingerprintFields:
+                ROOM_CATALOG_FINGERPRINT_FIELDS.filter((field) =>
+                  fields.has(field)
+                ),
+            }),
+        }] as const];
+      }),
+    );
 
     if (absentRoomKeysAuthoritative) {
       this.discoveredRoomJids = new Map(discoveredRoomEntries);
@@ -2732,6 +2741,8 @@ export class BrowserXmppClient {
     // New epoch: a genuine fresh cycle must be free to rejoin (#1221),
     // and the next handle must run its own session-ready setup.
     this.autoJoinAttemptedRoomKeys.clear();
+    this.roomDiscoveryGeneration += 1;
+    this.currentRoomCatalogFingerprintEvidence.clear();
     this.sessionReadyHandledXmpp = null;
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }

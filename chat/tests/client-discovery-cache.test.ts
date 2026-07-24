@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
+import type { RoomAutoJoinBlock } from "../src/lib/xmpp/room-auto-join-policy";
 import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import {
   discoInfoXml,
@@ -371,6 +372,330 @@ describe("BrowserXmppClient room discovery cache", () => {
       expect(state.autoJoinRoomJids).toEqual([roomJid]);
       expect(accessEvents).toEqual([]);
       expect(joinRoom).not.toHaveBeenCalled();
+    });
+  });
+
+  test("an omitted room cannot seed a fresh denial from a stale fingerprint", async () => {
+    await withFakeDomParser(async () => {
+      const fixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [],
+        bookmarks: [{ id: roomJid, name: "Private", autojoin: false }],
+      };
+      let onPresence: ((presence: {
+        from?: string;
+        presence_type: string;
+        error_condition?: string;
+        error_type?: string;
+      }) => void) | null = null;
+      const joinRoom = mock(async () => undefined);
+      const xmpp = {
+        ...createDiscoveryXmpp(fixture, joinRoom),
+        set_on_presence(callback: NonNullable<typeof onPresence>) {
+          onPresence = callback;
+        },
+      };
+      let savedBlocks: RoomAutoJoinBlock[] = [];
+      const client = new BrowserXmppClient(session(), {
+        ...nullResumePersistence,
+        saveAutoJoinBlocks: (blocks) => {
+          savedBlocks = blocks.map((block) => ({ ...block }));
+        },
+      });
+      const state = client as unknown as {
+        xmpp: typeof xmpp;
+        connected: boolean;
+        wireEvents: (xmpp: typeof xmpp) => void;
+      };
+      state.xmpp = xmpp;
+      state.connected = true;
+      state.wireEvents(xmpp);
+
+      const first = await client.discoverTopology();
+      expect(first.roomCatalogComplete).toBe(true);
+      expect(joinRoom).not.toHaveBeenCalled();
+
+      fixture.bookmarks = [{
+        id: roomJid,
+        name: "Private",
+        autojoin: true,
+      }];
+      fixture.rejectRoomInfo = roomJid;
+      const incomplete = await client.discoverTopology();
+      expect(incomplete.roomCatalogComplete).toBe(false);
+      expect(incomplete.rooms).toEqual([]);
+
+      const rejected = client.fanOutAutoJoin([roomJid]);
+      await Promise.resolve();
+      onPresence?.({
+        from: `${roomJid}/alice`,
+        presence_type: "error",
+        error_condition: "registration-required",
+        error_type: "auth",
+      });
+      await rejected;
+
+      expect(savedBlocks).toEqual([{
+        roomJid,
+        condition: "registration-required",
+      }]);
+
+      fixture.rejectRoomInfo = undefined;
+      const stable = await client.discoverTopology();
+      expect(stable.roomCatalogComplete).toBe(true);
+      expect(client.listRoomAccessRequirements()).toHaveLength(1);
+      expect(savedBlocks[0]?.catalogFingerprint).toBeString();
+
+      fixture.bookmarks = [{
+        id: roomJid,
+        name: "Private",
+        autojoin: false,
+      }];
+      await client.discoverTopology();
+      expect(client.listRoomAccessRequirements()).toEqual([]);
+    });
+  });
+
+  test("an older overlapping discovery cannot repopulate denial evidence", async () => {
+    await withFakeDomParser(async () => {
+      const firstFixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [],
+        bookmarks: [{ id: roomJid, name: "Private", autojoin: false }],
+      };
+      const latestFixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [],
+        bookmarks: [{ id: roomJid, name: "Private", autojoin: true }],
+      };
+      const joinRoom = mock(async () => undefined);
+      const firstXmpp = createDiscoveryXmpp(firstFixture, joinRoom);
+      const latestXmpp = createDiscoveryXmpp(latestFixture, joinRoom);
+      let releaseFirst!: () => void;
+      let releaseLatest!: () => void;
+      let markFirstStarted!: () => void;
+      let markLatestStarted!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const latestGate = new Promise<void>((resolve) => {
+        releaseLatest = resolve;
+      });
+      const firstStarted = new Promise<void>((resolve) => {
+        markFirstStarted = resolve;
+      });
+      const latestStarted = new Promise<void>((resolve) => {
+        markLatestStarted = resolve;
+      });
+      let rootDiscoveryCalls = 0;
+      let activeFixture: "first" | "latest" | null = null;
+      let onPresence: ((presence: {
+        from?: string;
+        presence_type: string;
+        error_condition?: string;
+        error_type?: string;
+      }) => void) | null = null;
+      const xmpp = {
+        join_room: joinRoom,
+        set_on_presence(callback: NonNullable<typeof onPresence>) {
+          onPresence = callback;
+        },
+        async send_raw_iq(xml: string): Promise<string> {
+          if (
+            xml.includes('xmlns="http://jabber.org/protocol/disco#items"')
+            && xml.includes('to="example.test"')
+          ) {
+            rootDiscoveryCalls += 1;
+            if (rootDiscoveryCalls === 1) {
+              markFirstStarted();
+              await firstGate;
+              activeFixture = "first";
+              return firstXmpp.send_raw_iq(xml);
+            }
+            markLatestStarted();
+            await latestGate;
+            activeFixture = "latest";
+            return latestXmpp.send_raw_iq(xml);
+          }
+          if (activeFixture === "first") {
+            return firstXmpp.send_raw_iq(xml);
+          }
+          return latestXmpp.send_raw_iq(xml);
+        },
+      };
+      let savedBlocks: RoomAutoJoinBlock[] = [];
+      const client = new BrowserXmppClient(session(), {
+        ...nullResumePersistence,
+        saveAutoJoinBlocks: (blocks) => {
+          savedBlocks = blocks.map((block) => ({ ...block }));
+        },
+      });
+      const state = client as unknown as {
+        xmpp: typeof xmpp;
+        connected: boolean;
+        wireEvents: (xmpp: typeof xmpp) => void;
+      };
+      state.xmpp = xmpp;
+      state.connected = true;
+      state.wireEvents(xmpp);
+
+      const firstDiscovery = client.discoverTopology();
+      await firstStarted;
+      const latestDiscovery = client.discoverTopology();
+      await latestStarted;
+
+      releaseFirst();
+      await firstDiscovery;
+
+      const rejected = client.fanOutAutoJoin([roomJid]);
+      await Promise.resolve();
+      onPresence?.({
+        from: `${roomJid}/alice`,
+        presence_type: "error",
+        error_condition: "registration-required",
+        error_type: "auth",
+      });
+      await rejected;
+      expect(savedBlocks).toEqual([{
+        roomJid,
+        condition: "registration-required",
+      }]);
+
+      releaseLatest();
+      await latestDiscovery;
+      expect(client.listRoomAccessRequirements()).toHaveLength(1);
+      expect(savedBlocks[0]?.catalogFingerprint).toBeString();
+    });
+  });
+
+  test("an in-flight discovery cannot repopulate evidence after disconnect", async () => {
+    await withFakeDomParser(async () => {
+      const fixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [],
+        bookmarks: [{ id: roomJid, name: "Private", autojoin: true }],
+      };
+      const joinRoom = mock(async () => undefined);
+      const discoveryXmpp = createDiscoveryXmpp(fixture, joinRoom);
+      let releaseDiscovery!: () => void;
+      let markDiscoveryStarted!: () => void;
+      const discoveryGate = new Promise<void>((resolve) => {
+        releaseDiscovery = resolve;
+      });
+      const discoveryStarted = new Promise<void>((resolve) => {
+        markDiscoveryStarted = resolve;
+      });
+      let rootDiscoveryBlocked = false;
+      const xmpp = {
+        join_room: joinRoom,
+        async send_raw_iq(xml: string): Promise<string> {
+          if (
+            !rootDiscoveryBlocked
+            && xml.includes('xmlns="http://jabber.org/protocol/disco#items"')
+            && xml.includes('to="example.test"')
+          ) {
+            rootDiscoveryBlocked = true;
+            markDiscoveryStarted();
+            await discoveryGate;
+          }
+          return discoveryXmpp.send_raw_iq(xml);
+        },
+      };
+      const client = new BrowserXmppClient(session(), nullResumePersistence);
+      const state = client as unknown as {
+        xmpp: typeof xmpp;
+        connected: boolean;
+        autoJoinRoomJids: readonly string[];
+        currentRoomCatalogFingerprintEvidence: ReadonlyMap<string, unknown>;
+      };
+      state.xmpp = xmpp;
+      state.connected = true;
+
+      const discovery = client.discoverTopology();
+      await discoveryStarted;
+      await client.disconnect();
+      releaseDiscovery();
+      await discovery;
+
+      expect(state.currentRoomCatalogFingerprintEvidence.size).toBe(0);
+      expect(state.autoJoinRoomJids).toEqual([]);
+      expect(joinRoom).not.toHaveBeenCalled();
+    });
+  });
+
+  test("partial room authority seeds a field-scoped denial baseline", async () => {
+    await withFakeDomParser(async () => {
+      const fixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [roomJid],
+        bookmarks: [],
+        spaceBookmarks: [{
+          id: roomJid,
+          name: "Private",
+          autojoin: true,
+        }],
+        rejectUserBookmarks: true,
+      };
+      let onPresence: ((presence: {
+        from?: string;
+        presence_type: string;
+        error_condition?: string;
+        error_type?: string;
+      }) => void) | null = null;
+      const joinRoom = mock(async () => undefined);
+      const xmpp = {
+        ...createDiscoveryXmpp(fixture, joinRoom),
+        set_on_presence(callback: NonNullable<typeof onPresence>) {
+          onPresence = callback;
+        },
+      };
+      let savedBlocks: RoomAutoJoinBlock[] = [];
+      const client = new BrowserXmppClient(session(), {
+        ...nullResumePersistence,
+        saveAutoJoinBlocks: (blocks) => {
+          savedBlocks = blocks.map((block) => ({ ...block }));
+        },
+      });
+      const state = client as unknown as {
+        xmpp: typeof xmpp;
+        connected: boolean;
+        wireEvents: (xmpp: typeof xmpp) => void;
+      };
+      state.xmpp = xmpp;
+      state.connected = true;
+      state.wireEvents(xmpp);
+
+      const incomplete = await client.discoverTopology();
+      expect(incomplete.roomCatalogComplete).toBe(false);
+      expect(
+        incomplete.roomReconciliationAuthority.roomFingerprints.find(
+          ({ roomKey }) => roomKey === roomJid,
+        )?.fields,
+      ).toEqual(["isGroupDm", "isBookmarked", "spaceId"]);
+
+      const rejected = client.fanOutAutoJoin([roomJid]);
+      await Promise.resolve();
+      onPresence?.({
+        from: `${roomJid}/alice`,
+        presence_type: "error",
+        error_condition: "forbidden",
+        error_type: "auth",
+      });
+      await rejected;
+
+      expect(savedBlocks[0]?.catalogFingerprint).toBeString();
+      expect(savedBlocks[0]).toMatchObject({
+        roomJid,
+        condition: "forbidden",
+        catalogFingerprintFields: [
+          "spaceId",
+          "isGroupDm",
+          "isBookmarked",
+        ],
+      });
+
+      await client.discoverTopology();
+      expect(client.listRoomAccessRequirements()).toHaveLength(1);
     });
   });
 });
