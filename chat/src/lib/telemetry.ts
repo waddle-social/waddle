@@ -94,6 +94,7 @@ interface InitTelemetryOptions {
 }
 
 let faro: Faro | null = null;
+const TELEMETRY_EXCEPTION_RECORDED = Symbol("waddle.telemetry.exception-recorded");
 let configuredTrustedSpanOrigins = new Set<string>();
 const sensitiveSpanUrls = new Set<string>();
 
@@ -1015,7 +1016,7 @@ export async function withSpan<T>(
         code: SpanStatusCode.ERROR,
         message: sanitizedError.message,
       });
-      span.recordException(sanitizedError);
+      recordSpanExceptionOnce(span, err, `${name}.error`);
       throw err;
     } finally {
       span.end();
@@ -1052,6 +1053,56 @@ export function reportError(
     contextStrings[k] = sanitizeTelemetryText(serialized);
   }
   faro.api.pushError(err, { type: kind, context: contextStrings });
+}
+
+/**
+ * Claims a thrown error whose canonical exception was emitted separately.
+ * Manual spans may still report an error status, but they must not record
+ * another exception event for the same failure.
+ */
+export function markErrorReportedToTelemetry(error: unknown): void {
+  markTelemetryExceptionRecorded(error);
+}
+
+function recordSpanExceptionOnce(span: Span, error: unknown, fallbackMessage: string): void {
+  if (telemetryExceptionWasRecorded(error)) return;
+  markTelemetryExceptionRecorded(error);
+  span.recordException(sanitizeErrorForTelemetry(error, fallbackMessage));
+}
+
+function telemetryExceptionWasRecorded(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && TELEMETRY_EXCEPTION_RECORDED in error;
+}
+
+function markTelemetryExceptionRecorded(error: unknown): void {
+  let current = error;
+  const visited = new Set<object>();
+  while (typeof current === "object" && current !== null && !visited.has(current)) {
+    visited.add(current);
+    if (Object.isExtensible(current)) {
+      Object.defineProperty(current, TELEMETRY_EXCEPTION_RECORDED, {
+        configurable: false,
+        enumerable: false,
+        value: true,
+        writable: false,
+      });
+    }
+    current = current instanceof Error ? current.cause : undefined;
+  }
+}
+
+/** For tests only — exercise the same exception-once gate used by `withSpan`. */
+export function __recordSpanExceptionForTesting(error: unknown): number {
+  let records = 0;
+  const span = {
+    recordException: () => {
+      records += 1;
+    },
+  } as unknown as Span;
+  recordSpanExceptionOnce(span, error, "test-span.error");
+  return records;
 }
 
 function sanitizeErrorForTelemetry(error: unknown, fallbackMessage: string): Error {

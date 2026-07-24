@@ -78,7 +78,8 @@ export type XmppErrorKind =
   | "connect-timeout"
   | "history"
   | "member-query"
-  | "muc-join";
+  | "muc-join"
+  | "muc-join-timeout";
 
 /** RFC 6120 §8.3.2 `type` attribute values of an `<error/>` element, plus
  * "unknown" for an unrecognised wire value (mirrors the wasm bridge's

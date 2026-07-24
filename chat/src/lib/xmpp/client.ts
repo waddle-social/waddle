@@ -66,6 +66,10 @@ import { MucAdmin, type AdminUsersPage } from "./client-muc-admin";
 import { PresenceManager } from "./client-presence";
 import { VCardManager } from "./client-vcard";
 import {
+  RoomJoinRetryCoordinator,
+  type ScheduleRoomJoinRetryOptions,
+} from "./room-join-retry";
+import {
   PubsubManager,
   type DmBookmarkItem,
   type SetDmNotificationModeResult,
@@ -486,6 +490,7 @@ export class BrowserXmppClient {
     string,
     { promise: Promise<void>; requestedNick: string; resolve: () => void; reject: (error: Error) => void }
   >();
+  private roomJoinRetry = new RoomJoinRetryCoordinator();
   // XEP-0280 dedupe memory: key → which representation was seen first
   // ("carbon" or "direct"). The source disambiguates a replayed carbon
   // (drop) from a carbon completing a direct-first pair (pass through
@@ -723,6 +728,7 @@ export class BrowserXmppClient {
   private markMucReadyFromSelfPresence(roomJid: string): void {
     const key = this.roomJoinKey(roomJid);
     if (!key) return;
+    this.roomJoinRetry.complete(key);
     if (!this.joinedMucs.has(key)) {
       this.joinedMucs.set(key, Promise.resolve());
     }
@@ -776,11 +782,13 @@ export class BrowserXmppClient {
       presence.error_type,
       presence.error_condition,
     );
-    waiter?.reject(new Error(
+    if (presence.error_type === "wait") this.scheduleRoomJoinRetry(room);
+    const rejection = new Error(
       terminalAuthorizationCondition
         ? "You need access to this channel."
         : "Channel presence was rejected. Try again in a moment.",
-    ));
+    );
+    waiter.reject(rejection);
     // Fully revoke — including the pending joinedMucs promise and its
     // token — BEFORE emitting, so an error listener that synchronously
     // retries the join starts a fresh one instead of awaiting the doomed
@@ -788,6 +796,7 @@ export class BrowserXmppClient {
     // microtasks later and its token guard makes this early delete safe).
     this.revokeMucReadiness(room);
     if (terminalAuthorizationCondition) {
+      this.roomJoinRetry.reset(key);
       const catalogFingerprintEvidence =
         this.currentRoomCatalogFingerprintEvidence.get(key);
       this.terminallyDeniedAutoJoinRooms.set(key, {
@@ -808,6 +817,7 @@ export class BrowserXmppClient {
       kind: "muc-join",
       recoverable: !terminalAuthorizationCondition,
       detail: `room join rejected — ${room}`,
+      cause: rejection,
       roomLocalpart: jidLocalpart(room),
       ...stanzaErrorContext({
         condition: presence.error_condition,
@@ -1174,6 +1184,7 @@ export class BrowserXmppClient {
     this.currentRoom = null;
     this.roomSwitchPromise = null;
     this.roomSwitchTarget = null;
+    this.roomJoinRetry.cancelAll();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     this.uploadServiceJid = null;
     this.clearRoomPresenceCaches();
@@ -1217,6 +1228,48 @@ export class BrowserXmppClient {
     this.discoveredRoomJids.set(channelId, normalizedRoomJid);
   }
 
+  private scheduleRoomJoinRetry(roomJid: string): void {
+    const key = this.roomJoinKey(roomJid);
+    const xmpp = this.xmpp;
+    if (!key || !xmpp || this.roomJoinRetry.pending(key)) return;
+
+    const focused = this.currentRoom !== null
+      && this.roomJoinKey(this.currentRoom) === key;
+    const retained = this.retainedJoinedRoomJids.has(key);
+    const autoJoin = this.autoJoinRoomJids.some(
+      (candidate) => this.roomJoinKey(candidate) === key,
+    );
+    if (!focused && !retained && !autoJoin) return;
+    const source = focused ? "focused" : retained ? "retained" : "autojoin";
+
+    void this.roomJoinRetry.schedule(
+      key,
+      this.roomJoinRetryOptions(roomJid, key, xmpp, source),
+    ).catch(() => undefined);
+  }
+
+  private roomJoinRetryOptions(
+    roomJid: string,
+    key: string,
+    xmpp: XmppClientInstance,
+    source: "focused" | "retained" | "autojoin",
+  ): ScheduleRoomJoinRetryOptions {
+    return {
+      // A focused retry belongs to that navigation intent and stops as soon
+      // as focus moves elsewhere. A background retry likewise belongs to the
+      // retained/autojoin source that admitted it; another source appearing
+      // later must not silently extend the retry's lifetime.
+      isEligible: () => this.isCurrentXmpp(xmpp) && (
+        source === "focused"
+          ? this.currentRoom !== null && this.roomJoinKey(this.currentRoom) === key
+          : source === "retained"
+            ? this.retainedJoinedRoomJids.has(key)
+            : this.autoJoinRoomJids.some((candidate) => this.roomJoinKey(candidate) === key)
+      ),
+      retry: () => this.ensureJoined(roomJid),
+    };
+  }
+
   private waitForRoomSelfPresence(roomJid: string, requestedNick: string): Promise<void> {
     const key = this.roomJoinKey(roomJid);
     // Concurrent joins for JIDs that normalize to the same room key
@@ -1234,8 +1287,17 @@ export class BrowserXmppClient {
     const timeout = setTimeout(() => {
       this.roomJoinWaiters.delete(key);
       const detail = `Timed out waiting for self-presence in ${roomJid}`;
-      this.emitError({ kind: "connect-timeout", recoverable: true, detail });
-      rejectJoin(new Error("Channel presence did not finish syncing. Try again in a moment."));
+      const rejection = new Error(
+        "Channel presence did not finish syncing. Try again in a moment.",
+      );
+      this.scheduleRoomJoinRetry(roomJid);
+      this.emitError({
+        kind: "muc-join-timeout",
+        recoverable: true,
+        detail,
+        cause: rejection,
+      });
+      rejectJoin(rejection);
     }, ROOM_SELF_PRESENCE_TIMEOUT_MS);
     this.roomJoinWaiters.set(key, {
       promise,
@@ -1245,7 +1307,7 @@ export class BrowserXmppClient {
         this.roomJoinWaiters.delete(key);
         resolveJoin();
       },
-      reject: (error) => {
+      reject: (error: Error) => {
         clearTimeout(timeout);
         this.roomJoinWaiters.delete(key);
         rejectJoin(error);
@@ -1273,8 +1335,24 @@ export class BrowserXmppClient {
     // the wire (`performMucJoin`, `rememberJoinedRoom`).
     const key = this.roomJoinKey(roomJid);
     if (this.joinedMucReady.has(key)) return;
+    const scheduledRetry = this.roomJoinRetry.pending(key);
+    if (scheduledRetry) return scheduledRetry;
     const existing = this.joinedMucs.get(key);
     if (existing) {
+      const xmpp = this.xmpp;
+      if (
+        xmpp
+        && this.currentRoom !== null
+        && this.roomJoinKey(this.currentRoom) === key
+      ) {
+        // A quick return adopts the still-running wire attempt. If it fails,
+        // the new focused intent may schedule another backoff window without
+        // sending a duplicate join presence in the meantime.
+        this.roomJoinRetry.reactivate(
+          key,
+          this.roomJoinRetryOptions(roomJid, key, xmpp, "focused"),
+        );
+      }
       const existingToken = this.joinedMucJoinTokens.get(key);
       await existing;
       if (existingToken && this.joinedMucJoinTokens.get(key) !== existingToken) {
@@ -1293,6 +1371,7 @@ export class BrowserXmppClient {
     try {
       await promise;
       if (this.joinedMucJoinTokens.get(key) === joinToken) {
+        this.roomJoinRetry.complete(key);
         this.joinedMucReady.add(key);
         this.clearAutoJoinBlock(key);
         this.rememberJoinedRoom(roomJid);
@@ -1452,6 +1531,9 @@ export class BrowserXmppClient {
   private async performRoomSwitch(nextRoom: string) {
     const xmpp = this.xmpp;
     if (!xmpp) return;
+    if (this.currentRoom && this.roomJoinKey(this.currentRoom) !== this.roomJoinKey(nextRoom)) {
+      this.roomJoinRetry.cancel(this.roomJoinKey(this.currentRoom));
+    }
     this.currentRoom = nextRoom;
     this.dispatchFocusedRoomHandlers();
     try {
@@ -2703,6 +2785,7 @@ export class BrowserXmppClient {
   }
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
+    this.roomJoinRetry.cancelAll();
     const previouslyJoinedRooms = [...this.joinedMucs.keys()];
     // Snapshot the self-presence-confirmed (status 110) rooms before the
     // trackers clear so a subsequent `resumed` session-ready can restore
