@@ -101,31 +101,16 @@ async fn link_preview_lookup_for_test(
     .await
 }
 
-/// Register a live connection for `bound_jid` — with both the connection
-/// registry and the authoritative `UserActor` the deferred delivery path
-/// resolves (mirroring production registration) — so the deferred
-/// link-preview reply (#1470) has somewhere to land; returns the outbound
-/// receiver.
+/// Register a live connection for `bound_jid` through the production-parity
+/// dual-registration helper (same `ConnectionEntry` mirrored into the actor
+/// tree) so the deferred link-preview reply (#1470) has somewhere to land;
+/// returns the outbound receiver.
 async fn register_link_preview_requester_for_test(
     state: &WebSocketState,
     bound_jid: &FullJid,
 ) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bound_jid.clone(), tx.clone());
-    state
-        .deps
-        .protocol
-        .user_registry
-        .ask(waddle_xmpp::registry::RegisterUserResource {
-            jid: bound_jid.clone(),
-            entry: waddle_xmpp::registry::ConnectionEntry::new(tx),
-        })
-        .await
-        .expect("register user resource");
+    register_test_connection(state, bound_jid, tx).await;
     rx
 }
 

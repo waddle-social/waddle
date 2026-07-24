@@ -406,6 +406,11 @@ async fn deliver_deferred_lookup_reply(
     requester: &FullJid,
     reply_iq: Iq,
 ) {
+    // Extracted before the stanza is boxed so every outcome log below can
+    // correlate a delivery failure with its specific lookup when several
+    // are in flight for the same resource (the reply contract is keyed on
+    // this id).
+    let reply_id = reply_iq.id().to_string();
     let stanza = Stanza::Iq(Box::new(reply_iq));
     // Bounded retry tail over the whole delivery attempt. It covers two
     // distinct transient failures with one loop:
@@ -421,13 +426,17 @@ async fn deliver_deferred_lookup_reply(
     //   before conceding.
     //
     // Retrying `Dropped` is safe for THIS stanza class even though it can
-    // include maybe-enqueued ask failures: a duplicate IQ *result* is
-    // ignored by id (RFC 6120 §8.2.3), unlike the groupchat reflections
-    // whose #1263 semantics forbid exactly this kind of replay. Total added
-    // wait is ~5.25 s — far below the client's ~30 s IQ budget — the task
-    // count stays bounded by the admission semaphore's throughput, and the
-    // resolver permit was released before delivery, so no fetch slot is
-    // pinned while waiting.
+    // include maybe-enqueued ask failures, where the retry can genuinely
+    // double-deliver: a duplicate IQ *result* is ignored by id on the wire
+    // (RFC 6120 §8.2.3), and the duplicate's XEP-0198 unacked-queue entry
+    // costs one extra bounded slot on a path that requires a double fault
+    // (ask reply lost AND retry landing) — negligible against the queue's
+    // capacity. Contrast the groupchat reflections whose #1263 semantics
+    // forbid exactly this kind of replay: those are user-visible messages,
+    // not id-matched replies. Total added wait is ~5.25 s — far below the
+    // client's ~30 s IQ budget — the task count stays bounded by the
+    // admission semaphore's throughput, and the resolver permit was
+    // released before delivery, so no fetch slot is pinned while waiting.
     const DELIVERY_RETRY_DELAYS: [std::time::Duration; 3] = [
         std::time::Duration::from_millis(250),
         std::time::Duration::from_secs(1),
@@ -447,6 +456,7 @@ async fn deliver_deferred_lookup_reply(
             FullJidDeliveryOutcome::QueuedDetached => {
                 debug!(
                     requester = %requester,
+                    id = %reply_id,
                     "deferred link-preview reply recorded for detached SM session"
                 );
                 return;
@@ -460,11 +470,19 @@ async fn deliver_deferred_lookup_reply(
                     // (previews fail open, #822).
                     warn!(
                         requester = %requester,
+                        id = %reply_id,
                         ?outcome,
                         "deferred link-preview reply dropped after bounded delivery retries"
                     );
                     return;
                 };
+                debug!(
+                    requester = %requester,
+                    id = %reply_id,
+                    ?outcome,
+                    retry_in = ?delay,
+                    "deferred link-preview reply delivery retrying"
+                );
                 tokio::time::sleep(*delay).await;
             }
         }
@@ -688,29 +706,16 @@ mod tests {
         b"test-link-preview-secret"
     }
 
-    /// Register a live connection for [`sender`] — with both the connection
-    /// registry and the authoritative `UserActor` the deferred delivery path
-    /// resolves (mirroring production registration) — and return the
-    /// outbound receiver.
+    /// Register a live connection for [`sender`] through the
+    /// production-parity dual-registration helper (same `ConnectionEntry`
+    /// mirrored into the actor tree the deferred delivery path resolves)
+    /// and return the outbound receiver.
     async fn register_requester(
         state: &WebSocketState,
     ) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .register(sender(), tx.clone());
-        state
-            .deps
-            .protocol
-            .user_registry
-            .ask(waddle_xmpp::registry::RegisterUserResource {
-                jid: sender(),
-                entry: waddle_xmpp::registry::ConnectionEntry::new(tx),
-            })
-            .await
-            .expect("register user resource");
+        crate::server::routes::websocket::tests::register_test_connection(state, &sender(), tx)
+            .await;
         rx
     }
 

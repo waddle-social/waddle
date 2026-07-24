@@ -310,7 +310,7 @@ async fn xep0198_detached_session_records_deferred_iq_result_for_resume_replay()
         .await
         .expect("store detached session");
 
-    let payload = minidom::Element::builder("lookup", "urn:waddle:link-preview:0")
+    let payload = minidom::Element::builder("lookup", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
         .attr(minidom::rxml::xml_ncname!("status").to_owned(), "ready")
         .build();
     let reply = Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Result {
@@ -341,7 +341,7 @@ async fn xep0198_detached_session_records_deferred_iq_result_for_resume_replay()
     assert_eq!(element.attr("type"), Some("result"));
     assert!(
         element
-            .get_child("lookup", "urn:waddle:link-preview:0")
+            .get_child("lookup", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
             .is_some(),
         "replayed result keeps the lookup payload: {replay_xml}"
     );
