@@ -35,6 +35,18 @@ pub(super) fn record_session_init_failure(
     detail: Option<String>,
 ) {
     use waddle_xmpp::telemetry::attributes::MetricAttribute;
+    // `error_span!` (not `info_span!`): the registry-level `EnvFilter` gates
+    // span export too, so an operator running `RUST_LOG=warn`/`error` must
+    // not silently lose the failure span while keeping the log line.
+    let span = tracing::error_span!(
+        "xmpp.session.init",
+        user = %jid.to_bare(),
+        reason = reason.value(),
+    );
+    let _enter = span.enter();
+    // Inside the span scope so the OTLP log record carries this span's
+    // trace/span id — the alertable line pivots straight to the Tempo
+    // error span.
     error!(
         user = %jid.to_bare(),
         resource = %jid.resource(),
@@ -53,12 +65,6 @@ pub(super) fn record_session_init_failure(
         1,
         reason,
     );
-    let span = tracing::info_span!(
-        "xmpp.session.init",
-        user = %jid.to_bare(),
-        reason = reason.value(),
-    );
-    let _enter = span.enter();
     crate::telemetry::mark_span_error("session initialization failed");
 }
 
