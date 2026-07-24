@@ -14,7 +14,14 @@ type RoomJoinRetryOptions = {
 type ScheduledRoomJoinRetry = {
   promise: Promise<void>;
   timer: ReturnType<typeof setTimeout>;
+  resolve: () => void;
   reject: (error: Error) => void;
+};
+
+type RunningRoomJoinRetry = {
+  entry: ScheduledRoomJoinRetry;
+  options: ScheduleRoomJoinRetryOptions;
+  cancelled: boolean;
 };
 
 type ScheduleRoomJoinRetryOptions = {
@@ -56,6 +63,7 @@ export class RoomJoinRetryCoordinator {
   private readonly random: () => number;
   private readonly failureCounts = new Map<string, number>();
   private readonly scheduled = new Map<string, ScheduledRoomJoinRetry>();
+  private readonly running = new Map<string, RunningRoomJoinRetry>();
 
   constructor(options: RoomJoinRetryOptions = {}) {
     this.timer = options.timer ?? defaultTimer;
@@ -69,6 +77,16 @@ export class RoomJoinRetryCoordinator {
   schedule(roomKey: string, options: ScheduleRoomJoinRetryOptions): Promise<void> {
     const existing = this.scheduled.get(roomKey);
     if (existing) return existing.promise;
+    const running = this.running.get(roomKey);
+    if (running) {
+      if (running.cancelled || !running.options.isEligible()) {
+        return cancelledRoomJoinRetry();
+      }
+      // The next window continues the source that admitted this chain. A
+      // failure callback may run after navigation changed the client's room
+      // sets; accepting freshly computed options here would resurrect it.
+      options = running.options;
+    }
 
     const failureIndex = this.failureCounts.get(roomKey) ?? 0;
     this.failureCounts.set(roomKey, failureIndex + 1);
@@ -83,7 +101,12 @@ export class RoomJoinRetryCoordinator {
     const timer = this.timer.setTimeout(() => {
       void this.run(roomKey, entry, options, resolveRetry, rejectRetry);
     }, roomJoinRetryDelayMs(failureIndex, this.random));
-    Object.assign(entry, { promise, timer, reject: rejectRetry });
+    Object.assign(entry, {
+      promise,
+      timer,
+      resolve: resolveRetry,
+      reject: rejectRetry,
+    });
     this.scheduled.set(roomKey, entry);
     // The retry runs independently of any one UI listener. Keep cancellation
     // or a failed scheduled attempt from becoming an unhandled rejection when
@@ -94,21 +117,38 @@ export class RoomJoinRetryCoordinator {
 
   cancel(roomKey: string): void {
     const entry = this.scheduled.get(roomKey);
+    const running = this.running.get(roomKey);
     this.failureCounts.delete(roomKey);
-    if (!entry) return;
-    this.scheduled.delete(roomKey);
-    this.timer.clearTimeout(entry.timer);
-    entry.reject(new Error("Room join retry cancelled"));
+    const cancellation = new Error("Room join retry cancelled");
+    if (entry) {
+      this.scheduled.delete(roomKey);
+      this.timer.clearTimeout(entry.timer);
+      entry.reject(cancellation);
+    }
+    if (running) {
+      running.cancelled = true;
+      running.entry.reject(cancellation);
+    }
   }
 
   cancelAll(): void {
-    for (const roomKey of [...this.scheduled.keys()]) this.cancel(roomKey);
+    const roomKeys = new Set([...this.scheduled.keys(), ...this.running.keys()]);
+    for (const roomKey of roomKeys) this.cancel(roomKey);
     this.failureCounts.clear();
   }
 
   reset(roomKey: string): void {
     this.cancel(roomKey);
     this.failureCounts.delete(roomKey);
+  }
+
+  complete(roomKey: string): void {
+    const entry = this.scheduled.get(roomKey);
+    this.failureCounts.delete(roomKey);
+    if (!entry) return;
+    this.scheduled.delete(roomKey);
+    this.timer.clearTimeout(entry.timer);
+    entry.resolve();
   }
 
   private async run(
@@ -125,6 +165,12 @@ export class RoomJoinRetryCoordinator {
       reject(new Error("Room join retry cancelled"));
       return;
     }
+    const running: RunningRoomJoinRetry = {
+      entry,
+      options,
+      cancelled: false,
+    };
+    this.running.set(roomKey, running);
     try {
       await options.retry();
       this.failureCounts.delete(roomKey);
@@ -135,6 +181,14 @@ export class RoomJoinRetryCoordinator {
       // chain ended for another reason and a future failure starts fresh.
       if (!this.scheduled.has(roomKey)) this.failureCounts.delete(roomKey);
       reject(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      if (this.running.get(roomKey) === running) this.running.delete(roomKey);
     }
   }
+}
+
+function cancelledRoomJoinRetry(): Promise<void> {
+  const promise = Promise.reject<void>(new Error("Room join retry cancelled"));
+  void promise.catch(() => undefined);
+  return promise;
 }

@@ -619,6 +619,33 @@ describe("telemetry module no-op behaviour", () => {
     }
   });
 
+  test("non-join XMPP failures remain available to span exception recording", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+    const failure = new Error("history replay failed");
+    const internal = client as unknown as {
+      emitError: (event: {
+        kind: "history";
+        recoverable: boolean;
+        detail: string;
+        cause: Error;
+      }) => void;
+    };
+
+    internal.emitError({
+      kind: "history",
+      recoverable: true,
+      detail: "history replay failed",
+      cause: failure,
+    });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(__recordSpanExceptionForTesting(failure)).toBe(1);
+    expect(__recordSpanExceptionForTesting(failure)).toBe(0);
+  });
+
   test("transport sanitizer replaces Faro page URLs with route templates", () => {
     let currentUrl = new URL("https://chat.example/dm/alice?thread=secret-thread#waddle_session_id=tok");
     const location = {

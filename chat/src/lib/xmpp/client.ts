@@ -725,7 +725,7 @@ export class BrowserXmppClient {
   private markMucReadyFromSelfPresence(roomJid: string): void {
     const key = this.roomJoinKey(roomJid);
     if (!key) return;
-    this.roomJoinRetry.reset(key);
+    this.roomJoinRetry.complete(key);
     if (!this.joinedMucs.has(key)) {
       this.joinedMucs.set(key, Promise.resolve());
     }
@@ -1342,7 +1342,7 @@ export class BrowserXmppClient {
     try {
       await promise;
       if (this.joinedMucJoinTokens.get(key) === joinToken) {
-        this.roomJoinRetry.reset(key);
+        this.roomJoinRetry.complete(key);
         this.joinedMucReady.add(key);
         this.clearAutoJoinBlock(key);
         this.rememberJoinedRoom(roomJid);

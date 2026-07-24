@@ -63,4 +63,36 @@ describe("room join retry backoff", () => {
     await expect(scheduled).rejects.toThrow("Room join retry cancelled");
     expect(retry).not.toHaveBeenCalled();
   });
+
+  test("cancellation during an attempt prevents the failed chain from rescheduling", async () => {
+    const timer = new ManualRoomJoinRetryTimer();
+    const coordinator = new RoomJoinRetryCoordinator({
+      timer,
+      random: () => 1,
+    });
+    let rejectAttempt!: (error: Error) => void;
+    const retry = mock(() => new Promise<void>((_resolve, reject) => {
+      rejectAttempt = reject;
+    }));
+    const scheduled = coordinator.schedule("busy@muc.example.com", {
+      isEligible: () => true,
+      retry,
+    });
+
+    timer.runNext();
+    expect(retry).toHaveBeenCalledTimes(1);
+    coordinator.cancel("busy@muc.example.com");
+    await expect(scheduled).rejects.toThrow("Room join retry cancelled");
+
+    const continuation = coordinator.schedule("busy@muc.example.com", {
+      isEligible: () => true,
+      retry,
+    });
+    await expect(continuation).rejects.toThrow("Room join retry cancelled");
+    rejectAttempt(new Error("resource-constraint"));
+    await Promise.resolve();
+
+    expect(timer.scheduledDelays).toEqual([4_000]);
+    expect(timer.pendingCount).toBe(0);
+  });
 });

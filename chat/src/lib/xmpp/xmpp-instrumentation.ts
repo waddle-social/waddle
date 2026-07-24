@@ -71,7 +71,11 @@ export function installInstrumentation(client: BrowserXmppClient): void {
       ? telemetryStreamManagementCounts(event)
       : undefined;
     const errorSource = telemetryErrorSource(event.kind, condition);
-    if (event.cause !== undefined) markErrorReportedToTelemetry(event.cause);
+    const isRoomJoinFailure = event.kind === "muc-join"
+      || (event.kind === "connect-timeout" && event.detail.includes("self-presence"));
+    if (isRoomJoinFailure && event.cause !== undefined) {
+      markErrorReportedToTelemetry(event.cause);
+    }
     const cause = new Error(
       detail,
       event.cause === undefined ? undefined : { cause: event.cause },
