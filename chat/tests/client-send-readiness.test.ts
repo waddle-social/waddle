@@ -564,6 +564,8 @@ describe("client send readiness", () => {
       presence_type: string;
       error_condition?: string;
       error_type?: string;
+      muc_status_codes?: number[];
+      muc_jid?: string;
     }) => void) | null = null;
     const xmpp = {
       join_room: mock(async () => undefined),
@@ -611,6 +613,8 @@ describe("client send readiness", () => {
       presence_type: string;
       error_condition?: string;
       error_type?: string;
+      muc_status_codes?: number[];
+      muc_jid?: string;
     }) => void) | null = null;
     const joinRoom = mock(async () => undefined);
     const xmpp = {
@@ -888,6 +892,7 @@ describe("client send readiness", () => {
       connected: boolean;
       wireEvents: (xmpp: typeof xmpp) => void;
       roomJoinRetry: RoomJoinRetryCoordinator;
+      fullJid: string;
     };
     state.xmpp = xmpp;
     state.connected = true;
@@ -926,6 +931,20 @@ describe("client send readiness", () => {
     expect(joinRoom).toHaveBeenCalledTimes(2);
     expect(errors).toHaveLength(2);
     expect(retryTimer.scheduledDelays).toEqual([4_000, 8_000]);
+
+    const recoveredListener = client.ensureJoined(roomJid);
+    retryTimer.runNext();
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+      muc_jid: state.fullJid,
+    });
+    await recoveredListener;
+
+    expect(joinRoom).toHaveBeenCalledTimes(3);
+    expect(retryTimer.pendingCount).toBe(0);
   });
 
   test("self-presence timeout enters the same room retry backoff", async () => {
