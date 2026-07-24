@@ -91,6 +91,7 @@ import type {
   ReactionEvent,
   RoomActivityEvent,
   RoomAuthority,
+  RoomCatalogFingerprintField,
   RoomHats,
   RoomPresence,
   RosterContact,
@@ -119,6 +120,7 @@ import {
   type ResumePersistence,
 } from "./resume-persistence";
 import {
+  hasCompleteRoomCatalogFingerprintAuthority,
   reconcileAutoJoinBlocks,
   roomCatalogFingerprint,
   terminalMucJoinCondition,
@@ -2329,8 +2331,10 @@ export class BrowserXmppClient {
   async discoverTopology(): Promise<DiscoveredTopology> {
     const xmpp = await this.requireConnectedXmpp();
     const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
-    const authoritativeRoomKeys = new Set(
-      topology.roomReconciliationAuthority.fingerprintRoomKeys,
+    const authoritativeFingerprintFields = new Map(
+      topology.roomReconciliationAuthority.roomFingerprints.map(
+        ({ roomKey, fields }) => [roomKey, new Set(fields)] as const,
+      ),
     );
     const reconciliation = reconcileAutoJoinBlocks(
       this.terminallyDeniedAutoJoinRooms,
@@ -2338,7 +2342,7 @@ export class BrowserXmppClient {
       {
         absentRoomKeysAuthoritative:
           topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
-        authoritativeRoomKeys,
+        authoritativeFingerprintFields,
       },
     );
     this.terminallyDeniedAutoJoinRooms = reconciliation.blocks;
@@ -2350,10 +2354,15 @@ export class BrowserXmppClient {
       });
     }
     if (reconciliation.changed) this.persistAutoJoinBlocks();
-    this.updateRoomDiscoveryCaches(topology, authoritativeRoomKeys);
+    this.updateRoomDiscoveryCaches(topology, authoritativeFingerprintFields);
     if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
     const autoJoinRoomJids = topology.rooms
-      .filter((room) => room.autojoin !== false && !!room.jid)
+      .filter((room) => {
+        if (room.autojoin === false || !room.jid) return false;
+        const key = this.roomJoinKey(room.jid);
+        return topology.roomCatalogComplete
+          || authoritativeFingerprintFields.get(key)?.has("autojoin");
+      })
       .map((room) => room.jid!);
     if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
     return topology;
@@ -2361,7 +2370,10 @@ export class BrowserXmppClient {
 
   private updateRoomDiscoveryCaches(
     topology: DiscoveredTopology,
-    authoritativeRoomKeys: ReadonlySet<string>,
+    authoritativeFingerprintFields: ReadonlyMap<
+      string,
+      ReadonlySet<RoomCatalogFingerprintField>
+    >,
   ): void {
     const discoveredRoomEntries = topology.rooms.flatMap((room) =>
       room.jid ? [[room.id, room.jid] as const] : []
@@ -2371,7 +2383,7 @@ export class BrowserXmppClient {
     );
     const authoritativeRooms = topology.rooms.filter((room) => {
       const key = room.jid ? this.roomJoinKey(room.jid) : "";
-      return !!key && authoritativeRoomKeys.has(key);
+      return !!key && !!authoritativeFingerprintFields.get(key)?.size;
     });
 
     if (topology.roomCatalogComplete) {
@@ -2390,7 +2402,11 @@ export class BrowserXmppClient {
         }
       }
       for (const room of authoritativeRooms) {
-        fingerprints.set(this.roomJoinKey(room.jid!), roomCatalogFingerprint(room));
+        const key = this.roomJoinKey(room.jid!);
+        const fields = authoritativeFingerprintFields.get(key)!;
+        if (hasCompleteRoomCatalogFingerprintAuthority(fields)) {
+          fingerprints.set(key, roomCatalogFingerprint(room));
+        }
       }
       this.roomCatalogFingerprints = fingerprints;
     }
@@ -2414,8 +2430,10 @@ export class BrowserXmppClient {
       const roomJid = room.jid!;
       const key = this.roomJoinKey(roomJid);
       discoveredRoomJids.set(room.id, roomJid);
-      autoJoinRooms.delete(key);
-      if (room.autojoin !== false) autoJoinRooms.set(key, roomJid);
+      if (authoritativeFingerprintFields.get(key)?.has("autojoin")) {
+        autoJoinRooms.delete(key);
+        if (room.autojoin !== false) autoJoinRooms.set(key, roomJid);
+      }
     }
     this.discoveredRoomJids = discoveredRoomJids;
     this.autoJoinRoomJids = [...autoJoinRooms.values()];

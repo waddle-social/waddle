@@ -186,9 +186,10 @@ describe("discoverTopology partial-failure resilience", () => {
       expect(
         topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
       ).toBe(true);
-      expect(topology.roomReconciliationAuthority.fingerprintRoomKeys).toEqual([
-        "general@muc.example.test",
-      ]);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([{
+        roomKey: "general@muc.example.test",
+        fields: ["spaceId", "autojoin", "isGroupDm", "isBookmarked"],
+      }]);
     });
   });
 
@@ -207,7 +208,7 @@ describe("discoverTopology partial-failure resilience", () => {
       expect(
         topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
       ).toBe(false);
-      expect(topology.roomReconciliationAuthority.fingerprintRoomKeys).toEqual([]);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([]);
     });
   });
 
@@ -226,7 +227,51 @@ describe("discoverTopology partial-failure resilience", () => {
       expect(
         topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
       ).toBe(false);
-      expect(topology.roomReconciliationAuthority.fingerprintRoomKeys).toEqual([]);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([]);
+    });
+  });
+
+  test("keeps exact space-bookmark authority when user bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({
+          rejectUserBookmarks: true,
+          spaceBookmarks: [{
+            id: "general@muc.example.test",
+            name: "General",
+            autojoin: false,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([{
+        roomKey: "general@muc.example.test",
+        fields: ["isGroupDm", "isBookmarked", "spaceId"],
+      }]);
+    });
+  });
+
+  test("keeps exact user-bookmark authority when space bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({
+          rejectSpaceBookmarks: true,
+          userBookmarks: [{
+            id: "general@muc.example.test",
+            name: "General",
+            autojoin: false,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([{
+        roomKey: "general@muc.example.test",
+        fields: ["isGroupDm", "isBookmarked", "autojoin"],
+      }]);
     });
   });
 });
@@ -237,6 +282,8 @@ type ResilientClientOptions = {
   rejectSpaceBookmarks?: boolean;
   rejectUserBookmarks?: boolean;
   rejectRoomInfo?: string;
+  spaceBookmarks?: Array<{ id: string; name: string; autojoin: boolean }>;
+  userBookmarks?: Array<{ id: string; name: string; autojoin: boolean }>;
 };
 
 function neverResolvesForComponent(jid: string) {
@@ -417,7 +464,10 @@ function resilientClient(options: ResilientClientOptions = {}) {
         ) {
           throw new Error("simulated user bookmark failure");
         }
-        return pubsubItemsXml([]);
+        if (xml.includes('to="spaces.example.test"')) {
+          return pubsubItemsXml(options.spaceBookmarks ?? []);
+        }
+        return pubsubItemsXml(options.userBookmarks ?? []);
       }
       throw new Error(`Unexpected IQ: ${xml}`);
     },

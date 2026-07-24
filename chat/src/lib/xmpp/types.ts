@@ -554,6 +554,12 @@ export interface DiscoveredSpace {
   role?: "owner" | "admin" | "moderator" | "member" | null;
 }
 
+export type RoomCatalogFingerprintField =
+  | "spaceId"
+  | "autojoin"
+  | "isGroupDm"
+  | "isBookmarked";
+
 export interface DiscoveredTopology {
   spaces: DiscoveredSpace[];
   rooms: DiscoveredChannel[];
@@ -566,8 +572,15 @@ export interface DiscoveredTopology {
   roomReconciliationAuthority: {
     /** True when successful MUC and bookmark listings make absence authoritative. */
     absentRoomKeysAuthoritative: boolean;
-    /** Normalized room keys whose own hydration and all bookmark sources completed. */
-    fingerprintRoomKeys: string[];
+    /**
+     * Field-level evidence for present rooms. This lets a successful exact-room
+     * bookmark source remain useful without treating unrelated failed sources
+     * as authoritative for fields they could have overridden.
+     */
+    roomFingerprints: Array<{
+      roomKey: string;
+      fields: RoomCatalogFingerprintField[];
+    }>;
   };
   serverRole?: "owner" | "admin" | "moderator" | "member" | null;
   services?: {

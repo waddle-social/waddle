@@ -29,6 +29,8 @@ type DiscoveryFixtureState = {
   mucCatalogAvailable: boolean;
   roomJids: string[];
   bookmarks: Array<{ id: string; name: string; autojoin: boolean }>;
+  spaceBookmarks?: Array<{ id: string; name: string; autojoin: boolean }>;
+  rejectSpaceBookmarks?: boolean;
   rejectUserBookmarks?: boolean;
   rejectRoomInfo?: string;
 };
@@ -48,7 +50,11 @@ function createDiscoveryXmpp(
           ]);
         }
         if (xml.includes('to="spaces.example.test"')) {
-          return discoItemsXml([]);
+          return state.spaceBookmarks || state.rejectSpaceBookmarks
+            ? discoItemsXml([
+                { name: "Engineering", node: "space-engineering" },
+              ])
+            : discoItemsXml([]);
         }
         if (xml.includes('to="muc.example.test"')) {
           if (!state.mucCatalogAvailable) {
@@ -82,6 +88,16 @@ function createDiscoveryXmpp(
           });
         }
         if (xml.includes('to="spaces.example.test"')) {
+          if (xml.includes(' node=')) {
+            return discoInfoXml({
+              identities: [{ category: "pubsub", type: "leaf" }],
+              features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
+              fields: {
+                FORM_TYPE: "http://jabber.org/protocol/pubsub#meta-data",
+                "pubsub#type": "urn:xmpp:spaces:0",
+              },
+            });
+          }
           return discoInfoXml({
             identities: [{ category: "pubsub", type: "service" }],
             features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
@@ -93,6 +109,12 @@ function createDiscoveryXmpp(
       }
 
       if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
+        if (xml.includes('to="spaces.example.test"')) {
+          if (state.rejectSpaceBookmarks) {
+            throw new Error("temporary space bookmark failure");
+          }
+          return pubsubItemsXml(state.spaceBookmarks ?? []);
+        }
         if (
           state.rejectUserBookmarks
           && xml.includes('to="alice@example.test"')
@@ -222,8 +244,8 @@ describe("BrowserXmppClient room discovery cache", () => {
 
         expect(changed.roomCatalogComplete).toBe(false);
         expect(
-          changed.roomReconciliationAuthority.fingerprintRoomKeys.includes(
-            roomJid,
+          changed.roomReconciliationAuthority.roomFingerprints.some(
+            ({ roomKey }) => roomKey === roomJid,
           ),
         ).toBe(shouldUnblock);
         expect(client.listRoomAccessRequirements()).toHaveLength(
@@ -238,4 +260,52 @@ describe("BrowserXmppClient room discovery cache", () => {
       });
     });
   }
+
+  test("an exact space-membership change unblocks despite failed user bookmarks", async () => {
+    await withFakeDomParser(async () => {
+      const fixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [roomJid],
+        bookmarks: [],
+      };
+      const joinRoom = mock(async () => undefined);
+      const xmpp = createDiscoveryXmpp(fixture, joinRoom);
+      const client = new BrowserXmppClient(session(), {
+        ...nullResumePersistence,
+        loadAutoJoinBlocks: () => [{
+          roomJid,
+          condition: "forbidden",
+        }],
+      });
+      const state = client as unknown as {
+        xmpp: typeof xmpp;
+        connected: boolean;
+      };
+      state.xmpp = xmpp;
+      state.connected = true;
+
+      await client.discoverTopology();
+      expect(client.listRoomAccessRequirements()).toHaveLength(1);
+      const accessEvents: Array<{ roomJid: string; state: string }> = [];
+      client.onRoomAccessChanged((event) => accessEvents.push(event));
+      joinRoom.mockClear();
+
+      fixture.spaceBookmarks = [{
+        id: roomJid,
+        name: "Private",
+        autojoin: true,
+      }];
+      fixture.rejectUserBookmarks = true;
+      const changed = await client.discoverTopology();
+
+      expect(changed.roomCatalogComplete).toBe(false);
+      expect(changed.roomReconciliationAuthority.roomFingerprints).toEqual([{
+        roomKey: roomJid,
+        fields: ["isGroupDm", "isBookmarked", "spaceId"],
+      }]);
+      expect(client.listRoomAccessRequirements()).toEqual([]);
+      expect(accessEvents).toContainEqual({ roomJid, state: "available" });
+      expect(joinRoom).not.toHaveBeenCalled();
+    });
+  });
 });
