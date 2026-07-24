@@ -4,6 +4,10 @@ pub(crate) enum LinkPreviewTelemetryEvent {
     ResolverBlocked,
     ResolverFailed,
     ResolverUnsupported,
+    /// Deferred-resolve admission was refused because the per-node
+    /// concurrency cap is exhausted (#1470); the lookup answered `failed`
+    /// immediately instead of queueing.
+    ResolverSaturated,
     CacheHit,
     CacheMiss,
     TokenInvalid,
@@ -18,6 +22,7 @@ impl LinkPreviewTelemetryEvent {
             Self::ResolverBlocked => "blocked",
             Self::ResolverFailed => "failed",
             Self::ResolverUnsupported => "unsupported",
+            Self::ResolverSaturated => "saturated",
             Self::CacheHit => "cache_hit",
             Self::CacheMiss => "cache_miss",
             Self::TokenInvalid => "token_invalid",
@@ -126,6 +131,7 @@ mod tests {
             LinkPreviewTelemetryEvent::ResolverBlocked.as_str(),
             LinkPreviewTelemetryEvent::ResolverFailed.as_str(),
             LinkPreviewTelemetryEvent::ResolverUnsupported.as_str(),
+            LinkPreviewTelemetryEvent::ResolverSaturated.as_str(),
             LinkPreviewTelemetryEvent::CacheHit.as_str(),
             LinkPreviewTelemetryEvent::CacheMiss.as_str(),
             LinkPreviewTelemetryEvent::TokenInvalid.as_str(),
@@ -140,6 +146,7 @@ mod tests {
                 "blocked",
                 "failed",
                 "unsupported",
+                "saturated",
                 "cache_hit",
                 "cache_miss",
                 "token_invalid",

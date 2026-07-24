@@ -294,6 +294,60 @@ async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
 }
 
 #[tokio::test]
+async fn xep0198_detached_session_records_deferred_iq_result_for_resume_replay() {
+    // #1470: link-preview lookups are answered off the frame dispatch path;
+    // when the requester detaches mid-resolve, the server-generated IQ
+    // *result* is recorded against the detached session exactly like any
+    // other server-generated frame, so resume replays it. This pins the
+    // registry-level contract the deferred-reply path
+    // (`deliver_direct_to_full` → detached fallback) depends on: IQ results
+    // are recordable (no roster/presence gating) and the replay XML
+    // round-trips as the same typed result.
+    let registry = InMemorySmSessionRegistry::new();
+    let jid: FullJid = "alice@example.test/composer".parse().expect("valid jid");
+    registry
+        .store_session(detached_session("preview-stream", jid.as_str()))
+        .await
+        .expect("store detached session");
+
+    let payload = minidom::Element::builder("lookup", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
+        .attr(minidom::rxml::xml_ncname!("status").to_owned(), "ready")
+        .build();
+    let reply = Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Result {
+        from: None,
+        to: Some(Jid::from(jid.clone())),
+        id: "preview-42".to_string(),
+        payload: Some(payload),
+    }));
+
+    assert!(
+        registry
+            .record_stanza_for_detached_bound_resource(&jid, &reply, chrono::Utc::now())
+            .await
+            .expect("record deferred IQ result"),
+        "a detached bound resource must accept a server-generated IQ result"
+    );
+
+    let claimed = registry
+        .claim_session("preview-stream")
+        .await
+        .expect("claim session")
+        .expect("session exists");
+    assert_eq!(claimed.unacked_stanzas.len(), 1);
+    let replay_xml = &claimed.unacked_stanzas[0].stanza_xml;
+    let element: minidom::Element = replay_xml.parse().expect("replay XML parses");
+    assert_eq!(element.name(), "iq");
+    assert_eq!(element.attr("id"), Some("preview-42"));
+    assert_eq!(element.attr("type"), Some("result"));
+    assert!(
+        element
+            .get_child("lookup", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
+            .is_some(),
+        "replayed result keeps the lookup payload: {replay_xml}"
+    );
+}
+
+#[tokio::test]
 async fn xep0198_claimed_session_remains_writable_until_completed() {
     let registry = InMemorySmSessionRegistry::new();
     let jid: FullJid = "alice@example.test/phone".parse().expect("valid jid");
