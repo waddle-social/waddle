@@ -95,4 +95,44 @@ describe("room join retry backoff", () => {
     expect(timer.scheduledDelays).toEqual([4_000]);
     expect(timer.pendingCount).toBe(0);
   });
+
+  test("a new intent can re-adopt a cancelled in-flight attempt", async () => {
+    const timer = new ManualRoomJoinRetryTimer();
+    const coordinator = new RoomJoinRetryCoordinator({
+      timer,
+      random: () => 1,
+    });
+    let rejectAttempt!: (error: Error) => void;
+    const firstRetry = mock(() => new Promise<void>((_resolve, reject) => {
+      rejectAttempt = reject;
+    }));
+    const first = coordinator.schedule("busy@muc.example.com", {
+      isEligible: () => true,
+      retry: firstRetry,
+    });
+
+    timer.runNext();
+    expect(firstRetry).toHaveBeenCalledTimes(1);
+    coordinator.cancel("busy@muc.example.com");
+    await expect(first).rejects.toThrow("Room join retry cancelled");
+
+    const secondRetry = mock(async () => undefined);
+    coordinator.reactivate("busy@muc.example.com", {
+      isEligible: () => true,
+      retry: secondRetry,
+    });
+    const second = coordinator.schedule("busy@muc.example.com", {
+      isEligible: () => true,
+      retry: secondRetry,
+    });
+
+    expect(timer.scheduledDelays).toEqual([4_000, 4_000]);
+    rejectAttempt(new Error("resource-constraint"));
+    await Promise.resolve();
+    timer.runNext();
+    await second;
+
+    expect(secondRetry).toHaveBeenCalledTimes(1);
+    expect(timer.pendingCount).toBe(0);
+  });
 });

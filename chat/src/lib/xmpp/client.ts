@@ -65,7 +65,10 @@ import {
 import { MucAdmin, type AdminUsersPage } from "./client-muc-admin";
 import { PresenceManager } from "./client-presence";
 import { VCardManager } from "./client-vcard";
-import { RoomJoinRetryCoordinator } from "./room-join-retry";
+import {
+  RoomJoinRetryCoordinator,
+  type ScheduleRoomJoinRetryOptions,
+} from "./room-join-retry";
 import {
   PubsubManager,
   type DmBookmarkItem,
@@ -1239,7 +1242,19 @@ export class BrowserXmppClient {
     if (!focused && !retained && !autoJoin) return;
     const source = focused ? "focused" : retained ? "retained" : "autojoin";
 
-    void this.roomJoinRetry.schedule(key, {
+    void this.roomJoinRetry.schedule(
+      key,
+      this.roomJoinRetryOptions(roomJid, key, xmpp, source),
+    ).catch(() => undefined);
+  }
+
+  private roomJoinRetryOptions(
+    roomJid: string,
+    key: string,
+    xmpp: XmppClientInstance,
+    source: "focused" | "retained" | "autojoin",
+  ): ScheduleRoomJoinRetryOptions {
+    return {
       // A focused retry belongs to that navigation intent and stops as soon
       // as focus moves elsewhere. A background retry likewise belongs to the
       // retained/autojoin source that admitted it; another source appearing
@@ -1252,7 +1267,7 @@ export class BrowserXmppClient {
             : this.autoJoinRoomJids.some((candidate) => this.roomJoinKey(candidate) === key)
       ),
       retry: () => this.ensureJoined(roomJid),
-    }).catch(() => undefined);
+    };
   }
 
   private waitForRoomSelfPresence(roomJid: string, requestedNick: string): Promise<void> {
@@ -1292,7 +1307,7 @@ export class BrowserXmppClient {
         this.roomJoinWaiters.delete(key);
         resolveJoin();
       },
-      reject: (error) => {
+      reject: (error: Error) => {
         clearTimeout(timeout);
         this.roomJoinWaiters.delete(key);
         rejectJoin(error);
@@ -1324,6 +1339,20 @@ export class BrowserXmppClient {
     if (scheduledRetry) return scheduledRetry;
     const existing = this.joinedMucs.get(key);
     if (existing) {
+      const xmpp = this.xmpp;
+      if (
+        xmpp
+        && this.currentRoom !== null
+        && this.roomJoinKey(this.currentRoom) === key
+      ) {
+        // A quick return adopts the still-running wire attempt. If it fails,
+        // the new focused intent may schedule another backoff window without
+        // sending a duplicate join presence in the meantime.
+        this.roomJoinRetry.reactivate(
+          key,
+          this.roomJoinRetryOptions(roomJid, key, xmpp, "focused"),
+        );
+      }
       const existingToken = this.joinedMucJoinTokens.get(key);
       await existing;
       if (existingToken && this.joinedMucJoinTokens.get(key) !== existingToken) {
@@ -1503,7 +1532,14 @@ export class BrowserXmppClient {
     const xmpp = this.xmpp;
     if (!xmpp) return;
     if (this.currentRoom && this.roomJoinKey(this.currentRoom) !== this.roomJoinKey(nextRoom)) {
-      this.roomJoinRetry.cancel(this.roomJoinKey(this.currentRoom));
+      const currentRoom = this.currentRoom;
+      const currentRoomKey = this.roomJoinKey(currentRoom);
+      const cancelledCurrentRetry = this.roomJoinRetry.cancel(currentRoomKey);
+      if (cancelledCurrentRetry) {
+        const cancellation = new Error("Room join retry cancelled");
+        this.revokeMucReadiness(currentRoom);
+        this.cancelRoomJoinWaiter(currentRoom, cancellation);
+      }
     }
     this.currentRoom = nextRoom;
     this.dispatchFocusedRoomHandlers();

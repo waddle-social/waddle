@@ -24,7 +24,7 @@ type RunningRoomJoinRetry = {
   cancelled: boolean;
 };
 
-type ScheduleRoomJoinRetryOptions = {
+export type ScheduleRoomJoinRetryOptions = {
   isEligible: () => boolean;
   retry: () => Promise<void>;
 };
@@ -113,6 +113,13 @@ export class RoomJoinRetryCoordinator {
     // nobody is currently awaiting the shared promise.
     void promise.catch(() => undefined);
     return promise;
+  }
+
+  reactivate(roomKey: string, options: ScheduleRoomJoinRetryOptions): void {
+    const running = this.running.get(roomKey);
+    if (!running?.cancelled) return;
+    running.cancelled = false;
+    running.options = options;
   }
 
   cancel(roomKey: string): void {

@@ -619,6 +619,85 @@ describe("telemetry module no-op behaviour", () => {
     }
   });
 
+  test("each self-presence timeout attempt emits one Faro exception across listeners and spans", async () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+    const retryTimer = new ManualRoomJoinRetryTimer();
+    const observedByFirstListener: Error[] = [];
+    const observedBySecondListener: Error[] = [];
+    client.onError((event) => {
+      if (event.kind === "muc-join-timeout" && event.cause instanceof Error) {
+        observedByFirstListener.push(event.cause);
+      }
+    });
+    client.onError((event) => {
+      if (event.kind === "muc-join-timeout" && event.cause instanceof Error) {
+        observedBySecondListener.push(event.cause);
+      }
+    });
+
+    const roomJid = roomBareJidFor(session(), "slow");
+    const joinRoom = mock(async () => undefined);
+    const internal = client as unknown as {
+      xmpp: { join_room: typeof joinRoom };
+      connected: boolean;
+      retainedJoinedRoomJids: Set<string>;
+      roomJoinRetry: RoomJoinRetryCoordinator;
+    };
+    internal.xmpp = { join_room: joinRoom };
+    internal.connected = true;
+    internal.retainedJoinedRoomJids.add(roomJid);
+    internal.roomJoinRetry = new RoomJoinRetryCoordinator({
+      timer: retryTimer,
+      random: () => 1,
+    });
+
+    const originalSetTimeout = globalThis.setTimeout;
+    let selfPresenceTimeout: (() => void) | null = null;
+    globalThis.setTimeout = ((callback: TimerHandler, delayMs?: number) => {
+      if (delayMs === 15_000 && typeof callback === "function") {
+        selfPresenceTimeout = callback;
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return originalSetTimeout(callback, delayMs);
+    }) as typeof setTimeout;
+
+    try {
+      const firstAttempt = client.fanOutAutoJoin([roomJid]);
+      await Promise.resolve();
+      expect(selfPresenceTimeout).not.toBeNull();
+      selfPresenceTimeout?.();
+      await firstAttempt;
+
+      expect(stub.errors).toHaveLength(1);
+      expect(stub.errors[0].error.message).toBe("room-self-presence-timeout");
+
+      const firstJoinListener = client.ensureJoined(roomJid);
+      const secondJoinListener = client.ensureJoined(roomJid);
+      retryTimer.runNext();
+      await Promise.resolve();
+      expect(selfPresenceTimeout).not.toBeNull();
+      selfPresenceTimeout?.();
+      await Promise.allSettled([firstJoinListener, secondJoinListener]);
+
+      expect(joinRoom).toHaveBeenCalledTimes(2);
+      expect(stub.errors).toHaveLength(2);
+      expect(stub.errors.map(({ error }) => error.message)).toEqual([
+        "room-self-presence-timeout",
+        "room-self-presence-timeout",
+      ]);
+      expect(observedByFirstListener).toHaveLength(2);
+      expect(observedBySecondListener).toHaveLength(2);
+      for (const failure of observedByFirstListener) {
+        expect(__recordSpanExceptionForTesting(failure)).toBe(0);
+      }
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
   test("non-join XMPP failures remain available to span exception recording", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);

@@ -1139,6 +1139,98 @@ describe("client send readiness", () => {
     ]);
   });
 
+  test("returning during an in-flight retry re-adopts it without a duplicate join", async () => {
+    const busyRoomJid = roomBareJidFor(session(), "busy");
+    const nextRoomJid = roomBareJidFor(session(), "next");
+    const client = new BrowserXmppClient(session());
+    const retryTimer = new ManualRoomJoinRetryTimer();
+    const retryCoordinator = new RoomJoinRetryCoordinator({
+      timer: retryTimer,
+      random: () => 1,
+    });
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+      muc_jid?: string;
+    }) => void) | null = null;
+    const joinRoom = mock(async () => undefined);
+    const xmpp = {
+      join_room: joinRoom,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    const state = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      wireEvents: (xmpp: typeof xmpp) => void;
+      roomJoinRetry: RoomJoinRetryCoordinator;
+      fullJid: string;
+    };
+    state.xmpp = xmpp;
+    state.connected = true;
+    state.roomJoinRetry = retryCoordinator;
+    state.wireEvents(xmpp);
+
+    const firstSwitch = client.switchRoom("", "busy");
+    await Promise.resolve();
+    onPresence?.({
+      from: `${busyRoomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await expect(firstSwitch).rejects.toThrow(
+      "Channel presence was rejected. Try again in a moment.",
+    );
+
+    retryTimer.runNext();
+    await Promise.resolve();
+    expect(joinRoom).toHaveBeenCalledTimes(2);
+
+    const nextSwitch = client.switchRoom("", "next");
+    await Promise.resolve();
+    onPresence?.({
+      from: `${nextRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+      muc_jid: state.fullJid,
+    });
+    await nextSwitch;
+
+    const returnSwitch = client.switchRoom("", "busy");
+    await Promise.resolve();
+    expect(joinRoom).toHaveBeenCalledTimes(2);
+    onPresence?.({
+      from: `${busyRoomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await expect(returnSwitch).rejects.toThrow(
+      "Channel presence was rejected. Try again in a moment.",
+    );
+
+    expect(retryTimer.scheduledDelays).toEqual([4_000, 4_000]);
+    expect(retryTimer.pendingCount).toBe(1);
+    const recovered = client.ensureJoined(busyRoomJid);
+    retryTimer.runNext();
+    await Promise.resolve();
+    onPresence?.({
+      from: `${busyRoomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+      muc_jid: state.fullJid,
+    });
+    await recovered;
+
+    expect(joinRoom).toHaveBeenCalledTimes(3);
+    expect(retryTimer.pendingCount).toBe(0);
+  });
+
   test("a room removed from retained state is not retried", async () => {
     const roomJid = roomBareJidFor(session(), "removed");
     const client = new BrowserXmppClient(session(), {
