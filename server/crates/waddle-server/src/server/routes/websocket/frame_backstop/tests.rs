@@ -191,6 +191,33 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
     );
 }
 
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn iq_timeout_exports_span_status_error() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let stanza = iq_get_stanza("disco-1", "alice@example.com/web", "upload.example.com");
+    let backstop = StanzaBackstop::capture(&stanza, None);
+
+    let mut fut = Box::pin(run_with_backstop(backstop, pending::<Vec<String>>()));
+    assert!(
+        futures::poll!(fut.as_mut()).is_pending(),
+        "must not resolve before the wedge budget elapses"
+    );
+    tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
+    let (_, disposition) = responses_and_disposition(fut.await);
+    assert_eq!(disposition, InboundDisposition::Handled);
+
+    assert!(matches!(
+        spans.status_of("xmpp.stanza.dispatch"),
+        Some(opentelemetry::trace::Status::Error { .. })
+    ));
+    assert_eq!(
+        spans.attribute_of("xmpp.stanza.dispatch", "condition"),
+        Some("resource-constraint".to_string()),
+        "the timeout fallback should expose its retryable stanza condition"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn message_timeout_yields_no_response() {
     let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;

@@ -2,6 +2,7 @@ use super::*;
 use crate::permissions::CheckPermission;
 use std::io;
 use std::sync::{Arc, Mutex};
+use tracing::Instrument as _;
 
 #[derive(Clone, Default)]
 struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
@@ -1086,9 +1087,10 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
 /// rejected with `<registration-required/>`, and that denial must now
 /// be visible — the `waddle.muc.admission.denied` counter records it,
 /// keyed by the stanza error condition, through the metric-reader seam.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn managed_registration_required_denial_increments_admission_counter() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
     let state = create_test_websocket_state().await;
     let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
     let room_jid: BareJid = "locked-space@muc.example.com".parse().expect("room jid");
@@ -1111,6 +1113,10 @@ async fn managed_registration_required_denial_increments_admission_counter() {
     .await
     .expect("channel upsert");
 
+    // Match the production dispatch span declaration so the denial helper
+    // records the allowlisted condition without classifying policy as failure.
+    let dispatch_span =
+        tracing::info_span!("xmpp.stanza.dispatch", condition = tracing::field::Empty);
     let denied = handle_muc_join(
         state.as_ref(),
         "example.com",
@@ -1120,6 +1126,7 @@ async fn managed_registration_required_denial_increments_admission_counter() {
         None,
         &Some(session),
     )
+    .instrument(dispatch_span)
     .await;
     assert_eq!(denied.len(), 1);
     assert!(
@@ -1133,6 +1140,16 @@ async fn managed_registration_required_denial_increments_admission_counter() {
         ),
         Some(1),
         "the registration-required admission denial must increment the counter exactly once"
+    );
+    assert_eq!(
+        spans.attribute_of("xmpp.stanza.dispatch", "condition"),
+        Some("registration-required".to_string()),
+        "the exported dispatch span must carry the allowlisted stanza condition"
+    );
+    assert_eq!(
+        spans.status_of("xmpp.stanza.dispatch"),
+        Some(opentelemetry::trace::Status::Unset),
+        "a conformant XEP-0045 admission denial is not an internal server failure"
     );
     assert!(
         get_room_actor(state.as_ref(), &room_jid).await.is_none(),
@@ -1310,6 +1327,64 @@ async fn managed_internal_server_error_denial_emits_admission_telemetry() {
         denial_log.contains("\"resolver_outcome\":\"session-jid-malformed\""),
         "{denial_log}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_internal_admission_failure_exports_error_dispatch_span() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let state = create_test_websocket_state().await;
+    let malformed_session = crate::auth::Session::new("not a jid", "alice", "alice");
+    let room_jid: BareJid = "resolver-span-failure@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "resolver-span-failure".to_string(),
+            name: "Resolver Span Failure".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    // This malformed authenticated identity is an internal resolver failure,
+    // not a policy denial, so the same condition attribute carries ERROR status.
+    let dispatch_span =
+        tracing::info_span!("xmpp.stanza.dispatch", condition = tracing::field::Empty);
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(malformed_session),
+    )
+    .instrument(dispatch_span)
+    .await;
+
+    assert!(
+        denied[0].contains("internal-server-error"),
+        "malformed identity must fail closed: {denied:?}"
+    );
+    assert_eq!(
+        spans.attribute_of("xmpp.stanza.dispatch", "condition"),
+        Some("internal-server-error".to_string())
+    );
+    assert!(matches!(
+        spans.status_of("xmpp.stanza.dispatch"),
+        Some(opentelemetry::trace::Status::Error { .. })
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

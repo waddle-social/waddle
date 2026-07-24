@@ -17,7 +17,7 @@ use kameo::error::SendError;
 use kameo::message::Context;
 use kameo::Actor;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::connection_registry::{ConnectionEntry, ForceDetachOutcome, ForceDetachRequest};
 use super::user_actor::delivery::GetConnectionEntry;
@@ -85,6 +85,11 @@ impl UserRegistryActor {
         }
     }
 
+    #[tracing::instrument(
+        name = "xmpp.user_registry.acquire_claim",
+        skip_all,
+        fields(otel.status_code = tracing::field::Empty)
+    )]
     async fn acquire_user_claim(
         &self,
         bare_jid: &BareJid,
@@ -101,7 +106,10 @@ impl UserRegistryActor {
                     .await
             }
             Err(error) => {
-                warn!(
+                // This is a claim-store failure, not ordinary contention; the
+                // explicit status survives the typed actor-error translation.
+                crate::telemetry::mark_span_error();
+                error!(
                     jid = %bare_jid,
                     %error,
                     "UserActor claim acquisition failed"
@@ -111,6 +119,11 @@ impl UserRegistryActor {
         }
     }
 
+    #[tracing::instrument(
+        name = "xmpp.user_registry.steal_stale_claim",
+        skip_all,
+        fields(otel.status_code = tracing::field::Empty)
+    )]
     async fn steal_from_dead_user_owner(
         &self,
         entity: &Entity,
@@ -119,8 +132,13 @@ impl UserRegistryActor {
     ) -> Result<UserClaimLease, UserRegistryError> {
         let snapshot = match self.claim_store.current_claim(entity).await {
             Ok(Some(snapshot)) => snapshot,
-            Ok(None) | Err(_) => {
-                return Err(UserRegistryError::ClaimHeldByAnotherNode(bare_jid.clone()))
+            Ok(None) => return Err(UserRegistryError::ClaimHeldByAnotherNode(bare_jid.clone())),
+            Err(error) => {
+                // A failed ownership lookup cannot safely be treated as proof
+                // that the foreign claim disappeared.
+                crate::telemetry::mark_span_error();
+                error!(jid = %bare_jid, %error, "UserActor claim owner lookup failed");
+                return Err(UserRegistryError::ClaimHeldByAnotherNode(bare_jid.clone()));
             }
         };
         if snapshot.owner_lease_fresh {
@@ -194,6 +212,11 @@ impl UserRegistryActor {
         Ok(self.spawn_user_actor(bare_jid, claim))
     }
 
+    #[tracing::instrument(
+        name = "xmpp.user_registry.release_claim",
+        skip_all,
+        fields(otel.status_code = tracing::field::Empty)
+    )]
     async fn release_user_claim(&self, bare_jid: &BareJid, claim: &UserClaimLease) {
         let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
         if let Err(error) = self
@@ -201,7 +224,10 @@ impl UserRegistryActor {
             .release(&entity, &claim.owner, claim.epoch)
             .await
         {
-            warn!(
+            // Release is best-effort for actor cleanup, but a backend failure
+            // leaves ownership behind and must remain visible in trace queries.
+            crate::telemetry::mark_span_error();
+            error!(
                 jid = %bare_jid,
                 owner = %claim.owner.node_id,
                 epoch = claim.epoch.0,
@@ -211,6 +237,11 @@ impl UserRegistryActor {
         }
     }
 
+    #[tracing::instrument(
+        name = "xmpp.user_registry.validate_claim",
+        skip_all,
+        fields(otel.status_code = tracing::field::Empty)
+    )]
     async fn validate_existing_user_entry_claim(
         &self,
         bare_jid: &BareJid,
@@ -242,7 +273,10 @@ impl UserRegistryActor {
                 UserEntryClaimStatus::ProvenStale
             }
             Err(error) => {
-                warn!(
+                // Refusing reuse is the safe response, but the unavailable
+                // fence proof is still an internal dependency failure.
+                crate::telemetry::mark_span_error();
+                error!(
                     jid = %bare_jid,
                     epoch = entry.claim.epoch.0,
                     %error,
@@ -253,6 +287,11 @@ impl UserRegistryActor {
         }
     }
 
+    #[tracing::instrument(
+        name = "xmpp.user_registry.reuse_claim",
+        skip_all,
+        fields(otel.status_code = tracing::field::Empty)
+    )]
     async fn existing_user_actor_for_current_claim(
         &mut self,
         bare_jid: &BareJid,
@@ -261,7 +300,10 @@ impl UserRegistryActor {
             return Ok(None);
         };
         if !entry.actor_ref.is_alive() {
-            debug!(jid = %bare_jid, "Detected dead UserActor; failing fast");
+            // A registry entry pointing at a dead actor is an internal state
+            // loss even though the caller receives a typed recoverable error.
+            crate::telemetry::mark_span_error();
+            error!(jid = %bare_jid, "Detected dead UserActor; failing fast");
             return Err(self.mark_actor_state_lost(bare_jid).await);
         }
         match self
@@ -287,6 +329,11 @@ impl UserRegistryActor {
         Ok(None)
     }
 
+    #[tracing::instrument(
+        name = "xmpp.user_registry.force_detach_stale",
+        skip_all,
+        fields(otel.status_code = tracing::field::Empty)
+    )]
     async fn force_detach_stale_actor_resources(
         &self,
         bare_jid: &BareJid,
@@ -300,7 +347,10 @@ impl UserRegistryActor {
         {
             Ok(resources) => resources,
             Err(error) => {
-                warn!(
+                // Refused claim reuse is an internal actor-coordination
+                // failure, so mark the active operation before returning false.
+                crate::telemetry::mark_span_error();
+                error!(
                     jid = %bare_jid,
                     ?error,
                     "failed to enumerate stale UserActor resources; refusing claim reuse"
@@ -319,7 +369,8 @@ impl UserRegistryActor {
                 Ok(Some(entry)) => entry,
                 Ok(None) => continue,
                 Err(error) => {
-                    warn!(
+                    crate::telemetry::mark_span_error();
+                    error!(
                         jid = %jid,
                         ?error,
                         "failed to read stale UserActor resource entry; refusing claim reuse"
@@ -333,7 +384,8 @@ impl UserRegistryActor {
                 ack,
             };
             if let Err(error) = entry.force_detach_sender().try_send(request) {
-                warn!(
+                crate::telemetry::mark_span_error();
+                error!(
                     jid = %jid,
                     ?error,
                     "failed to queue stale UserActor resource force-detach; refusing claim reuse"
@@ -349,7 +401,8 @@ impl UserRegistryActor {
             match outcome {
                 Ok(Ok(ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted)) => {}
                 Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => {
-                    warn!(
+                    crate::telemetry::mark_span_error();
+                    error!(
                         jid = %jid,
                         requester = %bare_jid,
                         "stale UserActor resource force-detach identity mismatch; refusing claim reuse"
@@ -357,14 +410,16 @@ impl UserRegistryActor {
                     return false;
                 }
                 Ok(Err(_closed)) => {
-                    warn!(
+                    crate::telemetry::mark_span_error();
+                    error!(
                         jid = %jid,
                         "stale UserActor resource force-detach ack channel closed; refusing claim reuse"
                     );
                     return false;
                 }
                 Err(_elapsed) => {
-                    warn!(
+                    crate::telemetry::mark_span_error();
+                    error!(
                         jid = %jid,
                         timeout_ms = CHILD_ACTOR_TIMEOUT.as_millis() as u64,
                         "stale UserActor resource force-detach timed out; refusing claim reuse"

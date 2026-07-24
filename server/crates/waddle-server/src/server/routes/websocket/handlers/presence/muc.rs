@@ -676,6 +676,23 @@ struct JoinAdmissionDenial {
     message: &'static str,
 }
 
+fn record_stanza_error_condition(
+    condition: waddle_xmpp::telemetry::attributes::StanzaErrorCondition,
+) {
+    // The dispatch span declares this bounded field; recording it here keeps
+    // rejection taxonomy queryable without promoting protocol denials to
+    // failed operations.
+    tracing::Span::current().record("condition", condition.as_str());
+}
+
+fn mark_internal_join_failure(
+    condition: waddle_xmpp::telemetry::attributes::StanzaErrorCondition,
+    description: &'static str,
+) {
+    record_stanza_error_condition(condition);
+    crate::telemetry::mark_span_error(description);
+}
+
 /// Central choke point for join-admission denials covered by #1315.
 ///
 /// Every managed-channel join rejection routes through here so the
@@ -694,6 +711,16 @@ fn deny_join_admission(
     managed_channel_confirmed: bool,
     denial: JoinAdmissionDenial,
 ) -> Vec<String> {
+    record_stanza_error_condition(denial.condition);
+    if matches!(
+        denial.condition,
+        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError
+    ) {
+        // `internal-server-error` is emitted only for server-side admission
+        // failures; policy conditions such as `registration-required` remain
+        // successful protocol handling with an UNSET span status.
+        crate::telemetry::mark_span_error("MUC join admission failed internally");
+    }
     if managed_channel_confirmed {
         info!(
             room = %room_jid,
@@ -1355,6 +1382,10 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         waddle_xmpp::muc::room_actor::RoomActorError::RestorePending
                     )
                 ) {
+                    mark_internal_join_failure(
+                        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
+                        "MUC durable restore remained pending",
+                    );
                     return vec![build_muc_presence_error_xml(
                         room_jid,
                         &nick,
@@ -1373,6 +1404,10 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         waddle_xmpp::muc::room_actor::RoomActorError::OwnershipUnavailable
                     )
                 ) {
+                    mark_internal_join_failure(
+                        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
+                        "MUC ownership reconciliation unavailable",
+                    );
                     return vec![build_muc_presence_error_xml(
                         room_jid,
                         &nick,

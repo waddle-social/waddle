@@ -56,10 +56,17 @@ use crate::clustering::NodeId;
 use crate::db::{Database, DatabaseError, Transaction};
 
 fn db_err(error: DatabaseError) -> XmppError {
+    // Durable MUC operations translate database failures into typed XMPP
+    // errors, so record the internal failure before returning the protocol
+    // response to the caller.
+    crate::telemetry::mark_span_error("MUC durable storage operation failed");
     XmppError::internal(format!("MUC durable store backend error: {error}"))
 }
 
 fn fence_db_unavailable(error: DatabaseError, fence: &RoomClaimFenceContext) -> XmppError {
+    // An unavailable fence proof is a backend failure, unlike a successful
+    // proof that reports ownership was lost.
+    crate::telemetry::mark_span_error("MUC durable ownership fence check failed");
     tracing::warn!(
         %error,
         entity = %fence.entity,

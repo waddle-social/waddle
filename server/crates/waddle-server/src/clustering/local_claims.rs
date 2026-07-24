@@ -161,6 +161,7 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
     /// reclaim and the general reaper share one hydration implementation.
     /// A no-op before `wire` runs, mirroring `demote`/`owned`'s identical
     /// unwired behavior.
+    #[tracing::instrument(name = "clustering.sm_session.hydrate_reclaimed", skip_all)]
     async fn hydrate_reclaimed(
         &self,
         entities: &[(
@@ -191,6 +192,11 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                         .release_reclaimed_claim(entity, &fence, *reservation)
                         .await
                     {
+                        // Internal reclaim repair failure should stay visible for postmortem
+                        // analysis: leave ownership in place and let retry logic reclaim later.
+                        crate::telemetry::mark_span_error(
+                            "sm_session_rehydrate: failed to release reclaimed claim",
+                        );
                         tracing::warn!(
                             entity_id = %entity.id,
                             %error,
@@ -200,6 +206,12 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                 }
                 Ok(_) => {}
                 Err(error) => {
+                    // Rehydrate failed before ownership transfer: this is not protocol
+                    // failure, but it should still export a failed span for incident
+                    // detection and operator alerting.
+                    crate::telemetry::mark_span_error(
+                        "sm_session_rehydrate: failed to hydrate reclaimed claim",
+                    );
                     tracing::warn!(
                         entity_id = %entity.id,
                         %error,
@@ -537,6 +549,12 @@ impl UserLocalClaims {
             Ok(Some(actor_ref)) => actor_ref,
             Ok(None) => return Vec::new(),
             Err(error) => {
+                // Missing actor handle after lookup means this claim is no longer
+                // actively represented; demotion continues via best-effort cleanup,
+                // but the span must still record the dependency failure.
+                crate::telemetry::mark_span_error(
+                    "user_local_claims: user registry lookup failed before force-detach",
+                );
                 tracing::warn!(
                     jid = %bare_jid,
                     ?error,
@@ -553,6 +571,12 @@ impl UserLocalClaims {
         {
             Ok(resources) => resources,
             Err(error) => {
+                // Resource enumeration requires a live actor for force-detach;
+                // failure here means an internal path diverged from best-effort
+                // cleanup assumptions.
+                crate::telemetry::mark_span_error(
+                    "user_local_claims: failed to enumerate user actor resources",
+                );
                 tracing::warn!(
                     jid = %bare_jid,
                     ?error,
@@ -591,6 +615,12 @@ impl UserLocalClaims {
                 jid = %bare_jid,
                 resource_count = resources.len(),
                 "UserLocalClaims::demote: no ConnectionRegistry wired; cannot force-detach live resources"
+            );
+            // Without ConnectionRegistry we cannot complete demotion cleanup for live
+            // connections on this process; this is an internal miswire/internal
+            // dependency failure.
+            crate::telemetry::mark_span_error(
+                "user_local_claims: no connection registry available for force-detach",
             );
             return;
         };
@@ -652,11 +682,21 @@ impl UserLocalClaims {
                             requester = %bare_jid,
                             "UserLocalClaims::demote: force-detach identity mismatch; leaving registry entry untouched"
                         );
+                        // Identity changed while detach was in flight; keep failure
+                        // visibility in traces for later reconciliation debugging.
+                        crate::telemetry::mark_span_error(
+                            "user_local_claims: force-detach identity mismatch",
+                        );
                     }
                     Ok(Err(_closed)) => {
                         tracing::warn!(
                             jid = %jid,
                             "UserLocalClaims::demote: force-detach ack channel closed before response; leaving registry entry for connection-owned cleanup"
+                        );
+                        // Ack channel closure is an internal detach-path failure even
+                        // if cleanup can continue asynchronously.
+                        crate::telemetry::mark_span_error(
+                            "user_local_claims: force-detach ack channel closed",
                         );
                     }
                     Err(_elapsed) => {
@@ -665,6 +705,12 @@ impl UserLocalClaims {
                             timeout_ms = USER_FORCE_DETACH_ACK_TIMEOUT.as_millis() as u64,
                             "UserLocalClaims::demote: force-detach timed out; leaving registry entry so the connection task does not misclassify cleanup as superseded"
                         );
+                        // Timeout indicates stalled force-detach coordination; mark span
+                        // failed to keep this in incident triage, even though it remains
+                        // best-effort.
+                        crate::telemetry::mark_span_error(
+                            "user_local_claims: force-detach timed out",
+                        );
                     }
                 },
                 Err(error) => {
@@ -672,6 +718,11 @@ impl UserLocalClaims {
                         jid = %jid,
                         ?error,
                         "UserLocalClaims::demote: force-detach request could not be queued; leaving registry entry for connection-owned cleanup"
+                    );
+                    // If the detach request cannot be queued, we intentionally defer cleanup,
+                    // but this is still an internal failure and should become a span error.
+                    crate::telemetry::mark_span_error(
+                        "user_local_claims: force-detach request could not be queued",
                     );
                 }
             }
@@ -726,6 +777,7 @@ impl LocallyClaimedEntities for UserLocalClaims {
         owned
     }
 
+    #[tracing::instrument(name = "clustering.user_actor.demote", skip_all)]
     async fn demote(&self, entity: &Entity) {
         let Some(registry) = self.registry.get() else {
             return;
@@ -757,6 +809,9 @@ impl LocallyClaimedEntities for UserLocalClaims {
             }
             Ok(false) => {}
             Err(error) => {
+                // UserActor demotion failed in local-claim cleanup; this is an internal
+                // operation failure and should remain queryable by span status.
+                crate::telemetry::mark_span_error("user_local_claims: user actor demotion failed");
                 tracing::warn!(
                     jid = %bare_jid,
                     ?error,
@@ -822,6 +877,7 @@ impl LocallyClaimedEntities for UserLocalClaims {
         }
     }
 
+    #[tracing::instrument(name = "clustering.user_actor.demote_owned_by", skip_all)]
     async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
         let Some(registry) = self.registry.get() else {
             return;
@@ -861,6 +917,11 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    // Exact-owner demotion failed after ownership check; this is an
+                    // internal consistency error during cluster recovery.
+                    crate::telemetry::mark_span_error(
+                        "user_local_claims: exact-owner demotion failed",
+                    );
                     tracing::warn!(jid = %bare_jid, ?error, "exact-owner UserActor demotion failed");
                 }
             }

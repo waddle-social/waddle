@@ -431,13 +431,10 @@ pub fn init_local() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// Mark the current tracing span as failed so it matches Tempo
 /// `status=error` queries (#1428).
 ///
-/// The single home for the idiom: every failure site marks its span
-/// through this helper, keeping the "what counts as an error span"
-/// decision in one place. The description is deliberately
-/// `&'static str`: span status is exported trace metadata, so it must
-/// be a short, stable phrase — full error text (which can embed raw
-/// row values or DSN-adjacent detail) belongs only on the adjacent
-/// log line.
+/// The single home for the server-side idiom: every warn-level failure site
+/// marks its span through this helper. The protocol crate records the reserved
+/// `otel.status_code` tracing field instead, avoiding a dependency on the
+/// production OpenTelemetry tracing layer.
 pub(crate) fn mark_span_error(description: &'static str) {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     tracing::Span::current().set_status(opentelemetry::trace::Status::error(description));
