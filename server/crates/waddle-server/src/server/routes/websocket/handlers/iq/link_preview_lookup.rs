@@ -407,56 +407,67 @@ async fn deliver_deferred_lookup_reply(
     reply_iq: Iq,
 ) {
     let stanza = Stanza::Iq(Box::new(reply_iq));
-    match deliver_direct_to_full(
-        Some(user_registry),
-        Some(sm_session_registry),
-        requester,
-        &stanza,
-    )
-    .await
-    {
-        FullJidDeliveryOutcome::Delivered => {}
-        FullJidDeliveryOutcome::QueuedDetached => debug!(
-            requester = %requester,
-            "deferred link-preview reply recorded for detached SM session"
-        ),
-        FullJidDeliveryOutcome::Unavailable => {
-            // Neither a live actor resource nor a detached/claimed session —
-            // a resume may have completed between the delivery attempt and
-            // the detached-record fallback (resume consumes the session), so
-            // retry once before dropping the reply. At-least-once is the
-            // contract: a duplicate result replayed from the displacement
-            // corner is ignored by id (RFC 6120 §8.2.3). If the retry still
-            // finds nobody, the requester is truly gone and the client's own
-            // IQ timeout owns the failure (previews fail open, #822).
-            match deliver_direct_to_full(
-                Some(user_registry),
-                Some(sm_session_registry),
-                requester,
-                &stanza,
-            )
-            .await
-            {
-                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
-                    debug!(
-                        requester = %requester,
-                        "deferred link-preview reply delivered on post-resume retry"
-                    );
-                }
-                _ => debug!(
+    // Bounded retry tail over the whole delivery attempt. It covers two
+    // distinct transient failures with one loop:
+    //
+    // - `Unavailable`: a resume completed between the live attempt and the
+    //   detached-record fallback (resume consumes the session) — the next
+    //   attempt finds the freshly resumed connection.
+    // - `Dropped`: a CONNECTED requester's outbound channel stayed full
+    //   through `deliver_direct_to_full`'s short in-line retry schedule
+    //   (e.g. an XEP-0198 send-window pause). The old synchronous path
+    //   could not lose the reply here — it wrote on the connection's own
+    //   loop — so give the channel a few bounded, spaced chances to drain
+    //   before conceding.
+    //
+    // Retrying `Dropped` is safe for THIS stanza class even though it can
+    // include maybe-enqueued ask failures: a duplicate IQ *result* is
+    // ignored by id (RFC 6120 §8.2.3), unlike the groupchat reflections
+    // whose #1263 semantics forbid exactly this kind of replay. Total added
+    // wait is ~5.25 s — far below the client's ~30 s IQ budget — the task
+    // count stays bounded by the admission semaphore's throughput, and the
+    // resolver permit was released before delivery, so no fetch slot is
+    // pinned while waiting.
+    const DELIVERY_RETRY_DELAYS: [std::time::Duration; 3] = [
+        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(4),
+    ];
+    let mut delays = DELIVERY_RETRY_DELAYS.iter();
+    loop {
+        match deliver_direct_to_full(
+            Some(user_registry),
+            Some(sm_session_registry),
+            requester,
+            &stanza,
+        )
+        .await
+        {
+            FullJidDeliveryOutcome::Delivered => return,
+            FullJidDeliveryOutcome::QueuedDetached => {
+                debug!(
                     requester = %requester,
-                    "deferred link-preview reply dropped; requester disconnected without \
-                     resumable session"
-                ),
+                    "deferred link-preview reply recorded for detached SM session"
+                );
+                return;
+            }
+            #[cfg(feature = "clustering")]
+            FullJidDeliveryOutcome::MaybeCommitted => return,
+            outcome @ (FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped) => {
+                let Some(delay) = delays.next() else {
+                    // The requester is either truly gone or unrecoverably
+                    // backpressured; their own IQ timeout owns the failure
+                    // (previews fail open, #822).
+                    warn!(
+                        requester = %requester,
+                        ?outcome,
+                        "deferred link-preview reply dropped after bounded delivery retries"
+                    );
+                    return;
+                };
+                tokio::time::sleep(*delay).await;
             }
         }
-        FullJidDeliveryOutcome::Dropped => warn!(
-            requester = %requester,
-            "deferred link-preview reply dropped by delivery path (full channel or \
-             detached-record failure)"
-        ),
-        #[cfg(feature = "clustering")]
-        FullJidDeliveryOutcome::MaybeCommitted => {}
     }
 }
 

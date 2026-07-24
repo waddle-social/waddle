@@ -1141,15 +1141,23 @@ async fn managed_registration_required_denial_increments_admission_counter() {
         Some(1),
         "the registration-required admission denial must increment the counter exactly once"
     );
+    // Assert on the RECORDED span field, not the exported span: this
+    // join's scope fans out actor asks, and the dispatch span only exports
+    // once every kameo child (`actor.handle_message` / `actor.lifecycle`,
+    // parented under the caller's span) closes — a straggling or
+    // spawned-inside-the-scope actor can hold it open past this assertion
+    // point indefinitely (#1479). Field records happen synchronously on
+    // the denial call path, so the observer sees them deterministically.
+    // The record→OTel-attribute export fidelity, and the Unset-vs-Error
+    // status split, stay pinned by `managed_internal_admission_failure_
+    // exports_error_dispatch_span` below and the frame-backstop span
+    // tests, whose narrower scopes export deterministically. (A denial
+    // never calls `mark_span_error` unless the condition is
+    // internal-server-error, which the condition assertion excludes.)
     assert_eq!(
-        spans.attribute_of("xmpp.stanza.dispatch", "condition"),
+        spans.recorded_field("xmpp.stanza.dispatch", "condition"),
         Some("registration-required".to_string()),
-        "the exported dispatch span must carry the allowlisted stanza condition"
-    );
-    assert_eq!(
-        spans.status_of("xmpp.stanza.dispatch"),
-        Some(opentelemetry::trace::Status::Unset),
-        "a conformant XEP-0045 admission denial is not an internal server failure"
+        "the dispatch span must carry the allowlisted stanza condition"
     );
     assert!(
         get_room_actor(state.as_ref(), &room_jid).await.is_none(),

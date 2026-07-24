@@ -56,18 +56,99 @@ pub fn acquire_spans() -> SpanTestGuard {
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
-    let subscriber = tracing_subscriber::registry().with(
-        tracing_opentelemetry::layer()
-            .with_tracer(provider.tracer("waddle-span-test"))
-            .with_error_events_to_status(true)
-            .with_error_records_to_exceptions(true),
-    );
+    let recorded_fields = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry()
+        .with(RecordedFieldObserver {
+            fields: recorded_fields.clone(),
+        })
+        .with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("waddle-span-test"))
+                .with_error_events_to_status(true)
+                .with_error_records_to_exceptions(true),
+        );
     let dispatch_guard = tracing::subscriber::set_default(subscriber);
 
     SpanTestGuard {
         exporter,
         provider,
+        recorded_fields,
         _dispatch_guard: dispatch_guard,
+    }
+}
+
+/// Observes every field value a span receives — at creation and through
+/// later `Span::record` calls — WITHOUT waiting for the span to close.
+///
+/// Why closure can't be waited on (#1479): kameo parents actor spans
+/// (`actor.handle_message`, `actor.lifecycle`) under the caller's current
+/// span, so an actor spawned — or an abandoned/straggling ask handled —
+/// inside an instrumented scope holds that scope's span open until the
+/// actor task gets around to finishing, potentially for the actor's whole
+/// life. A test that gates on the *exported* span therefore races actor
+/// scheduling and can wait forever. Recording, by contrast, happens
+/// synchronously on the asserting test's own call path.
+struct RecordedFieldObserver {
+    /// `(span name, field name, rendered value)` per record, in order.
+    fields: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+}
+
+struct RecordedFieldVisitor<'a> {
+    span_name: &'a str,
+    fields: &'a mut Vec<(String, String, String)>,
+}
+
+impl tracing::field::Visit for RecordedFieldVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.fields.push((
+            self.span_name.to_string(),
+            field.name().to_string(),
+            format!("{value:?}"),
+        ));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.fields.push((
+            self.span_name.to_string(),
+            field.name().to_string(),
+            value.to_string(),
+        ));
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for RecordedFieldObserver
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if let Ok(mut fields) = self.fields.lock() {
+            attrs.record(&mut RecordedFieldVisitor {
+                span_name: attrs.metadata().name(),
+                fields: &mut fields,
+            });
+        }
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        if let Ok(mut fields) = self.fields.lock() {
+            values.record(&mut RecordedFieldVisitor {
+                span_name: span.name(),
+                fields: &mut fields,
+            });
+        }
     }
 }
 
@@ -75,10 +156,32 @@ pub fn acquire_spans() -> SpanTestGuard {
 pub struct SpanTestGuard {
     exporter: InMemorySpanExporter,
     provider: SdkTracerProvider,
+    recorded_fields: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     _dispatch_guard: tracing::subscriber::DefaultGuard,
 }
 
 impl SpanTestGuard {
+    /// The last value recorded for `field` on any span named `span_name` —
+    /// whether set at span creation or via a later `Span::record`.
+    ///
+    /// Use this (not [`Self::attribute_of`]) for spans whose scope awaited
+    /// or messaged actors: those spans may be held open past the test's
+    /// assertion point by kameo children (`actor.handle_message` /
+    /// `actor.lifecycle` parent under the caller's span, and an actor
+    /// spawned inside the scope pins it until the actor dies — #1479), so
+    /// gating on the *exported* span races actor scheduling. Field records
+    /// happen synchronously on the recording call path, so this observer
+    /// sees them deterministically.
+    pub fn recorded_field(&self, span_name: &str, field: &str) -> Option<String> {
+        self.recorded_fields
+            .lock()
+            .ok()?
+            .iter()
+            .rev()
+            .find(|(span, name, _)| span == span_name && name == field)
+            .map(|(_, _, value)| value.clone())
+    }
+
     /// Flush and return every completed span exported since acquisition.
     pub fn exported(&self) -> Vec<SpanData> {
         self.provider
