@@ -55,6 +55,7 @@ type UseChannelMamPagingDeps = {
   pendingEchoClientIds: Set<string>;
   appendQueuedMessages: (timeline: TimelineMessage[], roomJid: string) => TimelineMessage[];
   roomJidForChannel: (channelId: string) => string | null;
+  isRoomAccessRequired: (roomJid: string) => boolean;
   scrollToPinnedEdgeAndPin: () => Promise<boolean>;
   persistLastSeen: (channelId: string, messageId: string) => void;
 };
@@ -77,6 +78,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     pendingEchoClientIds,
     appendQueuedMessages,
     roomJidForChannel,
+    isRoomAccessRequired,
     scrollToPinnedEdgeAndPin,
     persistLastSeen,
   } = deps;
@@ -114,6 +116,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     channelId: string,
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
+    options: { allowAccessRetry?: boolean } = {},
   ): Promise<TimelineLoadResult> {
     if (!session.value) return "aborted";
 
@@ -137,7 +140,22 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     pendingEchoClientIds.clear();
     messages.value = appendQueuedMessages([], roomJid);
 
+    if (options.allowAccessRetry === false && isRoomAccessRequired(roomJid)) {
+      isLoadingMessages.value = false;
+      hasOlderMessages.value = false;
+      hydratePinnedRoom(roomJid, []);
+      return "loaded";
+    }
+
     try {
+      if (
+        options.allowAccessRetry === true
+        && xmppClient.value
+        && "retryRoomAccess" in xmppClient.value
+      ) {
+        await xmppClient.value.retryRoomAccess(spaceId, channelId);
+      }
+
       // #414: hydrate the pin store for this room. Fire-and-forget — the
       // panel + badge tolerate an empty store and the live pin-event
       // handler will mutate it from now on. Capture the epoch at request

@@ -73,7 +73,10 @@ export function useRoomSync(deps: RoomSyncDeps) {
         candidate.jid ? barePeerJid(candidate.jid) === normalizedRoomJid : false
       );
       if (!channel || channel.id === waddles.activeChannelId.value) return;
-      void selectChannel(channel.id, { roomJid: normalizedRoomJid });
+      void selectChannel(channel.id, {
+        roomJid: normalizedRoomJid,
+        allowAccessRetry: false,
+      });
     },
   );
   watch(
@@ -98,7 +101,14 @@ export function useRoomSync(deps: RoomSyncDeps) {
     return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
   }
 
-  async function selectChannel(channelId: string, options: { roomJid?: string; surface?: "channels" | "dms" } = {}) {
+  async function selectChannel(
+    channelId: string,
+    options: {
+      roomJid?: string;
+      surface?: "channels" | "dms";
+      allowAccessRetry?: boolean;
+    } = {},
+  ) {
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = options.surface ?? "channels";
@@ -127,6 +137,8 @@ export function useRoomSync(deps: RoomSyncDeps) {
       waddles.currentChannel.value?.spaceId ?? "",
       channelId,
       unreadAtLoad,
+      [],
+      { allowAccessRetry: options.allowAccessRetry !== false },
     );
     ui.showMobileNav.value = false;
   }
@@ -156,7 +168,10 @@ export function useRoomSync(deps: RoomSyncDeps) {
     await selectChannel(channelId, { roomJid: normalizedRoomJid });
   }
 
-  async function selectGroupDm(roomJid: string, options: { updateUrl?: boolean } = {}) {
+  async function selectGroupDm(
+    roomJid: string,
+    options: { updateUrl?: boolean; allowAccessRetry?: boolean } = {},
+  ) {
     const normalizedRoomJid = barePeerJid(roomJid);
     const group = waddles.groupDms.value.find((candidate) => barePeerJid(candidate.roomJid) === normalizedRoomJid);
     const channelId = group?.id ?? knownChannelIdForRoomJid(
@@ -175,7 +190,11 @@ export function useRoomSync(deps: RoomSyncDeps) {
       return false;
     }
     dmConversations.closeDm();
-    await selectChannel(channelId, { roomJid: normalizedRoomJid, surface: "dms" });
+    await selectChannel(channelId, {
+      roomJid: normalizedRoomJid,
+      surface: "dms",
+      allowAccessRetry: options.allowAccessRetry !== false,
+    });
     if (options.updateUrl !== false) updateUrl();
     return true;
   }

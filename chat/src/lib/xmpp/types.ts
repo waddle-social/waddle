@@ -557,6 +557,8 @@ export interface DiscoveredSpace {
 export interface DiscoveredTopology {
   spaces: DiscoveredSpace[];
   rooms: DiscoveredChannel[];
+  /** False when room discovery or hydration degraded and `rooms` may be incomplete. */
+  roomCatalogComplete: boolean;
   serverRole?: "owner" | "admin" | "moderator" | "member" | null;
   services?: {
     muc?: string;

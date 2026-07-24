@@ -82,7 +82,13 @@ export function useExtensionRoutes(deps: ExtensionRoutesDeps) {
     if (waddles.activeChannelId.value !== channelId) {
       waddles.activeChannelId.value = channelId;
       messaging.clearMessages();
-      await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", channelId);
+      await messaging.loadMessages(
+        waddles.currentChannel.value?.spaceId ?? "",
+        channelId,
+        0,
+        [],
+        { allowAccessRetry: true },
+      );
     }
     activeExtensionRouteKey.value = { channelId, pluginId: route.pluginId, routeId: route.routeId };
     activeRightPanel.value = "extension";

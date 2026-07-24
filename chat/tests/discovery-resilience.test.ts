@@ -164,6 +164,7 @@ describe("discoverTopology partial-failure resilience", () => {
 
       // Spaces discovery succeeded.
       expect(topology.spaces.map((space) => space.id)).toContain("space-engineering");
+      expect(topology.roomCatalogComplete).toBe(false);
       // MUC items hung → rooms array stays empty rather than the whole
       // topology call rejecting.
       expect(topology.rooms).toEqual([]);
@@ -181,6 +182,7 @@ describe("discoverTopology partial-failure resilience", () => {
       // channelFromRoom record without hydrated fields.
       const ids = topology.rooms.map((room) => room.id).sort();
       expect(ids).toEqual(["broken", "general"]);
+      expect(topology.roomCatalogComplete).toBe(false);
     });
   });
 });

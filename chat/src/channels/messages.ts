@@ -614,6 +614,8 @@ export function useChannelMessages(
     pendingEchoClientIds,
     appendQueuedMessages,
     roomJidForChannel,
+    isRoomAccessRequired: (roomJid) =>
+      !!roomAccessRequirements.value[bareJidKey(roomJid)],
     scrollToPinnedEdgeAndPin,
     persistLastSeen,
   });
@@ -638,19 +640,29 @@ export function useChannelMessages(
     channelId: string,
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
+    options: { allowAccessRetry?: boolean } = {},
   ) {
     messageSearch.reset();
     return withSpan(
       "xmpp.initial_render",
       { "conversation.kind": "room" },
-      () => paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed),
+      () =>
+        paging.loadMessages(
+          spaceId,
+          channelId,
+          unreadAtLoad,
+          metadataSeed,
+          options,
+        ),
     );
   }
 
   async function selectChannel(channelId: string) {
     messages.value = [];
     clearTypingState();
-    await loadMessages(activeSpaceId.value ?? "", channelId);
+    await loadMessages(activeSpaceId.value ?? "", channelId, 0, [], {
+      allowAccessRetry: true,
+    });
   }
 
   function disconnect() {

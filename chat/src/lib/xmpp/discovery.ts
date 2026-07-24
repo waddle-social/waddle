@@ -461,6 +461,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
+  let roomCatalogComplete = true;
   const bookmarkedRooms = new Map<string, { spaceId?: string; autojoin: boolean; name?: string }>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
@@ -530,6 +531,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     // sendDiscoItems already logged via logDiscoFailure; here we just
     // continue with an empty room list. The cause is observable in the
     // console for diagnostics.
+    roomCatalogComplete = false;
     void err;
   }
   const roomItems: Array<{ jid?: string; name?: string; bookmarkOnly?: boolean }> =
@@ -549,6 +551,9 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
     ),
   );
+  if (hydratedSettled.some((entry) => entry.status === "rejected")) {
+    roomCatalogComplete = false;
+  }
   const hydrated = hydratedSettled.flatMap((entry, index) => {
     const source = roomItems[index]!;
     if (entry.status === "fulfilled") {
@@ -583,6 +588,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   return {
     spaces,
     rooms: rooms.map((room, position) => ({ ...room, position, ...(room.jid && roomSpaceIds.get(barePeerJid(room.jid)) ? { standalone: false } : { standalone: room.standalone ?? true }) })),
+    roomCatalogComplete,
     serverRole,
     services,
   };

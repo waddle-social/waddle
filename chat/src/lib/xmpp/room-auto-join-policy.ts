@@ -29,18 +29,25 @@ export function terminalMucJoinCondition(
 export function reconcileAutoJoinBlocks(
   current: ReadonlyMap<string, RoomAutoJoinBlock>,
   rooms: readonly DiscoveredChannel[],
+  options: { catalogComplete?: boolean } = {},
 ): {
   blocks: Map<string, RoomAutoJoinBlock>;
   unblockedRoomKeys: string[];
   changed: boolean;
 } {
+  if (options.catalogComplete === false) {
+    return {
+      blocks: new Map(current),
+      unblockedRoomKeys: [],
+      changed: false,
+    };
+  }
+
   const catalog = new Map<string, string>();
-  const bookmarkedRoomKeys = new Set<string>();
   for (const room of rooms) {
     const roomJid = room.jid ? bareJidKey(room.jid) : "";
     if (!roomJid) continue;
     catalog.set(roomJid, roomCatalogFingerprint(room));
-    if (room.isBookmarked) bookmarkedRoomKeys.add(roomJid);
   }
   const blocks = new Map<string, RoomAutoJoinBlock>();
   const unblockedRoomKeys: string[] = [];
@@ -49,11 +56,6 @@ export function reconcileAutoJoinBlocks(
   for (const [key, block] of current) {
     const currentFingerprint = catalog.get(key) ?? null;
     if (block.catalogFingerprint === undefined) {
-      if (bookmarkedRoomKeys.has(key)) {
-        unblockedRoomKeys.push(key);
-        changed = true;
-        continue;
-      }
       blocks.set(key, { ...block, catalogFingerprint: currentFingerprint });
       changed = true;
       continue;

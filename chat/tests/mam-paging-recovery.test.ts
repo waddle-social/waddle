@@ -49,6 +49,50 @@ function makeDmMessage(id: string, body: string, peerJid: string): LiveDmMessage
 }
 
 describe("useChannelMamPaging — XEP-0313 §4.3.4 recovery", () => {
+  test("automatic route hydration does not query a room that still requires access", async () => {
+    const queryMamPage = mock(async () => ({
+      messages: [],
+      firstArchiveId: null,
+      complete: true,
+    }));
+    const fetchRoomPins = mock(async () => []);
+    const paging = useChannelMamPaging({
+      session: ref(session),
+      xmppClient: ref({
+        queryMamPage,
+        fetchRoomPins,
+      } as unknown as BrowserXmppClient),
+      activeSpaceId: ref("space"),
+      activeChannelId: ref("space_room"),
+      currentChannel: ref(channel),
+      messages: ref<TimelineMessage[]>([]),
+      firstUnseenId: ref<string | null>(null),
+      timelineEl: ref(null),
+      scrollDirection: ref("bottom"),
+      pinnedEdgeScroller: { cancelSettleLock: () => {} },
+      actionError: ref(""),
+      clearActionError: () => {},
+      normalizeError: (e) => String(e),
+      pendingEchoClientIds: new Set<string>(),
+      appendQueuedMessages: (timeline) => timeline,
+      roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => true,
+      scrollToPinnedEdgeAndPin: async () => true,
+      persistLastSeen: () => {},
+    });
+
+    await expect(
+      paging.loadMessages("space", "space_room", 0, [], {
+        allowAccessRetry: false,
+      }),
+    ).resolves.toBe("loaded");
+
+    expect(queryMamPage).not.toHaveBeenCalled();
+    expect(fetchRoomPins).not.toHaveBeenCalled();
+    expect(paging.isLoadingMessages.value).toBe(false);
+    expect(paging.hasOlderMessages.value).toBe(false);
+  });
+
   test("loadOlderMessages: item-not-found on a before-cursor triggers cursor reset + tail-page refetch", async () => {
     const tailMessages = [makeRoomMessage("m1", "older"), makeRoomMessage("m2", "newer")];
 
@@ -84,6 +128,7 @@ describe("useChannelMamPaging — XEP-0313 §4.3.4 recovery", () => {
       pendingEchoClientIds: new Set<string>(),
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });
@@ -141,6 +186,7 @@ describe("useChannelMamPaging — XEP-0313 §4.3.4 recovery", () => {
       pendingEchoClientIds: new Set<string>(),
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });

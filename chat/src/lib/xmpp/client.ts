@@ -1389,9 +1389,27 @@ export class BrowserXmppClient {
     await Promise.allSettled(workers);
   }
 
-  async switchRoom(_spaceId: string, channelId: string) {
+  async retryRoomAccess(spaceId: string, channelId: string): Promise<void> {
+    const roomJid = this.roomJidForChannel(channelId);
+    if (!this.terminallyDeniedAutoJoinRooms.has(this.roomJoinKey(roomJid))) return;
+    await this.switchRoom(spaceId, channelId, { allowAccessRetry: true });
+  }
+
+  async switchRoom(
+    _spaceId: string,
+    channelId: string,
+    options: { allowAccessRetry?: boolean } = {},
+  ) {
     await this.connect();
     const nextRoom = this.roomJidForChannel(channelId);
+    if (
+      options.allowAccessRetry !== true
+      && this.terminallyDeniedAutoJoinRooms.has(this.roomJoinKey(nextRoom))
+    ) {
+      this.currentRoom = nextRoom;
+      this.dispatchFocusedRoomHandlers();
+      throw new Error("You need access to this channel.");
+    }
     if (this.roomSwitchPromise) {
       if (this.roomSwitchTarget === nextRoom) return this.roomSwitchPromise;
       await this.roomSwitchPromise.catch(() => undefined);
@@ -2306,6 +2324,7 @@ export class BrowserXmppClient {
     const reconciliation = reconcileAutoJoinBlocks(
       this.terminallyDeniedAutoJoinRooms,
       topology.rooms,
+      { catalogComplete: topology.roomCatalogComplete },
     );
     this.terminallyDeniedAutoJoinRooms = reconciliation.blocks;
     for (const key of reconciliation.unblockedRoomKeys) {
@@ -2316,19 +2335,27 @@ export class BrowserXmppClient {
       });
     }
     if (reconciliation.changed) this.persistAutoJoinBlocks();
-    this.roomCatalogFingerprints = new Map(
-      topology.rooms.flatMap((room) => {
-        const key = room.jid ? this.roomJoinKey(room.jid) : "";
-        return key ? [[key, roomCatalogFingerprint(room)] as const] : [];
-      }),
-    );
-    this.hasDiscoveredRoomCatalog = true;
+    if (topology.roomCatalogComplete) {
+      this.roomCatalogFingerprints = new Map(
+        topology.rooms.flatMap((room) => {
+          const key = room.jid ? this.roomJoinKey(room.jid) : "";
+          return key ? [[key, roomCatalogFingerprint(room)] as const] : [];
+        }),
+      );
+      this.hasDiscoveredRoomCatalog = true;
+    }
     if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
-    this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : []));
     const autoJoinRoomJids = topology.rooms
       .filter((room) => room.autojoin !== false && !!room.jid)
       .map((room) => room.jid!);
-    this.autoJoinRoomJids = autoJoinRoomJids;
+    if (topology.roomCatalogComplete) {
+      this.discoveredRoomJids = new Map(
+        topology.rooms.flatMap((room) =>
+          room.jid ? [[room.id, room.jid] as const] : []
+        ),
+      );
+      this.autoJoinRoomJids = autoJoinRoomJids;
+    }
     if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
     return topology;
   }

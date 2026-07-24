@@ -713,6 +713,11 @@ describe("client send readiness", () => {
 
     await reloaded.fanOutAutoJoin([roomJid]);
     expect(reloadedJoinRoom).not.toHaveBeenCalled();
+
+    await expect(reloaded.switchRoom("", "private")).rejects.toThrow(
+      "You need access to this channel.",
+    );
+    expect(reloadedJoinRoom).not.toHaveBeenCalled();
   });
 
   test("explicit navigation can retry a room after a forbidden auto-join rejection", async () => {
@@ -759,7 +764,7 @@ describe("client send readiness", () => {
     });
     await rejected;
 
-    const explicitRetry = client.ensureJoined(roomJid);
+    const explicitRetry = client.retryRoomAccess("", "private");
     await Promise.resolve();
     onPresence?.({
       from: `${roomJid}/alice`,
