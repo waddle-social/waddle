@@ -13,6 +13,40 @@ pub(super) enum RegistrationAfterFrame {
     SessionInitializationFailed,
 }
 
+/// Single choke point for a failed post-auth session initialization (#1454).
+///
+/// Every `SessionInitializationFailed` return routes through here so the
+/// client-visible stream `<internal-server-error/>` is never server-silent
+/// again: one `error!` with the bare JID, the XEP-0198 stream id when one
+/// exists, and the typed reason; the `waddle.session.init.failed` counter
+/// keyed by that reason so the rate is alertable; and an error mark on the
+/// current dispatch span so the failure surfaces in Tempo `status=error`
+/// queries (#1428). The bare JID lives on the log only — never as a metric
+/// attribute.
+fn record_session_init_failure(
+    reason: waddle_xmpp::telemetry::attributes::SessionInitFailureReason,
+    jid: &FullJid,
+    stream_id: Option<&str>,
+) {
+    use waddle_xmpp::telemetry::attributes::MetricAttribute;
+    error!(
+        user = %jid.to_bare(),
+        resource = %jid.resource(),
+        stream_id = stream_id.unwrap_or(""),
+        reason = reason.value(),
+        "session initialization failed; sending stream internal-server-error and closing"
+    );
+    waddle_xmpp::counter_add!(
+        "waddle.session.init.failed",
+        "1",
+        "Post-auth session initialization failures by reason; each one sent a \
+         client a stream-level internal-server-error.",
+        1,
+        reason,
+    );
+    crate::telemetry::mark_span_error("session initialization failed");
+}
+
 /// Publish the SM stream id onto the freshly-registered entry so the
 /// offline-flush path keys claims by the XEP-0198 session id, not the
 /// resource JID. For a fresh bind without SM enabled, sm_state.stream_id is
@@ -116,6 +150,11 @@ pub(super) async fn register_bound_connection_after_frame(
                     %error,
                     "Failed to load XEP-0191 blocklist at bind; failing the bind to avoid a \
                      session-long fail-open. Client should reconnect."
+                );
+                record_session_init_failure(
+                    waddle_xmpp::telemetry::attributes::SessionInitFailureReason::BlocklistLoad,
+                    &jid,
+                    conn.sm_state.stream_id.as_deref(),
                 );
                 return RegistrationAfterFrame::SessionInitializationFailed;
             }
@@ -229,6 +268,13 @@ pub(super) async fn register_bound_connection_after_frame(
             )
             .await;
             conn.registry_owner = None;
+            // This was the server-silent path from #1454: the rollback ran
+            // and the client got a stream error with no server-side trace.
+            record_session_init_failure(
+                waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
+                &jid,
+                conn.sm_state.stream_id.as_deref(),
+            );
             return RegistrationAfterFrame::SessionInitializationFailed;
         }
     }

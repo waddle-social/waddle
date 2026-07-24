@@ -2,7 +2,8 @@
 //! samples through the in-memory reader seam, never internal state.
 
 use super::attributes::{
-    Janitor, MessageKind, MetricAttribute, StanzaErrorCondition, SweepOutcome,
+    Janitor, MessageKind, MetricAttribute, SessionInitFailureReason, StanzaErrorCondition,
+    SweepOutcome,
 };
 use super::test_support;
 use super::validate_metric_name;
@@ -274,5 +275,14 @@ fn attribute_enums_expose_stable_keys_and_values() {
     assert_eq!(
         StanzaErrorCondition::PolicyViolation.value(),
         "policy-violation"
+    );
+    assert_eq!(SessionInitFailureReason::BlocklistLoad.key(), "reason");
+    assert_eq!(
+        SessionInitFailureReason::BlocklistLoad.value(),
+        "blocklist_load"
+    );
+    assert_eq!(
+        SessionInitFailureReason::AuthoritativeRegistration.value(),
+        "authoritative_registration"
     );
 }
