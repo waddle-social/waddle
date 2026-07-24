@@ -4,7 +4,7 @@ import type {
 } from "./types";
 import { bareJidKey } from "./jid";
 
-const ROOM_CATALOG_FINGERPRINT_FIELDS = [
+export const ROOM_CATALOG_FINGERPRINT_FIELDS = [
   "spaceId",
   "autojoin",
   "isGroupDm",
@@ -24,6 +24,11 @@ export type RoomAutoJoinBlock = {
    * room was absent from the discovered catalog.
    */
   catalogFingerprint?: string | null;
+  /**
+   * Fields proven by a partial first observation. Missing means every
+   * fingerprint field is authoritative.
+   */
+  catalogFingerprintFields?: RoomCatalogFingerprintField[];
 };
 
 export function terminalMucJoinCondition(
@@ -82,29 +87,79 @@ export function reconcileAutoJoinBlocks(
     }
     const currentFingerprint = roomIsPresent ? catalog.get(key)! : null;
     if (block.catalogFingerprint === undefined) {
-      if (
-        roomIsPresent
-        && !hasCompleteRoomCatalogFingerprintAuthority(authoritativeFields!)
-      ) {
-        blocks.set(key, block);
-        continue;
-      }
-      blocks.set(key, { ...block, catalogFingerprint: currentFingerprint });
+      const observedFields = roomIsPresent
+        ? orderedRoomCatalogFingerprintFields(authoritativeFields!)
+        : [];
+      blocks.set(key, {
+        ...block,
+        catalogFingerprint: currentFingerprint,
+        ...(roomIsPresent
+            && !hasCompleteRoomCatalogFingerprintAuthority(authoritativeFields!)
+          ? { catalogFingerprintFields: observedFields }
+          : {}),
+      });
       changed = true;
       continue;
     }
+    const baselineFields = roomIsPresent
+      ? new Set(
+        block.catalogFingerprintFields
+          ?? ROOM_CATALOG_FINGERPRINT_FIELDS,
+      )
+      : undefined;
+    const comparableFields = roomIsPresent
+      ? intersectRoomCatalogFingerprintFields(
+          authoritativeFields!,
+          baselineFields!,
+        )
+      : undefined;
     if (
       roomIsPresent
         ? roomCatalogFingerprintChanged(
             block.catalogFingerprint,
             roomsByKey.get(key)!,
-            authoritativeFields!,
+            comparableFields!,
           )
         : block.catalogFingerprint !== currentFingerprint
     ) {
       unblockedRoomKeys.push(key);
       changed = true;
       continue;
+    }
+    if (roomIsPresent && block.catalogFingerprintFields) {
+      const expandedFields = new Set([
+        ...baselineFields!,
+        ...authoritativeFields!,
+      ]);
+      if (expandedFields.size > baselineFields!.size) {
+        const expandedFingerprint = mergeRoomCatalogFingerprint(
+          block.catalogFingerprint,
+          roomsByKey.get(key)!,
+          authoritativeFields!,
+        );
+        if (expandedFingerprint) {
+          const {
+            catalogFingerprintFields: _discardPartialFields,
+            ...blockWithoutPartialFields
+          } = block;
+          blocks.set(
+            key,
+            hasCompleteRoomCatalogFingerprintAuthority(expandedFields)
+              ? {
+                ...blockWithoutPartialFields,
+                catalogFingerprint: expandedFingerprint,
+              }
+              : {
+                ...block,
+                catalogFingerprint: expandedFingerprint,
+                catalogFingerprintFields:
+                  orderedRoomCatalogFingerprintFields(expandedFields),
+              },
+          );
+          changed = true;
+          continue;
+        }
+      }
     }
     blocks.set(key, block);
   }
@@ -120,6 +175,41 @@ export function hasCompleteRoomCatalogFingerprintAuthority(
   fields: ReadonlySet<RoomCatalogFingerprintField>,
 ): boolean {
   return ROOM_CATALOG_FINGERPRINT_FIELDS.every((field) => fields.has(field));
+}
+
+function orderedRoomCatalogFingerprintFields(
+  fields: ReadonlySet<RoomCatalogFingerprintField>,
+): RoomCatalogFingerprintField[] {
+  return ROOM_CATALOG_FINGERPRINT_FIELDS.filter((field) => fields.has(field));
+}
+
+function intersectRoomCatalogFingerprintFields(
+  left: ReadonlySet<RoomCatalogFingerprintField>,
+  right: ReadonlySet<RoomCatalogFingerprintField>,
+): Set<RoomCatalogFingerprintField> {
+  return new Set(
+    ROOM_CATALOG_FINGERPRINT_FIELDS.filter(
+      (field) => left.has(field) && right.has(field),
+    ),
+  );
+}
+
+function mergeRoomCatalogFingerprint(
+  baseline: string | null,
+  room: DiscoveredChannel,
+  fields: ReadonlySet<RoomCatalogFingerprintField>,
+): string | null {
+  if (baseline === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(baseline);
+  } catch {
+    return null;
+  }
+  if (!isRoomCatalogFingerprintData(parsed)) return null;
+  const current = roomCatalogFingerprintData(room);
+  for (const field of fields) parsed[field] = current[field];
+  return JSON.stringify(parsed);
 }
 
 function roomCatalogFingerprintChanged(

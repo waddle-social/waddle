@@ -190,7 +190,7 @@ describe("room auto-join terminal authorization policy", () => {
     expect(changedSpace.unblockedRoomKeys).toEqual([roomJid]);
   });
 
-  test("a first partial observation does not record unproven fingerprint fields", () => {
+  test("a first partial observation records only proven fingerprint fields", () => {
     const partial = reconcileAutoJoinBlocks(
       deniedBlock(),
       [room({ spaceId: "space-new", isBookmarked: true })],
@@ -204,7 +204,108 @@ describe("room auto-join terminal authorization policy", () => {
     );
 
     expect(partial.unblockedRoomKeys).toEqual([]);
-    expect(partial.blocks).toEqual(deniedBlock());
-    expect(partial.changed).toBe(false);
+    expect(partial.blocks.get(roomJid)?.catalogFingerprint).toBeString();
+    expect(partial.blocks.get(roomJid)?.catalogFingerprintFields).toEqual([
+      "spaceId",
+      "isBookmarked",
+    ]);
+    expect(partial.changed).toBe(true);
+  });
+
+  test("a later change to a previously proven field unblocks after a partial baseline", () => {
+    const partial = reconcileAutoJoinBlocks(
+      deniedBlock(),
+      [room({ spaceId: "space-old", isBookmarked: true })],
+      {
+        absentRoomKeysAuthoritative: false,
+        authoritativeFingerprintFields: new Map([[
+          roomJid,
+          new Set(["spaceId", "isBookmarked"] as const),
+        ]]),
+      },
+    );
+    const changed = reconcileAutoJoinBlocks(
+      partial.blocks,
+      [room({ spaceId: "space-new", isBookmarked: true })],
+      { absentRoomKeysAuthoritative: true },
+    );
+
+    expect(changed.unblockedRoomKeys).toEqual([roomJid]);
+    expect(changed.blocks.has(roomJid)).toBe(false);
+  });
+
+  test("newly proven fields extend a partial baseline without causing a false unblock", () => {
+    const partial = reconcileAutoJoinBlocks(
+      deniedBlock(),
+      [room({
+        spaceId: "space-old",
+        autojoin: true,
+        isBookmarked: true,
+      })],
+      {
+        absentRoomKeysAuthoritative: false,
+        authoritativeFingerprintFields: new Map([[
+          roomJid,
+          new Set(["spaceId", "isBookmarked"] as const),
+        ]]),
+      },
+    );
+    const completed = reconcileAutoJoinBlocks(
+      partial.blocks,
+      [room({
+        spaceId: "space-old",
+        autojoin: false,
+        isBookmarked: true,
+      })],
+      { absentRoomKeysAuthoritative: true },
+    );
+
+    expect(completed.unblockedRoomKeys).toEqual([]);
+    expect(completed.blocks.has(roomJid)).toBe(true);
+    expect(
+      completed.blocks.get(roomJid)?.catalogFingerprintFields,
+    ).toBeUndefined();
+
+    const laterChange = reconcileAutoJoinBlocks(
+      completed.blocks,
+      [room({
+        spaceId: "space-old",
+        autojoin: true,
+        isBookmarked: true,
+      })],
+      { absentRoomKeysAuthoritative: true },
+    );
+    expect(laterChange.unblockedRoomKeys).toEqual([roomJid]);
+  });
+
+  test("an unchanged complete observation promotes a partial baseline without unblocking", () => {
+    const observedRoom = room({
+      spaceId: "space-old",
+      autojoin: true,
+      isBookmarked: true,
+    });
+    const partial = reconcileAutoJoinBlocks(
+      deniedBlock(),
+      [observedRoom],
+      {
+        absentRoomKeysAuthoritative: false,
+        authoritativeFingerprintFields: new Map([[
+          roomJid,
+          new Set(["spaceId", "isBookmarked"] as const),
+        ]]),
+      },
+    );
+    const completed = reconcileAutoJoinBlocks(
+      partial.blocks,
+      [observedRoom],
+      { absentRoomKeysAuthoritative: true },
+    );
+
+    expect(completed.unblockedRoomKeys).toEqual([]);
+    expect(completed.blocks.has(roomJid)).toBe(true);
+    expect(
+      completed.blocks.get(roomJid)?.catalogFingerprintFields,
+    ).toBeUndefined();
+    expect(completed.changed).toBe(true);
   });
 });

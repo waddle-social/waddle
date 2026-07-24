@@ -726,6 +726,12 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         condition: "forbidden",
         catalogFingerprint: null,
       },
+      {
+        roomJid: "Limited@Conference.Example.com",
+        condition: "forbidden",
+        catalogFingerprint: "{\"spaceId\":\"space-a\"}",
+        catalogFingerprintFields: ["spaceId", "isBookmarked"],
+      },
     ]);
 
     expect(persistence.loadAutoJoinBlocks?.()).toEqual([
@@ -733,6 +739,12 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         roomJid: "private@conference.example.com",
         condition: "forbidden",
         catalogFingerprint: null,
+      },
+      {
+        roomJid: "limited@conference.example.com",
+        condition: "forbidden",
+        catalogFingerprint: "{\"spaceId\":\"space-a\"}",
+        catalogFingerprintFields: ["spaceId", "isBookmarked"],
       },
     ]);
     expect(otherTab.loadAutoJoinBlocks?.()).toEqual([]);

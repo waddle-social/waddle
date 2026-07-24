@@ -30,7 +30,11 @@
 
 import { reportError } from "@/lib/telemetry";
 import { bareJidKey } from "./jid";
-import type { RoomAutoJoinBlock } from "./room-auto-join-policy";
+import {
+  ROOM_CATALOG_FINGERPRINT_FIELDS,
+  type RoomAutoJoinBlock,
+} from "./room-auto-join-policy";
+import type { RoomCatalogFingerprintField } from "./types";
 
 const CATCHUP_PREFIX = "waddle.chat.resume-cursors";
 const SM_PREFIX = "waddle.chat.sm-resume";
@@ -230,6 +234,12 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
           ...(block.catalogFingerprint !== undefined
             ? { catalogFingerprint: block.catalogFingerprint }
             : {}),
+          ...(block.catalogFingerprintFields
+            ? {
+              catalogFingerprintFields:
+                [...block.catalogFingerprintFields],
+            }
+            : {}),
         });
       }
       return [...normalized.values()];
@@ -242,6 +252,12 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
           condition: block.condition,
           ...(block.catalogFingerprint !== undefined
             ? { catalogFingerprint: block.catalogFingerprint }
+            : {}),
+          ...(block.catalogFingerprintFields
+            ? {
+              catalogFingerprintFields:
+                [...block.catalogFingerprintFields],
+            }
             : {}),
         })).filter((block) => !!block.roomJid),
         "auto-join-blocks",
@@ -571,8 +587,30 @@ function isPersistedAutoJoinBlockArray(value: unknown): value is PersistedAutoJo
         candidate.catalogFingerprint === undefined
         || candidate.catalogFingerprint === null
         || typeof candidate.catalogFingerprint === "string"
+      )
+      && (
+        candidate.catalogFingerprintFields === undefined
+        || (
+          typeof candidate.catalogFingerprint === "string"
+          && isRoomCatalogFingerprintFieldArray(
+            candidate.catalogFingerprintFields,
+          )
+        )
       );
   });
+}
+
+function isRoomCatalogFingerprintFieldArray(
+  value: unknown,
+): value is RoomCatalogFingerprintField[] {
+  return Array.isArray(value)
+    && value.every(
+      (field) =>
+        typeof field === "string"
+        && ROOM_CATALOG_FINGERPRINT_FIELDS.includes(
+          field as RoomCatalogFingerprintField,
+        ),
+    );
 }
 
 function isOwnerLease(value: unknown): value is OwnerLease {
