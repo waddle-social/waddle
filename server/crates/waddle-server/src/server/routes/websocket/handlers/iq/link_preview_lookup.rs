@@ -34,8 +34,8 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 use super::link_preview_resolver::{
-    resolve_link_preview, LinkPreviewMediaCache, LinkPreviewResolverOutcome,
-    LinkPreviewResolverPolicy, LinkPreviewResolverStatus,
+    classify_url_with_policy, resolve_link_preview, LinkPreviewMediaCache,
+    LinkPreviewResolverOutcome, LinkPreviewResolverPolicy, LinkPreviewResolverStatus,
 };
 use crate::server::routes::websocket::link_preview_telemetry::{
     record_link_preview_event, LinkPreviewTelemetryEvent,
@@ -158,6 +158,21 @@ async fn handle_link_preview_lookup_iq_with_policy(
             deps.response_from,
             deps.response_to,
             LinkPreviewResolverStatus::Blocked,
+            None,
+        )];
+    }
+    // Deterministic pre-I/O policy verdicts (scheme support, IP literals,
+    // host allow/block lists) stay on the dispatch path: they need no
+    // network and no resolve permit, and under saturation they must keep
+    // answering `blocked`/`unsupported` rather than degrading to `failed`.
+    let pre_verdict = classify_url_with_policy(&original_url, &resolver_policy);
+    if !matches!(pre_verdict, LinkPreviewResolverStatus::Ready) {
+        record_link_preview_event(telemetry_event_for_status(pre_verdict));
+        return vec![build_link_preview_lookup_result(
+            iq,
+            deps.response_from,
+            deps.response_to,
+            pre_verdict,
             None,
         )];
     }
@@ -384,11 +399,28 @@ async fn deliver_deferred_lookup_reply(
                     requester = %requester,
                     "deferred link-preview reply recorded for detached SM session"
                 ),
-                Ok(false) => debug!(
-                    requester = %requester,
-                    "deferred link-preview reply dropped; requester disconnected without \
-                     resumable session"
-                ),
+                Ok(false) => {
+                    // No detached session either — but a resume may have
+                    // COMPLETED between the failed live send and the record
+                    // attempt (resume consumes the detached session), so
+                    // retry the live path once before dropping the reply.
+                    if connection_registry
+                        .send_to(requester, stanza.clone())
+                        .await
+                        .is_sent()
+                    {
+                        debug!(
+                            requester = %requester,
+                            "deferred link-preview reply delivered on post-resume retry"
+                        );
+                    } else {
+                        debug!(
+                            requester = %requester,
+                            "deferred link-preview reply dropped; requester disconnected \
+                             without resumable session"
+                        );
+                    }
+                }
                 Err(error) => warn!(
                     requester = %requester,
                     %error,
@@ -959,7 +991,6 @@ mod tests {
         let iq = iq_get_with_payload(payload);
 
         let state = create_test_websocket_state().await;
-        let mut rx = register_requester(state.as_ref());
         let response = handle_link_preview_lookup_iq(
             &iq,
             Some(&sender()),
@@ -971,11 +1002,12 @@ mod tests {
         )
         .await;
 
-        assert!(
-            response.is_empty(),
-            "accepted lookup answers off the dispatch path: {response:?}"
-        );
-        let (_, lookup) = recv_deferred_lookup_reply(&mut rx).await;
+        // Non-HTTPS is a deterministic pre-I/O verdict — answered inline on
+        // the dispatch path, no resolve permit consumed.
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
         assert_eq!(lookup.attr("status"), Some("unsupported"));
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
@@ -1055,7 +1087,6 @@ mod tests {
         let iq = iq_get_with_payload(payload);
 
         let state = create_test_websocket_state().await;
-        let mut rx = register_requester(state.as_ref());
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
             Some(&sender()),
@@ -1073,11 +1104,12 @@ mod tests {
         )
         .await;
 
-        assert!(
-            response.is_empty(),
-            "accepted lookup answers off the dispatch path: {response:?}"
-        );
-        let (_, lookup) = recv_deferred_lookup_reply(&mut rx).await;
+        // An operator-blocked host is a deterministic pre-I/O verdict —
+        // answered inline on the dispatch path, no resolve permit consumed.
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
         assert_eq!(lookup.attr("status"), Some("blocked"));
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)

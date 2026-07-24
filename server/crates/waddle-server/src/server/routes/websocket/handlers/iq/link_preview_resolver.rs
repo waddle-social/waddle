@@ -955,7 +955,13 @@ async fn prepare_target<'a>(
     Ok(PreparedTarget { host, addrs })
 }
 
-fn classify_url_with_policy(
+/// Deterministic, I/O-free policy verdict for a lookup URL: scheme support,
+/// IP-literal and `.local` rejection, and the operator host allow/block
+/// lists. `Ready` means "no static objection" — the fetch path still applies
+/// the DNS-resolution SSRF checks that need I/O. Exposed to the lookup
+/// handler (#1470) so these verdicts stay on the dispatch path instead of
+/// consuming a deferred-resolve permit.
+pub(super) fn classify_url_with_policy(
     url: &Url,
     policy: &LinkPreviewResolverPolicy,
 ) -> LinkPreviewResolverStatus {
