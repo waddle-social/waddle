@@ -400,10 +400,14 @@ async fn deliver_deferred_lookup_reply(
                     "deferred link-preview reply recorded for detached SM session"
                 ),
                 Ok(false) => {
-                    // No detached session either — but a resume may have
-                    // COMPLETED between the failed live send and the record
-                    // attempt (resume consumes the detached session), so
-                    // retry the live path once before dropping the reply.
+                    // No detached OR claimed session found — a resume may
+                    // have completed between the failed live send and the
+                    // record attempt (resume consumes the session), so retry
+                    // the live path once before dropping the reply.
+                    // At-least-once is the contract: in the displacement
+                    // corner where the record persisted durably before
+                    // reporting false, a replayed duplicate result is
+                    // ignored by id (RFC 6120 §8.2.3).
                     if connection_registry
                         .send_to(requester, stanza.clone())
                         .await
@@ -1292,6 +1296,67 @@ mod tests {
         assert!(
             recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverSaturated),
             "saturated admission must emit saturated telemetry"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_host_verdict_survives_saturation_without_consuming_permit() {
+        // Deterministic pre-I/O verdicts run before admission: with every
+        // resolver permit drained, an operator-blocked host still answers
+        // `blocked` (not `failed`) inline.
+        let state = create_test_websocket_state().await;
+        let available = state
+            .deps
+            .protocol
+            .link_preview_resolves
+            .available_permits();
+        let _hog = state
+            .deps
+            .protocol
+            .link_preview_resolves
+            .clone()
+            .try_acquire_many_owned(u32::try_from(available).expect("permit count fits u32"))
+            .expect("drain all resolver permits");
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append("https://blocked.example/a")
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(LinkPreviewResolverPolicy {
+                    blocked_hosts: vec!["blocked.example".parse().expect("pattern")],
+                    ..Default::default()
+                }),
+            },
+        )
+        .await;
+
+        assert_eq!(response.len(), 1, "exactly one inline reply");
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
+        assert_eq!(
+            lookup.attr("status"),
+            Some("blocked"),
+            "policy verdict must not degrade to `failed` under saturation"
         );
     }
 
