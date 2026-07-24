@@ -912,8 +912,9 @@ async fn test_register_after_identity_rotation_force_detaches_stale_actor_resour
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_register_claim_validation_error_does_not_force_detach_or_remove_live_actor() {
+    let spans = crate::telemetry::test_support::acquire_spans();
     let registry = spawn_registry().await;
     let claim_store = Arc::new(RecordingClaimStore::empty());
     let claim_store_trait: Arc<dyn ClaimStore> = claim_store.clone();
@@ -981,6 +982,10 @@ async fn test_register_claim_validation_error_does_not_force_detach_or_remove_li
     assert_eq!(resources, vec![old_jid]);
     assert!(old_actor.is_alive());
     assert!(claim_store.release_owners().is_empty());
+    assert!(
+        spans.has_error_status("xmpp.user_registry.validate_claim"),
+        "claim validation failure must export at least one ERROR operation span"
+    );
 }
 
 #[tokio::test]

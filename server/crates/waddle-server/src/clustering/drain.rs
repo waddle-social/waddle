@@ -68,6 +68,7 @@ const MARK_DRAINING_BOUND: Duration = Duration::from_secs(2);
 /// complete within budget is left claimed — abandoned, not lost: the claim
 /// stays fenced-safe and is reclaimed later by another node's orphan
 /// reaper, or by this node itself once its own lease naturally lapses.
+#[tracing::instrument(name = "clustering.shutdown_drain", skip_all)]
 pub(crate) async fn run_shutdown_drain<L>(
     lease: &L,
     claim_store: &Arc<dyn ClaimStore>,
@@ -140,6 +141,9 @@ pub(crate) async fn run_shutdown_drain<L>(
         }
     }
     if abandoned > 0 {
+        // All abandonment causes are internal drain failures even though the
+        // claims remain fenced-safe for later recovery.
+        crate::telemetry::mark_span_error("clustering drain abandoned claims");
         metrics::record_claims_abandoned_on_drain(abandoned);
     }
     metrics::record_drain_duration_ms(start.elapsed().as_secs_f64() * 1000.0);
@@ -418,8 +422,10 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn drain_seals_then_releases_only_room_entities_skipping_sm_sessions() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
         let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
         let me = identity();
         let room_a = room("room-a@muc.example.com");
@@ -473,10 +479,16 @@ mod tests {
             "the sm_session entity must be left untouched by the generic drain loop \
              (owned by the separate Q6 SM drain path instead)"
         );
+        assert_eq!(
+            spans.status_of("clustering.shutdown_drain"),
+            Some(opentelemetry::trace::Status::Unset)
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn drain_abandons_a_failed_seal_and_leaves_the_claim_held() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
         let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
         let me = identity();
         let room_a = room("room-fails@muc.example.com");
@@ -505,6 +517,10 @@ mod tests {
                 .unwrap_or(false),
             "a failed seal must leave the claim held, not release it"
         );
+        assert!(matches!(
+            spans.status_of("clustering.shutdown_drain"),
+            Some(opentelemetry::trace::Status::Error { .. })
+        ));
     }
 
     #[tokio::test(start_paused = true)]

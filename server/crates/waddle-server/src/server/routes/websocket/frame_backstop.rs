@@ -132,6 +132,7 @@ impl StanzaBackstop {
             stanza_kind = kind,
             payload_ns = %payload_ns,
             otel.status_code = tracing::field::Empty,
+            condition = tracing::field::Empty,
             message_id = tracing::field::Empty,
             room = tracing::field::Empty,
             xmpp.resource = tracing::field::Empty,
@@ -166,6 +167,13 @@ impl StanzaBackstop {
         let _enter = self.span.enter();
         match &self.iq_reply {
             Some(reply) => {
+                // The synthesized IQ rejection is typed as
+                // `resource-constraint`; expose that bounded condition on the
+                // same failed dispatch span as every handler-level rejection.
+                self.span.record(
+                    "condition",
+                    waddle_xmpp::StanzaErrorCondition::ResourceConstraint.as_str(),
+                );
                 warn!(
                     stanza_kind = self.kind,
                     id = %reply.id,

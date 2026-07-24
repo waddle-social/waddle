@@ -76,6 +76,16 @@ pub fn meter() -> opentelemetry::metrics::Meter {
     opentelemetry::global::meter("waddle")
 }
 
+/// Mark the current protocol span as failed without coupling this crate to the
+/// production OpenTelemetry tracing layer.
+///
+/// Callers must declare `otel.status_code` as an empty tracing field on their
+/// operation span. `tracing-opentelemetry` interprets the recorded `ERROR`
+/// value at the server boundary.
+pub(crate) fn mark_span_error() {
+    tracing::Span::current().record("otel.status_code", "ERROR");
+}
+
 /// Force-flush a meter provider without blocking the async runtime or
 /// waiting longer than `timeout` for the SDK's synchronous flush.
 ///

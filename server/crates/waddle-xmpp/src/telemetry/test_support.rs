@@ -96,6 +96,24 @@ impl SpanTestGuard {
             .find(|span| span.name == span_name)
             .map(|span| span.status)
     }
+
+    /// Whether any exported instance of the named span has error status.
+    pub fn has_error_status(&self, span_name: &str) -> bool {
+        self.exported()
+            .into_iter()
+            .any(|span| span.name == span_name && matches!(span.status, Status::Error { .. }))
+    }
+
+    /// Return a string-valued attribute from the named exported span.
+    pub fn attribute_of(&self, span_name: &str, key: &str) -> Option<String> {
+        self.exported()
+            .into_iter()
+            .find(|span| span.name == span_name)?
+            .attributes
+            .into_iter()
+            .find(|attribute| attribute.key.as_str() == key)
+            .map(|attribute| attribute.value.to_string())
+    }
 }
 
 struct TestPipeline {
