@@ -1237,16 +1237,19 @@ export class BrowserXmppClient {
       (candidate) => this.roomJoinKey(candidate) === key,
     );
     if (!focused && !retained && !autoJoin) return;
+    const source = focused ? "focused" : retained ? "retained" : "autojoin";
 
     void this.roomJoinRetry.schedule(key, {
       // A focused retry belongs to that navigation intent and stops as soon
-      // as focus moves elsewhere. Background joins remain eligible only
-      // while their retained/autojoin source still contains the room.
+      // as focus moves elsewhere. A background retry likewise belongs to the
+      // retained/autojoin source that admitted it; another source appearing
+      // later must not silently extend the retry's lifetime.
       isEligible: () => this.isCurrentXmpp(xmpp) && (
-        focused
+        source === "focused"
           ? this.currentRoom !== null && this.roomJoinKey(this.currentRoom) === key
-          : this.retainedJoinedRoomJids.has(key)
-            || this.autoJoinRoomJids.some((candidate) => this.roomJoinKey(candidate) === key)
+          : source === "retained"
+            ? this.retainedJoinedRoomJids.has(key)
+            : this.autoJoinRoomJids.some((candidate) => this.roomJoinKey(candidate) === key)
       ),
       retry: () => this.ensureJoined(roomJid),
     }).catch(() => undefined);

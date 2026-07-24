@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { BrowserXmppClient, type SessionLifecycleEvent } from "../src/lib/xmpp-client";
+import {
+  BrowserXmppClient,
+  roomBareJidFor,
+  type SessionLifecycleEvent,
+} from "../src/lib/xmpp-client";
 import { __createFallbackXmppResourceForTesting } from "../src/lib/xmpp/client";
+import { RoomJoinRetryCoordinator } from "../src/lib/xmpp/room-join-retry";
 import {
   __clearSensitiveUrlsForTesting,
   __recordSpanExceptionForTesting,
@@ -32,6 +37,7 @@ import {
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
+import { ManualRoomJoinRetryTimer } from "./helpers/manual-room-join-retry-timer";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -528,28 +534,89 @@ describe("telemetry module no-op behaviour", () => {
     });
   });
 
-  test("an explicitly reported join failure is not recorded again by nested spans", () => {
+  test("each failed join attempt emits one Faro exception across listeners and spans", async () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
-    const joinFailure = new Error(
-      "Channel presence was rejected. Try again in a moment.",
-    );
-    const stableTelemetryError = new Error(
-      "room-join-resource-constraint",
-      { cause: joinFailure },
-    );
-
-    reportError("xmpp.stream", stableTelemetryError, {
-      recoverable: true,
-      detail: "room-join-resource-constraint",
-      condition: "resource-constraint",
-      errorType: "wait",
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+    const retryTimer = new ManualRoomJoinRetryTimer();
+    const observedByFirstListener: Error[] = [];
+    const observedBySecondListener: Error[] = [];
+    client.onError((event) => {
+      if (event.kind === "muc-join" && event.cause instanceof Error) {
+        observedByFirstListener.push(event.cause);
+      }
     });
+    client.onError((event) => {
+      if (event.kind === "muc-join" && event.cause instanceof Error) {
+        observedBySecondListener.push(event.cause);
+      }
+    });
+    const roomJid = roomBareJidFor(session(), "busy");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+    }) => void) | null = null;
+    const joinRoom = mock(async () => undefined);
+    const xmpp = {
+      join_room: joinRoom,
+      set_on_presence(callback: NonNullable<typeof onPresence>) {
+        onPresence = callback;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      retainedJoinedRoomJids: Set<string>;
+      roomJoinRetry: RoomJoinRetryCoordinator;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.connected = true;
+    internal.retainedJoinedRoomJids.add(roomJid);
+    internal.roomJoinRetry = new RoomJoinRetryCoordinator({
+      timer: retryTimer,
+      random: () => 1,
+    });
+    internal.wireEvents(xmpp);
+
+    const firstAttempt = client.fanOutAutoJoin([roomJid]);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await firstAttempt;
 
     expect(stub.errors).toHaveLength(1);
     expect(stub.errors[0].error.message).toBe("room-join-resource-constraint");
-    expect(__recordSpanExceptionForTesting(joinFailure)).toBe(0);
-    expect(__recordSpanExceptionForTesting(joinFailure)).toBe(0);
+    const firstJoinListener = client.ensureJoined(roomJid);
+    const secondJoinListener = client.ensureJoined(roomJid);
+    retryTimer.runNext();
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await Promise.allSettled([firstJoinListener, secondJoinListener]);
+
+    expect(joinRoom).toHaveBeenCalledTimes(2);
+    expect(stub.errors).toHaveLength(2);
+    expect(stub.errors.map(({ error }) => error.message)).toEqual([
+      "room-join-resource-constraint",
+      "room-join-resource-constraint",
+    ]);
+    expect(observedByFirstListener).toHaveLength(2);
+    expect(observedBySecondListener).toHaveLength(2);
+    for (const failure of observedByFirstListener) {
+      expect(__recordSpanExceptionForTesting(failure)).toBe(0);
+    }
   });
 
   test("transport sanitizer replaces Faro page URLs with route templates", () => {

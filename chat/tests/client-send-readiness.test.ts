@@ -11,10 +11,10 @@ import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import {
   RoomJoinRetryCoordinator,
-  type RoomJoinRetryTimer,
 } from "../src/lib/xmpp/room-join-retry";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
+import { ManualRoomJoinRetryTimer } from "./helpers/manual-room-join-retry-timer";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -28,35 +28,6 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
 
 function normalizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-class ManualRoomJoinRetryTimer implements RoomJoinRetryTimer {
-  readonly scheduledDelays: number[] = [];
-  private nextId = 1;
-  private readonly callbacks = new Map<number, () => void>();
-
-  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
-    const id = this.nextId++;
-    this.scheduledDelays.push(delayMs);
-    this.callbacks.set(id, callback);
-    return id as unknown as ReturnType<typeof setTimeout>;
-  }
-
-  clearTimeout(handle: ReturnType<typeof setTimeout>): void {
-    this.callbacks.delete(handle as unknown as number);
-  }
-
-  runNext(): void {
-    const next = this.callbacks.entries().next().value as [number, () => void] | undefined;
-    if (!next) throw new Error("No room join retry is scheduled");
-    const [id, callback] = next;
-    this.callbacks.delete(id);
-    callback();
-  }
-
-  get pendingCount(): number {
-    return this.callbacks.size;
-  }
 }
 
 function createStorageMock() {
@@ -935,7 +906,7 @@ describe("client send readiness", () => {
 
     expect(joinRoom).toHaveBeenCalledTimes(1);
     expect(errors).toHaveLength(1);
-    expect(retryTimer.scheduledDelays).toEqual([2_000]);
+    expect(retryTimer.scheduledDelays).toEqual([4_000]);
 
     const firstListener = client.ensureJoined(roomJid);
     const secondListener = client.ensureJoined(roomJid);
@@ -954,7 +925,7 @@ describe("client send readiness", () => {
 
     expect(joinRoom).toHaveBeenCalledTimes(2);
     expect(errors).toHaveLength(2);
-    expect(retryTimer.scheduledDelays).toEqual([2_000, 4_000]);
+    expect(retryTimer.scheduledDelays).toEqual([4_000, 8_000]);
   });
 
   test("self-presence timeout enters the same room retry backoff", async () => {
@@ -998,7 +969,7 @@ describe("client send readiness", () => {
       );
 
       expect(joinRoom).toHaveBeenCalledTimes(1);
-      expect(retryTimer.scheduledDelays).toEqual([2_000]);
+      expect(retryTimer.scheduledDelays).toEqual([4_000]);
     } finally {
       globalThis.setTimeout = originalSetTimeout;
     }
@@ -1100,10 +1071,12 @@ describe("client send readiness", () => {
       wireEvents: (xmpp: typeof xmpp) => void;
       roomJoinRetry: RoomJoinRetryCoordinator;
       retainedJoinedRoomJids: Set<string>;
+      autoJoinRoomJids: ReadonlyArray<string>;
     };
     state.xmpp = xmpp;
     state.connected = true;
     state.roomJoinRetry = retryCoordinator;
+    state.autoJoinRoomJids = [roomJid];
     state.wireEvents(xmpp);
 
     const firstAttempt = client.fanOutAutoJoin([roomJid]);

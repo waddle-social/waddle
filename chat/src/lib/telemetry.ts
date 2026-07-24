@@ -94,7 +94,7 @@ interface InitTelemetryOptions {
 }
 
 let faro: Faro | null = null;
-const recordedTelemetryExceptions = new WeakSet<object>();
+const TELEMETRY_EXCEPTION_RECORDED = Symbol("waddle.telemetry.exception-recorded");
 let configuredTrustedSpanOrigins = new Set<string>();
 const sensitiveSpanUrls = new Set<string>();
 
@@ -1043,7 +1043,6 @@ export function reportError(
   },
 ): void {
   if (!faro) return;
-  markTelemetryExceptionRecorded(error);
   const err = sanitizeErrorForTelemetry(error, kind);
   const contextStrings: Record<string, string> = { kind, recoverable: String(context.recoverable) };
   for (const [k, v] of Object.entries(context)) {
@@ -1056,6 +1055,15 @@ export function reportError(
   faro.api.pushError(err, { type: kind, context: contextStrings });
 }
 
+/**
+ * Claims a thrown error whose canonical exception was emitted separately.
+ * Manual spans may still report an error status, but they must not record
+ * another exception event for the same failure.
+ */
+export function markErrorReportedToTelemetry(error: unknown): void {
+  markTelemetryExceptionRecorded(error);
+}
+
 function recordSpanExceptionOnce(span: Span, error: unknown, fallbackMessage: string): void {
   if (telemetryExceptionWasRecorded(error)) return;
   markTelemetryExceptionRecorded(error);
@@ -1065,7 +1073,7 @@ function recordSpanExceptionOnce(span: Span, error: unknown, fallbackMessage: st
 function telemetryExceptionWasRecorded(error: unknown): boolean {
   return typeof error === "object"
     && error !== null
-    && recordedTelemetryExceptions.has(error);
+    && TELEMETRY_EXCEPTION_RECORDED in error;
 }
 
 function markTelemetryExceptionRecorded(error: unknown): void {
@@ -1073,7 +1081,14 @@ function markTelemetryExceptionRecorded(error: unknown): void {
   const visited = new Set<object>();
   while (typeof current === "object" && current !== null && !visited.has(current)) {
     visited.add(current);
-    recordedTelemetryExceptions.add(current);
+    if (Object.isExtensible(current)) {
+      Object.defineProperty(current, TELEMETRY_EXCEPTION_RECORDED, {
+        configurable: false,
+        enumerable: false,
+        value: true,
+        writable: false,
+      });
+    }
     current = current instanceof Error ? current.cause : undefined;
   }
 }

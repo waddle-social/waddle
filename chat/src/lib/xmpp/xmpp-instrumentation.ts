@@ -25,6 +25,7 @@ import {
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
+  markErrorReportedToTelemetry,
   setXmppResourceForTelemetry,
 } from "@/lib/telemetry";
 
@@ -70,6 +71,7 @@ export function installInstrumentation(client: BrowserXmppClient): void {
       ? telemetryStreamManagementCounts(event)
       : undefined;
     const errorSource = telemetryErrorSource(event.kind, condition);
+    if (event.cause !== undefined) markErrorReportedToTelemetry(event.cause);
     const cause = new Error(
       detail,
       event.cause === undefined ? undefined : { cause: event.cause },

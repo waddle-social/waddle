@@ -28,10 +28,10 @@ const defaultTimer: RoomJoinRetryTimer = {
 };
 
 /**
- * Equal-jitter exponential backoff. The lower half of each exponential
- * window is skipped so a transient failure cannot immediately hammer the
- * room again, while the randomized upper half spreads clients that were
- * rejected in the same server-side burst.
+ * Equal-jitter exponential backoff. The first window is 2–4 seconds, so
+ * jitter never makes the existing two-second retry pressure worse. Later
+ * windows double up to a 30–60 second capped range, spreading clients that
+ * were rejected in the same server-side burst.
  */
 export function roomJoinRetryDelayMs(
   failureIndex: number,
@@ -40,7 +40,7 @@ export function roomJoinRetryDelayMs(
   const exponent = Math.max(0, Math.floor(failureIndex));
   const exponentialDelay = Math.min(
     ROOM_JOIN_RETRY_MAX_DELAY_MS,
-    ROOM_JOIN_RETRY_BASE_DELAY_MS * (2 ** Math.min(exponent, 30)),
+    ROOM_JOIN_RETRY_BASE_DELAY_MS * (2 ** Math.min(exponent + 1, 30)),
   );
   const jitter = 0.5 + (Math.min(1, Math.max(0, random())) * 0.5);
   return Math.round(exponentialDelay * jitter);
