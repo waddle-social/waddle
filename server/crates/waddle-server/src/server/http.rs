@@ -747,6 +747,8 @@ async fn create_websocket_state(
                 dnd_reader,
                 notification_activity,
                 sm_session_registry,
+                link_preview_resolves:
+                    crate::server::routes::websocket::default_link_preview_resolve_permits(),
                 resumable_sessions,
                 caps_resolver,
                 avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),

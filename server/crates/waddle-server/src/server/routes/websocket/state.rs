@@ -1308,6 +1308,16 @@ pub struct ProtocolServices {
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    /// Bounded admission for deferred link-preview resolver fetches
+    /// (#1470). Serial frame dispatch used to throttle lookups to one in
+    /// flight per connection as a side effect of blocking; once resolution
+    /// moved off the dispatch path the bound must be explicit so a lookup
+    /// burst cannot fan out into an unbounded outbound-fetch storm.
+    /// Admission is `try_acquire` at IQ dispatch — a saturated resolver
+    /// answers `failed` immediately (previews fail open, #822) instead of
+    /// queueing tasks whose replies would outlive the client's IQ budget.
+    /// Build with [`default_link_preview_resolve_permits`].
+    pub link_preview_resolves: Arc<tokio::sync::Semaphore>,
     /// XEP-0115 entity-capabilities resolver. Maintains the
     /// process-wide hash-keyed `CapsCache` plus per-resource caps
     /// mappings used by XEP-0163 §3 fan-out filtering.
@@ -1381,6 +1391,18 @@ pub struct ProtocolServices {
     /// outlive their XMPP presence (graceful unavailable, tab close,
     /// SM-expiry — all go through `cleanup_muc_presence`).
     pub sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
+}
+
+/// Per-node cap for [`ProtocolServices::link_preview_resolves`]. Deliberately
+/// generous: the old inline path allowed one concurrent resolve per
+/// connection, so node-wide concurrency scaled with connection count.
+pub const MAX_CONCURRENT_LINK_PREVIEW_RESOLVES: usize = 32;
+
+/// Fresh admission semaphore for [`ProtocolServices::link_preview_resolves`].
+pub fn default_link_preview_resolve_permits() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(
+        MAX_CONCURRENT_LINK_PREVIEW_RESOLVES,
+    ))
 }
 
 /// Per-connection mutable state for a single WebSocket XMPP transport.

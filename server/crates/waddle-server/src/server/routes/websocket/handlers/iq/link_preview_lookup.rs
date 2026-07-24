@@ -18,7 +18,7 @@
 use super::*;
 use chrono::{Duration, SecondsFormat, Utc};
 use minidom::rxml::xml_ncname;
-use tokio::sync::Semaphore;
+use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 use url::Url;
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
@@ -48,19 +48,6 @@ struct LinkPreviewLookupDeps<'a> {
     secret: &'a [u8],
     resolver_policy: Option<LinkPreviewResolverPolicy>,
 }
-
-/// Cap on concurrently running deferred resolver fetches per node. Serial
-/// frame dispatch used to throttle lookups to one in flight per connection as
-/// a side effect of blocking; once resolution moved off the dispatch path
-/// (#1470) the bound must be explicit so a burst of lookups cannot fan out
-/// into an unbounded outbound-fetch storm. Excess lookups queue on the
-/// semaphore in arrival order; each resolve is bounded by the resolver's own
-/// per-phase timeouts, so queued lookups still answer within the client's IQ
-/// budget except under sustained abuse — where queueing, not unbounded
-/// fan-out, is the correct failure mode (previews fail open, #822).
-const MAX_CONCURRENT_DEFERRED_RESOLVES: usize = 8;
-
-static DEFERRED_RESOLVE_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_DEFERRED_RESOLVES);
 
 pub(super) fn is_link_preview_lookup_iq(iq: &Iq) -> bool {
     let Iq::Get { payload, .. } = iq else {
@@ -174,25 +161,49 @@ async fn handle_link_preview_lookup_iq_with_policy(
             None,
         )];
     }
+    // Bounded admission (#1470): `try_acquire` against the per-node resolver
+    // semaphore — a saturated resolver answers `failed` immediately
+    // (previews fail open, #822) rather than queueing tasks whose replies
+    // would outlive the client's IQ budget and whose spans would stay open
+    // for the whole queue wait (#1438).
+    let Ok(resolve_permit) = state
+        .deps
+        .protocol
+        .link_preview_resolves
+        .clone()
+        .try_acquire_owned()
+    else {
+        record_link_preview_event(LinkPreviewTelemetryEvent::ResolverSaturated);
+        return vec![build_link_preview_lookup_result(
+            iq,
+            deps.response_from,
+            deps.response_to,
+            LinkPreviewResolverStatus::Failed,
+            None,
+        )];
+    };
     // Accepted for resolution. Everything from here involves outbound
     // network fetches, so it runs off the dispatch path (#1470): spawn the
     // resolve and answer the IQ later through the connection registry.
-    spawn_deferred_lookup_resolution(DeferredLookupResolution {
-        connection_registry: state.deps.protocol.connection_registry.clone(),
-        sm_session_registry: state.deps.protocol.sm_session_registry.clone(),
-        requester: sender_jid.clone(),
-        scope_jid,
-        original_url,
-        resolver_policy,
-        secret: deps.secret.to_vec(),
-        reply: DeferredLookupReply {
-            id: iq.id().to_string(),
-            from: deps
-                .response_from
-                .and_then(|value| value.parse::<Jid>().ok()),
-            to: deps.response_to.and_then(|value| value.parse::<Jid>().ok()),
+    spawn_deferred_lookup_resolution(
+        resolve_permit,
+        DeferredLookupResolution {
+            connection_registry: state.deps.protocol.connection_registry.clone(),
+            sm_session_registry: state.deps.protocol.sm_session_registry.clone(),
+            requester: sender_jid.clone(),
+            scope_jid,
+            original_url,
+            resolver_policy,
+            secret: deps.secret.to_vec(),
+            reply: DeferredLookupReply {
+                id: iq.id().to_string(),
+                from: deps
+                    .response_from
+                    .and_then(|value| value.parse::<Jid>().ok()),
+                to: deps.response_to.and_then(|value| value.parse::<Jid>().ok()),
+            },
         },
-    });
+    );
     Vec::new()
 }
 
@@ -219,7 +230,10 @@ struct DeferredLookupReply {
     to: Option<Jid>,
 }
 
-fn spawn_deferred_lookup_resolution(resolution: DeferredLookupResolution) {
+fn spawn_deferred_lookup_resolution(
+    resolve_permit: OwnedSemaphorePermit,
+    resolution: DeferredLookupResolution,
+) {
     // Created while the dispatch span is current, so the resolve — and the
     // resolver's child `link_preview.fetch` spans — stay on the originating
     // stanza's trace after dispatch returns (#1438: bounded, parented spans).
@@ -239,10 +253,6 @@ fn spawn_deferred_lookup_resolution(resolution: DeferredLookupResolution) {
                 secret,
                 reply,
             } = resolution;
-            let Ok(_permit) = DEFERRED_RESOLVE_PERMITS.acquire().await else {
-                // The static semaphore is never closed.
-                return;
-            };
             let reply_iq = resolve_deferred_lookup(
                 &requester,
                 scope_jid,
@@ -252,6 +262,11 @@ fn spawn_deferred_lookup_resolution(resolution: DeferredLookupResolution) {
                 reply,
             )
             .await;
+            // Release the fetch-concurrency permit before delivery:
+            // `send_to` waits for the recipient's outbound-channel capacity,
+            // and a backpressured recipient must not pin a resolver slot its
+            // fetch is no longer using.
+            drop(resolve_permit);
             deliver_deferred_lookup_reply(
                 &connection_registry,
                 &sm_session_registry,
@@ -334,6 +349,14 @@ async fn resolve_deferred_lookup(
 /// server-generated `DirectFrame` (the destination's main loop records it in
 /// the XEP-0198 unacked queue before the wire write, like every other
 /// server-generated reply).
+///
+/// Deliberately NOT owner-gated (`send_to`, not `send_to_if_owner`): an
+/// XEP-0198 resume onto a new connection registers a fresh owner token, and
+/// the requester's pending IQ survives that resume — owner-gating would drop
+/// the reply in exactly the race the old synchronous path's SM replay
+/// covered. The residual cost is a reply delivered to a same-full-JID
+/// replacement session, which ignores an IQ result whose id it never issued
+/// (RFC 6120 §8.2.3).
 async fn deliver_deferred_lookup_reply(
     connection_registry: &ConnectionRegistry,
     sm_session_registry: &InMemorySmSessionRegistry,
@@ -341,6 +364,9 @@ async fn deliver_deferred_lookup_reply(
     reply_iq: Iq,
 ) {
     let stanza = Stanza::Iq(Box::new(reply_iq));
+    // The clone is unavoidable: `send_to` consumes the stanza (it may retry
+    // on a replacement sender), while the detached-SM fallback below still
+    // needs it.
     match connection_registry.send_to(requester, stanza.clone()).await {
         SendResult::Sent => {}
         SendResult::NotConnected | SendResult::ChannelClosed => {
@@ -1124,9 +1150,233 @@ mod tests {
             "dispatch must not wait for the resolver round-trip \
              (took {dispatch_elapsed:?} against a {page_delay:?} page delay)"
         );
+
+        // A subsequent IQ through the same dispatch seam is fully answered
+        // while the first lookup's resolver round-trip is still in flight —
+        // the "stanzas queued behind a cold-cache preview" half of the
+        // acceptance criteria. (The frame loop awaits exactly this handler,
+        // so completing here is completing for the connection.)
+        let second_iq = iq_get_with_payload(
+            Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+                .append(
+                    Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                        .append("https://example.com/next")
+                        .build(),
+                )
+                .append(
+                    Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                        .append("alice@example.com")
+                        .build(),
+                )
+                .build(),
+        );
+        let second_response = handle_link_preview_lookup_iq_with_policy(
+            &second_iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(LinkPreviewResolverPolicy {
+                    enabled: false,
+                    ..Default::default()
+                }),
+            },
+        )
+        .await;
+        let second_elem: Element = second_response[0].parse().expect("second iq result");
+        assert_eq!(
+            second_elem
+                .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+                .and_then(|lookup| lookup.attr("status")),
+            Some("blocked"),
+            "second stanza is fully dispatched and answered while the first \
+             preview is still resolving"
+        );
+
         let (id, lookup) = recv_deferred_lookup_reply(&mut rx).await;
         assert_eq!(id, "lookup-1", "deferred reply echoes the request id");
         assert_eq!(lookup.attr("status"), Some("ready"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn saturated_resolver_answers_failed_synchronously() {
+        // Bounded admission (#1470): with every resolver permit taken, an
+        // otherwise-valid lookup is answered `failed` inline (fail open,
+        // #822) instead of queueing a deferred task.
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let state = create_test_websocket_state().await;
+        let available = state
+            .deps
+            .protocol
+            .link_preview_resolves
+            .available_permits();
+        let _hog = state
+            .deps
+            .protocol
+            .link_preview_resolves
+            .clone()
+            .try_acquire_many_owned(u32::try_from(available).expect("permit count fits u32"))
+            .expect("drain all resolver permits");
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append("https://example.com/a")
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(LinkPreviewResolverPolicy::default()),
+            },
+        )
+        .await;
+
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
+        assert_eq!(lookup.attr("status"), Some("failed"));
+        assert!(lookup
+            .get_child("preview", NS_WADDLE_LINK_PREVIEW)
+            .is_none());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverSaturated),
+            "saturated admission must emit saturated telemetry"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deferred_reply_records_into_detached_sm_session_for_resume_replay() {
+        // XEP-0198 parity with the old synchronous path: a reply whose
+        // requester detached mid-resolve is recorded against the detached SM
+        // session, so a later resume replays it instead of losing it.
+        use waddle_xmpp::stream_management::SmSessionRegistry as _;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head><meta property="og:title" content="T"></head></html>"#,
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+        let state = create_test_websocket_state().await;
+        let requester = sender();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(waddle_xmpp::stream_management::DetachedSession {
+                stream_id: "preview-stream-1".to_string(),
+                user_id: requester.to_string(),
+                jid: requester.clone(),
+                inbound_count: 1,
+                outbound_count: 4,
+                last_acked: 4,
+                replay_gap_through: None,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: true,
+                blocklist_interested: false,
+                presence_available: true,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            })
+            .await
+            .expect("store detached session");
+        let resolver_policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append(format!("{}/a", server.uri()).as_str())
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        // No live registry entry for the requester — only the detached
+        // session above.
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&requester),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(resolver_policy),
+            },
+        )
+        .await;
+        assert!(response.is_empty());
+
+        // The deferred reply lands in the detached session's unacked queue.
+        let claimed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let session = state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .claim_session("preview-stream-1")
+                    .await
+                    .expect("claim detached session")
+                    .expect("session still stored");
+                if !session.unacked_stanzas.is_empty() {
+                    break session;
+                }
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .release_claim("preview-stream-1")
+                    .await
+                    .expect("release claim between polls");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("deferred reply recorded for resume replay");
+        assert_eq!(claimed.unacked_stanzas.len(), 1);
+        assert!(
+            claimed.unacked_stanzas[0].stanza_xml.contains("lookup-1")
+                && claimed.unacked_stanzas[0]
+                    .stanza_xml
+                    .contains(NS_WADDLE_LINK_PREVIEW),
+            "recorded stanza is the lookup reply: {}",
+            claimed.unacked_stanzas[0].stanza_xml
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

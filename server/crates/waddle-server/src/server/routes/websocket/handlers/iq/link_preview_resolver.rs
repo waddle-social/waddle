@@ -200,15 +200,33 @@ impl LinkPreviewResolverOutcome {
     }
 }
 
+/// Which outbound fetch a `link_preview.fetch` span describes.
+#[derive(Debug, Clone, Copy)]
+enum FetchPhase {
+    /// The HTML page (or direct-media probe) fetch.
+    Page,
+    /// The OpenGraph preview-image fetch feeding the media cache.
+    Image,
+}
+
+impl FetchPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Image => "image",
+        }
+    }
+}
+
 /// Child span for one outbound resolver fetch (#1470). Carries only the
-/// target host and the fetch phase (`page` | `image`) — never the URL, path,
-/// query, or any JID — and stays parented under the caller's span so the
-/// resolver's dominant wall time is attributable in traces without adding
-/// root-span noise (#1438).
-fn outbound_fetch_span(phase: &'static str, url: &Url) -> tracing::Span {
+/// target host and the fetch phase — never the URL, path, query, or any JID
+/// — and stays parented under the caller's span so the resolver's dominant
+/// wall time is attributable in traces without adding root-span noise
+/// (#1438).
+fn outbound_fetch_span(phase: FetchPhase, url: &Url) -> tracing::Span {
     let span = tracing::info_span!(
         "link_preview.fetch",
-        link_preview.phase = phase,
+        link_preview.phase = phase.as_str(),
         host = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
     );
@@ -238,7 +256,7 @@ pub(super) async fn resolve_link_preview(
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
             return LinkPreviewResolverOutcome::Failed;
         };
-        let fetch_span = outbound_fetch_span("page", &current);
+        let fetch_span = outbound_fetch_span(FetchPhase::Page, &current);
         let fetch = match fetch_html_once(&current, policy, timeout)
             .instrument(fetch_span.clone())
             .await
@@ -276,7 +294,7 @@ pub(super) async fn resolve_link_preview(
                     // `policy.timeout` thus bounds each phase independently, so
                     // a worst-case resolve is ~2x `policy.timeout` (page + image).
                     let image_deadline = Instant::now() + policy.timeout;
-                    let image_span = outbound_fetch_span("image", &remote_image.url);
+                    let image_span = outbound_fetch_span(FetchPhase::Image, &remote_image.url);
                     match fetch_cached_preview_image(&remote_image, policy, cache, image_deadline)
                         .instrument(image_span.clone())
                         .await

@@ -102,7 +102,22 @@ async fn link_preview_lookup_for_test(
 }
 
 /// Register a live connection for `bound_jid` so the deferred link-preview
-/// reply (#1470) has somewhere to land, and await the typed IQ result on it.
+/// reply (#1470) has somewhere to land; returns the outbound receiver.
+fn register_link_preview_requester_for_test(
+    state: &WebSocketState,
+    bound_jid: &FullJid,
+) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bound_jid.clone(), tx);
+    rx
+}
+
+/// Await the deferred link-preview IQ result (#1470) on the requester's
+/// outbound channel and return it typed.
 async fn recv_deferred_link_preview_reply_for_test(
     rx: &mut tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
 ) -> xmpp_parsers::iq::Iq {
@@ -128,12 +143,7 @@ async fn link_preview_lookup_dispatch_returns_typed_unsupported_metadata_outcome
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;
     let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bound_jid.clone(), tx);
+    let mut rx = register_link_preview_requester_for_test(state.as_ref(), &bound_jid);
     let frame = "\
         <iq xmlns='jabber:client' type='get' id='preview-1' from='alice@example.com/desktop' to='example.com'>\
           <lookup xmlns='urn:waddle:link-preview:0'>\
@@ -243,12 +253,7 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolv
         })
         .await
         .expect("join room");
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(bound_jid.clone(), tx);
+    let mut rx = register_link_preview_requester_for_test(state.as_ref(), &bound_jid);
     let frame = "\
         <iq xmlns='jabber:client' type='get' id='preview-muc-1' from='alice@example.com/desktop' to='example.com'>\
           <lookup xmlns='urn:waddle:link-preview:0'>\
