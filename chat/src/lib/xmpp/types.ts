@@ -559,6 +559,16 @@ export interface DiscoveredTopology {
   rooms: DiscoveredChannel[];
   /** False when room discovery or hydration degraded and `rooms` may be incomplete. */
   roomCatalogComplete: boolean;
+  /**
+   * Exact authority available for terminal-denial reconciliation. Whole-cache
+   * replacement remains gated by `roomCatalogComplete`.
+   */
+  roomReconciliationAuthority: {
+    /** True when successful MUC and bookmark listings make absence authoritative. */
+    absentRoomKeysAuthoritative: boolean;
+    /** Normalized room keys whose own hydration and all bookmark sources completed. */
+    fingerprintRoomKeys: string[];
+  };
   serverRole?: "owner" | "admin" | "moderator" | "member" | null;
   services?: {
     muc?: string;

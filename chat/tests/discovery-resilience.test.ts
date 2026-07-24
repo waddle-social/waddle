@@ -183,6 +183,12 @@ describe("discoverTopology partial-failure resilience", () => {
       const ids = topology.rooms.map((room) => room.id).sort();
       expect(ids).toEqual(["broken", "general"]);
       expect(topology.roomCatalogComplete).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(true);
+      expect(topology.roomReconciliationAuthority.fingerprintRoomKeys).toEqual([
+        "general@muc.example.test",
+      ]);
     });
   });
 
@@ -198,6 +204,10 @@ describe("discoverTopology partial-failure resilience", () => {
         "general",
       ]);
       expect(topology.roomCatalogComplete).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+      expect(topology.roomReconciliationAuthority.fingerprintRoomKeys).toEqual([]);
     });
   });
 
@@ -213,6 +223,10 @@ describe("discoverTopology partial-failure resilience", () => {
         "general",
       ]);
       expect(topology.roomCatalogComplete).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+      expect(topology.roomReconciliationAuthority.fingerprintRoomKeys).toEqual([]);
     });
   });
 });

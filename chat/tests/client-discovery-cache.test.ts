@@ -25,77 +25,101 @@ function session(): WaddleSession {
   } as WaddleSession;
 }
 
+type DiscoveryFixtureState = {
+  mucCatalogAvailable: boolean;
+  roomJids: string[];
+  bookmarks: Array<{ id: string; name: string; autojoin: boolean }>;
+  rejectUserBookmarks?: boolean;
+  rejectRoomInfo?: string;
+};
+
+function createDiscoveryXmpp(
+  state: DiscoveryFixtureState,
+  joinRoom: ReturnType<typeof mock>,
+) {
+  return {
+    join_room: joinRoom,
+    async send_raw_iq(xml: string): Promise<string> {
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
+        if (xml.includes('to="example.test"')) {
+          return discoItemsXml([
+            { jid: "spaces.example.test", name: "Spaces" },
+            { jid: "muc.example.test", name: "Chatrooms" },
+          ]);
+        }
+        if (xml.includes('to="spaces.example.test"')) {
+          return discoItemsXml([]);
+        }
+        if (xml.includes('to="muc.example.test"')) {
+          if (!state.mucCatalogAvailable) {
+            throw new Error("temporary MUC catalog failure");
+          }
+          return discoItemsXml(
+            state.roomJids.map((jid) => ({
+              jid,
+              name: jid === roomJid ? "Private" : "Broken",
+            })),
+          );
+        }
+        return discoItemsXml([]);
+      }
+
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
+        if (
+          state.rejectRoomInfo
+          && xml.includes(`to="${state.rejectRoomInfo}"`)
+        ) {
+          throw new Error("temporary room hydration failure");
+        }
+        if (
+          xml.includes('to="muc.example.test"')
+          || state.roomJids.some((jid) => xml.includes(`to="${jid}"`))
+          || state.bookmarks.some(({ id }) => xml.includes(`to="${id}"`))
+        ) {
+          return discoInfoXml({
+            identities: [{ category: "conference", type: "text" }],
+            features: ["http://jabber.org/protocol/muc"],
+          });
+        }
+        if (xml.includes('to="spaces.example.test"')) {
+          return discoInfoXml({
+            identities: [{ category: "pubsub", type: "service" }],
+            features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
+          });
+        }
+        return discoInfoXml({
+          identities: [{ category: "server", type: "im" }],
+        });
+      }
+
+      if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
+        if (
+          state.rejectUserBookmarks
+          && xml.includes('to="alice@example.test"')
+        ) {
+          throw new Error("temporary bookmark failure");
+        }
+        return pubsubItemsXml(state.bookmarks);
+      }
+
+      throw new Error(`Unexpected IQ: ${xml}`);
+    },
+  };
+}
+
 describe("BrowserXmppClient room discovery cache", () => {
   test("degraded refreshes preserve denial, room, and auto-join caches", async () => {
     await withFakeDomParser(async () => {
-      let mucCatalogAvailable = true;
-      let rejectUserBookmarks = false;
+      const fixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [roomJid],
+        bookmarks: [{ id: roomJid, name: "Private", autojoin: true }],
+        rejectUserBookmarks: false,
+      };
       const joinRoom = mock(async () => {
         throw new Error("a degraded refresh must not attempt a join");
       });
-      const xmpp = {
-        join_room: joinRoom,
-        async send_raw_iq(xml: string): Promise<string> {
-          if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
-            if (xml.includes('to="example.test"')) {
-              return discoItemsXml([
-                { jid: "spaces.example.test", name: "Spaces" },
-                { jid: "muc.example.test", name: "Chatrooms" },
-              ]);
-            }
-            if (xml.includes('to="spaces.example.test"')) {
-              return discoItemsXml([]);
-            }
-            if (xml.includes('to="muc.example.test"')) {
-              if (!mucCatalogAvailable) {
-                throw new Error("temporary MUC catalog failure");
-              }
-              return discoItemsXml([{ jid: roomJid, name: "Private" }]);
-            }
-            return discoItemsXml([]);
-          }
-
-          if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
-            if (xml.includes('to="muc.example.test"')) {
-              return discoInfoXml({
-                identities: [{ category: "conference", type: "text" }],
-                features: ["http://jabber.org/protocol/muc"],
-              });
-            }
-            if (xml.includes(`to="${roomJid}"`)) {
-              return discoInfoXml({
-                identities: [{ category: "conference", type: "text" }],
-                features: ["http://jabber.org/protocol/muc"],
-              });
-            }
-            if (xml.includes('to="spaces.example.test"')) {
-              return discoInfoXml({
-                identities: [{ category: "pubsub", type: "service" }],
-                features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
-              });
-            }
-            return discoInfoXml({
-              identities: [{ category: "server", type: "im" }],
-            });
-          }
-
-          if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
-            if (
-              rejectUserBookmarks
-              && xml.includes('to="alice@example.test"')
-            ) {
-              throw new Error("temporary bookmark failure");
-            }
-            return pubsubItemsXml(
-              mucCatalogAvailable
-                ? [{ id: roomJid, name: "Private", autojoin: true }]
-                : [],
-            );
-          }
-
-          throw new Error(`Unexpected IQ: ${xml}`);
-        },
-      };
+      const xmpp = createDiscoveryXmpp(fixture, joinRoom);
       const client = new BrowserXmppClient(session(), {
         ...nullResumePersistence,
         loadAutoJoinBlocks: () => [{
@@ -119,7 +143,7 @@ describe("BrowserXmppClient room discovery cache", () => {
       expect(state.roomJidForChannel("private")).toBe(roomJid);
       expect(state.autoJoinRoomJids).toEqual([roomJid]);
 
-      rejectUserBookmarks = true;
+      fixture.rejectUserBookmarks = true;
       const bookmarkDegraded = await client.discoverTopology();
 
       expect(bookmarkDegraded.roomCatalogComplete).toBe(false);
@@ -128,8 +152,9 @@ describe("BrowserXmppClient room discovery cache", () => {
       expect(state.autoJoinRoomJids).toEqual([roomJid]);
       expect(joinRoom).not.toHaveBeenCalled();
 
-      rejectUserBookmarks = false;
-      mucCatalogAvailable = false;
+      fixture.rejectUserBookmarks = false;
+      fixture.mucCatalogAvailable = false;
+      fixture.bookmarks = [];
       const degraded = await client.discoverTopology();
 
       expect(degraded.roomCatalogComplete).toBe(false);
@@ -139,4 +164,78 @@ describe("BrowserXmppClient room discovery cache", () => {
       expect(joinRoom).not.toHaveBeenCalled();
     });
   });
+
+  for (const {
+    degradedSource,
+    shouldUnblock,
+  } of [
+    { degradedSource: "sibling hydration", shouldUnblock: true },
+    { degradedSource: "MUC items", shouldUnblock: true },
+    { degradedSource: "blocked room hydration", shouldUnblock: false },
+  ] as const) {
+    test(`${shouldUnblock ? "an authoritative" : "an incomplete"} membership change ${
+      shouldUnblock ? "unblocks" : "stays blocked"
+    } through degraded ${degradedSource}`, async () => {
+      await withFakeDomParser(async () => {
+        const siblingRoomJid = "broken@rooms.example.test";
+        const fixture: DiscoveryFixtureState = {
+          mucCatalogAvailable: true,
+          roomJids: [roomJid, siblingRoomJid],
+          bookmarks: [],
+        };
+        const joinRoom = mock(async () => undefined);
+        const xmpp = createDiscoveryXmpp(fixture, joinRoom);
+        const client = new BrowserXmppClient(session(), {
+          ...nullResumePersistence,
+          loadAutoJoinBlocks: () => [{
+            roomJid,
+            condition: "forbidden",
+          }],
+        });
+        const state = client as unknown as {
+          xmpp: typeof xmpp;
+          connected: boolean;
+          autoJoinRoomJids: readonly string[];
+        };
+        state.xmpp = xmpp;
+        state.connected = true;
+
+        const baseline = await client.discoverTopology();
+        expect(baseline.roomCatalogComplete).toBe(true);
+        expect(client.listRoomAccessRequirements()).toHaveLength(1);
+        joinRoom.mockClear();
+
+        fixture.bookmarks = [{
+          id: roomJid,
+          name: "Private",
+          autojoin: false,
+        }];
+        if (degradedSource === "MUC items") {
+          fixture.mucCatalogAvailable = false;
+        } else {
+          fixture.rejectRoomInfo =
+            degradedSource === "sibling hydration"
+              ? siblingRoomJid
+              : roomJid;
+        }
+        const changed = await client.discoverTopology();
+
+        expect(changed.roomCatalogComplete).toBe(false);
+        expect(
+          changed.roomReconciliationAuthority.fingerprintRoomKeys.includes(
+            roomJid,
+          ),
+        ).toBe(shouldUnblock);
+        expect(client.listRoomAccessRequirements()).toHaveLength(
+          shouldUnblock ? 0 : 1,
+        );
+        expect(state.autoJoinRoomJids.includes(roomJid)).toBe(false);
+        expect(
+          joinRoom.mock.calls.some(([joinedRoomJid]) =>
+            joinedRoomJid === roomJid
+          ),
+        ).toBe(false);
+      });
+    });
+  }
 });

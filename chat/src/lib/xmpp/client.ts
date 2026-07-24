@@ -2329,10 +2329,17 @@ export class BrowserXmppClient {
   async discoverTopology(): Promise<DiscoveredTopology> {
     const xmpp = await this.requireConnectedXmpp();
     const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    const authoritativeRoomKeys = new Set(
+      topology.roomReconciliationAuthority.fingerprintRoomKeys,
+    );
     const reconciliation = reconcileAutoJoinBlocks(
       this.terminallyDeniedAutoJoinRooms,
       topology.rooms,
-      { catalogComplete: topology.roomCatalogComplete },
+      {
+        absentRoomKeysAuthoritative:
+          topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+        authoritativeRoomKeys,
+      },
     );
     this.terminallyDeniedAutoJoinRooms = reconciliation.blocks;
     for (const key of reconciliation.unblockedRoomKeys) {
@@ -2343,6 +2350,30 @@ export class BrowserXmppClient {
       });
     }
     if (reconciliation.changed) this.persistAutoJoinBlocks();
+    this.updateRoomDiscoveryCaches(topology, authoritativeRoomKeys);
+    if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
+    const autoJoinRoomJids = topology.rooms
+      .filter((room) => room.autojoin !== false && !!room.jid)
+      .map((room) => room.jid!);
+    if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
+    return topology;
+  }
+
+  private updateRoomDiscoveryCaches(
+    topology: DiscoveredTopology,
+    authoritativeRoomKeys: ReadonlySet<string>,
+  ): void {
+    const discoveredRoomEntries = topology.rooms.flatMap((room) =>
+      room.jid ? [[room.id, room.jid] as const] : []
+    );
+    const freshRoomKeys = new Set(
+      discoveredRoomEntries.map(([, roomJid]) => this.roomJoinKey(roomJid)),
+    );
+    const authoritativeRooms = topology.rooms.filter((room) => {
+      const key = room.jid ? this.roomJoinKey(room.jid) : "";
+      return !!key && authoritativeRoomKeys.has(key);
+    });
+
     if (topology.roomCatalogComplete) {
       this.roomCatalogFingerprints = new Map(
         topology.rooms.flatMap((room) => {
@@ -2351,21 +2382,43 @@ export class BrowserXmppClient {
         }),
       );
       this.hasDiscoveredRoomCatalog = true;
+    } else {
+      const fingerprints = new Map(this.roomCatalogFingerprints);
+      if (topology.roomReconciliationAuthority.absentRoomKeysAuthoritative) {
+        for (const key of fingerprints.keys()) {
+          if (!freshRoomKeys.has(key)) fingerprints.delete(key);
+        }
+      }
+      for (const room of authoritativeRooms) {
+        fingerprints.set(this.roomJoinKey(room.jid!), roomCatalogFingerprint(room));
+      }
+      this.roomCatalogFingerprints = fingerprints;
     }
-    if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
-    const autoJoinRoomJids = topology.rooms
-      .filter((room) => room.autojoin !== false && !!room.jid)
-      .map((room) => room.jid!);
-    if (topology.roomCatalogComplete) {
-      this.discoveredRoomJids = new Map(
-        topology.rooms.flatMap((room) =>
-          room.jid ? [[room.id, room.jid] as const] : []
-        ),
-      );
-      this.autoJoinRoomJids = autoJoinRoomJids;
+
+    if (topology.roomReconciliationAuthority.absentRoomKeysAuthoritative) {
+      this.discoveredRoomJids = new Map(discoveredRoomEntries);
+      this.autoJoinRoomJids = topology.rooms
+        .filter((room) => room.autojoin !== false && !!room.jid)
+        .map((room) => room.jid!);
+      return;
     }
-    if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
-    return topology;
+
+    const discoveredRoomJids = new Map(this.discoveredRoomJids);
+    const autoJoinRooms = new Map(
+      this.autoJoinRoomJids.flatMap((roomJid) => {
+        const key = this.roomJoinKey(roomJid);
+        return key ? [[key, roomJid] as const] : [];
+      }),
+    );
+    for (const room of authoritativeRooms) {
+      const roomJid = room.jid!;
+      const key = this.roomJoinKey(roomJid);
+      discoveredRoomJids.set(room.id, roomJid);
+      autoJoinRooms.delete(key);
+      if (room.autojoin !== false) autoJoinRooms.set(key, roomJid);
+    }
+    this.discoveredRoomJids = discoveredRoomJids;
+    this.autoJoinRoomJids = [...autoJoinRooms.values()];
   }
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> { return this.mucAdmin.listRoomMembers(channelId, options); }
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> { return this.mucAdmin.setRoomAffiliation(channelId, jid, affiliation); }

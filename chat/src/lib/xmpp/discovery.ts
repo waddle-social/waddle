@@ -3,7 +3,7 @@ import { normalizeChannelType } from "@/lib/channel-types";
 import { reportError } from "@/lib/telemetry";
 import { XMPP_ERROR_CONDITIONS } from "./types";
 import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
-import { barePeerJid, jidDomain, jidLocalpart } from "./jid";
+import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 import { stanzaErrorContext } from "./stanza-error-context";
 
@@ -424,16 +424,24 @@ export function applyDiscoInfoToChannel(room: DiscoveredChannel, info: DiscoInfo
   };
 }
 
-async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<DiscoveredChannel> {
-  if (!room.jid) return room;
+type RoomInfoHydration = {
+  room: DiscoveredChannel;
+  fingerprintComplete: boolean;
+};
+
+async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<RoomInfoHydration> {
+  if (!room.jid) return { room, fingerprintComplete: false };
   // No internal try/catch: callers wrap this in `Promise.allSettled` and
   // map rejected entries to the unhydrated `channelFromRoom` record, so a
   // local catch here would make the outer rejection branch unreachable
   // dead code. Single resilience layer (one site to reason about), not
   // two redundant ones.
   const info = await sendDiscoInfo(xmpp, room.jid);
-  if (!info) return room;
-  return applyDiscoInfoToChannel(room, info);
+  if (!info) return { room, fingerprintComplete: false };
+  return {
+    room: applyDiscoInfoToChannel(room, info),
+    fingerprintComplete: true,
+  };
 }
 
 export async function discoverChannels(xmpp: HybridClient, jid: string): Promise<DiscoveredChannel[]> {
@@ -451,7 +459,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
   );
   const hydrated = settled.map((entry, index) =>
     entry.status === "fulfilled"
-      ? entry.value
+      ? entry.value.room
       : channelFromRoom({ jid: items[index]!.jid ?? "", name: items[index]!.name }, index),
   );
   return hydrated.map((room, position) => ({ id: room.id, name: room.name, channelType: room.channelType, position }));
@@ -462,6 +470,8 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
   let roomCatalogComplete = true;
+  let bookmarkCatalogComplete = true;
+  let mucCatalogComplete = true;
   const bookmarkedRooms = new Map<string, { spaceId?: string; autojoin: boolean; name?: string }>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
@@ -483,6 +493,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
       } catch {
         roomCatalogComplete = false;
+        bookmarkCatalogComplete = false;
         continue;
       }
       try {
@@ -498,11 +509,13 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         }
       } catch {
         roomCatalogComplete = false;
+        bookmarkCatalogComplete = false;
       }
       spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
     }
   } catch {
     roomCatalogComplete = false;
+    bookmarkCatalogComplete = false;
   }
 
   try {
@@ -519,6 +532,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     }
   } catch {
     roomCatalogComplete = false;
+    bookmarkCatalogComplete = false;
   }
 
   // Narrow try/catch JUST around `sendDiscoItems`: a wedged muc service
@@ -539,6 +553,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     // continue with an empty room list. The cause is observable in the
     // console for diagnostics.
     roomCatalogComplete = false;
+    mucCatalogComplete = false;
     void err;
   }
   const roomItems: Array<{ jid?: string; name?: string; bookmarkOnly?: boolean }> =
@@ -558,16 +573,30 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
     ),
   );
-  if (hydratedSettled.some((entry) => entry.status === "rejected")) {
+  if (hydratedSettled.some(
+    (entry) =>
+      entry.status === "rejected"
+      || !entry.value.fingerprintComplete
+  )) {
     roomCatalogComplete = false;
   }
+  const fingerprintCompleteRoomJids = new Set(
+    hydratedSettled.flatMap((entry) => {
+      if (entry.status !== "fulfilled" || !entry.value.fingerprintComplete) return [];
+      const roomJid = entry.value.room.jid ? barePeerJid(entry.value.room.jid) : "";
+      return roomJid ? [roomJid] : [];
+    }),
+  );
   const hydrated = hydratedSettled.flatMap((entry, index) => {
     const source = roomItems[index]!;
     if (entry.status === "fulfilled") {
-      if (source.bookmarkOnly && !entry.value.features?.some((feature) => feature === NS_MUC)) {
+      if (
+        source.bookmarkOnly
+        && !entry.value.room.features?.some((feature) => feature === NS_MUC)
+      ) {
         return [];
       }
-      return [entry.value];
+      return [entry.value.room];
     }
     if (source.bookmarkOnly) return [];
     return [channelFromRoom({ jid: source.jid ?? "", name: source.name }, index)];
@@ -592,10 +621,23 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   });
 
   const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
+  const authoritativeRoomFingerprintKeys = bookmarkCatalogComplete
+    ? rooms.flatMap((room) => {
+        const roomJid = room.jid ? barePeerJid(room.jid) : "";
+        return roomJid && fingerprintCompleteRoomJids.has(roomJid)
+          ? [bareJidKey(roomJid)]
+          : [];
+      })
+    : [];
   return {
     spaces,
     rooms: rooms.map((room, position) => ({ ...room, position, ...(room.jid && roomSpaceIds.get(barePeerJid(room.jid)) ? { standalone: false } : { standalone: room.standalone ?? true }) })),
     roomCatalogComplete,
+    roomReconciliationAuthority: {
+      absentRoomKeysAuthoritative:
+        bookmarkCatalogComplete && mucCatalogComplete,
+      fingerprintRoomKeys: authoritativeRoomFingerprintKeys,
+    },
     serverRole,
     services,
   };
