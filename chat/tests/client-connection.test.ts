@@ -364,6 +364,7 @@ function createRecordingPersistence() {
     loadJoinedRooms: () => [],
     saveJoinedRooms: () => undefined,
     clearJoinedRooms: () => calls.push("clearJoinedRooms"),
+    clearAutoJoinBlocks: () => calls.push("clearAutoJoinBlocks"),
   };
   return { persistence, calls, getSaved: () => saved };
 }
@@ -433,5 +434,11 @@ describe("ResumeStateStore", () => {
     store.clearAll();
     expect(freed).toBe(1);
     expect(store.handle).toBeNull();
+    expect(calls).toEqual([
+      "clearSm",
+      "clearSm",
+      "clearJoinedRooms",
+      "clearAutoJoinBlocks",
+    ]);
   });
 });

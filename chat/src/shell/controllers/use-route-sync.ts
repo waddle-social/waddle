@@ -10,6 +10,7 @@ import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import type { ActiveRightPanel } from "@/shell/controllers/use-thread-panels";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import type { ChannelLoadIntent } from "@/channels/room-access";
 
 /**
  * Single mapping from the typed route match to the page-level shell
@@ -81,7 +82,10 @@ interface RouteSyncDeps {
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   clearPendingChannelRoomJidSelection: () => void;
   openDm: (peerJid: string) => Promise<void>;
-  selectGroupDm: (roomJid: string, options?: { updateUrl?: boolean }) => Promise<boolean>;
+  selectGroupDm: (
+    roomJid: string,
+    options?: { updateUrl?: boolean; intent?: ChannelLoadIntent },
+  ) => Promise<boolean>;
   /** Owned by the connection lifecycle's structure-retry state: a user
    * navigation supersedes any channel route parked for a structure reload. */
   clearPendingChannelRoute: () => void;
@@ -216,14 +220,20 @@ export function useRouteSync(deps: RouteSyncDeps) {
     clearPendingChannelRoute();
     const requestId = ++routeRequestId;
     isApplyingRoute.value = true;
-    void applyRouteTarget(match, requestId).finally(() => {
+    void applyRouteTarget(match, requestId, {
+      intent: "explicit-navigation",
+    }).finally(() => {
       if (requestId === routeRequestId) {
         isApplyingRoute.value = false;
       }
     });
   }
 
-  async function applyRouteTarget(match: RouteMatch, requestId: number) {
+  async function applyRouteTarget(
+    match: RouteMatch,
+    requestId: number,
+    options: { intent?: ChannelLoadIntent } = {},
+  ) {
     clearPendingChannelRoomJidSelection();
     applyMatchToShellState(ui, match);
     if (match.id === "stories") {
@@ -289,7 +299,10 @@ export function useRouteSync(deps: RouteSyncDeps) {
     if (match.id === "groupDmRoom") {
       activeExtensionRouteKey.value = null;
       dmConversations.closeDm();
-      await selectGroupDm(match.params.roomJid, { updateUrl: false });
+      await selectGroupDm(match.params.roomJid, {
+        updateUrl: false,
+        intent: options.intent ?? "automatic",
+      });
       if (requestId !== routeRequestId) return;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
@@ -325,7 +338,9 @@ export function useRouteSync(deps: RouteSyncDeps) {
         routeId: match.params.routeId,
       };
       messaging.clearMessages();
-      await messaging.loadMessages(ch.spaceId ?? "", ch.id);
+      await messaging.loadMessages(ch.spaceId ?? "", ch.id, 0, [], {
+        intent: options.intent ?? "automatic",
+      });
       if (requestId !== routeRequestId) return;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
@@ -352,7 +367,10 @@ export function useRouteSync(deps: RouteSyncDeps) {
         params: { roomJid: ch.jid },
         search: match.search,
       }, { replace: true });
-      await selectGroupDm(ch.jid, { updateUrl: false });
+      await selectGroupDm(ch.jid, {
+        updateUrl: false,
+        intent: options.intent ?? "automatic",
+      });
       ui.showPinnedPanel.value = match.search.pinned;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
@@ -369,7 +387,9 @@ export function useRouteSync(deps: RouteSyncDeps) {
     waddles.activeChannelId.value = ch.id;
     void waddles.reloadChannelMembers(ch.id);
     messaging.clearMessages();
-    await messaging.loadMessages(ch.spaceId ?? "", ch.id);
+    await messaging.loadMessages(ch.spaceId ?? "", ch.id, 0, [], {
+      intent: options.intent ?? "automatic",
+    });
 
     // Restore the thread panel from the URL and initialize paging for every
     // visible thread pane. Dedupe in the messaging composable keeps already

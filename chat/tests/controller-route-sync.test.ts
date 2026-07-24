@@ -253,10 +253,37 @@ describe("useRouteSync applyRouteTarget", () => {
     expect(h.activeChannelId.value).toBe("general");
     expect(h.reloadChannelMembers).toHaveBeenCalledWith("general");
     expect(h.clearMessages).toHaveBeenCalledTimes(1);
-    expect(h.loadMessages).toHaveBeenCalledWith("space-1", "general");
+    expect(h.loadMessages).toHaveBeenCalledWith(
+      "space-1",
+      "general",
+      0,
+      [],
+      { intent: "automatic" },
+    );
     expect(h.activeThreadStack.value).toEqual(["t1"]);
     expect(h.activeRightPanel.value).toBe("thread");
     expect(h.channelBackfill).toHaveBeenCalledWith("t1");
+    h.scope.stop();
+  });
+
+  test("explicit history navigation may retry a denied channel", async () => {
+    const h = makeHarness();
+
+    await h.routeSync.applyRouteTarget({
+      id: "channel",
+      params: { channelId: "general" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest(), {
+      intent: "explicit-navigation",
+    });
+
+    expect(h.loadMessages).toHaveBeenCalledWith(
+      "space-1",
+      "general",
+      0,
+      [],
+      { intent: "explicit-navigation" },
+    );
     h.scope.stop();
   });
 

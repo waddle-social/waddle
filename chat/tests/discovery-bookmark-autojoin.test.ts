@@ -20,7 +20,10 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
         "alice@example.test",
       );
 
-      expect(topology.rooms.find((room) => room.jid === "general@muc.example.test")?.autojoin).toBe(true);
+      const room = topology.rooms.find((candidate) => candidate.jid === "general@muc.example.test");
+      expect(room?.autojoin).toBe(true);
+      expect(room?.isBookmarked).toBe(true);
+      expect(topology.roomCatalogComplete).toBe(true);
     });
   });
 
@@ -66,7 +69,9 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
         "alice@example.test",
       );
 
-      expect(topology.rooms.find((room) => room.jid === "orphan@muc.example.test")?.autojoin).toBe(true);
+      const room = topology.rooms.find((candidate) => candidate.jid === "orphan@muc.example.test");
+      expect(room?.autojoin).toBe(true);
+      expect(room?.isBookmarked).toBe(false);
     });
   });
 

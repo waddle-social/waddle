@@ -54,6 +54,10 @@ import { useChannelLiveMerge } from "@/channels/live-merge";
 import { useChannelChatStates } from "@/channels/chat-states";
 import { useChannelReadMarkers } from "@/channels/read-markers";
 import { useChannelMessageSearch } from "@/channels/message-search";
+import {
+  type ChannelLoadIntent,
+  useRoomAccessRequirements,
+} from "@/channels/room-access";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
 
 export function useChannelMessages(
@@ -152,6 +156,10 @@ export function useChannelMessages(
   const activeTimelineRoomJid = computed(() =>
     isChannelTimelineActive.value ? currentRoomJid.value : null
   );
+  const {
+    currentRoomAccessRequirement,
+    isRoomAccessRequired,
+  } = useRoomAccessRequirements(xmppClient, currentRoomJid);
 
   function roomJidForChannel(channelId: string): string | null {
     const currentSession = session.value;
@@ -580,6 +588,7 @@ export function useChannelMessages(
     pendingEchoClientIds,
     appendQueuedMessages,
     roomJidForChannel,
+    isRoomAccessRequired,
     scrollToPinnedEdgeAndPin,
     persistLastSeen,
   });
@@ -604,19 +613,29 @@ export function useChannelMessages(
     channelId: string,
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
+    options: { intent?: ChannelLoadIntent } = {},
   ) {
     messageSearch.reset();
     return withSpan(
       "xmpp.initial_render",
       { "conversation.kind": "room" },
-      () => paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed),
+      () =>
+        paging.loadMessages(
+          spaceId,
+          channelId,
+          unreadAtLoad,
+          metadataSeed,
+          options,
+        ),
     );
   }
 
   async function selectChannel(channelId: string) {
     messages.value = [];
     clearTypingState();
-    await loadMessages(activeSpaceId.value ?? "", channelId);
+    await loadMessages(activeSpaceId.value ?? "", channelId, 0, [], {
+      intent: "explicit-navigation",
+    });
   }
 
   function disconnect() {
@@ -810,6 +829,7 @@ export function useChannelMessages(
     timelineEl,
     timelineEdgeScroller,
     currentRoomJid,
+    currentRoomAccessRequirement,
     typingUsers,
     roomHats,
     roomAuthority,

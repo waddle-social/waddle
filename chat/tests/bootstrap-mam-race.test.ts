@@ -118,6 +118,7 @@ describe("useChannelMamPaging.loadMessages — bootstrap race (#675)", () => {
       pendingEchoClientIds,
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });
@@ -187,6 +188,7 @@ describe("useChannelMamPaging.loadMessages — bootstrap race (#675)", () => {
       pendingEchoClientIds,
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });
@@ -242,6 +244,7 @@ describe("bootstrap failure keeps live arrivals (#675 review)", () => {
       pendingEchoClientIds,
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });
@@ -302,6 +305,7 @@ describe("bootstrap merge keeps the unread divider anchored (#675 review)", () =
       pendingEchoClientIds,
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });
@@ -366,6 +370,7 @@ describe("bootstrap merge keeps archive-applied retractions (#675 review)", () =
       pendingEchoClientIds,
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });
@@ -433,6 +438,7 @@ describe("bootstrap merge keeps archive-applied corrections (#675 review)", () =
       pendingEchoClientIds,
       appendQueuedMessages: (timeline) => timeline,
       roomJidForChannel: () => "space_room@muc.example.com",
+      isRoomAccessRequired: () => false,
       scrollToPinnedEdgeAndPin: async () => true,
       persistLastSeen: () => {},
     });

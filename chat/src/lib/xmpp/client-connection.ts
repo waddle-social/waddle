@@ -311,6 +311,7 @@ export class ResumeStateStore {
     this.setHandle(null);
     this.persistence.clearSm();
     this.persistence.clearJoinedRooms();
+    this.persistence.clearAutoJoinBlocks?.();
   }
 
   /**

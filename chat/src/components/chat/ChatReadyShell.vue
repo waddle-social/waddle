@@ -126,6 +126,7 @@ const {
   authorHatsByNick,
   authorAuthorityByNick,
   activeActionError,
+  activeRoomAccessRequirement,
   activeErrorActionLabel,
   activeUploadProgress,
   setContentAreaRef,
@@ -872,6 +873,7 @@ onUnmounted(() => {
               :first-unseen-id="activeFirstUnseenId"
               :xmpp-status="messaging.xmppStatus.value"
               :action-error="activeActionError"
+              :channel-access-required="!!activeRoomAccessRequirement"
               :error-action-label="activeErrorActionLabel"
               :update-available="appUpdate.updateAvailable.value"
               :is-applying-update="appUpdate.isApplyingUpdate.value"

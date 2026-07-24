@@ -29,10 +29,17 @@
  */
 
 import { reportError } from "@/lib/telemetry";
+import { bareJidKey } from "./jid";
+import {
+  ROOM_CATALOG_FINGERPRINT_FIELDS,
+  type RoomAutoJoinBlock,
+} from "./room-auto-join-policy";
+import type { RoomCatalogFingerprintField } from "./types";
 
 const CATCHUP_PREFIX = "waddle.chat.resume-cursors";
 const SM_PREFIX = "waddle.chat.sm-resume";
 const JOINED_ROOMS_PREFIX = "waddle.chat.joined-rooms";
+const AUTO_JOIN_BLOCKS_PREFIX = "waddle.chat.auto-join-blocks";
 const OWNER_LEASE_PREFIX = `${SM_PREFIX}.owner-lease`;
 const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
 
@@ -64,6 +71,8 @@ export type PersistedSmResumeState = {
   unhandledOutboundStanzas?: string[];
   resource?: string;
 };
+
+type PersistedAutoJoinBlock = RoomAutoJoinBlock;
 
 interface PersistedSmEnvelope extends PersistedSmResumeState {
   savedAt: number;
@@ -114,6 +123,9 @@ export interface ResumePersistence {
   loadJoinedRooms(): string[];
   saveJoinedRooms(roomJids: readonly string[]): void;
   clearJoinedRooms(): void;
+  loadAutoJoinBlocks?(): PersistedAutoJoinBlock[];
+  saveAutoJoinBlocks?(blocks: readonly PersistedAutoJoinBlock[]): void;
+  clearAutoJoinBlocks?(): void;
 }
 
 /** No-op persistence — used in tests / non-browser contexts. */
@@ -129,6 +141,9 @@ export const nullResumePersistence: ResumePersistence = {
   loadJoinedRooms: () => [],
   saveJoinedRooms: () => undefined,
   clearJoinedRooms: () => undefined,
+  loadAutoJoinBlocks: () => [],
+  saveAutoJoinBlocks: () => undefined,
+  clearAutoJoinBlocks: () => undefined,
 };
 
 export function createLocalStorageResumePersistence(accountKey: string, ownerId?: string): ResumePersistence {
@@ -139,6 +154,7 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
   const catchupKey = `${catchupKeyPrefix}.${owner.ownerId}`;
   const smKey = `${SM_PREFIX}.${accountKey}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
+  const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
 
   return {
     loadCatchup() {
@@ -201,6 +217,54 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
     },
     clearJoinedRooms() {
       removeKey(joinedRoomsKey, "joined-rooms");
+    },
+    loadAutoJoinBlocks() {
+      const stored = readJson<PersistedAutoJoinBlock[]>(
+        autoJoinBlocksKey,
+        isPersistedAutoJoinBlockArray,
+        "auto-join-blocks",
+      ) ?? [];
+      const normalized = new Map<string, PersistedAutoJoinBlock>();
+      for (const block of stored) {
+        const roomJid = normalizeRoomJid(block.roomJid);
+        if (!roomJid) continue;
+        normalized.set(roomJid, {
+          roomJid,
+          condition: block.condition,
+          ...(block.catalogFingerprint !== undefined
+            ? { catalogFingerprint: block.catalogFingerprint }
+            : {}),
+          ...(block.catalogFingerprintFields
+            ? {
+              catalogFingerprintFields:
+                [...block.catalogFingerprintFields],
+            }
+            : {}),
+        });
+      }
+      return [...normalized.values()];
+    },
+    saveAutoJoinBlocks(blocks) {
+      writeJson(
+        autoJoinBlocksKey,
+        blocks.map((block) => ({
+          roomJid: normalizeRoomJid(block.roomJid),
+          condition: block.condition,
+          ...(block.catalogFingerprint !== undefined
+            ? { catalogFingerprint: block.catalogFingerprint }
+            : {}),
+          ...(block.catalogFingerprintFields
+            ? {
+              catalogFingerprintFields:
+                [...block.catalogFingerprintFields],
+            }
+            : {}),
+        })).filter((block) => !!block.roomJid),
+        "auto-join-blocks",
+      );
+    },
+    clearAutoJoinBlocks() {
+      removeKey(autoJoinBlocksKey, "auto-join-blocks");
     },
   };
 }
@@ -510,6 +574,45 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function isPersistedAutoJoinBlockArray(value: unknown): value is PersistedAutoJoinBlock[] {
+  return Array.isArray(value) && value.every((item) => {
+    if (!item || typeof item !== "object") return false;
+    const candidate = item as Record<string, unknown>;
+    return typeof candidate.roomJid === "string"
+      && (
+        candidate.condition === "registration-required"
+        || candidate.condition === "forbidden"
+      )
+      && (
+        candidate.catalogFingerprint === undefined
+        || candidate.catalogFingerprint === null
+        || typeof candidate.catalogFingerprint === "string"
+      )
+      && (
+        candidate.catalogFingerprintFields === undefined
+        || (
+          typeof candidate.catalogFingerprint === "string"
+          && isRoomCatalogFingerprintFieldArray(
+            candidate.catalogFingerprintFields,
+          )
+        )
+      );
+  });
+}
+
+function isRoomCatalogFingerprintFieldArray(
+  value: unknown,
+): value is RoomCatalogFingerprintField[] {
+  return Array.isArray(value)
+    && value.every(
+      (field) =>
+        typeof field === "string"
+        && ROOM_CATALOG_FINGERPRINT_FIELDS.includes(
+          field as RoomCatalogFingerprintField,
+        ),
+    );
+}
+
 function isOwnerLease(value: unknown): value is OwnerLease {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
@@ -539,7 +642,7 @@ function isPositiveU32(value: unknown): value is number {
 }
 
 function normalizeRoomJid(roomJid: string): string {
-  return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+  return bareJidKey(roomJid);
 }
 
 function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {

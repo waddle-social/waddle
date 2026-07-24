@@ -530,6 +530,10 @@ export interface DiscoveredChannel {
   standalone?: boolean;
   features?: string[];
   isGroupDm?: boolean;
+  /** Whether this room arrived through the account's XEP-0402 bookmark
+   * membership view. A change is a concrete membership-generation signal
+   * even when the room's disco metadata itself is unchanged. */
+  isBookmarked?: boolean;
   /**
    * XEP-0402 bookmark `autojoin` value. Bookmarked rooms with the
    * attribute omitted are `false` per spec; rooms discovered outside
@@ -550,9 +554,34 @@ export interface DiscoveredSpace {
   role?: "owner" | "admin" | "moderator" | "member" | null;
 }
 
+export type RoomCatalogFingerprintField =
+  | "spaceId"
+  | "autojoin"
+  | "isGroupDm"
+  | "isBookmarked";
+
 export interface DiscoveredTopology {
   spaces: DiscoveredSpace[];
   rooms: DiscoveredChannel[];
+  /** False when room discovery or hydration degraded and `rooms` may be incomplete. */
+  roomCatalogComplete: boolean;
+  /**
+   * Exact authority available for terminal-denial reconciliation. Whole-cache
+   * replacement remains gated by `roomCatalogComplete`.
+   */
+  roomReconciliationAuthority: {
+    /** True when successful MUC and bookmark listings make absence authoritative. */
+    absentRoomKeysAuthoritative: boolean;
+    /**
+     * Field-level evidence for present rooms. This lets a successful exact-room
+     * bookmark source remain useful without treating unrelated failed sources
+     * as authoritative for fields they could have overridden.
+     */
+    roomFingerprints: Array<{
+      roomKey: string;
+      fields: RoomCatalogFingerprintField[];
+    }>;
+  };
   serverRole?: "owner" | "admin" | "moderator" | "member" | null;
   services?: {
     muc?: string;

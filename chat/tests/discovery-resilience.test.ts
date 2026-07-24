@@ -164,6 +164,7 @@ describe("discoverTopology partial-failure resilience", () => {
 
       // Spaces discovery succeeded.
       expect(topology.spaces.map((space) => space.id)).toContain("space-engineering");
+      expect(topology.roomCatalogComplete).toBe(false);
       // MUC items hung → rooms array stays empty rather than the whole
       // topology call rejecting.
       expect(topology.rooms).toEqual([]);
@@ -181,6 +182,142 @@ describe("discoverTopology partial-failure resilience", () => {
       // channelFromRoom record without hydrated fields.
       const ids = topology.rooms.map((room) => room.id).sort();
       expect(ids).toEqual(["broken", "general"]);
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([{
+        roomKey: "general@muc.example.test",
+        fields: ["spaceId", "autojoin", "isGroupDm", "isBookmarked"],
+      }]);
+    });
+  });
+
+  test("does not authorize absence when failed hydration omits a bookmark-only room", async () => {
+    await withFakeDomParser(async () => {
+      const omittedRoomJid = "private@muc.example.test";
+      const topology = await discoverTopology(
+        resilientClient({
+          rejectRoomInfo: omittedRoomJid,
+          userBookmarks: [{
+            id: omittedRoomJid,
+            name: "Private",
+            autojoin: true,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.rooms.some((room) => room.jid === omittedRoomJid)).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+    });
+  });
+
+  test("does not authorize absence when incomplete hydration omits a bookmark-only room", async () => {
+    await withFakeDomParser(async () => {
+      const omittedRoomJid = "private@muc.example.test";
+      const topology = await discoverTopology(
+        resilientClient({
+          incompleteRoomInfo: omittedRoomJid,
+          userBookmarks: [{
+            id: omittedRoomJid,
+            name: "Private",
+            autojoin: true,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.rooms.some((room) => room.jid === omittedRoomJid)).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+    });
+  });
+
+  test("marks the room catalog incomplete when user bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({ rejectUserBookmarks: true }),
+        "alice@example.test",
+      );
+
+      expect(topology.rooms.map((room) => room.id).sort()).toEqual([
+        "broken",
+        "general",
+      ]);
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([]);
+    });
+  });
+
+  test("marks the room catalog incomplete when space bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({ rejectSpaceBookmarks: true }),
+        "alice@example.test",
+      );
+
+      expect(topology.rooms.map((room) => room.id).sort()).toEqual([
+        "broken",
+        "general",
+      ]);
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([]);
+    });
+  });
+
+  test("keeps exact space-bookmark authority when user bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({
+          rejectUserBookmarks: true,
+          spaceBookmarks: [{
+            id: "general@muc.example.test",
+            name: "General",
+            autojoin: false,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([{
+        roomKey: "general@muc.example.test",
+        fields: ["isGroupDm", "isBookmarked", "spaceId"],
+      }]);
+    });
+  });
+
+  test("keeps exact user-bookmark authority when space bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({
+          rejectSpaceBookmarks: true,
+          userBookmarks: [{
+            id: "general@muc.example.test",
+            name: "General",
+            autojoin: false,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([{
+        roomKey: "general@muc.example.test",
+        fields: ["isGroupDm", "isBookmarked", "autojoin"],
+      }]);
     });
   });
 });
@@ -188,7 +325,12 @@ describe("discoverTopology partial-failure resilience", () => {
 type ResilientClientOptions = {
   hangComponent?: string;
   hangMucItems?: boolean;
+  incompleteRoomInfo?: string;
+  rejectSpaceBookmarks?: boolean;
+  rejectUserBookmarks?: boolean;
   rejectRoomInfo?: string;
+  spaceBookmarks?: Array<{ id: string; name: string; autojoin: boolean }>;
+  userBookmarks?: Array<{ id: string; name: string; autojoin: boolean }>;
 };
 
 function neverResolvesForComponent(jid: string) {
@@ -317,6 +459,12 @@ function resilientClient(options: ResilientClientOptions = {}) {
         if (options.rejectRoomInfo && xml.includes(`to="${options.rejectRoomInfo}"`)) {
           throw new Error("simulated room disco#info failure");
         }
+        if (
+          options.incompleteRoomInfo
+          && xml.includes(`to="${options.incompleteRoomInfo}"`)
+        ) {
+          return '<iq type="result"/>';
+        }
         if (xml.includes('to="muc.example.test"')) {
           return discoInfoXml({
             identities: [{ category: "conference", type: "text", name: "Chatrooms" }],
@@ -357,7 +505,22 @@ function resilientClient(options: ResilientClientOptions = {}) {
         return discoInfoXml();
       }
       if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
-        return pubsubItemsXml([]);
+        if (
+          options.rejectSpaceBookmarks
+          && xml.includes('to="spaces.example.test"')
+        ) {
+          throw new Error("simulated space bookmark failure");
+        }
+        if (
+          options.rejectUserBookmarks
+          && xml.includes('to="alice@example.test"')
+        ) {
+          throw new Error("simulated user bookmark failure");
+        }
+        if (xml.includes('to="spaces.example.test"')) {
+          return pubsubItemsXml(options.spaceBookmarks ?? []);
+        }
+        return pubsubItemsXml(options.userBookmarks ?? []);
       }
       throw new Error(`Unexpected IQ: ${xml}`);
     },

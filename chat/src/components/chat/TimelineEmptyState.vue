@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { Hash, MessageCircle, MessagesSquare } from "lucide-vue-next";
+import { Hash, LockKeyhole, MessageCircle, MessagesSquare } from "lucide-vue-next";
 
 defineProps<{
   /**
    * pick  → no conversation selected yet.
    * quiet → conversation selected but its timeline is empty.
+   * access-required → the server denied this account access to the channel.
    */
-  variant: "pick" | "quiet";
+  variant: "pick" | "quiet" | "access-required";
   sidebarMode?: "channels" | "dms";
   isForumChannel: boolean;
   dmPeerUsername?: string | null;
@@ -15,7 +16,29 @@ defineProps<{
 </script>
 
 <template>
-  <div v-if="variant === 'pick'" class="chat-empty-state">
+  <div
+    v-if="variant === 'access-required'"
+    class="chat-empty-state"
+    role="status"
+    aria-live="polite"
+  >
+    <div class="chat-empty-state__halo">
+      <span class="chat-empty-state__halo-glow" aria-hidden="true" />
+      <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--muted">
+        <LockKeyhole class="w-6 h-6 text-primary/70" aria-hidden="true" />
+      </span>
+    </div>
+    <div class="chat-field-stack">
+      <p class="type-empty-title">
+        You need access to this channel
+      </p>
+      <p class="type-field text-muted-foreground chat-copy-measure">
+        Ask a space admin for access, then open the channel again to retry.
+      </p>
+    </div>
+  </div>
+
+  <div v-else-if="variant === 'pick'" class="chat-empty-state">
     <div class="chat-empty-state__halo">
       <span class="chat-empty-state__halo-glow" aria-hidden="true" />
       <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--muted">

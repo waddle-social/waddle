@@ -502,6 +502,7 @@ export function useChatAppController() {
     authorHatsByNick: memberDirectory.authorHatsByNick,
     authorAuthorityByNick: memberDirectory.authorAuthorityByNick,
     activeActionError: conversation.activeActionError,
+    activeRoomAccessRequirement: conversation.activeRoomAccessRequirement,
     activeErrorActionLabel: conversation.activeErrorActionLabel,
     activeUploadProgress: conversation.activeUploadProgress,
     setContentAreaRef: conversation.setContentAreaRef,

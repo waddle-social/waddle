@@ -78,6 +78,7 @@ const props = defineProps<{
   firstUnseenId: string | null;
   xmppStatus: XmppStatusSnapshot;
   actionError: string;
+  channelAccessRequired?: boolean;
   errorActionLabel?: string | null;
   updateAvailable: boolean;
   isApplyingUpdate: boolean;
@@ -470,7 +471,9 @@ const currentUserCanPin = computed(() => {
   const myAffiliation = props.roomAuthority[me]?.affiliation ?? "none";
   return myAffiliation === "owner" || myAffiliation === "admin";
 });
-const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
+const canShowComposer = computed(() =>
+  !!(props.channel || props.dmPeer) && !props.channelAccessRequired,
+);
 const queuedMessageCount = computed(() =>
   props.messages.filter((message) =>
     message.isSelf && (message.deliveryStatus === "sending" || message.deliveryStatus === "failed")
@@ -816,7 +819,7 @@ function dayDividerLabel(createdAt: string): string {
 
     <!-- Error banner -->
     <div
-      v-if="actionError"
+      v-if="actionError && !channelAccessRequired"
       class="type-control bg-destructive/10 border-b border-destructive/20 text-destructive animate-fade-in"
       role="alert"
       aria-live="assertive"
@@ -929,12 +932,19 @@ function dayDividerLabel(createdAt: string): string {
 
     <!-- Messages -->
     <div
-      v-if="isLoadingMessages || !channel && !dmPeer || feedMessages.length === 0"
+      v-if="channelAccessRequired || isLoadingMessages || !channel && !dmPeer || feedMessages.length === 0"
       :ref="setMessagesContainer"
       class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
       @scroll="onMessagesScroll"
     >
-      <MessageListSkeleton v-if="isLoadingMessages" />
+      <TimelineEmptyState
+        v-if="channelAccessRequired"
+        variant="access-required"
+        :is-forum-channel="isForumChannel"
+        :channel-name="channel?.name ?? null"
+      />
+
+      <MessageListSkeleton v-else-if="isLoadingMessages" />
 
       <TimelineEmptyState
         v-else-if="!channel && !dmPeer"

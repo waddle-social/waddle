@@ -18,5 +18,7 @@ export function handlerStubs() {
     setLastSeenHandler: () => {},
     setActivityHandler: () => {},
     setRoomAvatarHandler: () => {},
+    listRoomAccessRequirements: () => [],
+    onRoomAccessChanged: () => () => {},
   };
 }

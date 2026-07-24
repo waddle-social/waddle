@@ -131,7 +131,13 @@ describe("useRoomSync selectChannel", () => {
     expect(h.clearChannelActivity).toHaveBeenCalledWith("general@muc.example.com");
     expect(h.clearMessages).toHaveBeenCalledTimes(1);
     // Unread-at-load comes from the computed unread map.
-    expect(h.loadMessages).toHaveBeenCalledWith("", "general", 7);
+    expect(h.loadMessages).toHaveBeenCalledWith(
+      "",
+      "general",
+      7,
+      [],
+      { intent: "explicit-navigation" },
+    );
     expect(h.activeChannelId.value).toBe("general");
     h.scope.stop();
   });
@@ -166,7 +172,13 @@ describe("useRoomSync selectChannelByRoomJid", () => {
 
     expect(h.roomSync.pendingChannelRoomJidSelection.value).toBeNull();
     expect(h.activeChannelId.value).toBe("general");
-    expect(h.loadMessages).toHaveBeenCalledWith("", "general", 7);
+    expect(h.loadMessages).toHaveBeenCalledWith(
+      "",
+      "general",
+      7,
+      [],
+      { intent: "explicit-navigation" },
+    );
     h.scope.stop();
   });
 

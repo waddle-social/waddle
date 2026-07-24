@@ -41,6 +41,7 @@ import type {
   ClientEvents,
   MdsDisplayedEntry,
   PubsubEvent,
+  RoomAccessChangedEvent,
 } from "./client-events";
 import {
   OfflineSendQueue,
@@ -90,6 +91,7 @@ import type {
   ReactionEvent,
   RoomActivityEvent,
   RoomAuthority,
+  RoomCatalogFingerprintField,
   RoomHats,
   RoomPresence,
   RosterContact,
@@ -117,6 +119,14 @@ import {
   createLocalStorageResumePersistence,
   type ResumePersistence,
 } from "./resume-persistence";
+import {
+  hasCompleteRoomCatalogFingerprintAuthority,
+  reconcileAutoJoinBlocks,
+  ROOM_CATALOG_FINGERPRINT_FIELDS,
+  roomCatalogFingerprint,
+  terminalMucJoinCondition,
+  type RoomAutoJoinBlock,
+} from "./room-auto-join-policy";
 import { clearDmCallJoinCacheForAccount } from "@/lib/calls/dm-call-join-cache";
 import {
   discoverExtensionCommands,
@@ -451,6 +461,16 @@ export class BrowserXmppClient {
   // later trigger, and the three fan-out triggers per session coalesce.
   // Cleared on disconnect so a genuine fresh cycle rejoins.
   private readonly autoJoinAttemptedRoomKeys = new Set<string>();
+  // XEP-0045 terminal room-entry denials are not transient join failures:
+  // reconnecting cannot grant membership or undo a ban. Keep those rooms
+  // out of automatic fan-out while still allowing `switchRoom` to retry
+  // explicitly when the user navigates back.
+  private terminallyDeniedAutoJoinRooms = new Map<string, RoomAutoJoinBlock>();
+  private currentRoomCatalogFingerprintEvidence = new Map<
+    string,
+    Pick<RoomAutoJoinBlock, "catalogFingerprint" | "catalogFingerprintFields">
+  >();
+  private roomDiscoveryGeneration = 0;
   private uploadServiceJid: string | null = null;
   private mucServiceJid = "";
   private discoveredRoomJids = new Map<string, string>();
@@ -648,6 +668,10 @@ export class BrowserXmppClient {
       },
     });
     this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
+    for (const block of this.resumePersistence.loadAutoJoinBlocks?.() ?? []) {
+      const key = this.roomJoinKey(block.roomJid);
+      if (key) this.terminallyDeniedAutoJoinRooms.set(key, { ...block, roomJid: key });
+    }
   }
 
   private trustedLinkPreviewMediaOrigin(): string | null {
@@ -690,6 +714,10 @@ export class BrowserXmppClient {
    */
   private roomJoinKey(roomJid: string): string {
     return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+  }
+
+  private roomIsTerminallyDenied(roomJid: string): boolean {
+    return this.terminallyDeniedAutoJoinRooms.has(this.roomJoinKey(roomJid));
   }
 
   private markMucReadyFromSelfPresence(roomJid: string): void {
@@ -744,16 +772,41 @@ export class BrowserXmppClient {
     if (!waiter) return false;
     if (errorNick !== waiter.requestedNick) return false;
 
-    waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
+    const terminalAuthorizationCondition = terminalMucJoinCondition(
+      presence.error_type,
+      presence.error_condition,
+    );
+    waiter?.reject(new Error(
+      terminalAuthorizationCondition
+        ? "You need access to this channel."
+        : "Channel presence was rejected. Try again in a moment.",
+    ));
     // Fully revoke — including the pending joinedMucs promise and its
     // token — BEFORE emitting, so an error listener that synchronously
     // retries the join starts a fresh one instead of awaiting the doomed
     // rejected entry (ensureJoined's own catch cleanup only lands several
     // microtasks later and its token guard makes this early delete safe).
     this.revokeMucReadiness(room);
+    if (terminalAuthorizationCondition) {
+      const catalogFingerprintEvidence =
+        this.currentRoomCatalogFingerprintEvidence.get(key);
+      this.terminallyDeniedAutoJoinRooms.set(key, {
+        roomJid: key,
+        condition: terminalAuthorizationCondition,
+        ...catalogFingerprintEvidence,
+      });
+      this.persistAutoJoinBlocks();
+      this.events.emit("roomAccessChanged", {
+        roomJid: key,
+        state: "required",
+        condition: terminalAuthorizationCondition,
+      });
+      this.resumedSessionRoomKeys.delete(key);
+      if (this.retainedJoinedRoomJids.delete(key)) this.persistRetainedJoinedRooms();
+    }
     this.emitError({
       kind: "muc-join",
-      recoverable: true,
+      recoverable: !terminalAuthorizationCondition,
       detail: `room join rejected — ${room}`,
       roomLocalpart: jidLocalpart(room),
       ...stanzaErrorContext({
@@ -809,6 +862,14 @@ export class BrowserXmppClient {
   onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
   onQueueDepthChange(hook: (depth: { kind: "room" | "dm"; persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
   onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
+  listRoomAccessRequirements(): ReadonlyArray<Extract<RoomAccessChangedEvent, { state: "required" }>> {
+    return [...this.terminallyDeniedAutoJoinRooms.values()].map((block) => ({
+      roomJid: block.roomJid,
+      state: "required",
+      condition: block.condition,
+    }));
+  }
+  onRoomAccessChanged(hook: (event: RoomAccessChangedEvent) => void) { return this.events.on("roomAccessChanged", hook); }
   onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
   onCatchup(hook: (info: CatchupHookInfo) => void) { this.events.on("catchup", hook); }
   onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.events.on("resumeDrain", hook); }
@@ -1073,6 +1134,8 @@ export class BrowserXmppClient {
 
   async disconnect() {
     this.destroying = true;
+    this.roomDiscoveryGeneration += 1;
+    this.currentRoomCatalogFingerprintEvidence.clear();
     this.disarmOnlineRecovery();
     this.clearReconnectTimer();
     // F3: cancel the pending connect attempt outright. Bump the epoch
@@ -1219,6 +1282,7 @@ export class BrowserXmppClient {
       }
       if (!existingToken && !this.joinedMucs.has(key)) return;
       this.joinedMucReady.add(key);
+      this.clearAutoJoinBlock(key);
       this.rememberJoinedRoom(roomJid);
       return;
     }
@@ -1230,6 +1294,7 @@ export class BrowserXmppClient {
       await promise;
       if (this.joinedMucJoinTokens.get(key) === joinToken) {
         this.joinedMucReady.add(key);
+        this.clearAutoJoinBlock(key);
         this.rememberJoinedRoom(roomJid);
       }
     } catch (err) {
@@ -1252,6 +1317,21 @@ export class BrowserXmppClient {
 
   private persistRetainedJoinedRooms(): void {
     this.resumePersistence.saveJoinedRooms([...this.retainedJoinedRoomJids]);
+  }
+
+  private persistAutoJoinBlocks(): void {
+    this.resumePersistence.saveAutoJoinBlocks?.([...this.terminallyDeniedAutoJoinRooms.values()]);
+  }
+
+  private clearAutoJoinBlock(roomJid: string): void {
+    const key = this.roomJoinKey(roomJid);
+    if (!key || !this.terminallyDeniedAutoJoinRooms.delete(key)) return;
+    this.autoJoinAttemptedRoomKeys.delete(key);
+    this.persistAutoJoinBlocks();
+    this.events.emit("roomAccessChanged", {
+      roomJid: key,
+      state: "available",
+    });
   }
 
   private async performMucJoin(roomJid: string): Promise<void> {
@@ -1297,6 +1377,7 @@ export class BrowserXmppClient {
       const key = this.roomJoinKey(roomJid);
       if (!key || seenThisCall.has(key)) continue;
       seenThisCall.add(key);
+      if (this.roomIsTerminallyDenied(roomJid)) continue;
       if (this.autoJoinAttemptedRoomKeys.has(key)) continue;
       this.autoJoinAttemptedRoomKeys.add(key);
       queue.push(roomJid);
@@ -1320,9 +1401,31 @@ export class BrowserXmppClient {
     await Promise.allSettled(workers);
   }
 
-  async switchRoom(_spaceId: string, channelId: string) {
+  async retryRoomAccess(spaceId: string, channelId: string): Promise<void> {
+    const roomJid = this.roomJidForChannel(channelId);
+    if (!this.roomIsTerminallyDenied(roomJid)) return;
+    await this.switchRoomForIntent(spaceId, channelId, "explicit-navigation");
+  }
+
+  async switchRoom(spaceId: string, channelId: string) {
+    await this.switchRoomForIntent(spaceId, channelId, "automatic");
+  }
+
+  private async switchRoomForIntent(
+    _spaceId: string,
+    channelId: string,
+    intent: "automatic" | "explicit-navigation",
+  ) {
     await this.connect();
     const nextRoom = this.roomJidForChannel(channelId);
+    if (
+      intent !== "explicit-navigation"
+      && this.roomIsTerminallyDenied(nextRoom)
+    ) {
+      this.currentRoom = nextRoom;
+      this.dispatchFocusedRoomHandlers();
+      throw new Error("You need access to this channel.");
+    }
     if (this.roomSwitchPromise) {
       if (this.roomSwitchTarget === nextRoom) return this.roomSwitchPromise;
       await this.roomSwitchPromise.catch(() => undefined);
@@ -2233,15 +2336,122 @@ export class BrowserXmppClient {
   }
   async discoverTopology(): Promise<DiscoveredTopology> {
     const xmpp = await this.requireConnectedXmpp();
+    const discoveryGeneration = ++this.roomDiscoveryGeneration;
+    // A new refresh invalidates the previous observation until this run
+    // proves each room's complete fingerprint again. A terminal denial
+    // arriving while discovery is degraded or in flight must not inherit
+    // an older pre-denial membership snapshot.
+    this.currentRoomCatalogFingerprintEvidence.clear();
     const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    if (
+      this.destroying
+      || this.xmpp !== xmpp
+      || discoveryGeneration !== this.roomDiscoveryGeneration
+    ) {
+      return topology;
+    }
+    const authoritativeFingerprintFields = new Map(
+      topology.roomReconciliationAuthority.roomFingerprints.map(
+        ({ roomKey, fields }) => [roomKey, new Set(fields)] as const,
+      ),
+    );
+    const absentRoomKeysAuthoritative = topology.roomCatalogComplete
+      && topology.roomReconciliationAuthority.absentRoomKeysAuthoritative;
+    const reconciliation = reconcileAutoJoinBlocks(
+      this.terminallyDeniedAutoJoinRooms,
+      topology.rooms,
+      {
+        absentRoomKeysAuthoritative,
+        authoritativeFingerprintFields,
+      },
+    );
+    this.terminallyDeniedAutoJoinRooms = reconciliation.blocks;
+    for (const key of reconciliation.unblockedRoomKeys) {
+      this.autoJoinAttemptedRoomKeys.delete(key);
+      this.events.emit("roomAccessChanged", {
+        roomJid: key,
+        state: "available",
+      });
+    }
+    if (reconciliation.changed) this.persistAutoJoinBlocks();
+    this.updateRoomDiscoveryCaches(
+      topology,
+      authoritativeFingerprintFields,
+      absentRoomKeysAuthoritative,
+    );
     if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
-    this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : []));
     const autoJoinRoomJids = topology.rooms
-      .filter((room) => room.autojoin !== false && !!room.jid)
+      .filter((room) => {
+        if (room.autojoin === false || !room.jid) return false;
+        const key = this.roomJoinKey(room.jid);
+        return topology.roomCatalogComplete
+          || authoritativeFingerprintFields.get(key)?.has("autojoin");
+      })
       .map((room) => room.jid!);
-    this.autoJoinRoomJids = autoJoinRoomJids;
     if (autoJoinRoomJids.length > 0) void this.fanOutAutoJoin(autoJoinRoomJids);
     return topology;
+  }
+
+  private updateRoomDiscoveryCaches(
+    topology: DiscoveredTopology,
+    authoritativeFingerprintFields: ReadonlyMap<
+      string,
+      ReadonlySet<RoomCatalogFingerprintField>
+    >,
+    absentRoomKeysAuthoritative: boolean,
+  ): void {
+    const discoveredRoomEntries = topology.rooms.flatMap((room) =>
+      room.jid ? [[room.id, room.jid] as const] : []
+    );
+    const authoritativeRooms = topology.rooms.filter((room) => {
+      const key = room.jid ? this.roomJoinKey(room.jid) : "";
+      return !!key && !!authoritativeFingerprintFields.get(key)?.size;
+    });
+
+    this.currentRoomCatalogFingerprintEvidence = new Map(
+      authoritativeRooms.flatMap((room) => {
+        const key = this.roomJoinKey(room.jid!);
+        const fields = authoritativeFingerprintFields.get(key)!;
+        return [[key, {
+          catalogFingerprint: roomCatalogFingerprint(room),
+          ...(hasCompleteRoomCatalogFingerprintAuthority(fields)
+            ? {}
+            : {
+              catalogFingerprintFields:
+                ROOM_CATALOG_FINGERPRINT_FIELDS.filter((field) =>
+                  fields.has(field)
+                ),
+            }),
+        }] as const];
+      }),
+    );
+
+    if (absentRoomKeysAuthoritative) {
+      this.discoveredRoomJids = new Map(discoveredRoomEntries);
+      this.autoJoinRoomJids = topology.rooms
+        .filter((room) => room.autojoin !== false && !!room.jid)
+        .map((room) => room.jid!);
+      return;
+    }
+
+    const discoveredRoomJids = new Map(this.discoveredRoomJids);
+    const autoJoinRooms = new Map(
+      this.autoJoinRoomJids.flatMap((roomJid) => {
+        const key = this.roomJoinKey(roomJid);
+        return key ? [[key, roomJid] as const] : [];
+      }),
+    );
+    for (const room of authoritativeRooms) {
+      const roomJid = room.jid!;
+      const key = this.roomJoinKey(roomJid);
+      discoveredRoomJids.set(room.id, roomJid);
+      if (authoritativeFingerprintFields.get(key)?.has("autojoin")) {
+        autoJoinRooms.delete(key);
+        if (room.autojoin !== false) autoJoinRooms.set(key, roomJid);
+      }
+    }
+    this.discoveredRoomJids = discoveredRoomJids;
+    this.autoJoinRoomJids = [...autoJoinRooms.values()];
   }
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> { return this.mucAdmin.listRoomMembers(channelId, options); }
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> { return this.mucAdmin.setRoomAffiliation(channelId, jid, affiliation); }
@@ -2454,6 +2664,7 @@ export class BrowserXmppClient {
   }
 
   private async flushQueuedRoomAfterJoin(xmpp: XmppClientInstance, roomJid: string): Promise<void> {
+    if (this.roomIsTerminallyDenied(roomJid)) return;
     try {
       await this.ensureJoined(roomJid);
       if (this.xmpp !== xmpp) return;
@@ -2530,6 +2741,8 @@ export class BrowserXmppClient {
     // New epoch: a genuine fresh cycle must be free to rejoin (#1221),
     // and the next handle must run its own session-ready setup.
     this.autoJoinAttemptedRoomKeys.clear();
+    this.roomDiscoveryGeneration += 1;
+    this.currentRoomCatalogFingerprintEvidence.clear();
     this.sessionReadyHandledXmpp = null;
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }

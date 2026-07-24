@@ -14,6 +14,7 @@ import {
 } from "@/lib/channel-room";
 import { navigate } from "@/router";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import type { ChannelLoadIntent } from "@/channels/room-access";
 
 interface RoomSyncDeps {
   ui: ChatShellState;
@@ -73,7 +74,10 @@ export function useRoomSync(deps: RoomSyncDeps) {
         candidate.jid ? barePeerJid(candidate.jid) === normalizedRoomJid : false
       );
       if (!channel || channel.id === waddles.activeChannelId.value) return;
-      void selectChannel(channel.id, { roomJid: normalizedRoomJid });
+      void selectChannel(channel.id, {
+        roomJid: normalizedRoomJid,
+        intent: "automatic",
+      });
     },
   );
   watch(
@@ -98,7 +102,14 @@ export function useRoomSync(deps: RoomSyncDeps) {
     return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
   }
 
-  async function selectChannel(channelId: string, options: { roomJid?: string; surface?: "channels" | "dms" } = {}) {
+  async function selectChannel(
+    channelId: string,
+    options: {
+      roomJid?: string;
+      surface?: "channels" | "dms";
+      intent?: ChannelLoadIntent;
+    } = {},
+  ) {
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = options.surface ?? "channels";
@@ -127,6 +138,8 @@ export function useRoomSync(deps: RoomSyncDeps) {
       waddles.currentChannel.value?.spaceId ?? "",
       channelId,
       unreadAtLoad,
+      [],
+      { intent: options.intent ?? "explicit-navigation" },
     );
     ui.showMobileNav.value = false;
   }
@@ -156,7 +169,10 @@ export function useRoomSync(deps: RoomSyncDeps) {
     await selectChannel(channelId, { roomJid: normalizedRoomJid });
   }
 
-  async function selectGroupDm(roomJid: string, options: { updateUrl?: boolean } = {}) {
+  async function selectGroupDm(
+    roomJid: string,
+    options: { updateUrl?: boolean; intent?: ChannelLoadIntent } = {},
+  ) {
     const normalizedRoomJid = barePeerJid(roomJid);
     const group = waddles.groupDms.value.find((candidate) => barePeerJid(candidate.roomJid) === normalizedRoomJid);
     const channelId = group?.id ?? knownChannelIdForRoomJid(
@@ -175,7 +191,11 @@ export function useRoomSync(deps: RoomSyncDeps) {
       return false;
     }
     dmConversations.closeDm();
-    await selectChannel(channelId, { roomJid: normalizedRoomJid, surface: "dms" });
+    await selectChannel(channelId, {
+      roomJid: normalizedRoomJid,
+      surface: "dms",
+      intent: options.intent ?? "explicit-navigation",
+    });
     if (options.updateUrl !== false) updateUrl();
     return true;
   }

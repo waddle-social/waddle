@@ -36,6 +36,7 @@ import type {
   XmppStatusSnapshot,
 } from "./types";
 import type { InboxEntry } from "./inbox-types";
+import type { TerminalMucJoinCondition } from "./room-auto-join-policy";
 import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
 
 /** Event name → payload tuple. */
@@ -79,6 +80,17 @@ export type CatchupHookInfo = {
   outcome: CatchupOutcome;
 };
 
+export type RoomAccessChangedEvent =
+  | {
+      roomJid: string;
+      state: "required";
+      condition: TerminalMucJoinCondition;
+    }
+  | {
+      roomJid: string;
+      state: "available";
+    };
+
 /**
  * Event map for `BrowserXmppClient`'s internal bus.
  *
@@ -116,6 +128,7 @@ export type ClientEvents = {
   queuedMessageStatus: [messageId: string, status: "queued" | "sending"];
   sessionLifecycle: [event: SessionLifecycleEvent];
   catchupFailure: [failure: CatchupConversationFailure];
+  roomAccessChanged: [event: RoomAccessChangedEvent];
   // Observe-only telemetry hooks (multi-listener, error-isolated via
   // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health
   // hooks (see docs/planning/hung-tab-investigation.md); the client

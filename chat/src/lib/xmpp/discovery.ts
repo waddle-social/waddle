@@ -2,8 +2,13 @@ import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
 import { reportError } from "@/lib/telemetry";
 import { XMPP_ERROR_CONDITIONS } from "./types";
-import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
-import { barePeerJid, jidDomain, jidLocalpart } from "./jid";
+import type {
+  DiscoveredChannel,
+  DiscoveredSpace,
+  DiscoveredTopology,
+  RoomCatalogFingerprintField,
+} from "./types";
+import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 import { stanzaErrorContext } from "./stanza-error-context";
 
@@ -424,16 +429,24 @@ export function applyDiscoInfoToChannel(room: DiscoveredChannel, info: DiscoInfo
   };
 }
 
-async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<DiscoveredChannel> {
-  if (!room.jid) return room;
+type RoomInfoHydration = {
+  room: DiscoveredChannel;
+  fingerprintComplete: boolean;
+};
+
+async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<RoomInfoHydration> {
+  if (!room.jid) return { room, fingerprintComplete: false };
   // No internal try/catch: callers wrap this in `Promise.allSettled` and
   // map rejected entries to the unhydrated `channelFromRoom` record, so a
   // local catch here would make the outer rejection branch unreachable
   // dead code. Single resilience layer (one site to reason about), not
   // two redundant ones.
   const info = await sendDiscoInfo(xmpp, room.jid);
-  if (!info) return room;
-  return applyDiscoInfoToChannel(room, info);
+  if (!info) return { room, fingerprintComplete: false };
+  return {
+    room: applyDiscoInfoToChannel(room, info),
+    fingerprintComplete: true,
+  };
 }
 
 export async function discoverChannels(xmpp: HybridClient, jid: string): Promise<DiscoveredChannel[]> {
@@ -451,7 +464,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
   );
   const hydrated = settled.map((entry, index) =>
     entry.status === "fulfilled"
-      ? entry.value
+      ? entry.value.room
       : channelFromRoom({ jid: items[index]!.jid ?? "", name: items[index]!.name }, index),
   );
   return hydrated.map((room, position) => ({ id: room.id, name: room.name, channelType: room.channelType, position }));
@@ -461,7 +474,13 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
+  let roomCatalogComplete = true;
+  let bookmarkCatalogComplete = true;
+  let mucCatalogComplete = true;
+  let userBookmarksComplete = true;
   const bookmarkedRooms = new Map<string, { spaceId?: string; autojoin: boolean; name?: string }>();
+  const spaceBookmarkedRoomJids = new Set<string>();
+  const userBookmarkedRoomJids = new Set<string>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
@@ -481,29 +500,40 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         if (!isSpacesNodeInfo(info)) continue;
         if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
       } catch {
+        roomCatalogComplete = false;
+        bookmarkCatalogComplete = false;
         continue;
       }
       try {
         const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
         for (const bookmark of bookmarks) {
           if (bookmark.jid) {
-            bookmarkedRooms.set(barePeerJid(bookmark.jid), {
+            const roomJid = barePeerJid(bookmark.jid);
+            spaceBookmarkedRoomJids.add(roomJid);
+            bookmarkedRooms.set(roomJid, {
               spaceId,
               autojoin: bookmark.autojoin ?? false,
               name: bookmark.name,
             });
           }
         }
-      } catch {}
+      } catch {
+        roomCatalogComplete = false;
+        bookmarkCatalogComplete = false;
+      }
       spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
     }
-  } catch {}
+  } catch {
+    roomCatalogComplete = false;
+    bookmarkCatalogComplete = false;
+  }
 
   try {
     const userBookmarks = await sendPubsubItems(xmpp, barePeerJid(jid), NS_BOOKMARKS_1);
     for (const bookmark of userBookmarks) {
       if (!bookmark.jid) continue;
       const roomJid = barePeerJid(bookmark.jid);
+      userBookmarkedRoomJids.add(roomJid);
       const existing = bookmarkedRooms.get(roomJid);
       bookmarkedRooms.set(roomJid, {
         ...existing,
@@ -511,7 +541,11 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         name: bookmark.name ?? existing?.name,
       });
     }
-  } catch {}
+  } catch {
+    roomCatalogComplete = false;
+    bookmarkCatalogComplete = false;
+    userBookmarksComplete = false;
+  }
 
   // Narrow try/catch JUST around `sendDiscoItems`: a wedged muc service
   // (which now times out via `withIqTimeout` instead of hanging forever)
@@ -530,6 +564,8 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     // sendDiscoItems already logged via logDiscoFailure; here we just
     // continue with an empty room list. The cause is observable in the
     // console for diagnostics.
+    roomCatalogComplete = false;
+    mucCatalogComplete = false;
     void err;
   }
   const roomItems: Array<{ jid?: string; name?: string; bookmarkOnly?: boolean }> =
@@ -549,13 +585,30 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
     ),
   );
+  if (hydratedSettled.some(
+    (entry) =>
+      entry.status === "rejected"
+      || !entry.value.fingerprintComplete
+  )) {
+    roomCatalogComplete = false;
+  }
+  const fingerprintCompleteRoomJids = new Set(
+    hydratedSettled.flatMap((entry) => {
+      if (entry.status !== "fulfilled" || !entry.value.fingerprintComplete) return [];
+      const roomJid = entry.value.room.jid ? barePeerJid(entry.value.room.jid) : "";
+      return roomJid ? [roomJid] : [];
+    }),
+  );
   const hydrated = hydratedSettled.flatMap((entry, index) => {
     const source = roomItems[index]!;
     if (entry.status === "fulfilled") {
-      if (source.bookmarkOnly && !entry.value.features?.some((feature) => feature === NS_MUC)) {
+      if (
+        source.bookmarkOnly
+        && !entry.value.room.features?.some((feature) => feature === NS_MUC)
+      ) {
         return [];
       }
-      return [entry.value];
+      return [entry.value.room];
     }
     if (source.bookmarkOnly) return [];
     return [channelFromRoom({ jid: source.jid ?? "", name: source.name }, index)];
@@ -568,6 +621,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     return {
       ...roomWithoutSpace,
       position,
+      isBookmarked: !!bookmark,
       ...(bookmark?.spaceId
         ? { spaceId: bookmark.spaceId, standalone: false, autojoin: bookmark.autojoin }
         : parentSpaceId
@@ -579,9 +633,42 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   });
 
   const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
+  const authoritativeRoomFingerprints = rooms.flatMap((room) => {
+    const roomJid = room.jid ? barePeerJid(room.jid) : "";
+    if (!roomJid || !fingerprintCompleteRoomJids.has(roomJid)) return [];
+    if (bookmarkCatalogComplete) {
+      return [{
+        roomKey: bareJidKey(roomJid),
+        fields: [
+          "spaceId",
+          "autojoin",
+          "isGroupDm",
+          "isBookmarked",
+        ] satisfies RoomCatalogFingerprintField[],
+      }];
+    }
+    const hasSpaceBookmark = spaceBookmarkedRoomJids.has(roomJid);
+    const hasUserBookmark = userBookmarkedRoomJids.has(roomJid);
+    if (!hasSpaceBookmark && !hasUserBookmark) return [];
+    const fields: RoomCatalogFingerprintField[] = [
+      "isGroupDm",
+      "isBookmarked",
+    ];
+    if (hasSpaceBookmark) fields.push("spaceId");
+    if (hasUserBookmark || (hasSpaceBookmark && userBookmarksComplete)) {
+      fields.push("autojoin");
+    }
+    return [{ roomKey: bareJidKey(roomJid), fields }];
+  });
   return {
     spaces,
     rooms: rooms.map((room, position) => ({ ...room, position, ...(room.jid && roomSpaceIds.get(barePeerJid(room.jid)) ? { standalone: false } : { standalone: room.standalone ?? true }) })),
+    roomCatalogComplete,
+    roomReconciliationAuthority: {
+      absentRoomKeysAuthoritative:
+        roomCatalogComplete && bookmarkCatalogComplete && mucCatalogComplete,
+      roomFingerprints: authoritativeRoomFingerprints,
+    },
     serverRole,
     services,
   };
