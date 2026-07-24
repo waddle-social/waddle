@@ -21,6 +21,7 @@ let _rustInputs = [
 let _nixInputs = [
 	"../flake.nix",
 	"../flake.lock",
+	"../nix/patches/cuenv-0.54.0-fail-closed-discovery.patch",
 	"Cargo.toml",
 	"Cargo.lock",
 	".config/nextest.toml",
@@ -28,6 +29,33 @@ let _nixInputs = [
 	"crates/**",
 	"extensions/**",
 	"wit/**",
+]
+
+let _cuenvRootInputs = [
+	"../env.cue",
+	"../flake.lock",
+	"../flake.nix",
+	"../nix/patches/cuenv-0.54.0-fail-closed-discovery.patch",
+]
+
+let _cuenvProjectInputs = [
+	"../apps/android/env.cue",
+	"../chat/env.cue",
+	"../colony/env.cue",
+	"../infrastructure/waddle.cloud/env.cue",
+	"env.cue",
+	"../website/env.cue",
+]
+
+let _cuenvBootstrapInputs = list.Concat([_cuenvRootInputs, _cuenvProjectInputs])
+
+let _cuenvWorkflowInputs = [
+	"../.github/workflows/waddle-android-*.yml",
+	"../.github/workflows/waddle-chat-*.yml",
+	"../.github/workflows/waddle-cloud-*.yml",
+	"../.github/workflows/waddle-colony-*.yml",
+	"../.github/workflows/waddle-server-*.yml",
+	"../.github/workflows/waddle-website-*.yml",
 ]
 
 // cargo-nextest task template: xRust.#Test pins args[0] to "test", but the
@@ -92,7 +120,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		_NamespaceNix,
-		c.#CuenvRelease,
+		c.#CuenvNix,
 		c.#OnePassword,
 		schema.#Contributor & {
 			id: "flakehub"
@@ -154,6 +182,7 @@ schema.#Project & {
 				}
 			}
 			tasks: [
+				_t.verifyCuenvBootstrap,
 				_t.checkRootSyncDrift,
 				_t.checkCiDrift,
 				_t.checkSwitchableAlternativeProgram,
@@ -196,7 +225,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.verifyCuenvBootstrap, _t.checkRootSyncDrift, _t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -222,28 +251,48 @@ schema.#Project & {
 	}
 
 	tasks: {
+		verifyCuenvBootstrap: schema.#Task & {
+			command: "nix"
+			args: [
+				"build",
+				"--print-build-logs",
+				"--accept-flake-config",
+				"../#cuenv-source-coupling",
+				"../#cuenv-strict-discovery",
+				"../#cuenv-waddle-discovery",
+			]
+			inputs: _cuenvBootstrapInputs
+		}
+
 		checkCiDrift: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
 					cd ..
-					projects="$(
-					  cuenv info --json |
-					    bun -e 'const info = JSON.parse(await Bun.stdin.text()); if (!Array.isArray(info.projects) || info.projects.length === 0) throw new Error("cuenv info returned no projects"); for (const project of info.projects) { if (typeof project.path !== "string" || project.path.length === 0 || project.path.includes("\n")) throw new Error("cuenv info returned an invalid project path"); console.log(project.path); }'
-					)"
+					projects=(
+					  apps/android
+					  chat
+					  colony
+					  infrastructure/waddle.cloud
+					  server
+					  website
+					)
 					overall_status=0
-					while IFS= read -r project; do
+					for project in "${projects[@]}"; do
 					  if ! cuenv sync ci --check -p "${project}"; then
 					    overall_status=1
 					  fi
-					done <<< "${projects}"
+					done
 					exit "${overall_status}"
 				"""#]
-			inputs: [
-				"**/env.cue",
-				"deployment.cue",
-				"../.github/workflows/waddle-server-*.yml",
-			]
+			inputs: list.Concat([
+				_cuenvBootstrapInputs,
+				_cuenvWorkflowInputs,
+				[
+					"**/env.cue",
+					"deployment.cue",
+				],
+			])
 		}
 
 		checkRootSyncDrift: schema.#Task & {
@@ -253,12 +302,14 @@ schema.#Project & {
 					cuenv sync --check -p ..
 					git diff --exit-code -- ../.gitignore ../cuenv.lock
 				"""#]
-			inputs: [
-				"../env.cue",
-				"../cuenv.lock",
-				"../.rules.cue",
-				"../.gitignore",
-			]
+			inputs: list.Concat([
+				_cuenvRootInputs,
+				[
+					"../cuenv.lock",
+					"../.rules.cue",
+					"../.gitignore",
+				],
+			])
 		}
 
 		checkSwitchableAlternativeProgram: schema.#Task & {

@@ -82,21 +82,30 @@
             src = cuenvPatchedSrc;
             strictDeps = true;
             cargoExtraArgs = "--locked --package cuenv";
-            nativeBuildInputs = [ pkgs.go pkgs.pkg-config ];
+            nativeBuildInputs = [
+              pkgs.go
+              pkgs.pkg-config
+            ];
             buildInputs = lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
             CUE_BRIDGE_PATH = cuenvCueBridge;
           };
-          cuenvCargoArtifacts = craneLib.buildDepsOnly (cuenvBaseArgs // {
-            doCheck = false;
-          });
-          cuenv = craneLib.buildPackage (cuenvBaseArgs // {
-            cargoArtifacts = cuenvCargoArtifacts;
-            doCheck = false;
-            passthru = {
-              source = cuenvPatchedSrc;
-              cueBridge = cuenvCueBridge;
-            };
-          });
+          cuenvCargoArtifacts = craneLib.buildDepsOnly (
+            cuenvBaseArgs
+            // {
+              doCheck = false;
+            }
+          );
+          cuenv = craneLib.buildPackage (
+            cuenvBaseArgs
+            // {
+              cargoArtifacts = cuenvCargoArtifacts;
+              doCheck = false;
+              passthru = {
+                source = cuenvPatchedSrc;
+                cueBridge = cuenvCueBridge;
+              };
+            }
+          );
           cuenvFixtureModule = pkgs.writeText "waddle-cuenv-fixture-module.cue" ''
             module: "example.com/waddle-cuenv-fixture"
             language: {
@@ -106,76 +115,166 @@
           cuenvFixtureHealthy = pkgs.writeText "waddle-cuenv-fixture-healthy.cue" ''
             package cuenv
 
-            healthy: true
+            name: "healthy"
+            tasks: {
+              check: {
+                command: "true"
+                inputs: ["env.cue"]
+              }
+            }
           '';
           cuenvFixtureBrokenSelected = pkgs.writeText "waddle-cuenv-fixture-broken-selected.cue" ''
             package cuenv
 
             broken: {
           '';
-          cuenvSourceCoupling = pkgs.runCommand "waddle-cuenv-source-coupling" {
-            nativeBuildInputs = [ cuenv cuenvCueBridge ];
-            expectedSource = cuenvPatchedSrc;
-            cliSource = cuenv.passthru.source;
-            bridgeSource = cuenvCueBridge.passthru.source;
-          } ''
-            test "$expectedSource" = "$cliSource"
-            test "$expectedSource" = "$bridgeSource"
-            grep -F 'Selected CUE instances failed to evaluate' "$expectedSource/crates/cuengine/bridge.go"
-            {
-              printf '%s\n' "source=$expectedSource"
-              printf '%s\n' "cli_source=$cliSource"
-              printf '%s\n' "bridge_source=$bridgeSource"
-            } > "$out"
+          cuenvFixtureNoPackage = pkgs.writeText "waddle-cuenv-fixture-no-package.cue" ''
+            unknown: true
           '';
-          cuenvStrictDiscovery = pkgs.runCommand "waddle-cuenv-strict-discovery" {
-            nativeBuildInputs = [ cuenv ];
-          } ''
-            export HOME="$TMPDIR/home"
-            mkdir -p "$HOME" "$TMPDIR/fixture/cue.mod" "$TMPDIR/fixture/bad-selected"
-            install -Dm444 ${cuenvFixtureModule} "$TMPDIR/fixture/cue.mod/module.cue"
-            install -Dm444 ${cuenvFixtureHealthy} "$TMPDIR/fixture/env.cue"
-            install -Dm444 ${cuenvFixtureBrokenSelected} "$TMPDIR/fixture/bad-selected/env.cue"
-            cd "$TMPDIR/fixture"
+          cuenvFixtureOpenList = pkgs.writeText "waddle-cuenv-fixture-open-list.cue" ''
+            package cuenv
 
-            expect_selected_failure() {
-              name="$1"
-              shift
-              if "$@" > "$TMPDIR/$name.log" 2>&1; then
-                echo "expected $name to fail" >&2
-                sed -n '1,240p' "$TMPDIR/$name.log" >&2
-                exit 1
-              fi
-              grep -F 'bad-selected' "$TMPDIR/$name.log"
+            open: [...string]
+          '';
+          cuenvFixtureNestedIncomplete = pkgs.writeText "waddle-cuenv-fixture-nested-incomplete.cue" ''
+            package cuenv
+
+            outer: {
+              ready: "yes"
+              pending: string
             }
-
-            expect_selected_failure info ${cuenv}/bin/cuenv info --json
-            expect_selected_failure sync-all ${cuenv}/bin/cuenv sync -A
-            expect_selected_failure sync-ci-check-all ${cuenv}/bin/cuenv sync ci --check -A
-
-            mkdir -p "$out"
-            cp "$TMPDIR"/*.log "$out/"
           '';
-          cuenvWaddleDiscovery = pkgs.runCommand "waddle-cuenv-waddle-discovery" {
-            nativeBuildInputs = [ cuenv pkgs.jq ];
-            waddleSource = self;
-          } ''
-            export HOME="$TMPDIR/home"
-            mkdir -p "$HOME" "$out"
-            cd "$waddleSource"
-            ${cuenv}/bin/cuenv info --json > "$out/info.json"
-            jq -e '
-              .project_count == 6
-              and .projects == [
-                {"name": "waddle-android", "path": "apps/android"},
-                {"name": "waddle-chat", "path": "chat"},
-                {"name": "waddle-cloud", "path": "infrastructure/waddle.cloud"},
-                {"name": "waddle-colony", "path": "colony"},
-                {"name": "waddle-server", "path": "server"},
-                {"name": "waddle-website", "path": "website"}
-              ]
-            ' "$out/info.json" > /dev/null
+          cuenvFixtureBrokenOther = pkgs.writeText "waddle-cuenv-fixture-broken-other.cue" ''
+            package other
+
+            broken: {
           '';
+          cuenvSourceCoupling =
+            pkgs.runCommand "waddle-cuenv-source-coupling"
+              {
+                nativeBuildInputs = [
+                  cuenv
+                  cuenvCueBridge
+                ];
+                expectedSource = cuenvPatchedSrc;
+                cliSource = cuenv.passthru.source;
+                bridgeSource = cuenvCueBridge.passthru.source;
+              }
+              ''
+                test "$expectedSource" = "$cliSource"
+                test "$expectedSource" = "$bridgeSource"
+                grep -F 'Selected CUE instances failed to evaluate' "$expectedSource/crates/cuengine/bridge.go"
+                {
+                  printf '%s\n' "source=$expectedSource"
+                  printf '%s\n' "cli_source=$cliSource"
+                  printf '%s\n' "bridge_source=$bridgeSource"
+                } > "$out"
+              '';
+          cuenvStrictDiscovery =
+            pkgs.runCommand "waddle-cuenv-strict-discovery"
+              {
+                nativeBuildInputs = [
+                  cuenv
+                  pkgs.git
+                  pkgs.jq
+                ];
+              }
+              ''
+                            export XDG_CONFIG_HOME="$TMPDIR/xdg-config"
+                            export XDG_CACHE_HOME="$TMPDIR/xdg-cache"
+                            mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$out"
+
+                            prepare_fixture() {
+                              fixture="$1"
+                  mkdir -p "$fixture/cue.mod"
+                  install -Dm444 ${cuenvFixtureModule} "$fixture/cue.mod/module.cue"
+                  install -Dm444 ${cuenvFixtureHealthy} "$fixture/env.cue"
+                  git -C "$fixture" init -q
+                              git -C "$fixture" config user.name "Waddle cuenv proof"
+                              git -C "$fixture" config user.email "cuenv-proof@example.invalid"
+                            }
+
+                            expect_failure() {
+                              name="$1"
+                              expected_path="$2"
+                              fixture="$3"
+                              shift 3
+                              if (cd "$fixture" && "$@") > "$out/$name.log" 2>&1; then
+                                echo "expected $name to fail" >&2
+                                sed -n '1,240p' "$out/$name.log" >&2
+                                exit 1
+                              fi
+                              grep -F "$expected_path" "$out/$name.log"
+                            }
+
+                            bad_selected="$TMPDIR/bad-selected-fixture"
+                            prepare_fixture "$bad_selected"
+                            mkdir -p "$bad_selected/bad-selected"
+                            install -Dm444 ${cuenvFixtureBrokenSelected} "$bad_selected/bad-selected/env.cue"
+                            expect_failure bad-selected-info bad-selected "$bad_selected" ${cuenv}/bin/cuenv info --json
+                            expect_failure bad-selected-sync-all bad-selected "$bad_selected" ${cuenv}/bin/cuenv sync -A
+                            expect_failure bad-selected-sync-ci-check-all bad-selected "$bad_selected" ${cuenv}/bin/cuenv sync ci --check -A
+
+                            no_package="$TMPDIR/no-package-fixture"
+                    prepare_fixture "$no_package"
+                    mkdir -p "$no_package/unknown-package"
+                    install -Dm444 ${cuenvFixtureNoPackage} "$no_package/unknown-package/env.cue"
+                    expect_failure no-package-sync-all unknown-package "$no_package" ${cuenv}/bin/cuenv sync -A
+
+                            open_list="$TMPDIR/open-list-fixture"
+                            prepare_fixture "$open_list"
+                            mkdir -p "$open_list/open-list"
+                            install -Dm444 ${cuenvFixtureOpenList} "$open_list/open-list/env.cue"
+                            expect_failure open-list-info open-list "$open_list" ${cuenv}/bin/cuenv info --json
+
+                            nested_incomplete="$TMPDIR/nested-incomplete-fixture"
+                            prepare_fixture "$nested_incomplete"
+                            mkdir -p "$nested_incomplete/nested-incomplete"
+                            install -Dm444 ${cuenvFixtureNestedIncomplete} "$nested_incomplete/nested-incomplete/env.cue"
+                            expect_failure nested-incomplete-info nested-incomplete "$nested_incomplete" ${cuenv}/bin/cuenv info --json
+
+                            other_package="$TMPDIR/other-package-fixture"
+                prepare_fixture "$other_package"
+                mkdir -p "$other_package/malformed-other"
+                install -Dm444 ${cuenvFixtureBrokenOther} "$other_package/malformed-other/env.cue"
+                if ! (cd "$other_package" && ${cuenv}/bin/cuenv info --json) \
+                              > "$out/malformed-other-info.json" \
+                              2> "$out/malformed-other-info.stderr"; then
+                              echo "expected malformed positively-other package to remain isolated" >&2
+                              sed -n '1,240p' "$out/malformed-other-info.stderr" >&2
+                              exit 1
+                            fi
+                            jq -e '
+                              .project_count == 1
+                              and .projects == [{"name": "healthy", "path": "."}]
+                            ' "$out/malformed-other-info.json" > /dev/null
+              '';
+          cuenvWaddleDiscovery =
+            pkgs.runCommand "waddle-cuenv-waddle-discovery"
+              {
+                nativeBuildInputs = [
+                  cuenv
+                  pkgs.jq
+                ];
+                waddleSource = self;
+              }
+              ''
+                export HOME="$TMPDIR/home"
+                mkdir -p "$HOME" "$out"
+                cd "$waddleSource"
+                ${cuenv}/bin/cuenv info --json > "$out/info.json"
+                jq -e '
+                  .project_count == 6
+                  and .projects == [
+                    {"name": "waddle-android", "path": "apps/android"},
+                    {"name": "waddle-chat", "path": "chat"},
+                    {"name": "waddle-cloud", "path": "infrastructure/waddle.cloud"},
+                    {"name": "waddle-colony", "path": "colony"},
+                    {"name": "waddle-server", "path": "server"},
+                    {"name": "waddle-website", "path": "website"}
+                  ]
+                ' "$out/info.json" > /dev/null
+              '';
           serverPackageSrc = lib.fileset.toSource {
             root = ./server;
             fileset =

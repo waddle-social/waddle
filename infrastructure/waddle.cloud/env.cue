@@ -49,7 +49,7 @@ schema.#Project & {
 	let _t = tasks
 
 	ci: providers: ["github"]
-	ci: contributors: [_NamespaceNix, c.#CuenvRelease, c.#OnePassword]
+	ci: contributors: [_NamespaceNix, c.#CuenvNix, c.#OnePassword]
 
 	// Grafana Cloud ruler credentials for rulesSync (#1324). Resolved
 	// via 1Password on main-push CI (the OnePassword contributor +

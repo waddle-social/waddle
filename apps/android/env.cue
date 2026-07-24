@@ -97,7 +97,7 @@ schema.#Project & {
 	ci: contributors: [
 		_NamespaceNix,
 		_NamespaceAndroidCache,
-		c.#CuenvRelease,
+		c.#CuenvNix,
 	]
 
 	ci: provider: github: {
@@ -175,8 +175,15 @@ schema.#Project & {
 
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
-			args: ["sync", "ci", "--check", "-A"]
-			inputs: ["env.cue", "../../.github/workflows/waddle-android-*.yml"]
+			args: ["sync", "ci", "--check", "-p", "."]
+			inputs: [
+				"../../env.cue",
+				"../../flake.lock",
+				"../../flake.nix",
+				"../../nix/patches/cuenv-0.54.0-fail-closed-discovery.patch",
+				"env.cue",
+				"../../.github/workflows/waddle-android-*.yml",
+			]
 		}
 
 		build: schema.#Task & {

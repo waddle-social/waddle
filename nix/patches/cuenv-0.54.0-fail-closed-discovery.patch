@@ -1,7 +1,7 @@
-diff --git a/crates/ci/src/discovery.rs b/crates/ci/src/discovery.rs
+diff --git i/crates/ci/src/discovery.rs w/crates/ci/src/discovery.rs
 index f0da20a..9c63cfa 100644
---- a/crates/ci/src/discovery.rs
-+++ b/crates/ci/src/discovery.rs
+--- i/crates/ci/src/discovery.rs
++++ w/crates/ci/src/discovery.rs
 @@ -64,7 +64,7 @@ pub fn evaluate_module_from_cwd() -> Result<ModuleEvaluation> {
      })?;
  
@@ -43,10 +43,10 @@ index f0da20a..9c63cfa 100644
          )));
      }
  
-diff --git a/crates/core/src/cue/discovery.rs b/crates/core/src/cue/discovery.rs
+diff --git i/crates/core/src/cue/discovery.rs w/crates/core/src/cue/discovery.rs
 index 0b72190..7043bbe 100644
---- a/crates/core/src/cue/discovery.rs
-+++ b/crates/core/src/cue/discovery.rs
+--- i/crates/core/src/cue/discovery.rs
++++ w/crates/core/src/cue/discovery.rs
 @@ -239,8 +239,16 @@ fn collect_ancestor_env_files(
  /// # Returns
  /// A vector of directory paths (relative to module_root) containing matching env.cue files.
@@ -137,11 +137,11 @@ index 0b72190..7043bbe 100644
  fn is_env_cue_file(path: &Path) -> bool {
      path.file_name() == Some("env.cue".as_ref())
  }
-diff --git a/crates/cuengine/bridge.go b/crates/cuengine/bridge.go
-index e02dbd6..89b1b5d 100644
---- a/crates/cuengine/bridge.go
-+++ b/crates/cuengine/bridge.go
-@@ -328,10 +328,29 @@ func cue_eval_module(moduleRootPath *C.char, packageName *C.char, optionsJSON *C
+diff --git i/crates/cuengine/bridge.go w/crates/cuengine/bridge.go
+index e02dbd6..ab3776d 100644
+--- i/crates/cuengine/bridge.go
++++ w/crates/cuengine/bridge.go
+@@ -328,10 +328,31 @@ func cue_eval_module(moduleRootPath *C.char, packageName *C.char, optionsJSON *C
  	var loadErrors []string
  	var packageMismatches []string
  	for _, inst := range loadedInstances {
@@ -149,6 +149,8 @@ index e02dbd6..89b1b5d 100644
 -			packageMismatches = append(packageMismatches, fmt.Sprintf("%s has package '%s'", inst.Dir, inst.PkgName))
 +		classification, classificationErr := classifyInstancePackage(inst, effectivePackageName)
 +		switch classification {
++		case packageAbsent:
+ 			continue
 +		case packageOther:
 +			packageMismatches = append(
 +				packageMismatches,
@@ -159,7 +161,7 @@ index e02dbd6..89b1b5d 100644
 +					inst.PkgName,
 +				),
 +			)
- 			continue
++			continue
 +		case packageUnknown:
 +			diagnostic := fmt.Sprintf("%s: %v", inst.Dir, classificationErr)
 +			if inst.Err != nil {
@@ -173,7 +175,7 @@ index e02dbd6..89b1b5d 100644
  		if inst.Err != nil {
  			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", inst.Dir, inst.Err))
  			continue
-@@ -453,10 +472,17 @@ func cue_eval_module(moduleRootPath *C.char, packageName *C.char, optionsJSON *C
+@@ -453,10 +474,17 @@ func cue_eval_module(moduleRootPath *C.char, packageName *C.char, optionsJSON *C
  		}
  	}
  
@@ -193,12 +195,12 @@ index e02dbd6..89b1b5d 100644
  		result = createErrorResponse(ErrorCodeBuildValue, "No instances could be evaluated", &hint)
  		return result
  	}
-diff --git a/crates/cuengine/package_classification.go b/crates/cuengine/package_classification.go
+diff --git i/crates/cuengine/package_classification.go w/crates/cuengine/package_classification.go
 new file mode 100644
-index 0000000..c3425fe
+index 0000000..9cdcdaf
 --- /dev/null
-+++ b/crates/cuengine/package_classification.go
-@@ -0,0 +1,118 @@
++++ w/crates/cuengine/package_classification.go
+@@ -0,0 +1,142 @@
 +package main
 +
 +import (
@@ -217,6 +219,7 @@ index 0000000..c3425fe
 +	packageUnknown packageClassification = iota
 +	packageSelected
 +	packageOther
++	packageAbsent
 +)
 +
 +// classifyInstancePackage keeps package filtering ahead of evaluation errors.
@@ -238,6 +241,15 @@ index 0000000..c3425fe
 +	sources, err := packageSourcesForInstance(inst)
 +	if err != nil {
 +		return packageUnknown, err
++	}
++	if len(sources) == 0 {
++		if inst.Err != nil {
++			return packageUnknown, fmt.Errorf(
++				"could not establish CUE package for failed loader instance in %s: no CUE sources",
++				inst.Dir,
++			)
++		}
++		return packageAbsent, nil
 +	}
 +
 +	var unknownSources []string
@@ -285,12 +297,14 @@ index 0000000..c3425fe
 +
 +func packageSourcesForInstance(inst *build.Instance) ([]*build.File, error) {
 +	var sources []*build.File
-+	for _, file := range inst.InvalidFiles {
-+		if file == nil {
-+			continue
-+		}
-+		if file.Encoding == build.CUE || strings.HasSuffix(file.Filename, ".cue") {
-+			sources = append(sources, file)
++	for _, files := range [][]*build.File{inst.BuildFiles, inst.InvalidFiles} {
++		for _, file := range files {
++			if file == nil {
++				continue
++			}
++			if file.Encoding == build.CUE || strings.HasSuffix(file.Filename, ".cue") {
++				sources = append(sources, file)
++			}
 +		}
 +	}
 +	if len(sources) > 0 {
@@ -306,6 +320,18 @@ index 0000000..c3425fe
 +		)
 +	}
 +
++	// With Package="*", CUE retains a synthetic anonymous instance when a
++	// directory contains both a named CUE package and non-CUE orphan files.
++	// That instance owns no CUE files: the named sibling owns BuildFiles.
++	// A successful, source-free loader entry is therefore absent even though
++	// the directory itself contains the sibling package's .cue files.
++	if inst.Err == nil {
++		return nil, nil
++	}
++
++	// Failed loader entries do not always retain their source in InvalidFiles.
++	// Limit directory-wide recovery to that error case so malformed selected
++	// packages remain discoverable and terminal.
 +	for _, entry := range entries {
 +		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".cue") {
 +			continue
@@ -317,12 +343,12 @@ index 0000000..c3425fe
 +	}
 +	return sources, nil
 +}
-diff --git a/crates/cuengine/package_classification_test.go b/crates/cuengine/package_classification_test.go
+diff --git i/crates/cuengine/package_classification_test.go w/crates/cuengine/package_classification_test.go
 new file mode 100644
-index 0000000..f083835
+index 0000000..f5b0d99
 --- /dev/null
-+++ b/crates/cuengine/package_classification_test.go
-@@ -0,0 +1,143 @@
++++ w/crates/cuengine/package_classification_test.go
+@@ -0,0 +1,291 @@
 +package main
 +
 +import (
@@ -422,6 +448,132 @@ index 0000000..f083835
 +	}
 +}
 +
++func TestClassifyInstancePackageIgnoresSourceFreeLoaderEntry(t *testing.T) {
++	dir := t.TempDir()
++	instance := &build.Instance{
++		Dir:     dir,
++		PkgName: "_",
++	}
++
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if err != nil {
++		t.Fatalf("classify source-free loader entry: %v", err)
++	}
++	if classification != packageAbsent {
++		t.Fatalf("classification = %v, want absent", classification)
++	}
++}
++
++func TestClassifyInstancePackageRejectsFailedSourceFreeLoaderEntry(t *testing.T) {
++	dir := t.TempDir()
++	instance := &build.Instance{
++		Dir:     dir,
++		PkgName: "_",
++		Err:     errors.Newf(token.NoPos, "simulated loader failure"),
++	}
++
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if classification != packageUnknown {
++		t.Fatalf("classification = %v, want unknown", classification)
++	}
++	if err == nil || !strings.Contains(err.Error(), "failed loader instance") {
++		t.Fatalf("expected failed source-free loader error, got %v", err)
++	}
++}
++
++func TestClassifyInstancePackageIgnoresSyntheticAnonymousSibling(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(
++		filepath.Join(dir, "env.cue"),
++		[]byte("package cuenv\n\nhealthy: true\n"),
++		0o600,
++	); err != nil {
++		t.Fatalf("write named sibling source: %v", err)
++	}
++	orphanPath := filepath.Join(dir, "main.rs")
++	if err := os.WriteFile(orphanPath, []byte("fn main() {}\n"), 0o600); err != nil {
++		t.Fatalf("write non-CUE orphan: %v", err)
++	}
++
++	instance := &build.Instance{
++		Dir:     dir,
++		PkgName: "_",
++		OrphanedFiles: []*build.File{{
++			Filename: orphanPath,
++		}},
++	}
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if err != nil {
++		t.Fatalf("classify synthetic anonymous sibling: %v", err)
++	}
++	if classification != packageAbsent {
++		t.Fatalf("classification = %v, want absent", classification)
++	}
++}
++
++func TestClassifyInstancePackageRejectsOwnedAnonymousCUESource(t *testing.T) {
++	dir := t.TempDir()
++	sourcePath := filepath.Join(dir, "anonymous.cue")
++	if err := os.WriteFile(sourcePath, []byte("healthy: true\n"), 0o600); err != nil {
++		t.Fatalf("write anonymous CUE source: %v", err)
++	}
++
++	instance := &build.Instance{
++		Dir:     dir,
++		PkgName: "_",
++		BuildFiles: []*build.File{{
++			Filename: sourcePath,
++			Encoding: build.CUE,
++		}},
++	}
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if classification != packageUnknown {
++		t.Fatalf("classification = %v, want unknown", classification)
++	}
++	if err == nil || !strings.Contains(err.Error(), "has no package declaration") {
++		t.Fatalf("expected anonymous-source error, got %v", err)
++	}
++}
++
++func TestClassifyInstancePackageIgnoresSyntheticOtherPackageSibling(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(
++		filepath.Join(dir, "env.cue"),
++		[]byte("package other\n\nhealthy: true\n"),
++		0o600,
++	); err != nil {
++		t.Fatalf("write other-package sibling source: %v", err)
++	}
++	orphanPath := filepath.Join(dir, "README.md")
++	if err := os.WriteFile(orphanPath, []byte("fixture\n"), 0o600); err != nil {
++		t.Fatalf("write non-CUE orphan: %v", err)
++	}
++
++	synthetic := &build.Instance{
++		Dir:     dir,
++		PkgName: "_",
++		OrphanedFiles: []*build.File{{
++			Filename: orphanPath,
++		}},
++	}
++	classification, err := classifyInstancePackage(synthetic, "cuenv")
++	if err != nil {
++		t.Fatalf("classify synthetic other-package sibling: %v", err)
++	}
++	if classification != packageAbsent {
++		t.Fatalf("classification = %v, want absent", classification)
++	}
++
++	authoritative := &build.Instance{Dir: dir, PkgName: "other"}
++	classification, err = classifyInstancePackage(authoritative, "cuenv")
++	if err != nil {
++		t.Fatalf("classify authoritative other package: %v", err)
++	}
++	if classification != packageOther {
++		t.Fatalf("classification = %v, want other", classification)
++	}
++}
++
 +func TestClassifyInstancePackageRejectsSourceWithoutPackageAST(t *testing.T) {
 +	dir := t.TempDir()
 +	sourcePath := filepath.Join(dir, "env.cue")
@@ -466,10 +618,32 @@ index 0000000..f083835
 +		t.Fatalf("incomplete container serialized as %s; want concrete-value error", encoded)
 +	}
 +}
-diff --git a/crates/cuengine/tests/package_filter_tests.rs b/crates/cuengine/tests/package_filter_tests.rs
-index f223b5a..9df0aa2 100644
---- a/crates/cuengine/tests/package_filter_tests.rs
-+++ b/crates/cuengine/tests/package_filter_tests.rs
++
++func TestBuildJSONCleanAllowsNonExportedIncompleteSchemaState(t *testing.T) {
++	value := cuecontext.New().CompileString(`{
++		ready: "yes"
++		_hidden: string
++		#Schema: {
++			pending: string
++		}
++		optional?: string
++	}`)
++	if err := value.Err(); err != nil {
++		t.Fatalf("compile schema-bearing value: %v", err)
++	}
++
++	encoded, err := buildJSONClean(value)
++	if err != nil {
++		t.Fatalf("serialize exported concrete value: %v", err)
++	}
++	if got, want := string(encoded), `{"ready":"yes"}`; got != want {
++		t.Fatalf("encoded value = %s, want %s", got, want)
++	}
++}
+diff --git i/crates/cuengine/tests/package_filter_tests.rs w/crates/cuengine/tests/package_filter_tests.rs
+index f223b5a..f75899f 100644
+--- i/crates/cuengine/tests/package_filter_tests.rs
++++ w/crates/cuengine/tests/package_filter_tests.rs
 @@ -23,6 +23,35 @@ fn create_module() -> TestResult<TempDir> {
      Ok(temp_dir)
  }
@@ -477,7 +651,10 @@ index f223b5a..9df0aa2 100644
 +fn write_env(root: &std::path::Path, relative_dir: &str, package: &str, body: &str) -> TestResult {
 +    let directory = root.join(relative_dir);
 +    fs::create_dir_all(&directory)?;
-+    fs::write(directory.join("env.cue"), format!("package {package}\n\n{body}\n"))?;
++    fs::write(
++        directory.join("env.cue"),
++        format!("package {package}\n\n{body}\n"),
++    )?;
 +    Ok(())
 +}
 +
@@ -489,10 +666,7 @@ index f223b5a..9df0aa2 100644
 +    }
 +}
 +
-+fn assert_selected_failure(
-+    root: &std::path::Path,
-+    expected_path: &str,
-+) -> TestResult {
++fn assert_selected_failure(root: &std::path::Path, expected_path: &str) -> TestResult {
 +    let error = evaluate_module(root, "cuenv", Some(&recursive_options()))
 +        .expect_err("a selected cuenv package error must be terminal");
 +    let message = error.to_string();
@@ -506,7 +680,7 @@ index f223b5a..9df0aa2 100644
  #[test]
  fn recursive_eval_ignores_other_packages_in_same_directory() -> TestResult {
      let temp_dir = create_module()?;
-@@ -65,3 +94,63 @@ ignored: "this belongs to another CUE package"
+@@ -65,3 +94,146 @@ ignored: "this belongs to another CUE package"
  
      Ok(())
  }
@@ -558,6 +732,42 @@ index f223b5a..9df0aa2 100644
 +}
 +
 +#[test]
++fn recursive_eval_allows_non_exported_incomplete_schema_state() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(
++        root,
++        "",
++        "cuenv",
++        r#"
++let _ready = ready
++
++ready: "yes"
++selected: _ready
++_hidden: string
++#Schema: {
++    pending: string
++}
++optional?: string
++"#,
++    )?;
++
++    let result = evaluate_module(root, "cuenv", Some(&recursive_options()))?;
++    let root_instance = result
++        .instances
++        .get(".")
++        .ok_or_else(|| std::io::Error::other("missing root cuenv instance"))?;
++    assert_eq!(root_instance["ready"], Value::String("yes".to_string()));
++    assert_eq!(root_instance["selected"], Value::String("yes".to_string()));
++    assert!(root_instance.get("_hidden").is_none());
++    assert!(root_instance.get("#Schema").is_none());
++    assert!(root_instance.get("optional").is_none());
++
++    Ok(())
++}
++
++#[test]
 +fn recursive_eval_ignores_failing_non_cuenv_packages() -> TestResult {
 +    let temp_dir = create_module()?;
 +    let root = temp_dir.path();
@@ -570,10 +780,57 @@ index f223b5a..9df0aa2 100644
 +    assert!(result.instances.contains_key("."));
 +    Ok(())
 +}
-diff --git a/crates/cuengine/values.go b/crates/cuengine/values.go
-index 88520ae..fbcc692 100644
---- a/crates/cuengine/values.go
-+++ b/crates/cuengine/values.go
++
++#[test]
++fn recursive_eval_ignores_directories_without_cue_sources() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    let ordinary_source = root.join("ordinary/src/deep");
++    fs::create_dir_all(&ordinary_source)?;
++    fs::write(ordinary_source.join("main.rs"), "fn main() {}\n")?;
++
++    let result = evaluate_module(root, "cuenv", Some(&recursive_options()))?;
++    assert_eq!(result.instances.len(), 1);
++    assert!(result.instances.contains_key("."));
++    Ok(())
++}
++
++#[test]
++fn recursive_eval_ignores_synthetic_anonymous_project_sibling() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    fs::write(root.join("main.rs"), "fn main() {}\n")?;
++
++    let result = evaluate_module(root, "cuenv", Some(&recursive_options()))?;
++    assert_eq!(result.instances.len(), 1);
++    let root_instance = result
++        .instances
++        .get(".")
++        .ok_or_else(|| std::io::Error::other("missing root cuenv instance"))?;
++    assert_eq!(root_instance["healthy"], Value::Bool(true));
++    Ok(())
++}
++
++#[test]
++fn recursive_eval_rejects_owned_anonymous_cue_source() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    let anonymous_dir = root.join("anonymous");
++    fs::create_dir_all(&anonymous_dir)?;
++    fs::write(anonymous_dir.join("anonymous.cue"), "value: true\n")?;
++
++    assert_selected_failure(root, "anonymous")
++}
+diff --git i/crates/cuengine/values.go w/crates/cuengine/values.go
+index 88520ae..8b99ed4 100644
+--- i/crates/cuengine/values.go
++++ w/crates/cuengine/values.go
 @@ -9,7 +9,10 @@ import (
  // buildJSONClean builds a JSON representation without any _meta injection.
  // This returns clean JSON that can be correlated with the separate meta map.
@@ -592,10 +849,6 @@ index 88520ae..fbcc692 100644
  // buildValueClean recursively builds a clean value without metadata
 -func buildValueClean(v cue.Value) interface{} {
 +func buildValueClean(v cue.Value) (interface{}, error) {
-+	if err := v.Validate(cue.Concrete(true)); err != nil {
-+		return nil, err
-+	}
-+
  	switch v.Kind() {
  	case cue.StructKind:
  		result := make(map[string]interface{})
@@ -643,6 +896,10 @@ index 88520ae..fbcc692 100644
  
  	default:
  		// Concrete value (string, number, bool, null)
++		if err := v.Validate(cue.Concrete(true)); err != nil {
++			return nil, err
++		}
++
  		var val interface{}
 -		v.Decode(&val)
 -		return val
@@ -652,10 +909,10 @@ index 88520ae..fbcc692 100644
 +		return val, nil
  	}
  }
-diff --git a/crates/cuenv/src/commands/info.rs b/crates/cuenv/src/commands/info.rs
+diff --git i/crates/cuenv/src/commands/info.rs w/crates/cuenv/src/commands/info.rs
 index 9b28ddb..e3ab109 100644
---- a/crates/cuenv/src/commands/info.rs
-+++ b/crates/cuenv/src/commands/info.rs
+--- i/crates/cuenv/src/commands/info.rs
++++ w/crates/cuenv/src/commands/info.rs
 @@ -10,7 +10,7 @@
  use crate::commands::convert_engine_error;
  use crate::commands::env_file::{discover_env_cue_directories, find_cue_module_root};
@@ -710,10 +967,10 @@ index 9b28ddb..e3ab109 100644
      }
  
      if discovered.instances.is_empty() {
-diff --git a/crates/cuenv/src/commands/module_evaluation.rs b/crates/cuenv/src/commands/module_evaluation.rs
+diff --git i/crates/cuenv/src/commands/module_evaluation.rs w/crates/cuenv/src/commands/module_evaluation.rs
 index a4d29d0..d73855d 100644
---- a/crates/cuenv/src/commands/module_evaluation.rs
-+++ b/crates/cuenv/src/commands/module_evaluation.rs
+--- i/crates/cuenv/src/commands/module_evaluation.rs
++++ w/crates/cuenv/src/commands/module_evaluation.rs
 @@ -1,9 +1,8 @@
  use super::{CommandExecutor, convert_engine_error, env_file, schema_compat};
  use crate::commands::module_utils::EvaluationMetadataBuilder;
@@ -862,10 +1119,10 @@ index a4d29d0..d73855d 100644
 -        }))
 -    }
  }
-diff --git a/crates/cuenv/src/completions.rs b/crates/cuenv/src/completions.rs
+diff --git i/crates/cuenv/src/completions.rs w/crates/cuenv/src/completions.rs
 index 9c7f43c..60ae96e 100644
---- a/crates/cuenv/src/completions.rs
-+++ b/crates/cuenv/src/completions.rs
+--- i/crates/cuenv/src/completions.rs
++++ w/crates/cuenv/src/completions.rs
 @@ -48,7 +48,9 @@ fn get_available_tasks(path: &str, package: &str) -> Vec<(String, Option<String>
      };
  
@@ -877,11 +1134,11 @@ index 9c7f43c..60ae96e 100644
      if env_cue_dirs.is_empty() {
          return Vec::new();
      }
-diff --git a/crates/cuenv/tests/sync_scope_rules.rs b/crates/cuenv/tests/sync_scope_rules.rs
-index a255660..18466f7 100644
---- a/crates/cuenv/tests/sync_scope_rules.rs
-+++ b/crates/cuenv/tests/sync_scope_rules.rs
-@@ -624,6 +624,77 @@ fn sync_all_from_nested_generates_all_ci_in_repo_root() -> TestResult {
+diff --git i/crates/cuenv/tests/sync_scope_rules.rs w/crates/cuenv/tests/sync_scope_rules.rs
+index a255660..b1d0b80 100644
+--- i/crates/cuenv/tests/sync_scope_rules.rs
++++ w/crates/cuenv/tests/sync_scope_rules.rs
+@@ -624,6 +624,151 @@ fn sync_all_from_nested_generates_all_ci_in_repo_root() -> TestResult {
      Ok(())
  }
  
@@ -940,17 +1197,91 @@ index a255660..18466f7 100644
 +
 +    let unrelated = root.join("apps/non-cuenv");
 +    fs::create_dir_all(&unrelated)?;
-+    fs::write(
-+        unrelated.join("env.cue"),
-+        "package other\n\nbroken: {\n",
-+    )?;
++    fs::write(unrelated.join("env.cue"), "package other\n\nbroken: {\n")?;
 +
 +    let output = run_cuenv(root, &["sync", "-A"])?;
 +    assert!(
 +        output.success,
 +        "sync -A must ignore malformed non-cuenv packages\nstdout: {}\nstderr: {}",
-+        output.stdout,
-+        output.stderr
++        output.stdout, output.stderr
++    );
++
++    Ok(())
++}
++
++#[test]
++fn workspace_sync_ignores_ordinary_directories_without_cue_sources() -> TestResult {
++    let tmp = create_repo()?;
++    let root = tmp.path();
++
++    fs::write(
++        root.join("env.cue"),
++        project_env_cue("healthy", "build", "build", "@healthy"),
++    )?;
++
++    let ordinary_source = root.join("apps/ordinary/src/deep");
++    fs::create_dir_all(&ordinary_source)?;
++    fs::write(ordinary_source.join("main.rs"), "fn main() {}\n")?;
++
++    let output = run_cuenv(root, &["sync", "-A"])?;
++    assert!(
++        output.success,
++        "sync -A must ignore ordinary directories without CUE sources\nstdout: {}\nstderr: {}",
++        output.stdout, output.stderr
++    );
++
++    Ok(())
++}
++
++#[test]
++fn workspace_sync_ci_ignores_synthetic_anonymous_project_sibling() -> TestResult {
++    let tmp = create_repo()?;
++    let root = tmp.path();
++
++    fs::write(
++        root.join("env.cue"),
++        project_env_cue("healthy", "build", "build", "@healthy"),
++    )?;
++    fs::write(root.join("main.rs"), "fn main() {}\n")?;
++
++    let output = run_cuenv(root, &["sync", "ci", "--dry-run", "-A"])?;
++    assert!(
++        output.success,
++        "sync ci --dry-run -A must ignore the source-free synthetic anonymous sibling\nstdout: {}\nstderr: {}",
++        output.stdout, output.stderr
++    );
++    assert!(
++        output.stdout.contains("healthy-build.yml"),
++        "dry-run must still generate the named package workflow: {}",
++        output.stdout
++    );
++
++    Ok(())
++}
++
++#[test]
++fn workspace_sync_rejects_owned_anonymous_cue_source() -> TestResult {
++    let tmp = create_repo()?;
++    let root = tmp.path();
++
++    fs::write(
++        root.join("env.cue"),
++        project_env_cue("healthy", "build", "build", "@healthy"),
++    )?;
++
++    let anonymous = root.join("apps/anonymous");
++    fs::create_dir_all(&anonymous)?;
++    fs::write(anonymous.join("env.cue"), "value: true\n")?;
++
++    let output = run_cuenv(root, &["sync", "ci", "--dry-run", "-A"])?;
++    assert!(
++        !output.success,
++        "sync ci --dry-run -A must reject an owned anonymous CUE source"
++    );
++    let combined = format!("{}{}", output.stdout, output.stderr);
++    assert!(
++        combined.contains("anonymous"),
++        "anonymous-source error must name its path: {combined}"
 +    );
 +
 +    Ok(())

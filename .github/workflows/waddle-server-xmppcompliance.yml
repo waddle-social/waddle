@@ -13,6 +13,8 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - nix/patches/cuenv-0.54.0-fail-closed-discovery.patch
+    - nix/patches/cuenv-0.54.0-fail-closed-discovery.patch/**
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
     - server/Cargo.lock
@@ -37,6 +39,8 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - nix/patches/cuenv-0.54.0-fail-closed-discovery.patch
+    - nix/patches/cuenv-0.54.0-fail-closed-discovery.patch/**
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
     - server/Cargo.lock

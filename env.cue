@@ -6,6 +6,11 @@ import (
 )
 
 schema.#Base & {
+	config: ci: cuenv: {
+		source:  "nix"
+		version: "self"
+	}
+
 	runtime: type: "nix"
 
 	hooks: onEnter: nix: xNix.#NixFlake

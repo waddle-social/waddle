@@ -3,37 +3,37 @@ version = 4
 [runtimes."apps/android"]
 type = "nix"
 flake = "../.."
-digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+digest = "sha256:3eda40e104e201944dbc76841a36ef4f4ad3951d2c111e186c0af0c3cb643359"
 lockfile = "apps/android/../../flake.lock"
 
 [runtimes.chat]
 type = "nix"
 flake = ".."
-digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+digest = "sha256:3eda40e104e201944dbc76841a36ef4f4ad3951d2c111e186c0af0c3cb643359"
 lockfile = "chat/../flake.lock"
 
 [runtimes.colony]
 type = "nix"
 flake = ".."
-digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+digest = "sha256:3eda40e104e201944dbc76841a36ef4f4ad3951d2c111e186c0af0c3cb643359"
 lockfile = "colony/../flake.lock"
 
 [runtimes."infrastructure/waddle.cloud"]
 type = "nix"
 flake = "../.."
-digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+digest = "sha256:3eda40e104e201944dbc76841a36ef4f4ad3951d2c111e186c0af0c3cb643359"
 lockfile = "infrastructure/waddle.cloud/../../flake.lock"
 
 [runtimes.server]
 type = "nix"
 flake = ".."
-digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+digest = "sha256:3eda40e104e201944dbc76841a36ef4f4ad3951d2c111e186c0af0c3cb643359"
 lockfile = "server/../flake.lock"
 
 [runtimes.website]
 type = "nix"
 flake = ".."
-digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+digest = "sha256:3eda40e104e201944dbc76841a36ef4f4ad3951d2c111e186c0af0c3cb643359"
 lockfile = "website/../flake.lock"
 
 [vcs.cuenv-skills]

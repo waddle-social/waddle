@@ -74,7 +74,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		_NamespaceNix,
-		c.#CuenvRelease,
+		c.#CuenvNix,
 		c.#OnePassword,
 		c.#BunWorkspace,
 	]
