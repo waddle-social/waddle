@@ -185,11 +185,57 @@ describe("discoverTopology partial-failure resilience", () => {
       expect(topology.roomCatalogComplete).toBe(false);
       expect(
         topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
-      ).toBe(true);
+      ).toBe(false);
       expect(topology.roomReconciliationAuthority.roomFingerprints).toEqual([{
         roomKey: "general@muc.example.test",
         fields: ["spaceId", "autojoin", "isGroupDm", "isBookmarked"],
       }]);
+    });
+  });
+
+  test("does not authorize absence when failed hydration omits a bookmark-only room", async () => {
+    await withFakeDomParser(async () => {
+      const omittedRoomJid = "private@muc.example.test";
+      const topology = await discoverTopology(
+        resilientClient({
+          rejectRoomInfo: omittedRoomJid,
+          userBookmarks: [{
+            id: omittedRoomJid,
+            name: "Private",
+            autojoin: true,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.rooms.some((room) => room.jid === omittedRoomJid)).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+    });
+  });
+
+  test("does not authorize absence when incomplete hydration omits a bookmark-only room", async () => {
+    await withFakeDomParser(async () => {
+      const omittedRoomJid = "private@muc.example.test";
+      const topology = await discoverTopology(
+        resilientClient({
+          incompleteRoomInfo: omittedRoomJid,
+          userBookmarks: [{
+            id: omittedRoomJid,
+            name: "Private",
+            autojoin: true,
+          }],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.rooms.some((room) => room.jid === omittedRoomJid)).toBe(false);
+      expect(
+        topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
     });
   });
 
@@ -279,6 +325,7 @@ describe("discoverTopology partial-failure resilience", () => {
 type ResilientClientOptions = {
   hangComponent?: string;
   hangMucItems?: boolean;
+  incompleteRoomInfo?: string;
   rejectSpaceBookmarks?: boolean;
   rejectUserBookmarks?: boolean;
   rejectRoomInfo?: string;
@@ -411,6 +458,12 @@ function resilientClient(options: ResilientClientOptions = {}) {
         }
         if (options.rejectRoomInfo && xml.includes(`to="${options.rejectRoomInfo}"`)) {
           throw new Error("simulated room disco#info failure");
+        }
+        if (
+          options.incompleteRoomInfo
+          && xml.includes(`to="${options.incompleteRoomInfo}"`)
+        ) {
+          return '<iq type="result"/>';
         }
         if (xml.includes('to="muc.example.test"')) {
           return discoInfoXml({

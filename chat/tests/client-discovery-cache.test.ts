@@ -189,11 +189,24 @@ describe("BrowserXmppClient room discovery cache", () => {
 
   for (const {
     degradedSource,
+    expectedCachedAutoJoin,
     shouldUnblock,
   } of [
-    { degradedSource: "sibling hydration", shouldUnblock: true },
-    { degradedSource: "MUC items", shouldUnblock: true },
-    { degradedSource: "blocked room hydration", shouldUnblock: false },
+    {
+      degradedSource: "sibling hydration",
+      expectedCachedAutoJoin: false,
+      shouldUnblock: true,
+    },
+    {
+      degradedSource: "MUC items",
+      expectedCachedAutoJoin: false,
+      shouldUnblock: true,
+    },
+    {
+      degradedSource: "blocked room hydration",
+      expectedCachedAutoJoin: true,
+      shouldUnblock: false,
+    },
   ] as const) {
     test(`${shouldUnblock ? "an authoritative" : "an incomplete"} membership change ${
       shouldUnblock ? "unblocks" : "stays blocked"
@@ -251,7 +264,9 @@ describe("BrowserXmppClient room discovery cache", () => {
         expect(client.listRoomAccessRequirements()).toHaveLength(
           shouldUnblock ? 0 : 1,
         );
-        expect(state.autoJoinRoomJids.includes(roomJid)).toBe(false);
+        expect(state.autoJoinRoomJids.includes(roomJid)).toBe(
+          expectedCachedAutoJoin,
+        );
         expect(
           joinRoom.mock.calls.some(([joinedRoomJid]) =>
             joinedRoomJid === roomJid
@@ -305,6 +320,56 @@ describe("BrowserXmppClient room discovery cache", () => {
       }]);
       expect(client.listRoomAccessRequirements()).toEqual([]);
       expect(accessEvents).toContainEqual({ roomJid, state: "available" });
+      expect(joinRoom).not.toHaveBeenCalled();
+    });
+  });
+
+  test("an omitted bookmark-only room cannot clear denial or discovery caches", async () => {
+    await withFakeDomParser(async () => {
+      const fixture: DiscoveryFixtureState = {
+        mucCatalogAvailable: true,
+        roomJids: [roomJid],
+        bookmarks: [{ id: roomJid, name: "Private", autojoin: true }],
+      };
+      const joinRoom = mock(async () => undefined);
+      const xmpp = createDiscoveryXmpp(fixture, joinRoom);
+      const client = new BrowserXmppClient(session(), {
+        ...nullResumePersistence,
+        loadAutoJoinBlocks: () => [{
+          roomJid,
+          condition: "forbidden",
+        }],
+      });
+      const state = client as unknown as {
+        xmpp: typeof xmpp;
+        connected: boolean;
+        roomJidForChannel: (channelId: string) => string;
+        autoJoinRoomJids: readonly string[];
+      };
+      state.xmpp = xmpp;
+      state.connected = true;
+
+      await client.discoverTopology();
+      expect(client.listRoomAccessRequirements()).toHaveLength(1);
+      expect(state.roomJidForChannel("private")).toBe(roomJid);
+      expect(state.autoJoinRoomJids).toEqual([roomJid]);
+      const accessEvents: Array<{ roomJid: string; state: string }> = [];
+      client.onRoomAccessChanged((event) => accessEvents.push(event));
+      joinRoom.mockClear();
+
+      fixture.roomJids = [];
+      fixture.rejectRoomInfo = roomJid;
+      const degraded = await client.discoverTopology();
+
+      expect(degraded.roomCatalogComplete).toBe(false);
+      expect(degraded.rooms).toEqual([]);
+      expect(
+        degraded.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+      ).toBe(false);
+      expect(client.listRoomAccessRequirements()).toHaveLength(1);
+      expect(state.roomJidForChannel("private")).toBe(roomJid);
+      expect(state.autoJoinRoomJids).toEqual([roomJid]);
+      expect(accessEvents).toEqual([]);
       expect(joinRoom).not.toHaveBeenCalled();
     });
   });

@@ -666,7 +666,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     roomCatalogComplete,
     roomReconciliationAuthority: {
       absentRoomKeysAuthoritative:
-        bookmarkCatalogComplete && mucCatalogComplete,
+        roomCatalogComplete && bookmarkCatalogComplete && mucCatalogComplete,
       roomFingerprints: authoritativeRoomFingerprints,
     },
     serverRole,

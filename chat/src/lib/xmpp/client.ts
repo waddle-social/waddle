@@ -2336,12 +2336,13 @@ export class BrowserXmppClient {
         ({ roomKey, fields }) => [roomKey, new Set(fields)] as const,
       ),
     );
+    const absentRoomKeysAuthoritative = topology.roomCatalogComplete
+      && topology.roomReconciliationAuthority.absentRoomKeysAuthoritative;
     const reconciliation = reconcileAutoJoinBlocks(
       this.terminallyDeniedAutoJoinRooms,
       topology.rooms,
       {
-        absentRoomKeysAuthoritative:
-          topology.roomReconciliationAuthority.absentRoomKeysAuthoritative,
+        absentRoomKeysAuthoritative,
         authoritativeFingerprintFields,
       },
     );
@@ -2354,7 +2355,11 @@ export class BrowserXmppClient {
       });
     }
     if (reconciliation.changed) this.persistAutoJoinBlocks();
-    this.updateRoomDiscoveryCaches(topology, authoritativeFingerprintFields);
+    this.updateRoomDiscoveryCaches(
+      topology,
+      authoritativeFingerprintFields,
+      absentRoomKeysAuthoritative,
+    );
     if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
     const autoJoinRoomJids = topology.rooms
       .filter((room) => {
@@ -2374,6 +2379,7 @@ export class BrowserXmppClient {
       string,
       ReadonlySet<RoomCatalogFingerprintField>
     >,
+    absentRoomKeysAuthoritative: boolean,
   ): void {
     const discoveredRoomEntries = topology.rooms.flatMap((room) =>
       room.jid ? [[room.id, room.jid] as const] : []
@@ -2396,7 +2402,7 @@ export class BrowserXmppClient {
       this.hasDiscoveredRoomCatalog = true;
     } else {
       const fingerprints = new Map(this.roomCatalogFingerprints);
-      if (topology.roomReconciliationAuthority.absentRoomKeysAuthoritative) {
+      if (absentRoomKeysAuthoritative) {
         for (const key of fingerprints.keys()) {
           if (!freshRoomKeys.has(key)) fingerprints.delete(key);
         }
@@ -2411,7 +2417,7 @@ export class BrowserXmppClient {
       this.roomCatalogFingerprints = fingerprints;
     }
 
-    if (topology.roomReconciliationAuthority.absentRoomKeysAuthoritative) {
+    if (absentRoomKeysAuthoritative) {
       this.discoveredRoomJids = new Map(discoveredRoomEntries);
       this.autoJoinRoomJids = topology.rooms
         .filter((room) => room.autojoin !== false && !!room.jid)
