@@ -87,7 +87,7 @@ export function useExtensionRoutes(deps: ExtensionRoutesDeps) {
         channelId,
         0,
         [],
-        { allowAccessRetry: true },
+        { intent: "explicit-navigation" },
       );
     }
     activeExtensionRouteKey.value = { channelId, pluginId: route.pluginId, routeId: route.routeId };

@@ -83,7 +83,7 @@ describe("useChannelMamPaging — XEP-0313 §4.3.4 recovery", () => {
 
     await expect(
       paging.loadMessages("space", "space_room", 0, [], {
-        allowAccessRetry: false,
+        intent: "automatic",
       }),
     ).resolves.toBe("loaded");
 

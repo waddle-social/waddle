@@ -258,7 +258,7 @@ describe("useRouteSync applyRouteTarget", () => {
       "general",
       0,
       [],
-      { allowAccessRetry: false },
+      { intent: "automatic" },
     );
     expect(h.activeThreadStack.value).toEqual(["t1"]);
     expect(h.activeRightPanel.value).toBe("thread");
@@ -274,7 +274,7 @@ describe("useRouteSync applyRouteTarget", () => {
       params: { channelId: "general" },
       search: { thread: [], pinned: false },
     } as RouteMatch, h.routeSync.beginRouteRequest(), {
-      allowAccessRetry: true,
+      intent: "explicit-navigation",
     });
 
     expect(h.loadMessages).toHaveBeenCalledWith(
@@ -282,7 +282,7 @@ describe("useRouteSync applyRouteTarget", () => {
       "general",
       0,
       [],
-      { allowAccessRetry: true },
+      { intent: "explicit-navigation" },
     );
     h.scope.stop();
   });

@@ -710,6 +710,10 @@ export class BrowserXmppClient {
     return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
   }
 
+  private roomIsTerminallyDenied(roomJid: string): boolean {
+    return this.terminallyDeniedAutoJoinRooms.has(this.roomJoinKey(roomJid));
+  }
+
   private markMucReadyFromSelfPresence(roomJid: string): void {
     const key = this.roomJoinKey(roomJid);
     if (!key) return;
@@ -1365,7 +1369,7 @@ export class BrowserXmppClient {
       const key = this.roomJoinKey(roomJid);
       if (!key || seenThisCall.has(key)) continue;
       seenThisCall.add(key);
-      if (this.terminallyDeniedAutoJoinRooms.has(key)) continue;
+      if (this.roomIsTerminallyDenied(roomJid)) continue;
       if (this.autoJoinAttemptedRoomKeys.has(key)) continue;
       this.autoJoinAttemptedRoomKeys.add(key);
       queue.push(roomJid);
@@ -1391,20 +1395,24 @@ export class BrowserXmppClient {
 
   async retryRoomAccess(spaceId: string, channelId: string): Promise<void> {
     const roomJid = this.roomJidForChannel(channelId);
-    if (!this.terminallyDeniedAutoJoinRooms.has(this.roomJoinKey(roomJid))) return;
-    await this.switchRoom(spaceId, channelId, { allowAccessRetry: true });
+    if (!this.roomIsTerminallyDenied(roomJid)) return;
+    await this.switchRoomForIntent(spaceId, channelId, "explicit-navigation");
   }
 
-  async switchRoom(
+  async switchRoom(spaceId: string, channelId: string) {
+    await this.switchRoomForIntent(spaceId, channelId, "automatic");
+  }
+
+  private async switchRoomForIntent(
     _spaceId: string,
     channelId: string,
-    options: { allowAccessRetry?: boolean } = {},
+    intent: "automatic" | "explicit-navigation",
   ) {
     await this.connect();
     const nextRoom = this.roomJidForChannel(channelId);
     if (
-      options.allowAccessRetry !== true
-      && this.terminallyDeniedAutoJoinRooms.has(this.roomJoinKey(nextRoom))
+      intent !== "explicit-navigation"
+      && this.roomIsTerminallyDenied(nextRoom)
     ) {
       this.currentRoom = nextRoom;
       this.dispatchFocusedRoomHandlers();
@@ -2570,6 +2578,7 @@ export class BrowserXmppClient {
   }
 
   private async flushQueuedRoomAfterJoin(xmpp: XmppClientInstance, roomJid: string): Promise<void> {
+    if (this.roomIsTerminallyDenied(roomJid)) return;
     try {
       await this.ensureJoined(roomJid);
       if (this.xmpp !== xmpp) return;

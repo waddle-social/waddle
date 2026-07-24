@@ -482,6 +482,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         if (!isSpacesNodeInfo(info)) continue;
         if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
       } catch {
+        roomCatalogComplete = false;
         continue;
       }
       try {
@@ -495,10 +496,14 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
             });
           }
         }
-      } catch {}
+      } catch {
+        roomCatalogComplete = false;
+      }
       spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
     }
-  } catch {}
+  } catch {
+    roomCatalogComplete = false;
+  }
 
   try {
     const userBookmarks = await sendPubsubItems(xmpp, barePeerJid(jid), NS_BOOKMARKS_1);
@@ -512,7 +517,9 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         name: bookmark.name ?? existing?.name,
       });
     }
-  } catch {}
+  } catch {
+    roomCatalogComplete = false;
+  }
 
   // Narrow try/catch JUST around `sendDiscoItems`: a wedged muc service
   // (which now times out via `withIqTimeout` instead of hanging forever)

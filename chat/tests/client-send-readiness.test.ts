@@ -1246,6 +1246,35 @@ describe("client send readiness", () => {
     );
   });
 
+  test("session-ready room queue flush does not rejoin a terminally denied current room", async () => {
+    const roomJid = roomBareJidFor(session(), "private");
+    const client = new BrowserXmppClient(session(), {
+      ...nullResumePersistence,
+      loadAutoJoinBlocks: () => [{
+        roomJid,
+        condition: "forbidden",
+      }],
+    });
+    const xmpp = {
+      join_room: mock(async () => undefined),
+    };
+    const state = client as unknown as {
+      xmpp: typeof xmpp;
+      currentRoom: string | null;
+      handleSessionReady: (
+        xmpp: typeof xmpp,
+        lifecycle: { type: "fresh" },
+      ) => void;
+    };
+    state.xmpp = xmpp;
+    state.currentRoom = roomJid;
+
+    state.handleSessionReady(xmpp, { type: "fresh" });
+    await settleReconnectCatchup();
+
+    expect(xmpp.join_room).not.toHaveBeenCalled();
+  });
+
   test("session-ready rejoins retained non-current rooms", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = "side@muc.example.com";

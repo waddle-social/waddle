@@ -10,6 +10,7 @@ import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import type { ActiveRightPanel } from "@/shell/controllers/use-thread-panels";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import type { ChannelLoadIntent } from "@/channels/room-access";
 
 /**
  * Single mapping from the typed route match to the page-level shell
@@ -83,7 +84,7 @@ interface RouteSyncDeps {
   openDm: (peerJid: string) => Promise<void>;
   selectGroupDm: (
     roomJid: string,
-    options?: { updateUrl?: boolean; allowAccessRetry?: boolean },
+    options?: { updateUrl?: boolean; intent?: ChannelLoadIntent },
   ) => Promise<boolean>;
   /** Owned by the connection lifecycle's structure-retry state: a user
    * navigation supersedes any channel route parked for a structure reload. */
@@ -219,7 +220,9 @@ export function useRouteSync(deps: RouteSyncDeps) {
     clearPendingChannelRoute();
     const requestId = ++routeRequestId;
     isApplyingRoute.value = true;
-    void applyRouteTarget(match, requestId, { allowAccessRetry: true }).finally(() => {
+    void applyRouteTarget(match, requestId, {
+      intent: "explicit-navigation",
+    }).finally(() => {
       if (requestId === routeRequestId) {
         isApplyingRoute.value = false;
       }
@@ -229,7 +232,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
   async function applyRouteTarget(
     match: RouteMatch,
     requestId: number,
-    options: { allowAccessRetry?: boolean } = {},
+    options: { intent?: ChannelLoadIntent } = {},
   ) {
     clearPendingChannelRoomJidSelection();
     applyMatchToShellState(ui, match);
@@ -298,7 +301,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
       dmConversations.closeDm();
       await selectGroupDm(match.params.roomJid, {
         updateUrl: false,
-        allowAccessRetry: options.allowAccessRetry === true,
+        intent: options.intent ?? "automatic",
       });
       if (requestId !== routeRequestId) return;
       activeThreadTargetMessageId.value = null;
@@ -336,7 +339,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
       };
       messaging.clearMessages();
       await messaging.loadMessages(ch.spaceId ?? "", ch.id, 0, [], {
-        allowAccessRetry: options.allowAccessRetry === true,
+        intent: options.intent ?? "automatic",
       });
       if (requestId !== routeRequestId) return;
       activeThreadTargetMessageId.value = null;
@@ -366,7 +369,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
       }, { replace: true });
       await selectGroupDm(ch.jid, {
         updateUrl: false,
-        allowAccessRetry: options.allowAccessRetry === true,
+        intent: options.intent ?? "automatic",
       });
       ui.showPinnedPanel.value = match.search.pinned;
       activeThreadTargetMessageId.value = null;
@@ -385,7 +388,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
     void waddles.reloadChannelMembers(ch.id);
     messaging.clearMessages();
     await messaging.loadMessages(ch.spaceId ?? "", ch.id, 0, [], {
-      allowAccessRetry: options.allowAccessRetry === true,
+      intent: options.intent ?? "automatic",
     });
 
     // Restore the thread panel from the URL and initialize paging for every

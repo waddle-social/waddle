@@ -26,10 +26,13 @@ function session(): WaddleSession {
 }
 
 describe("BrowserXmppClient room discovery cache", () => {
-  test("a degraded refresh preserves the last complete room and auto-join caches", async () => {
+  test("degraded refreshes preserve denial, room, and auto-join caches", async () => {
     await withFakeDomParser(async () => {
-      let catalogAvailable = true;
-      const joinRoom = mock(async () => undefined);
+      let mucCatalogAvailable = true;
+      let rejectUserBookmarks = false;
+      const joinRoom = mock(async () => {
+        throw new Error("a degraded refresh must not attempt a join");
+      });
       const xmpp = {
         join_room: joinRoom,
         async send_raw_iq(xml: string): Promise<string> {
@@ -44,7 +47,9 @@ describe("BrowserXmppClient room discovery cache", () => {
               return discoItemsXml([]);
             }
             if (xml.includes('to="muc.example.test"')) {
-              if (!catalogAvailable) throw new Error("temporary MUC catalog failure");
+              if (!mucCatalogAvailable) {
+                throw new Error("temporary MUC catalog failure");
+              }
               return discoItemsXml([{ jid: roomJid, name: "Private" }]);
             }
             return discoItemsXml([]);
@@ -75,8 +80,14 @@ describe("BrowserXmppClient room discovery cache", () => {
           }
 
           if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
+            if (
+              rejectUserBookmarks
+              && xml.includes('to="alice@example.test"')
+            ) {
+              throw new Error("temporary bookmark failure");
+            }
             return pubsubItemsXml(
-              catalogAvailable
+              mucCatalogAvailable
                 ? [{ id: roomJid, name: "Private", autojoin: true }]
                 : [],
             );
@@ -108,7 +119,17 @@ describe("BrowserXmppClient room discovery cache", () => {
       expect(state.roomJidForChannel("private")).toBe(roomJid);
       expect(state.autoJoinRoomJids).toEqual([roomJid]);
 
-      catalogAvailable = false;
+      rejectUserBookmarks = true;
+      const bookmarkDegraded = await client.discoverTopology();
+
+      expect(bookmarkDegraded.roomCatalogComplete).toBe(false);
+      expect(bookmarkDegraded.rooms.map((room) => room.jid)).toEqual([roomJid]);
+      expect(state.roomJidForChannel("private")).toBe(roomJid);
+      expect(state.autoJoinRoomJids).toEqual([roomJid]);
+      expect(joinRoom).not.toHaveBeenCalled();
+
+      rejectUserBookmarks = false;
+      mucCatalogAvailable = false;
       const degraded = await client.discoverTopology();
 
       expect(degraded.roomCatalogComplete).toBe(false);

@@ -136,7 +136,7 @@ describe("useRoomSync selectChannel", () => {
       "general",
       7,
       [],
-      { allowAccessRetry: true },
+      { intent: "explicit-navigation" },
     );
     expect(h.activeChannelId.value).toBe("general");
     h.scope.stop();
@@ -177,7 +177,7 @@ describe("useRoomSync selectChannelByRoomJid", () => {
       "general",
       7,
       [],
-      { allowAccessRetry: true },
+      { intent: "explicit-navigation" },
     );
     h.scope.stop();
   });

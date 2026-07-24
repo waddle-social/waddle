@@ -35,6 +35,7 @@ import {
   threadCursorFromLatestPage,
 } from "@/lib/xmpp/mam";
 import { hydratePinnedRoom, pinnedRoomsEpoch } from "@/stores/pinned-messages";
+import type { ChannelLoadIntent } from "@/channels/room-access";
 
 const PAGE_SIZE = 100;
 
@@ -116,7 +117,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     channelId: string,
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
-    options: { allowAccessRetry?: boolean } = {},
+    options: { intent?: ChannelLoadIntent } = {},
   ): Promise<TimelineLoadResult> {
     if (!session.value) return "aborted";
 
@@ -140,7 +141,10 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     pendingEchoClientIds.clear();
     messages.value = appendQueuedMessages([], roomJid);
 
-    if (options.allowAccessRetry === false && isRoomAccessRequired(roomJid)) {
+    if (
+      options.intent !== "explicit-navigation"
+      && isRoomAccessRequired(roomJid)
+    ) {
       isLoadingMessages.value = false;
       hasOlderMessages.value = false;
       hydratePinnedRoom(roomJid, []);
@@ -149,7 +153,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
 
     try {
       if (
-        options.allowAccessRetry === true
+        options.intent === "explicit-navigation"
         && xmppClient.value
         && "retryRoomAccess" in xmppClient.value
       ) {

@@ -185,11 +185,43 @@ describe("discoverTopology partial-failure resilience", () => {
       expect(topology.roomCatalogComplete).toBe(false);
     });
   });
+
+  test("marks the room catalog incomplete when user bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({ rejectUserBookmarks: true }),
+        "alice@example.test",
+      );
+
+      expect(topology.rooms.map((room) => room.id).sort()).toEqual([
+        "broken",
+        "general",
+      ]);
+      expect(topology.roomCatalogComplete).toBe(false);
+    });
+  });
+
+  test("marks the room catalog incomplete when space bookmarks fail", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        resilientClient({ rejectSpaceBookmarks: true }),
+        "alice@example.test",
+      );
+
+      expect(topology.rooms.map((room) => room.id).sort()).toEqual([
+        "broken",
+        "general",
+      ]);
+      expect(topology.roomCatalogComplete).toBe(false);
+    });
+  });
 });
 
 type ResilientClientOptions = {
   hangComponent?: string;
   hangMucItems?: boolean;
+  rejectSpaceBookmarks?: boolean;
+  rejectUserBookmarks?: boolean;
   rejectRoomInfo?: string;
 };
 
@@ -359,6 +391,18 @@ function resilientClient(options: ResilientClientOptions = {}) {
         return discoInfoXml();
       }
       if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
+        if (
+          options.rejectSpaceBookmarks
+          && xml.includes('to="spaces.example.test"')
+        ) {
+          throw new Error("simulated space bookmark failure");
+        }
+        if (
+          options.rejectUserBookmarks
+          && xml.includes('to="alice@example.test"')
+        ) {
+          throw new Error("simulated user bookmark failure");
+        }
         return pubsubItemsXml([]);
       }
       throw new Error(`Unexpected IQ: ${xml}`);

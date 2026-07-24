@@ -14,6 +14,7 @@ import {
 } from "@/lib/channel-room";
 import { navigate } from "@/router";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import type { ChannelLoadIntent } from "@/channels/room-access";
 
 interface RoomSyncDeps {
   ui: ChatShellState;
@@ -75,7 +76,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
       if (!channel || channel.id === waddles.activeChannelId.value) return;
       void selectChannel(channel.id, {
         roomJid: normalizedRoomJid,
-        allowAccessRetry: false,
+        intent: "automatic",
       });
     },
   );
@@ -106,7 +107,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
     options: {
       roomJid?: string;
       surface?: "channels" | "dms";
-      allowAccessRetry?: boolean;
+      intent?: ChannelLoadIntent;
     } = {},
   ) {
     clearPendingChannelRoomJidSelection();
@@ -138,7 +139,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
       channelId,
       unreadAtLoad,
       [],
-      { allowAccessRetry: options.allowAccessRetry !== false },
+      { intent: options.intent ?? "explicit-navigation" },
     );
     ui.showMobileNav.value = false;
   }
@@ -170,7 +171,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
 
   async function selectGroupDm(
     roomJid: string,
-    options: { updateUrl?: boolean; allowAccessRetry?: boolean } = {},
+    options: { updateUrl?: boolean; intent?: ChannelLoadIntent } = {},
   ) {
     const normalizedRoomJid = barePeerJid(roomJid);
     const group = waddles.groupDms.value.find((candidate) => barePeerJid(candidate.roomJid) === normalizedRoomJid);
@@ -193,7 +194,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
     await selectChannel(channelId, {
       roomJid: normalizedRoomJid,
       surface: "dms",
-      allowAccessRetry: options.allowAccessRetry !== false,
+      intent: options.intent ?? "explicit-navigation",
     });
     if (options.updateUrl !== false) updateUrl();
     return true;
