@@ -36,6 +36,7 @@ const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
   "history": "xmpp.stream",
   "member-query": "xmpp.stream",
   "muc-join": "xmpp.stream",
+  "muc-join-timeout": "xmpp.disconnect",
 };
 export function installInstrumentation(client: BrowserXmppClient): void {
   setXmppResourceForTelemetry(client.xmppResource);
@@ -72,7 +73,7 @@ export function installInstrumentation(client: BrowserXmppClient): void {
       : undefined;
     const errorSource = telemetryErrorSource(event.kind, condition);
     const isRoomJoinFailure = event.kind === "muc-join"
-      || (event.kind === "connect-timeout" && event.detail.includes("self-presence"));
+      || event.kind === "muc-join-timeout";
     if (isRoomJoinFailure && event.cause !== undefined) {
       markErrorReportedToTelemetry(event.cause);
     }
@@ -107,9 +108,7 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
     case "auth":
       return "auth-error";
     case "connect-timeout":
-      return event.detail.includes("self-presence")
-        ? "room-self-presence-timeout"
-        : "connect-timeout";
+      return "connect-timeout";
     case "history":
       return "reconnect-catchup-failed";
     case "member-query":
@@ -117,6 +116,8 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
       return condition ? `member-query-${condition}` : "member-query-failed";
     case "muc-join":
       return condition ? `room-join-${condition}` : "room-join-rejected";
+    case "muc-join-timeout":
+      return "room-self-presence-timeout";
     case "stream":
       if (
         condition === "undefined-condition" &&
@@ -169,15 +170,15 @@ function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, 
 }
 
 /** Attribute the failure: a condition means the server answered with an
- * error stanza/stream error; `connect-timeout` events are client-side
- * timers (connect stall, room self-presence wait). Anything else is left
+ * error stanza/stream error; timeout events are client-side timers.
+ * Anything else is left
  * unattributed rather than guessed. */
 function telemetryErrorSource(
   kind: XmppErrorKind,
   condition: string | undefined,
 ): "server" | "local-timeout" | undefined {
   if (condition) return "server";
-  if (kind === "connect-timeout") return "local-timeout";
+  if (kind === "connect-timeout" || kind === "muc-join-timeout") return "local-timeout";
   return undefined;
 }
 

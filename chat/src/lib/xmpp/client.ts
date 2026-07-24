@@ -1277,7 +1277,7 @@ export class BrowserXmppClient {
       );
       this.scheduleRoomJoinRetry(roomJid);
       this.emitError({
-        kind: "connect-timeout",
+        kind: "muc-join-timeout",
         recoverable: true,
         detail,
         cause: rejection,

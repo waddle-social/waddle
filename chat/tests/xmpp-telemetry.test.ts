@@ -1106,14 +1106,14 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       emitError: (event: {
-        kind: "connect-timeout";
+        kind: "muc-join-timeout";
         recoverable: boolean;
         detail: string;
       }) => void;
     };
 
     internal.emitError({
-      kind: "connect-timeout",
+      kind: "muc-join-timeout",
       recoverable: true,
       detail: "Timed out waiting for self-presence in c1@muc.example.com",
     });
