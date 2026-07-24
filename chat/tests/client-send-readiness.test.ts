@@ -1218,7 +1218,7 @@ describe("client send readiness", () => {
       "Channel presence was rejected. Try again in a moment.",
     );
 
-    expect(retryTimer.scheduledDelays).toEqual([4_000, 4_000]);
+    expect(retryTimer.scheduledDelays).toEqual([4_000, 8_000]);
     expect(retryTimer.pendingCount).toBe(1);
     const recovered = client.ensureJoined(busyRoomJid);
     retryTimer.runNext();

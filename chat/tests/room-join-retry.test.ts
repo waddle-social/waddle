@@ -126,7 +126,7 @@ describe("room join retry backoff", () => {
       retry: secondRetry,
     });
 
-    expect(timer.scheduledDelays).toEqual([4_000, 4_000]);
+    expect(timer.scheduledDelays).toEqual([4_000, 8_000]);
     rejectAttempt(new Error("resource-constraint"));
     await Promise.resolve();
     timer.runNext();

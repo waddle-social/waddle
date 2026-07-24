@@ -125,7 +125,10 @@ export class RoomJoinRetryCoordinator {
   cancel(roomKey: string): void {
     const entry = this.scheduled.get(roomKey);
     const running = this.running.get(roomKey);
-    this.failureCounts.delete(roomKey);
+    // A running attempt may be re-adopted by a new navigation intent before
+    // it settles. Preserve its exponent until then; run() cleans it up when
+    // the cancelled chain actually ends.
+    if (!running) this.failureCounts.delete(roomKey);
     const cancellation = new Error("Room join retry cancelled");
     if (entry) {
       this.scheduled.delete(roomKey);
