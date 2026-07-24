@@ -15,6 +15,23 @@
         "type": "github"
       }
     },
+    "cuenvSource": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781797758,
+        "narHash": "sha256-agTH3MrIva7Ax1n/M+Rdh8lb5PRbwtEBSE0iqNyAdtk=",
+        "owner": "cuenv",
+        "repo": "cuenv",
+        "rev": "e337a3f60af6944552f391facf2ed2e25efa3bc7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cuenv",
+        "repo": "cuenv",
+        "rev": "e337a3f60af6944552f391facf2ed2e25efa3bc7",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1776255774,
@@ -34,6 +51,7 @@
     "root": {
       "inputs": {
         "crane": "crane",
+        "cuenvSource": "cuenvSource",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }

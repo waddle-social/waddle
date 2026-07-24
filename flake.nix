@@ -4,6 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     crane.url = "github:ipetkov/crane";
+    cuenvSource = {
+      url = "github:cuenv/cuenv/e337a3f60af6944552f391facf2ed2e25efa3bc7";
+      flake = false;
+    };
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -13,6 +17,7 @@
       self,
       nixpkgs,
       crane,
+      cuenvSource,
       rust-overlay,
     }:
     let
@@ -38,6 +43,139 @@
           lib = pkgs.lib;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          cuenvVersion = "0.54.0";
+          # Both the Rust CLI and the Go CUE archive consume this one patched
+          # source derivation. Keeping the source identity explicit prevents a
+          # host or upstream bridge from masking a patched CLI build.
+          cuenvPatchedSrc = pkgs.applyPatches {
+            name = "cuenv-0.54.0-waddle-fail-closed-source";
+            src = cuenvSource;
+            patches = [ ./nix/patches/cuenv-0.54.0-fail-closed-discovery.patch ];
+          };
+          cuenvBridgeSrc = cuenvPatchedSrc + "/crates/cuengine";
+          cuenvCueBridge = pkgs.buildGoModule {
+            pname = "waddle-cuenv-cue-bridge";
+            version = cuenvVersion;
+            src = cuenvBridgeSrc;
+            vendorHash = "sha256-p8gfl2H0lThSmqIRQZWDYoQ3antrIslpCwRCNKQ1cKs=";
+            buildInputs = lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+            buildPhase = ''
+              runHook preBuild
+              export CGO_ENABLED=1
+              mkdir -p "$out/debug" "$out/release"
+              go_sources=$(find . -maxdepth 1 -name '*.go' ! -name '*_test.go' -print | sort)
+              go build -buildmode=c-archive -o "$out/debug/libcue_bridge.a" $go_sources
+              cp libcue_bridge.h "$out/debug/"
+              go build -buildmode=c-archive -o "$out/release/libcue_bridge.a" $go_sources
+              cp libcue_bridge.h "$out/release/"
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              runHook postInstall
+            '';
+            passthru.source = cuenvPatchedSrc;
+          };
+          cuenvBaseArgs = {
+            pname = "cuenv";
+            version = cuenvVersion;
+            src = cuenvPatchedSrc;
+            strictDeps = true;
+            cargoExtraArgs = "--locked --package cuenv";
+            nativeBuildInputs = [ pkgs.go pkgs.pkg-config ];
+            buildInputs = lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+            CUE_BRIDGE_PATH = cuenvCueBridge;
+          };
+          cuenvCargoArtifacts = craneLib.buildDepsOnly (cuenvBaseArgs // {
+            doCheck = false;
+          });
+          cuenv = craneLib.buildPackage (cuenvBaseArgs // {
+            cargoArtifacts = cuenvCargoArtifacts;
+            doCheck = false;
+            passthru = {
+              source = cuenvPatchedSrc;
+              cueBridge = cuenvCueBridge;
+            };
+          });
+          cuenvFixtureModule = pkgs.writeText "waddle-cuenv-fixture-module.cue" ''
+            module: "example.com/waddle-cuenv-fixture"
+            language: {
+              version: "v0.9.0"
+            }
+          '';
+          cuenvFixtureHealthy = pkgs.writeText "waddle-cuenv-fixture-healthy.cue" ''
+            package cuenv
+
+            healthy: true
+          '';
+          cuenvFixtureBrokenSelected = pkgs.writeText "waddle-cuenv-fixture-broken-selected.cue" ''
+            package cuenv
+
+            broken: {
+          '';
+          cuenvSourceCoupling = pkgs.runCommand "waddle-cuenv-source-coupling" {
+            nativeBuildInputs = [ cuenv cuenvCueBridge ];
+            expectedSource = cuenvPatchedSrc;
+            cliSource = cuenv.passthru.source;
+            bridgeSource = cuenvCueBridge.passthru.source;
+          } ''
+            test "$expectedSource" = "$cliSource"
+            test "$expectedSource" = "$bridgeSource"
+            grep -F 'Selected CUE instances failed to evaluate' "$expectedSource/crates/cuengine/bridge.go"
+            {
+              printf '%s\n' "source=$expectedSource"
+              printf '%s\n' "cli_source=$cliSource"
+              printf '%s\n' "bridge_source=$bridgeSource"
+            } > "$out"
+          '';
+          cuenvStrictDiscovery = pkgs.runCommand "waddle-cuenv-strict-discovery" {
+            nativeBuildInputs = [ cuenv ];
+          } ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME" "$TMPDIR/fixture/cue.mod" "$TMPDIR/fixture/bad-selected"
+            install -Dm444 ${cuenvFixtureModule} "$TMPDIR/fixture/cue.mod/module.cue"
+            install -Dm444 ${cuenvFixtureHealthy} "$TMPDIR/fixture/env.cue"
+            install -Dm444 ${cuenvFixtureBrokenSelected} "$TMPDIR/fixture/bad-selected/env.cue"
+            cd "$TMPDIR/fixture"
+
+            expect_selected_failure() {
+              name="$1"
+              shift
+              if "$@" > "$TMPDIR/$name.log" 2>&1; then
+                echo "expected $name to fail" >&2
+                sed -n '1,240p' "$TMPDIR/$name.log" >&2
+                exit 1
+              fi
+              grep -F 'bad-selected' "$TMPDIR/$name.log"
+            }
+
+            expect_selected_failure info ${cuenv}/bin/cuenv info --json
+            expect_selected_failure sync-all ${cuenv}/bin/cuenv sync -A
+            expect_selected_failure sync-ci-check-all ${cuenv}/bin/cuenv sync ci --check -A
+
+            mkdir -p "$out"
+            cp "$TMPDIR"/*.log "$out/"
+          '';
+          cuenvWaddleDiscovery = pkgs.runCommand "waddle-cuenv-waddle-discovery" {
+            nativeBuildInputs = [ cuenv pkgs.jq ];
+            waddleSource = self;
+          } ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME" "$out"
+            cd "$waddleSource"
+            ${cuenv}/bin/cuenv info --json > "$out/info.json"
+            jq -e '
+              .project_count == 6
+              and .projects == [
+                {"name": "waddle-android", "path": "apps/android"},
+                {"name": "waddle-chat", "path": "chat"},
+                {"name": "waddle-cloud", "path": "infrastructure/waddle.cloud"},
+                {"name": "waddle-colony", "path": "colony"},
+                {"name": "waddle-server", "path": "server"},
+                {"name": "waddle-website", "path": "website"}
+              ]
+            ' "$out/info.json" > /dev/null
+          '';
           serverPackageSrc = lib.fileset.toSource {
             root = ./server;
             fileset =
@@ -170,7 +308,11 @@
           };
         in
         {
-          inherit waddle-server;
+          inherit waddle-server cuenv;
+          cuenv-cue-bridge = cuenvCueBridge;
+          cuenv-source-coupling = cuenvSourceCoupling;
+          cuenv-strict-discovery = cuenvStrictDiscovery;
+          cuenv-waddle-discovery = cuenvWaddleDiscovery;
           waddle-server-deps = cargoArtifacts;
           waddle-server-workspace-deps = workspaceArtifacts;
           waddle-server-workspace-all-features-deps = workspaceAllFeaturesArtifacts;

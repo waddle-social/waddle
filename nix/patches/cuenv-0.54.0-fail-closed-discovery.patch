@@ -1,0 +1,961 @@
+diff --git a/crates/ci/src/discovery.rs b/crates/ci/src/discovery.rs
+index f0da20a..9c63cfa 100644
+--- a/crates/ci/src/discovery.rs
++++ b/crates/ci/src/discovery.rs
+@@ -64,7 +64,7 @@ pub fn evaluate_module_from_cwd() -> Result<ModuleEvaluation> {
+     })?;
+ 
+     // Discover all directories with env.cue files matching our package
+-    let env_cue_dirs = discover_env_cue_directories(&module_root, PACKAGE);
++    let env_cue_dirs = discover_env_cue_directories(&module_root, PACKAGE)?;
+ 
+     if env_cue_dirs.is_empty() {
+         return Err(cuenv_core::Error::configuration(format!(
+@@ -117,21 +117,21 @@ pub fn evaluate_module_from_cwd() -> Result<ModuleEvaluation> {
+                     all_meta.insert(adjusted_key, meta_value);
+                 }
+             }
+-            Err(e) => {
+-                tracing::warn!(
+-                    dir = %dir.display(),
+-                    error = %e,
+-                    "Failed to evaluate env.cue - skipping directory"
+-                );
+-                eval_errors.push((dir, e));
+-            }
++            Err(e) => eval_errors.push((dir, e)),
+         }
+     }
+ 
+-    if all_instances.is_empty() {
++    if !eval_errors.is_empty() {
+         let error_summary = format_eval_errors(&eval_errors);
+         return Err(cuenv_core::Error::configuration(format!(
+-            "No instances could be evaluated. All directories failed:\n{error_summary}"
++            "Selected CUE projects failed during CI discovery:\n{error_summary}"
++        )));
++    }
++
++    if all_instances.is_empty() {
++        return Err(cuenv_core::Error::configuration(format!(
++            "No instances could be evaluated from selected CUE projects in module: {}",
++            module_root.display()
+         )));
+     }
+ 
+diff --git a/crates/core/src/cue/discovery.rs b/crates/core/src/cue/discovery.rs
+index 0b72190..7043bbe 100644
+--- a/crates/core/src/cue/discovery.rs
++++ b/crates/core/src/cue/discovery.rs
+@@ -239,8 +239,16 @@ fn collect_ancestor_env_files(
+ /// # Returns
+ /// A vector of directory paths (relative to module_root) containing matching env.cue files.
+ /// The paths are suitable for use with `cuengine::evaluate_module` with `TargetDir` option.
+-#[must_use]
+-pub fn discover_env_cue_directories(module_root: &Path, expected_package: &str) -> Vec<PathBuf> {
++///
++/// # Errors
++///
++/// Returns an error when workspace traversal, selected-package inspection, or path
++/// canonicalization fails. Callers that act on the discovered package must not
++/// continue with a partial project set.
++pub fn discover_env_cue_directories(
++    module_root: &Path,
++    expected_package: &str,
++) -> Result<Vec<PathBuf>> {
+     let mut directories = Vec::new();
+ 
+     let walker = WalkBuilder::new(module_root)
+@@ -249,27 +257,45 @@ pub fn discover_env_cue_directories(module_root: &Path, expected_package: &str)
+         .build();
+ 
+     for result in walker {
+-        let Ok(entry) = result else {
+-            continue;
+-        };
++        let entry = result.map_err(|error| {
++            Error::configuration(format!(
++                "Failed to scan CUE module '{}' while discovering package '{}': {error}",
++                module_root.display(),
++                expected_package,
++            ))
++        })?;
+ 
+         let path = entry.path();
+         if !is_env_cue_file(path) {
+             continue;
+         }
+ 
+-        if !matches_package(path, expected_package) {
++        let package_name = detect_package_name(path).map_err(|error| {
++            Error::configuration(format!(
++                "Failed to inspect package declaration in '{}': {error}",
++                path.display(),
++            ))
++        })?;
++        if package_name.as_deref() != Some(expected_package) {
+             continue;
+         }
+ 
+-        if let Some(dir) = path.parent()
+-            && let Ok(canonical) = dir.canonicalize()
+-        {
+-            directories.push(canonical);
+-        }
++        let dir = path.parent().ok_or_else(|| {
++            Error::configuration(format!(
++                "Cannot determine parent directory for selected env.cue: {}",
++                path.display(),
++            ))
++        })?;
++        let canonical = dir.canonicalize().map_err(|error| {
++            Error::configuration(format!(
++                "Failed to canonicalize selected CUE project '{}': {error}",
++                dir.display(),
++            ))
++        })?;
++        directories.push(canonical);
+     }
+ 
+-    directories
++    Ok(directories)
+ }
+ 
+ /// Discover all directories containing an env.cue file, regardless of package.
+@@ -312,14 +338,6 @@ pub fn discover_all_env_cue_directories(module_root: &Path) -> Vec<PathBuf> {
+     directories
+ }
+ 
+-fn matches_package(path: &Path, expected_package: &str) -> bool {
+-    let Ok(package_name) = detect_package_name(path) else {
+-        return false;
+-    };
+-
+-    package_name.as_deref() == Some(expected_package)
+-}
+-
+ fn is_env_cue_file(path: &Path) -> bool {
+     path.file_name() == Some("env.cue".as_ref())
+ }
+diff --git a/crates/cuengine/bridge.go b/crates/cuengine/bridge.go
+index e02dbd6..89b1b5d 100644
+--- a/crates/cuengine/bridge.go
++++ b/crates/cuengine/bridge.go
+@@ -328,10 +328,29 @@ func cue_eval_module(moduleRootPath *C.char, packageName *C.char, optionsJSON *C
+ 	var loadErrors []string
+ 	var packageMismatches []string
+ 	for _, inst := range loadedInstances {
+-		if effectivePackageName != "" && inst.PkgName != effectivePackageName {
+-			packageMismatches = append(packageMismatches, fmt.Sprintf("%s has package '%s'", inst.Dir, inst.PkgName))
++		classification, classificationErr := classifyInstancePackage(inst, effectivePackageName)
++		switch classification {
++		case packageOther:
++			packageMismatches = append(
++				packageMismatches,
++				fmt.Sprintf(
++					"%s is positively classified outside package '%s' (loader package '%s')",
++					inst.Dir,
++					effectivePackageName,
++					inst.PkgName,
++				),
++			)
+ 			continue
++		case packageUnknown:
++			diagnostic := fmt.Sprintf("%s: %v", inst.Dir, classificationErr)
++			if inst.Err != nil {
++				diagnostic = fmt.Sprintf("%s; load error: %v", diagnostic, inst.Err)
++			}
++			loadErrors = append(loadErrors, diagnostic)
++			continue
++		case packageSelected:
+ 		}
++
+ 		if inst.Err != nil {
+ 			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", inst.Dir, inst.Err))
+ 			continue
+@@ -453,10 +472,17 @@ func cue_eval_module(moduleRootPath *C.char, packageName *C.char, optionsJSON *C
+ 		}
+ 	}
+ 
+-	if len(instances) == 0 {
+-		allErrors := append(loadErrors, buildErrors...)
++	allErrors := append(loadErrors, buildErrors...)
++	if len(allErrors) > 0 {
+ 		hint := fmt.Sprintf("evalDir=%s, moduleRoot=%s, loadPattern=%s, package=%s, loadedInstances=%d, validInstances=%d, builtInstances=%d, errors=%v, packageMismatches=%v",
+ 			evalDir, goModuleRoot, loadPattern, effectivePackageName, len(loadedInstances), len(validInstances), len(builtInstances), allErrors, packageMismatches)
++		result = createErrorResponse(ErrorCodeBuildValue, "Selected CUE instances failed to evaluate", &hint)
++		return result
++	}
++
++	if len(instances) == 0 {
++		hint := fmt.Sprintf("evalDir=%s, moduleRoot=%s, loadPattern=%s, package=%s, loadedInstances=%d, validInstances=%d, builtInstances=%d, packageMismatches=%v",
++			evalDir, goModuleRoot, loadPattern, effectivePackageName, len(loadedInstances), len(validInstances), len(builtInstances), packageMismatches)
+ 		result = createErrorResponse(ErrorCodeBuildValue, "No instances could be evaluated", &hint)
+ 		return result
+ 	}
+diff --git a/crates/cuengine/package_classification.go b/crates/cuengine/package_classification.go
+new file mode 100644
+index 0000000..c3425fe
+--- /dev/null
++++ b/crates/cuengine/package_classification.go
+@@ -0,0 +1,118 @@
++package main
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"cuelang.org/go/cue/build"
++	"cuelang.org/go/cue/parser"
++)
++
++type packageClassification uint8
++
++const (
++	packageUnknown packageClassification = iota
++	packageSelected
++	packageOther
++)
++
++// classifyInstancePackage keeps package filtering ahead of evaluation errors.
++// A loader PkgName is authoritative. When a parser failure leaves it blank,
++// partial ASTs can still positively identify a selected or non-selected
++// package. Anything that cannot be proven either way is unknown and therefore
++// terminal: only positively identified non-selected packages may be ignored.
++func classifyInstancePackage(
++	inst *build.Instance,
++	expectedPackage string,
++) (packageClassification, error) {
++	if expectedPackage == "" || inst.PkgName == expectedPackage {
++		return packageSelected, nil
++	}
++	if inst.PkgName != "" && inst.PkgName != "_" {
++		return packageOther, nil
++	}
++
++	sources, err := packageSourcesForInstance(inst)
++	if err != nil {
++		return packageUnknown, err
++	}
++
++	var unknownSources []string
++	sawOtherPackage := false
++	for _, source := range sources {
++		file, parseErr := parser.ParseFile(source.Filename, source.Source)
++		if file == nil {
++			unknownSources = append(
++				unknownSources,
++				fmt.Sprintf("%s has no parseable CUE AST: %v", source.Filename, parseErr),
++			)
++			continue
++		}
++
++		packageName := file.PackageName()
++		if packageName == "" {
++			detail := fmt.Sprintf("%s has no package declaration", source.Filename)
++			if parseErr != nil {
++				detail = fmt.Sprintf("%s: %v", detail, parseErr)
++			}
++			unknownSources = append(unknownSources, detail)
++			continue
++		}
++		if packageName == expectedPackage {
++			return packageSelected, nil
++		}
++		sawOtherPackage = true
++	}
++
++	if len(unknownSources) > 0 {
++		return packageUnknown, fmt.Errorf(
++			"could not establish CUE package for loader instance: %s",
++			strings.Join(unknownSources, "; "),
++		)
++	}
++	if sawOtherPackage {
++		return packageOther, nil
++	}
++
++	return packageUnknown, fmt.Errorf(
++		"could not establish CUE package for loader instance in %s: no CUE sources",
++		inst.Dir,
++	)
++}
++
++func packageSourcesForInstance(inst *build.Instance) ([]*build.File, error) {
++	var sources []*build.File
++	for _, file := range inst.InvalidFiles {
++		if file == nil {
++			continue
++		}
++		if file.Encoding == build.CUE || strings.HasSuffix(file.Filename, ".cue") {
++			sources = append(sources, file)
++		}
++	}
++	if len(sources) > 0 {
++		return sources, nil
++	}
++
++	entries, err := os.ReadDir(inst.Dir)
++	if err != nil {
++		return nil, fmt.Errorf(
++			"could not inspect CUE sources for loader instance in %s: %w",
++			inst.Dir,
++			err,
++		)
++	}
++
++	for _, entry := range entries {
++		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".cue") {
++			continue
++		}
++		sources = append(sources, &build.File{
++			Filename: filepath.Join(inst.Dir, entry.Name()),
++			Encoding: build.CUE,
++		})
++	}
++	return sources, nil
++}
+diff --git a/crates/cuengine/package_classification_test.go b/crates/cuengine/package_classification_test.go
+new file mode 100644
+index 0000000..f083835
+--- /dev/null
++++ b/crates/cuengine/package_classification_test.go
+@@ -0,0 +1,143 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"cuelang.org/go/cue/build"
++	"cuelang.org/go/cue/cuecontext"
++	"cuelang.org/go/cue/errors"
++	"cuelang.org/go/cue/token"
++)
++
++func TestClassifyInstancePackageRecoversSelectedPackageFromMalformedSource(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(
++		filepath.Join(dir, "env.cue"),
++		[]byte("package cuenv\n\nbroken: {\n"),
++		0o600,
++	); err != nil {
++		t.Fatalf("write malformed selected source: %v", err)
++	}
++
++	instance := &build.Instance{
++		Dir: dir,
++		Err: errors.Newf(token.NoPos, "simulated loader failure"),
++	}
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if err != nil {
++		t.Fatalf("classify malformed selected package: %v", err)
++	}
++	if classification != packageSelected {
++		t.Fatalf("classification = %v, want selected", classification)
++	}
++}
++
++func TestClassifyInstancePackageRecoversAnonymousLoaderPackage(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(
++		filepath.Join(dir, "env.cue"),
++		[]byte("package cuenv\n\nbroken: {\n"),
++		0o600,
++	); err != nil {
++		t.Fatalf("write malformed selected source: %v", err)
++	}
++
++	instance := &build.Instance{
++		Dir:     dir,
++		PkgName: "_",
++		Err:     errors.Newf(token.NoPos, "simulated loader failure"),
++	}
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if err != nil {
++		t.Fatalf("classify anonymous loader package: %v", err)
++	}
++	if classification != packageSelected {
++		t.Fatalf("classification = %v, want selected", classification)
++	}
++}
++
++func TestClassifyInstancePackageLeavesMalformedOtherPackageUnselected(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.WriteFile(
++		filepath.Join(dir, "env.cue"),
++		[]byte("package other\n\nbroken: {\n"),
++		0o600,
++	); err != nil {
++		t.Fatalf("write malformed non-selected source: %v", err)
++	}
++
++	instance := &build.Instance{
++		Dir: dir,
++		Err: errors.Newf(token.NoPos, "simulated loader failure"),
++	}
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if err != nil {
++		t.Fatalf("classify malformed non-selected package: %v", err)
++	}
++	if classification != packageOther {
++		t.Fatalf("classification = %v, want other", classification)
++	}
++}
++
++func TestClassifyInstancePackageRejectsMissingSourceDirectory(t *testing.T) {
++	instance := &build.Instance{
++		Dir: filepath.Join(t.TempDir(), "missing"),
++		Err: errors.Newf(token.NoPos, "simulated loader failure"),
++	}
++
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if classification != packageUnknown {
++		t.Fatalf("classification = %v, want unknown", classification)
++	}
++	if err == nil || !strings.Contains(err.Error(), "could not inspect CUE sources") {
++		t.Fatalf("expected source inspection error, got %v", err)
++	}
++}
++
++func TestClassifyInstancePackageRejectsSourceWithoutPackageAST(t *testing.T) {
++	dir := t.TempDir()
++	sourcePath := filepath.Join(dir, "env.cue")
++	if err := os.WriteFile(sourcePath, []byte("broken: {\n"), 0o600); err != nil {
++		t.Fatalf("write unclassifiable source: %v", err)
++	}
++
++	instance := &build.Instance{
++		Dir: dir,
++		Err: errors.Newf(token.NoPos, "simulated loader failure"),
++	}
++	classification, err := classifyInstancePackage(instance, "cuenv")
++	if classification != packageUnknown {
++		t.Fatalf("classification = %v, want unknown", classification)
++	}
++	if err == nil || !strings.Contains(err.Error(), sourcePath) {
++		t.Fatalf("expected error naming unclassifiable source, got %v", err)
++	}
++}
++
++func TestBuildJSONCleanRejectsOpenList(t *testing.T) {
++	value := cuecontext.New().CompileString("[...string]")
++	if err := value.Err(); err != nil {
++		t.Fatalf("compile open list: %v", err)
++	}
++	if encoded, err := buildJSONClean(value); err == nil {
++		t.Fatalf("open list serialized as %s; want concrete-value error", encoded)
++	}
++}
++
++func TestBuildJSONCleanRejectsNestedIncompleteContainer(t *testing.T) {
++	value := cuecontext.New().CompileString(`{
++		outer: {
++			ready: "yes"
++			pending: string
++		}
++	}`)
++	if err := value.Err(); err != nil {
++		t.Fatalf("compile nested incomplete container: %v", err)
++	}
++	if encoded, err := buildJSONClean(value); err == nil {
++		t.Fatalf("incomplete container serialized as %s; want concrete-value error", encoded)
++	}
++}
+diff --git a/crates/cuengine/tests/package_filter_tests.rs b/crates/cuengine/tests/package_filter_tests.rs
+index f223b5a..9df0aa2 100644
+--- a/crates/cuengine/tests/package_filter_tests.rs
++++ b/crates/cuengine/tests/package_filter_tests.rs
+@@ -23,6 +23,35 @@ fn create_module() -> TestResult<TempDir> {
+     Ok(temp_dir)
+ }
+ 
++fn write_env(root: &std::path::Path, relative_dir: &str, package: &str, body: &str) -> TestResult {
++    let directory = root.join(relative_dir);
++    fs::create_dir_all(&directory)?;
++    fs::write(directory.join("env.cue"), format!("package {package}\n\n{body}\n"))?;
++    Ok(())
++}
++
++fn recursive_options() -> ModuleEvalOptions {
++    ModuleEvalOptions {
++        recursive: true,
++        package_name: Some("cuenv".to_string()),
++        ..Default::default()
++    }
++}
++
++fn assert_selected_failure(
++    root: &std::path::Path,
++    expected_path: &str,
++) -> TestResult {
++    let error = evaluate_module(root, "cuenv", Some(&recursive_options()))
++        .expect_err("a selected cuenv package error must be terminal");
++    let message = error.to_string();
++    assert!(
++        message.contains(expected_path),
++        "selected failure must name its path '{expected_path}': {message}"
++    );
++    Ok(())
++}
++
+ #[test]
+ fn recursive_eval_ignores_other_packages_in_same_directory() -> TestResult {
+     let temp_dir = create_module()?;
+@@ -65,3 +94,63 @@ ignored: "this belongs to another CUE package"
+ 
+     Ok(())
+ }
++
++#[test]
++fn recursive_eval_fails_closed_for_selected_load_errors() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    write_env(root, "load-error", "cuenv", "broken: {")?;
++
++    assert_selected_failure(root, "load-error")
++}
++
++#[test]
++fn recursive_eval_fails_closed_for_unclassifiable_load_errors() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    let unknown_dir = root.join("unknown-package");
++    fs::create_dir_all(&unknown_dir)?;
++    fs::write(unknown_dir.join("env.cue"), "broken: {\n")?;
++
++    assert_selected_failure(root, "unknown-package")
++}
++
++#[test]
++fn recursive_eval_fails_closed_for_selected_build_errors() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    write_env(root, "build-error", "cuenv", "conflict: 1 & 2")?;
++
++    assert_selected_failure(root, "build-error")
++}
++
++#[test]
++fn recursive_eval_fails_closed_for_selected_json_errors() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    write_env(root, "json-error", "cuenv", "incomplete: string")?;
++
++    assert_selected_failure(root, "json-error")
++}
++
++#[test]
++fn recursive_eval_ignores_failing_non_cuenv_packages() -> TestResult {
++    let temp_dir = create_module()?;
++    let root = temp_dir.path();
++
++    write_env(root, "", "cuenv", "healthy: true")?;
++    write_env(root, "nested/non-cuenv", "other", "broken: {")?;
++
++    let result = evaluate_module(root, "cuenv", Some(&recursive_options()))?;
++    assert_eq!(result.instances.len(), 1);
++    assert!(result.instances.contains_key("."));
++    Ok(())
++}
+diff --git a/crates/cuengine/values.go b/crates/cuengine/values.go
+index 88520ae..fbcc692 100644
+--- a/crates/cuengine/values.go
++++ b/crates/cuengine/values.go
+@@ -9,7 +9,10 @@ import (
+ // buildJSONClean builds a JSON representation without any _meta injection.
+ // This returns clean JSON that can be correlated with the separate meta map.
+ func buildJSONClean(v cue.Value) ([]byte, error) {
+-	result := buildValueClean(v)
++	result, err := buildValueClean(v)
++	if err != nil {
++		return nil, err
++	}
+ 	return json.Marshal(result)
+ }
+ 
+@@ -25,31 +28,55 @@ func unquoteSelector(s string) string {
+ }
+ 
+ // buildValueClean recursively builds a clean value without metadata
+-func buildValueClean(v cue.Value) interface{} {
++func buildValueClean(v cue.Value) (interface{}, error) {
++	if err := v.Validate(cue.Concrete(true)); err != nil {
++		return nil, err
++	}
++
+ 	switch v.Kind() {
+ 	case cue.StructKind:
+ 		result := make(map[string]interface{})
+-		iter, _ := v.Fields(cue.Definitions(false))
++		iter, err := v.Fields(cue.Definitions(false))
++		if err != nil {
++			return nil, err
++		}
+ 		for iter.Next() {
+ 			sel := iter.Selector()
+ 			fieldName := unquoteSelector(sel.String())
+-			result[fieldName] = buildValueClean(iter.Value())
++			value, err := buildValueClean(iter.Value())
++			if err != nil {
++				return nil, err
++			}
++			result[fieldName] = value
+ 		}
+-		return result
++		return result, nil
+ 
+ 	case cue.ListKind:
++		if err := v.Len().Validate(cue.Concrete(true)); err != nil {
++			return nil, err
++		}
++
+ 		// Use a non-nil slice so empty CUE lists serialize to [] (not null).
+ 		items := make([]interface{}, 0)
+-		iter, _ := v.List()
+-		for iter.Next() {
+-			items = append(items, buildValueClean(iter.Value()))
++		iter, err := v.List()
++		if err != nil {
++			return nil, err
+ 		}
+-		return items
++		for iter.Next() {
++			value, err := buildValueClean(iter.Value())
++			if err != nil {
++				return nil, err
++			}
++			items = append(items, value)
++		}
++		return items, nil
+ 
+ 	default:
+ 		// Concrete value (string, number, bool, null)
+ 		var val interface{}
+-		v.Decode(&val)
+-		return val
++		if err := v.Decode(&val); err != nil {
++			return nil, err
++		}
++		return val, nil
+ 	}
+ }
+diff --git a/crates/cuenv/src/commands/info.rs b/crates/cuenv/src/commands/info.rs
+index 9b28ddb..e3ab109 100644
+--- a/crates/cuenv/src/commands/info.rs
++++ b/crates/cuenv/src/commands/info.rs
+@@ -10,7 +10,7 @@
+ use crate::commands::convert_engine_error;
+ use crate::commands::env_file::{discover_env_cue_directories, find_cue_module_root};
+ use cuengine::ModuleEvalOptions;
+-use cuenv_core::cue::discovery::{adjust_meta_key_path, compute_relative_path};
++use cuenv_core::cue::discovery::{adjust_meta_key_path, compute_relative_path, format_eval_errors};
+ use cuenv_core::{ModuleEvaluation, Result};
+ use serde::Serialize;
+ use std::collections::HashMap;
+@@ -172,7 +172,7 @@ fn evaluate_discovered_env_cue_directories(
+     context: &InfoContext,
+     options: InfoOptions<'_>,
+ ) -> Result<cuengine::ModuleResult> {
+-    let env_cue_dirs = discover_env_cue_directories(&context.module_root, options.package);
++    let env_cue_dirs = discover_env_cue_directories(&context.module_root, options.package)?;
+ 
+     if env_cue_dirs.is_empty() {
+         return Err(cuenv_core::Error::configuration(format!(
+@@ -184,6 +184,8 @@ fn evaluate_discovered_env_cue_directories(
+ 
+     let mut discovered = DiscoveredModuleResults::default();
+ 
++    let mut evaluation_errors = Vec::new();
++
+     for dir in env_cue_dirs {
+         let dir_rel_path = compute_relative_path(&dir, &context.module_root);
+         let eval_options = ModuleEvalOptions {
+@@ -193,14 +195,19 @@ fn evaluate_discovered_env_cue_directories(
+             ..Default::default()
+         };
+ 
+-        let Ok(raw) =
+-            cuengine::evaluate_module(&context.module_root, options.package, Some(&eval_options))
+-                .map_err(convert_engine_error)
+-        else {
+-            continue;
+-        };
++        match cuengine::evaluate_module(&context.module_root, options.package, Some(&eval_options))
++            .map_err(convert_engine_error)
++        {
++            Ok(raw) => discovered.merge(raw, &dir_rel_path),
++            Err(error) => evaluation_errors.push((dir, error)),
++        }
++    }
+ 
+-        discovered.merge(raw, &dir_rel_path);
++    if !evaluation_errors.is_empty() {
++        let error_summary = format_eval_errors(&evaluation_errors);
++        return Err(cuenv_core::Error::configuration(format!(
++            "Selected CUE projects failed during info discovery:\n{error_summary}"
++        )));
+     }
+ 
+     if discovered.instances.is_empty() {
+diff --git a/crates/cuenv/src/commands/module_evaluation.rs b/crates/cuenv/src/commands/module_evaluation.rs
+index a4d29d0..d73855d 100644
+--- a/crates/cuenv/src/commands/module_evaluation.rs
++++ b/crates/cuenv/src/commands/module_evaluation.rs
+@@ -1,9 +1,8 @@
+ use super::{CommandExecutor, convert_engine_error, env_file, schema_compat};
+ use crate::commands::module_utils::EvaluationMetadataBuilder;
+ use cuengine::ModuleEvalOptions;
+-use cuenv_core::cue::discovery::{adjust_meta_key_path, compute_relative_path, format_eval_errors};
++use cuenv_core::cue::discovery::{adjust_meta_key_path, compute_relative_path};
+ use cuenv_core::{ModuleEvaluation, ModuleEvaluationInput, Result};
+-use rayon::prelude::*;
+ use std::collections::HashMap;
+ use std::path::Path;
+ 
+@@ -70,26 +69,18 @@ impl CommandExecutor {
+         // Fast path: evaluate the entire module in a single recursive CUE
+         // evaluation (equivalent to `cue eval ./...`). This loads the module
+         // and compiles imported schema packages once instead of once per
+-        // directory, which is significantly faster for monorepos.
+-        match self.evaluate_workspace_module_recursive(module_root) {
+-            Ok(module) => Ok(module),
+-            Err(e) => {
+-                tracing::warn!(
+-                    module_root = %module_root.display(),
+-                    error = %e,
+-                    "Recursive workspace evaluation failed - falling back to per-directory evaluation"
+-                );
+-                self.evaluate_workspace_module_fan_out(module_root)
+-            }
+-        }
++        // directory, which is significantly faster for monorepos. A selected
++        // package failure is terminal: a partial fan-out result must never
++        // hide a failed project from workspace-wide commands.
++        self.evaluate_workspace_module_recursive(module_root)
+     }
+ 
+     /// Evaluate the whole workspace with one recursive CUE evaluation.
+     ///
+-    /// The Go bridge loads the module once and builds every package instance
+-    /// in a shared CUE context, skipping directories whose package does not
+-    /// match or that fail to build (matching the per-directory fan-out
+-    /// semantics).
++    /// The Go bridge loads the module once and builds every selected package
++    /// instance in a shared CUE context. Non-selected packages are ignored;
++    /// an error in any selected package is terminal so workspace commands
++    /// cannot act on a partial project set.
+     fn evaluate_workspace_module_recursive(&self, module_root: &Path) -> Result<ModuleEvaluation> {
+         let options = ModuleEvalOptions {
+             recursive: true,
+@@ -114,101 +105,4 @@ impl CommandExecutor {
+             metadata: metadata.finish(),
+         }))
+     }
+-
+-    fn evaluate_workspace_module_fan_out(&self, module_root: &Path) -> Result<ModuleEvaluation> {
+-        let env_cue_dirs =
+-            cuenv_core::cue::discovery::discover_env_cue_directories(module_root, &self.package);
+-
+-        if env_cue_dirs.is_empty() {
+-            return Err(cuenv_core::Error::configuration(format!(
+-                "No env.cue files declaring package '{}' found in module: {}",
+-                self.package,
+-                module_root.display(),
+-            )));
+-        }
+-
+-        let package = &self.package;
+-        tracing::info!(
+-            env_cue_dirs = env_cue_dirs.len(),
+-            rayon_threads = rayon::current_num_threads(),
+-            "evaluate_workspace_module fan-out"
+-        );
+-        let results: Vec<_> = env_cue_dirs
+-            .par_iter()
+-            .map(|dir| {
+-                tracing::debug!(dir = %dir.display(), "cuengine::evaluate_module begin");
+-                let options = ModuleEvalOptions {
+-                    recursive: false,
+-                    with_meta: true,
+-                    with_references: true,
+-                    target_dir: Some(dir.to_string_lossy().to_string()),
+-                    ..Default::default()
+-                };
+-                let dir_rel_path = compute_relative_path(dir, module_root);
+-
+-                match cuengine::evaluate_module(module_root, package, Some(&options)) {
+-                    Ok(raw) => Ok((dir_rel_path, raw)),
+-                    Err(e) => {
+-                        tracing::warn!(
+-                            dir = %dir.display(),
+-                            error = %e,
+-                            "Failed to evaluate env.cue - skipping directory"
+-                        );
+-                        Err((dir.clone(), e))
+-                    }
+-                }
+-            })
+-            .collect();
+-
+-        let mut all_instances = HashMap::new();
+-        let mut all_projects = Vec::new();
+-        let mut metadata = EvaluationMetadataBuilder::default();
+-        let mut eval_errors = Vec::new();
+-
+-        for result in results {
+-            match result {
+-                Ok((dir_rel_path, raw)) => {
+-                    for (path_str, value) in raw.instances {
+-                        let rel_path = if path_str == "." {
+-                            dir_rel_path.clone()
+-                        } else {
+-                            path_str
+-                        };
+-                        all_instances.insert(rel_path, value);
+-                    }
+-
+-                    for project_path in raw.projects {
+-                        let rel_project_path = if project_path == "." {
+-                            dir_rel_path.clone()
+-                        } else {
+-                            project_path
+-                        };
+-                        if !all_projects.contains(&rel_project_path) {
+-                            all_projects.push(rel_project_path);
+-                        }
+-                    }
+-
+-                    for (meta_key, meta_value) in raw.meta {
+-                        let adjusted_key = adjust_meta_key_path(&meta_key, &dir_rel_path);
+-                        metadata.insert(adjusted_key, meta_value);
+-                    }
+-                }
+-                Err((dir, e)) => eval_errors.push((dir, e)),
+-            }
+-        }
+-
+-        if all_instances.is_empty() {
+-            let error_summary = format_eval_errors(&eval_errors);
+-            return Err(cuenv_core::Error::configuration(format!(
+-                "No instances could be evaluated. All directories failed:\n{error_summary}"
+-            )));
+-        }
+-
+-        Ok(ModuleEvaluation::from_raw_parts(ModuleEvaluationInput {
+-            root: module_root.to_path_buf(),
+-            raw_instances: all_instances,
+-            project_paths: all_projects,
+-            metadata: metadata.finish(),
+-        }))
+-    }
+ }
+diff --git a/crates/cuenv/src/completions.rs b/crates/cuenv/src/completions.rs
+index 9c7f43c..60ae96e 100644
+--- a/crates/cuenv/src/completions.rs
++++ b/crates/cuenv/src/completions.rs
+@@ -48,7 +48,9 @@ fn get_available_tasks(path: &str, package: &str) -> Vec<(String, Option<String>
+     };
+ 
+     // Discover all directories with env.cue files matching our package
+-    let env_cue_dirs = discover_env_cue_directories(&module_root, package);
++    let Ok(env_cue_dirs) = discover_env_cue_directories(&module_root, package) else {
++        return Vec::new();
++    };
+     if env_cue_dirs.is_empty() {
+         return Vec::new();
+     }
+diff --git a/crates/cuenv/tests/sync_scope_rules.rs b/crates/cuenv/tests/sync_scope_rules.rs
+index a255660..18466f7 100644
+--- a/crates/cuenv/tests/sync_scope_rules.rs
++++ b/crates/cuenv/tests/sync_scope_rules.rs
+@@ -624,6 +624,77 @@ fn sync_all_from_nested_generates_all_ci_in_repo_root() -> TestResult {
+     Ok(())
+ }
+ 
++#[test]
++fn workspace_commands_fail_closed_for_malformed_selected_projects() -> TestResult {
++    let tmp = create_repo()?;
++    let root = tmp.path();
++
++    fs::write(
++        root.join("env.cue"),
++        project_env_cue("healthy", "build", "build", "@healthy"),
++    )?;
++
++    let invalid_project = root.join("apps/bad-selected");
++    fs::create_dir_all(&invalid_project)?;
++    fs::write(
++        invalid_project.join("env.cue"),
++        "package cuenv\n\nbroken: {\n",
++    )?;
++
++    let commands: &[&[&str]] = &[
++        &["info", "--json"],
++        &["sync", "-A"],
++        &["sync", "ci", "--check", "-A"],
++    ];
++
++    for args in commands {
++        let output = run_cuenv(root, args)?;
++        assert!(
++            !output.success,
++            "cuenv {} must reject a malformed selected project\nstdout: {}\nstderr: {}",
++            args.join(" "),
++            output.stdout,
++            output.stderr
++        );
++        let combined = format!("{}{}", output.stdout, output.stderr);
++        assert!(
++            combined.contains("bad-selected"),
++            "cuenv {} must name the malformed selected path: {combined}",
++            args.join(" ")
++        );
++    }
++
++    Ok(())
++}
++
++#[test]
++fn workspace_sync_ignores_malformed_non_cuenv_projects() -> TestResult {
++    let tmp = create_repo()?;
++    let root = tmp.path();
++
++    fs::write(
++        root.join("env.cue"),
++        project_env_cue("healthy", "build", "build", "@healthy"),
++    )?;
++
++    let unrelated = root.join("apps/non-cuenv");
++    fs::create_dir_all(&unrelated)?;
++    fs::write(
++        unrelated.join("env.cue"),
++        "package other\n\nbroken: {\n",
++    )?;
++
++    let output = run_cuenv(root, &["sync", "-A"])?;
++    assert!(
++        output.success,
++        "sync -A must ignore malformed non-cuenv packages\nstdout: {}\nstderr: {}",
++        output.stdout,
++        output.stderr
++    );
++
++    Ok(())
++}
++
+ #[test]
+ fn sync_ci_rejects_schema_only_gitlab_provider() -> TestResult {
+     let tmp = create_repo()?;
