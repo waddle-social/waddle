@@ -4,6 +4,7 @@ import { BrowserXmppClient, type SessionLifecycleEvent } from "../src/lib/xmpp-c
 import { __createFallbackXmppResourceForTesting } from "../src/lib/xmpp/client";
 import {
   __clearSensitiveUrlsForTesting,
+  __recordSpanExceptionForTesting,
   __scrubMissingFetchSpanUrlForTesting,
   __scrubSpanUrlForTesting,
   __scrubXhrSpanUrlForTesting,
@@ -525,6 +526,30 @@ describe("telemetry module no-op behaviour", () => {
       queueSize: "2",
       storage_area: "outbound-queue",
     });
+  });
+
+  test("an explicitly reported join failure is not recorded again by nested spans", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    const joinFailure = new Error(
+      "Channel presence was rejected. Try again in a moment.",
+    );
+    const stableTelemetryError = new Error(
+      "room-join-resource-constraint",
+      { cause: joinFailure },
+    );
+
+    reportError("xmpp.stream", stableTelemetryError, {
+      recoverable: true,
+      detail: "room-join-resource-constraint",
+      condition: "resource-constraint",
+      errorType: "wait",
+    });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("room-join-resource-constraint");
+    expect(__recordSpanExceptionForTesting(joinFailure)).toBe(0);
+    expect(__recordSpanExceptionForTesting(joinFailure)).toBe(0);
   });
 
   test("transport sanitizer replaces Faro page URLs with route templates", () => {

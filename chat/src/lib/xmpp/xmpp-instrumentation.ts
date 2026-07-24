@@ -70,7 +70,10 @@ export function installInstrumentation(client: BrowserXmppClient): void {
       ? telemetryStreamManagementCounts(event)
       : undefined;
     const errorSource = telemetryErrorSource(event.kind, condition);
-    const cause = new Error(detail);
+    const cause = new Error(
+      detail,
+      event.cause === undefined ? undefined : { cause: event.cause },
+    );
     reportError(kind, cause, {
       recoverable: event.recoverable,
       detail,
