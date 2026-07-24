@@ -18,22 +18,31 @@ pub(super) enum RegistrationAfterFrame {
 /// Every `SessionInitializationFailed` return routes through here so the
 /// client-visible stream `<internal-server-error/>` is never server-silent
 /// again: one `error!` with the bare JID, the XEP-0198 stream id when one
-/// exists, and the typed reason; the `waddle.session.init.failed` counter
-/// keyed by that reason so the rate is alertable; and an error mark on the
-/// current dispatch span so the failure surfaces in Tempo `status=error`
-/// queries (#1428). The bare JID lives on the log only — never as a metric
+/// exists (fresh binds enable SM only after bind, so it is empty there),
+/// the typed reason, and the failure detail; the
+/// `waddle.session.init.failed` counter keyed by that reason so the rate is
+/// alertable; and a dedicated error-status span. The span is created here —
+/// not recorded on `Span::current()` — because registration runs after
+/// `handle_xmpp_frame` returns, outside `xmpp.stanza.dispatch`, where a
+/// current-span mark would be a silent no-op; a short point-in-time root
+/// span is exactly the #1428 "internal failures export as error spans"
+/// shape. The bare JID lives on the log and span only — never as a metric
 /// attribute.
-fn record_session_init_failure(
+pub(super) fn record_session_init_failure(
     reason: waddle_xmpp::telemetry::attributes::SessionInitFailureReason,
     jid: &FullJid,
     stream_id: Option<&str>,
+    detail: Option<String>,
 ) {
     use waddle_xmpp::telemetry::attributes::MetricAttribute;
     error!(
         user = %jid.to_bare(),
         resource = %jid.resource(),
-        stream_id = stream_id.unwrap_or(""),
+        // Logged as an Option so a fresh bind (no SM yet → None) stays
+        // distinguishable from a genuinely empty id.
+        stream_id = ?stream_id,
         reason = reason.value(),
+        detail = detail.as_deref().unwrap_or(""),
         "session initialization failed; sending stream internal-server-error and closing"
     );
     waddle_xmpp::counter_add!(
@@ -44,6 +53,12 @@ fn record_session_init_failure(
         1,
         reason,
     );
+    let span = tracing::info_span!(
+        "xmpp.session.init",
+        user = %jid.to_bare(),
+        reason = reason.value(),
+    );
+    let _enter = span.enter();
     crate::telemetry::mark_span_error("session initialization failed");
 }
 
@@ -145,16 +160,15 @@ pub(super) async fn register_bound_connection_after_frame(
         match load_blocklist_for_bind(&state.deps.app_state.db_pool, &jid).await {
             Ok(blocklist) => blocklist,
             Err(error) => {
-                error!(
-                    jid = %jid,
-                    %error,
-                    "Failed to load XEP-0191 blocklist at bind; failing the bind to avoid a \
-                     session-long fail-open. Client should reconnect."
-                );
+                // Fail the bind rather than run the session with an empty
+                // blocklist (a session-long XEP-0191 fail-open). The choke
+                // point below is the single log line for this failure —
+                // #1175 log hygiene: no second free-standing error!.
                 record_session_init_failure(
                     waddle_xmpp::telemetry::attributes::SessionInitFailureReason::BlocklistLoad,
                     &jid,
                     conn.sm_state.stream_id.as_deref(),
+                    Some(format!("XEP-0191 blocklist load failed: {error}")),
                 );
                 return RegistrationAfterFrame::SessionInitializationFailed;
             }
@@ -274,6 +288,7 @@ pub(super) async fn register_bound_connection_after_frame(
                 waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
                 &jid,
                 conn.sm_state.stream_id.as_deref(),
+                None,
             );
             return RegistrationAfterFrame::SessionInitializationFailed;
         }
