@@ -2,11 +2,27 @@
 //!
 //! The lookup resolves OpenGraph metadata through the bounded HTTPS resolver,
 //! then mints a scoped private token for the send-time XEP-0511 payload.
+//!
+//! Resolution runs OFF the per-connection frame dispatch path (#1470). The
+//! dispatch-side handler validates and authorizes the request synchronously,
+//! then spawns the resolver work and returns no frames, so the strictly
+//! serial frame loop (RFC 6120 §10.1) moves on to the next stanza
+//! immediately. The IQ result — still exactly one reply per request,
+//! matched by id (RFC 6120 §8.2.3) — is delivered later through the
+//! connection registry as a server-generated `DirectFrame`, which records it
+//! in the XEP-0198 unacked queue like every other server-generated reply.
+//! Before this, a cold-cache resolver round-trip stalled every stanza queued
+//! behind the lookup (production evidence on #1470: 1.3 s dispatch stalls vs
+//! a 13.6 ms dispatch p95).
 
 use super::*;
 use chrono::{Duration, SecondsFormat, Utc};
 use minidom::rxml::xml_ncname;
+use tokio::sync::Semaphore;
+use tracing::Instrument;
 use url::Url;
+use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::xep::{
     encode_link_preview_token_checked, LinkPreviewTokenData, LinkPreviewTokenImage,
     LinkPreviewTokenNativeVideo, LinkPreviewTokenPlayer, LinkPreviewTokenVideo,
@@ -30,8 +46,21 @@ struct LinkPreviewLookupDeps<'a> {
     response_from: Option<&'a str>,
     response_to: Option<&'a str>,
     secret: &'a [u8],
-    resolver_policy: Option<&'a LinkPreviewResolverPolicy>,
+    resolver_policy: Option<LinkPreviewResolverPolicy>,
 }
+
+/// Cap on concurrently running deferred resolver fetches per node. Serial
+/// frame dispatch used to throttle lookups to one in flight per connection as
+/// a side effect of blocking; once resolution moved off the dispatch path
+/// (#1470) the bound must be explicit so a burst of lookups cannot fan out
+/// into an unbounded outbound-fetch storm. Excess lookups queue on the
+/// semaphore in arrival order; each resolve is bounded by the resolver's own
+/// per-phase timeouts, so queued lookups still answer within the client's IQ
+/// budget except under sustained abuse — where queueing, not unbounded
+/// fan-out, is the correct failure mode (previews fail open, #822).
+const MAX_CONCURRENT_DEFERRED_RESOLVES: usize = 8;
+
+static DEFERRED_RESOLVE_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_DEFERRED_RESOLVES);
 
 pub(super) fn is_link_preview_lookup_iq(iq: &Iq) -> bool {
     let Iq::Get { payload, .. } = iq else {
@@ -78,21 +107,17 @@ async fn handle_link_preview_lookup_iq_with_policy(
             not_authorized_iq_error("Authentication required."),
         )];
     };
-    let owned_resolver_policy;
     let resolver_policy = match deps.resolver_policy {
         Some(policy) => policy,
-        None => {
-            owned_resolver_policy = LinkPreviewResolverPolicy::from_config(
-                &state.deps.link_preview,
-                Some(LinkPreviewMediaCache::new(
-                    state.deps.app_state.blob_storage.clone(),
-                    state.deps.auth_state.base_url.as_str(),
-                    state.deps.app_state.db_pool.global_actor().clone(),
-                    sender_jid.to_bare(),
-                )),
-            );
-            &owned_resolver_policy
-        }
+        None => LinkPreviewResolverPolicy::from_config(
+            &state.deps.link_preview,
+            Some(LinkPreviewMediaCache::new(
+                state.deps.app_state.blob_storage.clone(),
+                state.deps.auth_state.base_url.as_str(),
+                state.deps.app_state.db_pool.global_actor().clone(),
+                sender_jid.to_bare(),
+            )),
+        ),
     };
     let Iq::Get { payload, .. } = iq else {
         return vec![build_iq_error_xml_typed(
@@ -149,20 +174,115 @@ async fn handle_link_preview_lookup_iq_with_policy(
             None,
         )];
     }
-    let outcome = resolve_link_preview(&original_url, resolver_policy).await;
+    // Accepted for resolution. Everything from here involves outbound
+    // network fetches, so it runs off the dispatch path (#1470): spawn the
+    // resolve and answer the IQ later through the connection registry.
+    spawn_deferred_lookup_resolution(DeferredLookupResolution {
+        connection_registry: state.deps.protocol.connection_registry.clone(),
+        sm_session_registry: state.deps.protocol.sm_session_registry.clone(),
+        requester: sender_jid.clone(),
+        scope_jid,
+        original_url,
+        resolver_policy,
+        secret: deps.secret.to_vec(),
+        reply: DeferredLookupReply {
+            id: iq.id().to_string(),
+            from: deps
+                .response_from
+                .and_then(|value| value.parse::<Jid>().ok()),
+            to: deps.response_to.and_then(|value| value.parse::<Jid>().ok()),
+        },
+    });
+    Vec::new()
+}
+
+/// Everything one deferred lookup resolution owns once dispatch has moved
+/// on: registry handles for the eventual reply, the authorized request
+/// parameters, and the reply envelope.
+struct DeferredLookupResolution {
+    connection_registry: Arc<ConnectionRegistry>,
+    sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    requester: FullJid,
+    scope_jid: BareJid,
+    original_url: Url,
+    resolver_policy: LinkPreviewResolverPolicy,
+    secret: Vec<u8>,
+    reply: DeferredLookupReply,
+}
+
+/// Reply envelope captured from the request before dispatch returns: the
+/// request id the result must echo plus RFC 6120 §8.2.3 addressing
+/// (response `from` = request `to`, response `to` = request `from`).
+struct DeferredLookupReply {
+    id: String,
+    from: Option<Jid>,
+    to: Option<Jid>,
+}
+
+fn spawn_deferred_lookup_resolution(resolution: DeferredLookupResolution) {
+    // Created while the dispatch span is current, so the resolve — and the
+    // resolver's child `link_preview.fetch` spans — stay on the originating
+    // stanza's trace after dispatch returns (#1438: bounded, parented spans).
+    let span = tracing::info_span!("link_preview.resolve", host = tracing::field::Empty);
+    if let Some(host) = resolution.original_url.host_str() {
+        span.record("host", host);
+    }
+    tokio::spawn(
+        async move {
+            let DeferredLookupResolution {
+                connection_registry,
+                sm_session_registry,
+                requester,
+                scope_jid,
+                original_url,
+                resolver_policy,
+                secret,
+                reply,
+            } = resolution;
+            let Ok(_permit) = DEFERRED_RESOLVE_PERMITS.acquire().await else {
+                // The static semaphore is never closed.
+                return;
+            };
+            let reply_iq = resolve_deferred_lookup(
+                &requester,
+                scope_jid,
+                &original_url,
+                &resolver_policy,
+                &secret,
+                reply,
+            )
+            .await;
+            deliver_deferred_lookup_reply(
+                &connection_registry,
+                &sm_session_registry,
+                &requester,
+                reply_iq,
+            )
+            .await;
+        }
+        .instrument(span),
+    );
+}
+
+/// Run the bounded resolver and build the typed IQ result for the requester
+/// — the deferred continuation of the dispatch-side handler above.
+async fn resolve_deferred_lookup(
+    requester: &FullJid,
+    scope_jid: BareJid,
+    original_url: &Url,
+    resolver_policy: &LinkPreviewResolverPolicy,
+    secret: &[u8],
+    reply: DeferredLookupReply,
+) -> Iq {
+    let outcome = resolve_link_preview(original_url, resolver_policy).await;
     let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
         record_link_preview_event(telemetry_event_for_status(outcome.status()));
-        return vec![build_link_preview_lookup_result(
-            iq,
-            deps.response_from,
-            deps.response_to,
-            outcome.status(),
-            None,
-        )];
+        return build_link_preview_lookup_result_iq(reply, outcome.status(), None);
     };
+    let metadata = *metadata;
     let expires_at = Utc::now() + Duration::minutes(5);
     let data = LinkPreviewTokenData {
-        sender_jid: sender_jid.to_bare(),
+        sender_jid: requester.to_bare(),
         scope_jid,
         original_url: metadata.original_url,
         normalized_url: metadata.normalized_url,
@@ -193,29 +313,64 @@ async fn handle_link_preview_lookup_iq_with_policy(
         }),
         expires_at_unix: expires_at.timestamp(),
     };
-    let Some(token) = encode_link_preview_token_checked(&data, deps.secret) else {
+    let Some(token) = encode_link_preview_token_checked(&data, secret) else {
         record_link_preview_event(LinkPreviewTelemetryEvent::ResolverFailed);
-        return vec![build_link_preview_lookup_result(
-            iq,
-            deps.response_from,
-            deps.response_to,
-            LinkPreviewResolverStatus::Failed,
-            None,
-        )];
+        return build_link_preview_lookup_result_iq(reply, LinkPreviewResolverStatus::Failed, None);
     };
 
     record_link_preview_event(LinkPreviewTelemetryEvent::ResolverReady);
-    vec![build_link_preview_lookup_result(
-        iq,
-        deps.response_from,
-        deps.response_to,
+    build_link_preview_lookup_result_iq(
+        reply,
         LinkPreviewResolverStatus::Ready,
         Some((
             data,
             token.as_str(),
             expires_at.to_rfc3339_opts(SecondsFormat::Millis, true),
         )),
-    )]
+    )
+}
+
+/// Deliver the deferred IQ result to the requester's live connection as a
+/// server-generated `DirectFrame` (the destination's main loop records it in
+/// the XEP-0198 unacked queue before the wire write, like every other
+/// server-generated reply).
+async fn deliver_deferred_lookup_reply(
+    connection_registry: &ConnectionRegistry,
+    sm_session_registry: &InMemorySmSessionRegistry,
+    requester: &FullJid,
+    reply_iq: Iq,
+) {
+    let stanza = Stanza::Iq(Box::new(reply_iq));
+    match connection_registry.send_to(requester, stanza.clone()).await {
+        SendResult::Sent => {}
+        SendResult::NotConnected | SendResult::ChannelClosed => {
+            // The synchronous reply path recorded responses in the SM
+            // unacked queue, so a reply racing a brief disconnect replayed
+            // on resume. Preserve that guarantee: record against a detached
+            // SM session when one exists; otherwise the requester is truly
+            // gone and the client's own IQ timeout owns the failure
+            // (previews fail open, #822).
+            match sm_session_registry
+                .record_stanza_for_detached_bound_resource(requester, &stanza, Utc::now())
+                .await
+            {
+                Ok(true) => debug!(
+                    requester = %requester,
+                    "deferred link-preview reply recorded for detached SM session"
+                ),
+                Ok(false) => debug!(
+                    requester = %requester,
+                    "deferred link-preview reply dropped; requester disconnected without \
+                     resumable session"
+                ),
+                Err(error) => warn!(
+                    requester = %requester,
+                    %error,
+                    "failed to record deferred link-preview reply for detached SM session"
+                ),
+            }
+        }
+    }
 }
 
 fn telemetry_event_for_status(status: LinkPreviewResolverStatus) -> LinkPreviewTelemetryEvent {
@@ -279,6 +434,9 @@ fn lookup_scope(payload: &Element) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+/// Serialize a lookup result for the synchronous short-circuit paths
+/// (malformed URL, resolver disabled) that still answer inline on the
+/// dispatch path.
 fn build_link_preview_lookup_result(
     iq: &Iq,
     response_from: Option<&str>,
@@ -286,6 +444,25 @@ fn build_link_preview_lookup_result(
     status: LinkPreviewResolverStatus,
     preview: Option<(LinkPreviewTokenData, &str, String)>,
 ) -> String {
+    iq_to_xml(build_link_preview_lookup_result_iq(
+        DeferredLookupReply {
+            id: iq.id().to_string(),
+            from: response_from.and_then(|value| value.parse::<Jid>().ok()),
+            to: response_to.and_then(|value| value.parse::<Jid>().ok()),
+        },
+        status,
+        preview,
+    ))
+}
+
+/// Build the typed lookup result IQ — the single wire-shape authority for
+/// both the synchronous short-circuit replies and the deferred registry
+/// delivery.
+fn build_link_preview_lookup_result_iq(
+    reply: DeferredLookupReply,
+    status: LinkPreviewResolverStatus,
+    preview: Option<(LinkPreviewTokenData, &str, String)>,
+) -> Iq {
     let mut lookup = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW).attr(
         xml_ncname!("status").to_owned(),
         if preview.is_some() {
@@ -369,7 +546,12 @@ fn build_link_preview_lookup_result(
         }
         lookup = lookup.append(preview);
     }
-    build_iq_result_xml(iq.id(), response_from, response_to, Some(lookup.build()))
+    Iq::Result {
+        from: reply.from,
+        to: reply.to,
+        id: reply.id,
+        payload: Some(lookup.build()),
+    }
 }
 
 fn append_text(parent: &mut Element, name: &str, value: Option<&str>) {
@@ -406,6 +588,50 @@ mod tests {
 
     fn secret() -> &'static [u8] {
         b"test-link-preview-secret"
+    }
+
+    /// Register a live connection for [`sender`] so the deferred lookup
+    /// reply has somewhere to land, and return the outbound receiver.
+    fn register_requester(
+        state: &WebSocketState,
+    ) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(sender(), tx);
+        rx
+    }
+
+    /// Await the deferred lookup reply on the requester's outbound channel
+    /// and return `(iq id, lookup payload element)`.
+    async fn recv_deferred_lookup_reply(
+        rx: &mut tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
+    ) -> (String, Element) {
+        let outbound = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+            .await
+            .expect("deferred lookup reply within timeout")
+            .expect("outbound channel open");
+        assert!(
+            matches!(
+                outbound.kind,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame
+            ),
+            "deferred IQ reply is a server-generated direct frame"
+        );
+        let Stanza::Iq(iq) = outbound.stanza else {
+            panic!("expected deferred IQ reply, got {:?}", outbound.stanza);
+        };
+        let Iq::Result { id, payload, .. } = *iq else {
+            panic!("expected IQ result");
+        };
+        let payload = payload.expect("lookup payload");
+        assert!(
+            payload.is("lookup", NS_WADDLE_LINK_PREVIEW),
+            "reply payload is the lookup element"
+        );
+        (id, payload)
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -470,6 +696,7 @@ mod tests {
             )
             .build();
         let iq = iq_get_with_payload(payload);
+        let mut rx = register_requester(state.as_ref());
 
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
@@ -480,15 +707,17 @@ mod tests {
                 response_from: None,
                 response_to: None,
                 secret: secret(),
-                resolver_policy: Some(&resolver_policy),
+                resolver_policy: Some(resolver_policy),
             },
         )
         .await;
 
-        let elem: Element = response[0].parse().expect("iq result");
-        let lookup = elem
-            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
-            .expect("lookup result");
+        assert!(
+            response.is_empty(),
+            "accepted lookup answers off the dispatch path: {response:?}"
+        );
+        let (id, lookup) = recv_deferred_lookup_reply(&mut rx).await;
+        assert_eq!(id, "lookup-1");
         assert_eq!(lookup.attr("status"), Some("ready"));
         let preview = lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
@@ -568,6 +797,7 @@ mod tests {
             )
             .build();
         let iq = iq_get_with_payload(payload);
+        let mut rx = register_requester(state.as_ref());
 
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
@@ -578,15 +808,16 @@ mod tests {
                 response_from: None,
                 response_to: None,
                 secret: secret(),
-                resolver_policy: Some(&resolver_policy),
+                resolver_policy: Some(resolver_policy),
             },
         )
         .await;
 
-        let elem: Element = response[0].parse().expect("iq result");
-        let lookup = elem
-            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
-            .expect("lookup result");
+        assert!(
+            response.is_empty(),
+            "accepted lookup answers off the dispatch path: {response:?}"
+        );
+        let (_, lookup) = recv_deferred_lookup_reply(&mut rx).await;
         assert_eq!(lookup.attr("status"), Some("ready"));
         let preview = lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
@@ -653,6 +884,7 @@ mod tests {
         let iq = iq_get_with_payload(payload);
 
         let state = create_test_websocket_state().await;
+        let mut rx = register_requester(state.as_ref());
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
             Some(&sender()),
@@ -662,15 +894,16 @@ mod tests {
                 response_from: None,
                 response_to: None,
                 secret: secret(),
-                resolver_policy: Some(&resolver_policy),
+                resolver_policy: Some(resolver_policy),
             },
         )
         .await;
 
-        let elem: Element = response[0].parse().expect("iq result");
-        let lookup = elem
-            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
-            .expect("lookup result");
+        assert!(
+            response.is_empty(),
+            "accepted lookup answers off the dispatch path: {response:?}"
+        );
+        let (_, lookup) = recv_deferred_lookup_reply(&mut rx).await;
         assert_eq!(lookup.attr("status"), Some("failed"));
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
@@ -700,6 +933,7 @@ mod tests {
         let iq = iq_get_with_payload(payload);
 
         let state = create_test_websocket_state().await;
+        let mut rx = register_requester(state.as_ref());
         let response = handle_link_preview_lookup_iq(
             &iq,
             Some(&sender()),
@@ -711,10 +945,11 @@ mod tests {
         )
         .await;
 
-        let elem: Element = response[0].parse().expect("iq result");
-        let lookup = elem
-            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
-            .expect("lookup result");
+        assert!(
+            response.is_empty(),
+            "accepted lookup answers off the dispatch path: {response:?}"
+        );
+        let (_, lookup) = recv_deferred_lookup_reply(&mut rx).await;
         assert_eq!(lookup.attr("status"), Some("unsupported"));
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
@@ -753,7 +988,7 @@ mod tests {
                 response_from: None,
                 response_to: None,
                 secret: secret(),
-                resolver_policy: Some(&LinkPreviewResolverPolicy {
+                resolver_policy: Some(LinkPreviewResolverPolicy {
                     enabled: false,
                     ..Default::default()
                 }),
@@ -761,6 +996,8 @@ mod tests {
         )
         .await;
 
+        // A disabled resolver is a synchronous short-circuit — no fetch is
+        // ever involved, so the reply stays on the dispatch path.
         let elem: Element = response[0].parse().expect("iq result");
         let lookup = elem
             .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
@@ -775,7 +1012,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn blocked_host_policy_returns_blocked_lookup_without_token() {
         let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
             .append(
@@ -792,6 +1029,7 @@ mod tests {
         let iq = iq_get_with_payload(payload);
 
         let state = create_test_websocket_state().await;
+        let mut rx = register_requester(state.as_ref());
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
             Some(&sender()),
@@ -801,7 +1039,7 @@ mod tests {
                 response_from: None,
                 response_to: None,
                 secret: secret(),
-                resolver_policy: Some(&LinkPreviewResolverPolicy {
+                resolver_policy: Some(LinkPreviewResolverPolicy {
                     blocked_hosts: vec!["blocked.example".parse().expect("pattern")],
                     ..Default::default()
                 }),
@@ -809,14 +1047,150 @@ mod tests {
         )
         .await;
 
-        let elem: Element = response[0].parse().expect("iq result");
-        let lookup = elem
-            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
-            .expect("lookup result");
+        assert!(
+            response.is_empty(),
+            "accepted lookup answers off the dispatch path: {response:?}"
+        );
+        let (_, lookup) = recv_deferred_lookup_reply(&mut rx).await;
         assert_eq!(lookup.attr("status"), Some("blocked"));
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
             .is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_returns_before_slow_resolution_and_reply_still_arrives() {
+        // #1470 acceptance: a cold-cache resolve must not block dispatch —
+        // the handler returns immediately while the resolver round-trip is
+        // still in flight, and the requester still gets the result, matched
+        // by the original IQ id, once resolution completes.
+        let server = MockServer::start().await;
+        let page_delay = std::time::Duration::from_secs(3);
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(page_delay)
+                    .set_body_raw(
+                        r#"<html><head>
+                        <meta property="og:title" content="Slow Article">
+                      </head></html>"#,
+                        "text/html",
+                    ),
+            )
+            .mount(&server)
+            .await;
+        let state = create_test_websocket_state().await;
+        let mut rx = register_requester(state.as_ref());
+        let resolver_policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            timeout: std::time::Duration::from_secs(10),
+            ..Default::default()
+        };
+        let lookup_url = format!("{}/slow", server.uri());
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append(lookup_url.as_str())
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let dispatch_started = std::time::Instant::now();
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(resolver_policy),
+            },
+        )
+        .await;
+        let dispatch_elapsed = dispatch_started.elapsed();
+
+        assert!(response.is_empty(), "no synchronous frames: {response:?}");
+        assert!(
+            dispatch_elapsed < page_delay,
+            "dispatch must not wait for the resolver round-trip \
+             (took {dispatch_elapsed:?} against a {page_delay:?} page delay)"
+        );
+        let (id, lookup) = recv_deferred_lookup_reply(&mut rx).await;
+        assert_eq!(id, "lookup-1", "deferred reply echoes the request id");
+        assert_eq!(lookup.attr("status"), Some("ready"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deferred_reply_for_disconnected_requester_resolves_without_delivery() {
+        // No registered connection and no detached SM session: the resolve
+        // must still complete cleanly (previews fail open, #822) and the
+        // reply is dropped without panicking the spawned task.
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head><meta property="og:title" content="T"></head></html>"#,
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+        let state = create_test_websocket_state().await;
+        let resolver_policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append(format!("{}/a", server.uri()).as_str())
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(resolver_policy),
+            },
+        )
+        .await;
+        assert!(response.is_empty());
+
+        // The resolve completed (ready telemetry) even though delivery had
+        // nowhere to go.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverReady) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("resolve completes despite disconnected requester");
     }
 
     #[test]

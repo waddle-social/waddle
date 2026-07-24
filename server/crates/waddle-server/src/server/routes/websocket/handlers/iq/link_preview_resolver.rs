@@ -9,7 +9,7 @@ use kameo::actor::ActorRef;
 use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE};
 use reqwest::{redirect, Client, StatusCode};
 use sha2::{Digest, Sha256};
-use tracing::warn;
+use tracing::{warn, Instrument};
 use url::{Host, Url};
 use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
 
@@ -200,6 +200,34 @@ impl LinkPreviewResolverOutcome {
     }
 }
 
+/// Child span for one outbound resolver fetch (#1470). Carries only the
+/// target host and the fetch phase (`page` | `image`) — never the URL, path,
+/// query, or any JID — and stays parented under the caller's span so the
+/// resolver's dominant wall time is attributable in traces without adding
+/// root-span noise (#1438).
+fn outbound_fetch_span(phase: &'static str, url: &Url) -> tracing::Span {
+    let span = tracing::info_span!(
+        "link_preview.fetch",
+        link_preview.phase = phase,
+        host = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    if let Some(host) = url.host_str() {
+        span.record("host", host);
+    }
+    span
+}
+
+/// Stamp the fetch span for a fetch that produced no usable response.
+/// `Blocked`/`Unsupported` are policy verdicts, not failures — only `Failed`
+/// (network error, timeout, oversize) sets OTEL error status, keeping error
+/// traces meaningful (#1477).
+fn mark_fetch_span_outcome(span: &tracing::Span, status: LinkPreviewResolverStatus) {
+    if matches!(status, LinkPreviewResolverStatus::Failed) {
+        span.record("otel.status_code", "ERROR");
+    }
+}
+
 pub(super) async fn resolve_link_preview(
     url: &Url,
     policy: &LinkPreviewResolverPolicy,
@@ -210,14 +238,25 @@ pub(super) async fn resolve_link_preview(
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
             return LinkPreviewResolverOutcome::Failed;
         };
-        let fetch = match fetch_html_once(&current, policy, timeout).await {
+        let fetch_span = outbound_fetch_span("page", &current);
+        let fetch = match fetch_html_once(&current, policy, timeout)
+            .instrument(fetch_span.clone())
+            .await
+        {
             Ok(fetch) => fetch,
-            Err(LinkPreviewResolverStatus::Blocked) => return LinkPreviewResolverOutcome::Blocked,
-            Err(LinkPreviewResolverStatus::Failed) => return LinkPreviewResolverOutcome::Failed,
-            Err(LinkPreviewResolverStatus::Unsupported) => {
-                return LinkPreviewResolverOutcome::Unsupported;
+            Err(status) => {
+                mark_fetch_span_outcome(&fetch_span, status);
+                return match status {
+                    LinkPreviewResolverStatus::Blocked => LinkPreviewResolverOutcome::Blocked,
+                    LinkPreviewResolverStatus::Failed => LinkPreviewResolverOutcome::Failed,
+                    LinkPreviewResolverStatus::Unsupported => {
+                        LinkPreviewResolverOutcome::Unsupported
+                    }
+                    LinkPreviewResolverStatus::Ready => {
+                        unreachable!("ready is not a fetch error")
+                    }
+                };
             }
-            Err(LinkPreviewResolverStatus::Ready) => unreachable!("ready is not a fetch error"),
         };
         match fetch {
             FetchOnceResult::Html { final_url, html } => {
@@ -237,21 +276,28 @@ pub(super) async fn resolve_link_preview(
                     // `policy.timeout` thus bounds each phase independently, so
                     // a worst-case resolve is ~2x `policy.timeout` (page + image).
                     let image_deadline = Instant::now() + policy.timeout;
+                    let image_span = outbound_fetch_span("image", &remote_image.url);
                     match fetch_cached_preview_image(&remote_image, policy, cache, image_deadline)
+                        .instrument(image_span.clone())
                         .await
                     {
                         Ok(image) => metadata.image = Some(image),
-                        Err(LinkPreviewResolverStatus::Blocked) => warn!(
-                            url = %remote_image.url,
-                            "dropping blocked link preview image after metadata resolved"
-                        ),
-                        Err(LinkPreviewResolverStatus::Failed) => warn!(
-                            url = %remote_image.url,
-                            "dropping failed link preview image after metadata resolved"
-                        ),
-                        Err(LinkPreviewResolverStatus::Unsupported) => {}
-                        Err(LinkPreviewResolverStatus::Ready) => {
-                            unreachable!("ready is not an image fetch error")
+                        Err(status) => {
+                            mark_fetch_span_outcome(&image_span, status);
+                            match status {
+                                LinkPreviewResolverStatus::Blocked => warn!(
+                                    url = %remote_image.url,
+                                    "dropping blocked link preview image after metadata resolved"
+                                ),
+                                LinkPreviewResolverStatus::Failed => warn!(
+                                    url = %remote_image.url,
+                                    "dropping failed link preview image after metadata resolved"
+                                ),
+                                LinkPreviewResolverStatus::Unsupported => {}
+                                LinkPreviewResolverStatus::Ready => {
+                                    unreachable!("ready is not an image fetch error")
+                                }
+                            }
                         }
                     }
                 }

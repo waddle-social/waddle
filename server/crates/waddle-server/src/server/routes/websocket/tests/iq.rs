@@ -101,11 +101,39 @@ async fn link_preview_lookup_for_test(
     .await
 }
 
+/// Register a live connection for `bound_jid` so the deferred link-preview
+/// reply (#1470) has somewhere to land, and await the typed IQ result on it.
+async fn recv_deferred_link_preview_reply_for_test(
+    rx: &mut tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
+) -> xmpp_parsers::iq::Iq {
+    let outbound = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+        .await
+        .expect("deferred lookup reply within timeout")
+        .expect("outbound channel open");
+    assert!(
+        matches!(
+            outbound.kind,
+            waddle_xmpp::registry::DeliveryKind::DirectFrame
+        ),
+        "deferred IQ reply is a server-generated direct frame"
+    );
+    let Stanza::Iq(iq) = outbound.stanza else {
+        panic!("expected deferred IQ reply, got {:?}", outbound.stanza);
+    };
+    *iq
+}
+
 #[tokio::test]
 async fn link_preview_lookup_dispatch_returns_typed_unsupported_metadata_outcome() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;
     let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bound_jid.clone(), tx);
     let frame = "\
         <iq xmlns='jabber:client' type='get' id='preview-1' from='alice@example.com/desktop' to='example.com'>\
           <lookup xmlns='urn:waddle:link-preview:0'>\
@@ -116,23 +144,42 @@ async fn link_preview_lookup_dispatch_returns_typed_unsupported_metadata_outcome
 
     let responses = link_preview_lookup_for_test(state.as_ref(), session, &bound_jid, frame).await;
 
-    let response = responses.first().expect("lookup result");
     assert!(
-        response.contains("id='preview-1'"),
-        "preserves iq id: {response}"
+        responses.is_empty(),
+        "accepted lookup answers off the dispatch path (#1470): {responses:?}"
+    );
+    let reply = recv_deferred_link_preview_reply_for_test(&mut rx).await;
+    let xmpp_parsers::iq::Iq::Result {
+        id,
+        from,
+        to,
+        payload,
+    } = reply
+    else {
+        panic!("normal resolver miss/failure is not an IQ transport error: {reply:?}");
+    };
+    assert_eq!(id, "preview-1", "preserves iq id");
+    assert_eq!(
+        from.as_ref().map(ToString::to_string).as_deref(),
+        Some("example.com"),
+        "stamps result 'from' from request envelope"
+    );
+    assert_eq!(
+        to.as_ref().map(ToString::to_string).as_deref(),
+        Some("alice@example.com/desktop"),
+        "stamps result 'to' from request envelope"
+    );
+    let lookup = payload.expect("lookup payload");
+    assert!(
+        matches!(lookup.attr("status"), Some("unsupported" | "failed")),
+        "normal resolver miss/failure is typed in the lookup result"
     );
     assert!(
-        response.contains("from='example.com'")
-            && response.contains("to='alice@example.com/desktop'"),
-        "stamps result addressing from request envelope: {response}"
-    );
-    assert!(
-        response.contains("status='unsupported'") || response.contains("status='failed'"),
-        "normal resolver miss/failure is typed in the lookup result: {response}"
-    );
-    assert!(
-        !response.contains("type='error'") && !response.contains("token='"),
-        "normal resolver miss/failure is not an IQ transport error and does not mint token: {response}"
+        lookup.attr("token").is_none()
+            && lookup
+                .get_child("preview", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
+                .is_none(),
+        "resolver miss/failure does not mint a token"
     );
 }
 
@@ -196,6 +243,12 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolv
         })
         .await
         .expect("join room");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bound_jid.clone(), tx);
     let frame = "\
         <iq xmlns='jabber:client' type='get' id='preview-muc-1' from='alice@example.com/desktop' to='example.com'>\
           <lookup xmlns='urn:waddle:link-preview:0'>\
@@ -206,14 +259,18 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolv
 
     let responses = link_preview_lookup_for_test(state.as_ref(), session, &bound_jid, frame).await;
 
-    let response = responses.first().expect("lookup result");
-    let elem: Element = response.parse().expect("lookup xml");
-    let lookup = elem
-        .get_child("lookup", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
-        .expect("lookup result");
+    assert!(
+        responses.is_empty(),
+        "authorized lookup answers off the dispatch path (#1470): {responses:?}"
+    );
+    let reply = recv_deferred_link_preview_reply_for_test(&mut rx).await;
+    let xmpp_parsers::iq::Iq::Result { payload, .. } = reply else {
+        panic!("authorized room lookup should reach a typed resolver outcome: {reply:?}");
+    };
+    let lookup = payload.expect("lookup payload");
     assert!(
         matches!(lookup.attr("status"), Some("unsupported" | "failed")),
-        "authorized room lookup should reach typed resolver outcome: {response}"
+        "authorized room lookup should reach typed resolver outcome"
     );
     assert!(lookup
         .get_child("preview", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
