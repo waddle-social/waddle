@@ -101,9 +101,12 @@ async fn link_preview_lookup_for_test(
     .await
 }
 
-/// Register a live connection for `bound_jid` so the deferred link-preview
-/// reply (#1470) has somewhere to land; returns the outbound receiver.
-fn register_link_preview_requester_for_test(
+/// Register a live connection for `bound_jid` — with both the connection
+/// registry and the authoritative `UserActor` the deferred delivery path
+/// resolves (mirroring production registration) — so the deferred
+/// link-preview reply (#1470) has somewhere to land; returns the outbound
+/// receiver.
+async fn register_link_preview_requester_for_test(
     state: &WebSocketState,
     bound_jid: &FullJid,
 ) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
@@ -112,7 +115,17 @@ fn register_link_preview_requester_for_test(
         .deps
         .protocol
         .connection_registry
-        .register(bound_jid.clone(), tx);
+        .register(bound_jid.clone(), tx.clone());
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: bound_jid.clone(),
+            entry: waddle_xmpp::registry::ConnectionEntry::new(tx),
+        })
+        .await
+        .expect("register user resource");
     rx
 }
 
@@ -143,7 +156,7 @@ async fn link_preview_lookup_dispatch_returns_typed_unsupported_metadata_outcome
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;
     let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
-    let mut rx = register_link_preview_requester_for_test(state.as_ref(), &bound_jid);
+    let mut rx = register_link_preview_requester_for_test(state.as_ref(), &bound_jid).await;
     let frame = "\
         <iq xmlns='jabber:client' type='get' id='preview-1' from='alice@example.com/desktop' to='example.com'>\
           <lookup xmlns='urn:waddle:link-preview:0'>\
@@ -253,7 +266,7 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolv
         })
         .await
         .expect("join room");
-    let mut rx = register_link_preview_requester_for_test(state.as_ref(), &bound_jid);
+    let mut rx = register_link_preview_requester_for_test(state.as_ref(), &bound_jid).await;
     let frame = "\
         <iq xmlns='jabber:client' type='get' id='preview-muc-1' from='alice@example.com/desktop' to='example.com'>\
           <lookup xmlns='urn:waddle:link-preview:0'>\

@@ -9,20 +9,24 @@
 //! serial frame loop (RFC 6120 §10.1) moves on to the next stanza
 //! immediately. The IQ result — still exactly one reply per request,
 //! matched by id (RFC 6120 §8.2.3) — is delivered later through the
-//! connection registry as a server-generated `DirectFrame`, which records it
-//! in the XEP-0198 unacked queue like every other server-generated reply.
+//! authoritative `UserActor` delivery seam as a server-generated
+//! `DirectFrame`, which the destination records in the XEP-0198 unacked
+//! queue like every other server-generated reply.
 //! Before this, a cold-cache resolver round-trip stalled every stanza queued
 //! behind the lookup (production evidence on #1470: 1.3 s dispatch stalls vs
 //! a 13.6 ms dispatch p95).
 
 use super::*;
 use chrono::{Duration, SecondsFormat, Utc};
+use kameo::actor::ActorRef;
 use minidom::rxml::xml_ncname;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 use url::Url;
-use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
+use waddle_xmpp::registry::UserRegistryActor;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+use crate::server::routes::interpret::{deliver_direct_to_full, FullJidDeliveryOutcome};
 use waddle_xmpp::xep::{
     encode_link_preview_token_checked, LinkPreviewTokenData, LinkPreviewTokenImage,
     LinkPreviewTokenNativeVideo, LinkPreviewTokenPlayer, LinkPreviewTokenVideo,
@@ -203,13 +207,13 @@ async fn handle_link_preview_lookup_iq_with_policy(
     spawn_deferred_lookup_resolution(
         resolve_permit,
         DeferredLookupResolution {
-            connection_registry: state.deps.protocol.connection_registry.clone(),
+            user_registry: state.deps.protocol.user_registry.clone(),
             sm_session_registry: state.deps.protocol.sm_session_registry.clone(),
             requester: sender_jid.clone(),
             scope_jid,
             original_url,
             resolver_policy,
-            secret: deps.secret.to_vec(),
+            secret: LinkPreviewSigningSecret(deps.secret.to_vec()),
             reply: DeferredLookupReply {
                 id: iq.id().to_string(),
                 from: deps
@@ -222,17 +226,35 @@ async fn handle_link_preview_lookup_iq_with_policy(
     Vec::new()
 }
 
+/// Signing key for composer preview tokens, typed so the deferred callback
+/// envelope never carries raw secret bytes as an untyped blob
+/// (typed-payloads rule). Today this wraps the deployment occupant-id
+/// secret's key material, which the lookup path has always reused for token
+/// HMACs (see the `handle_iq_with_conn_state` call site).
+struct LinkPreviewSigningSecret(Vec<u8>);
+
+impl LinkPreviewSigningSecret {
+    fn key(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// Everything one deferred lookup resolution owns once dispatch has moved
 /// on: registry handles for the eventual reply, the authorized request
 /// parameters, and the reply envelope.
 struct DeferredLookupResolution {
-    connection_registry: Arc<ConnectionRegistry>,
+    /// Authoritative delivery seam (ADR-0017): the `UserActor` resolved
+    /// through this registry owns the requester's live channel — including,
+    /// under clustering, remote resources registered by the route bridge —
+    /// so the deferred reply follows the same DirectFrame path as every
+    /// other server-generated frame.
+    user_registry: ActorRef<UserRegistryActor>,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
     requester: FullJid,
     scope_jid: BareJid,
     original_url: Url,
     resolver_policy: LinkPreviewResolverPolicy,
-    secret: Vec<u8>,
+    secret: LinkPreviewSigningSecret,
     reply: DeferredLookupReply,
 }
 
@@ -259,7 +281,7 @@ fn spawn_deferred_lookup_resolution(
     tokio::spawn(
         async move {
             let DeferredLookupResolution {
-                connection_registry,
+                user_registry,
                 sm_session_registry,
                 requester,
                 scope_jid,
@@ -273,17 +295,18 @@ fn spawn_deferred_lookup_resolution(
                 scope_jid,
                 &original_url,
                 &resolver_policy,
-                &secret,
+                secret.key(),
                 reply,
             )
             .await;
-            // Release the fetch-concurrency permit before delivery:
-            // `send_to` waits for the recipient's outbound-channel capacity,
-            // and a backpressured recipient must not pin a resolver slot its
-            // fetch is no longer using.
+            // Release the fetch-concurrency permit before delivery: the
+            // delivery path below is bounded (non-blocking actor try-send
+            // with capped ask timeouts), but it is still not fetch work —
+            // a slow recipient must not pin a resolver slot its fetch is
+            // no longer using.
             drop(resolve_permit);
             deliver_deferred_lookup_reply(
-                &connection_registry,
+                &user_registry,
                 &sm_session_registry,
                 &requester,
                 reply_iq,
@@ -360,78 +383,80 @@ async fn resolve_deferred_lookup(
     )
 }
 
-/// Deliver the deferred IQ result to the requester's live connection as a
-/// server-generated `DirectFrame` (the destination's main loop records it in
-/// the XEP-0198 unacked queue before the wire write, like every other
-/// server-generated reply).
+/// Deliver the deferred IQ result to the requester as a server-generated
+/// `DirectFrame` through [`deliver_direct_to_full`] — the authoritative
+/// `UserActor` delivery seam (ADR-0017). That helper is bounded end to end
+/// (non-blocking `TrySendDirect` with capped ask timeouts and a finite
+/// dropped-full retry schedule, never a channel-capacity wait), covers
+/// clustered remote resources registered with the owner actor, and falls
+/// back to the detached XEP-0198 replay buffer itself — preserving the old
+/// synchronous path's replay-on-resume guarantee. The destination's main
+/// loop records the frame in the XEP-0198 unacked queue before the wire
+/// write, like every other server-generated reply.
 ///
-/// Deliberately NOT owner-gated (`send_to`, not `send_to_if_owner`): an
-/// XEP-0198 resume onto a new connection registers a fresh owner token, and
-/// the requester's pending IQ survives that resume — owner-gating would drop
-/// the reply in exactly the race the old synchronous path's SM replay
-/// covered. The residual cost is a reply delivered to a same-full-JID
-/// replacement session, which ignores an IQ result whose id it never issued
-/// (RFC 6120 §8.2.3).
+/// Deliberately NOT owner-gated: an XEP-0198 resume onto a new connection
+/// registers a fresh owner token, and the requester's pending IQ survives
+/// that resume — owner-gating would drop the reply in exactly the race the
+/// SM replay covers. The residual cost is a reply delivered to a
+/// same-full-JID replacement session, which ignores an IQ result whose id
+/// it never issued (RFC 6120 §8.2.3).
 async fn deliver_deferred_lookup_reply(
-    connection_registry: &ConnectionRegistry,
-    sm_session_registry: &InMemorySmSessionRegistry,
+    user_registry: &ActorRef<UserRegistryActor>,
+    sm_session_registry: &Arc<InMemorySmSessionRegistry>,
     requester: &FullJid,
     reply_iq: Iq,
 ) {
     let stanza = Stanza::Iq(Box::new(reply_iq));
-    // The clone is unavoidable: `send_to` consumes the stanza (it may retry
-    // on a replacement sender), while the detached-SM fallback below still
-    // needs it.
-    match connection_registry.send_to(requester, stanza.clone()).await {
-        SendResult::Sent => {}
-        SendResult::NotConnected | SendResult::ChannelClosed => {
-            // The synchronous reply path recorded responses in the SM
-            // unacked queue, so a reply racing a brief disconnect replayed
-            // on resume. Preserve that guarantee: record against a detached
-            // SM session when one exists; otherwise the requester is truly
-            // gone and the client's own IQ timeout owns the failure
-            // (previews fail open, #822).
-            match sm_session_registry
-                .record_stanza_for_detached_bound_resource(requester, &stanza, Utc::now())
-                .await
+    match deliver_direct_to_full(
+        Some(user_registry),
+        Some(sm_session_registry),
+        requester,
+        &stanza,
+    )
+    .await
+    {
+        FullJidDeliveryOutcome::Delivered => {}
+        FullJidDeliveryOutcome::QueuedDetached => debug!(
+            requester = %requester,
+            "deferred link-preview reply recorded for detached SM session"
+        ),
+        FullJidDeliveryOutcome::Unavailable => {
+            // Neither a live actor resource nor a detached/claimed session —
+            // a resume may have completed between the delivery attempt and
+            // the detached-record fallback (resume consumes the session), so
+            // retry once before dropping the reply. At-least-once is the
+            // contract: a duplicate result replayed from the displacement
+            // corner is ignored by id (RFC 6120 §8.2.3). If the retry still
+            // finds nobody, the requester is truly gone and the client's own
+            // IQ timeout owns the failure (previews fail open, #822).
+            match deliver_direct_to_full(
+                Some(user_registry),
+                Some(sm_session_registry),
+                requester,
+                &stanza,
+            )
+            .await
             {
-                Ok(true) => debug!(
-                    requester = %requester,
-                    "deferred link-preview reply recorded for detached SM session"
-                ),
-                Ok(false) => {
-                    // No detached OR claimed session found — a resume may
-                    // have completed between the failed live send and the
-                    // record attempt (resume consumes the session), so retry
-                    // the live path once before dropping the reply.
-                    // At-least-once is the contract: in the displacement
-                    // corner where the record persisted durably before
-                    // reporting false, a replayed duplicate result is
-                    // ignored by id (RFC 6120 §8.2.3).
-                    if connection_registry
-                        .send_to(requester, stanza.clone())
-                        .await
-                        .is_sent()
-                    {
-                        debug!(
-                            requester = %requester,
-                            "deferred link-preview reply delivered on post-resume retry"
-                        );
-                    } else {
-                        debug!(
-                            requester = %requester,
-                            "deferred link-preview reply dropped; requester disconnected \
-                             without resumable session"
-                        );
-                    }
+                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                    debug!(
+                        requester = %requester,
+                        "deferred link-preview reply delivered on post-resume retry"
+                    );
                 }
-                Err(error) => warn!(
+                _ => debug!(
                     requester = %requester,
-                    %error,
-                    "failed to record deferred link-preview reply for detached SM session"
+                    "deferred link-preview reply dropped; requester disconnected without \
+                     resumable session"
                 ),
             }
         }
+        FullJidDeliveryOutcome::Dropped => warn!(
+            requester = %requester,
+            "deferred link-preview reply dropped by delivery path (full channel or \
+             detached-record failure)"
+        ),
+        #[cfg(feature = "clustering")]
+        FullJidDeliveryOutcome::MaybeCommitted => {}
     }
 }
 
@@ -652,9 +677,11 @@ mod tests {
         b"test-link-preview-secret"
     }
 
-    /// Register a live connection for [`sender`] so the deferred lookup
-    /// reply has somewhere to land, and return the outbound receiver.
-    fn register_requester(
+    /// Register a live connection for [`sender`] — with both the connection
+    /// registry and the authoritative `UserActor` the deferred delivery path
+    /// resolves (mirroring production registration) — and return the
+    /// outbound receiver.
+    async fn register_requester(
         state: &WebSocketState,
     ) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -662,7 +689,17 @@ mod tests {
             .deps
             .protocol
             .connection_registry
-            .register(sender(), tx);
+            .register(sender(), tx.clone());
+        state
+            .deps
+            .protocol
+            .user_registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: sender(),
+                entry: waddle_xmpp::registry::ConnectionEntry::new(tx),
+            })
+            .await
+            .expect("register user resource");
         rx
     }
 
@@ -758,7 +795,7 @@ mod tests {
             )
             .build();
         let iq = iq_get_with_payload(payload);
-        let mut rx = register_requester(state.as_ref());
+        let mut rx = register_requester(state.as_ref()).await;
 
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
@@ -859,7 +896,7 @@ mod tests {
             )
             .build();
         let iq = iq_get_with_payload(payload);
-        let mut rx = register_requester(state.as_ref());
+        let mut rx = register_requester(state.as_ref()).await;
 
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
@@ -946,7 +983,7 @@ mod tests {
         let iq = iq_get_with_payload(payload);
 
         let state = create_test_websocket_state().await;
-        let mut rx = register_requester(state.as_ref());
+        let mut rx = register_requester(state.as_ref()).await;
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
             Some(&sender()),
@@ -1143,7 +1180,7 @@ mod tests {
             .mount(&server)
             .await;
         let state = create_test_websocket_state().await;
-        let mut rx = register_requester(state.as_ref());
+        let mut rx = register_requester(state.as_ref()).await;
         let resolver_policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
             timeout: std::time::Duration::from_secs(10),
