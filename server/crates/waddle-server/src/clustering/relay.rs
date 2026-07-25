@@ -18,6 +18,7 @@
 //! Phase 4 wires DM/MUC/presence routing through this relay. Kademlia still
 //! discovers node relays only; entity ownership remains in Postgres claims.
 
+use super::NodeId;
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
 use super::metrics;
@@ -32,7 +33,6 @@ use super::route_bridge::{
     RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
 };
 use super::self_fence::LocallyClaimedEntities;
-use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
 use kameo::message::{Context, Message};
@@ -40,7 +40,7 @@ use kameo::{Actor, RemoteActor, Reply};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity};
@@ -69,8 +69,14 @@ pub fn relay_name(node_id: &NodeId) -> String {
 /// instrumentation), so the kameo `actor.handle_message` spans its work
 /// mints would root the trace — exactly the shape the #1438 span-noise
 /// sampler drops. Opening this dedicated root before any actor message is
-/// sent keeps the whole delivery traceable: the actor spans become
-/// parented children and survive the sampler.
+/// sent keeps the receiving node's half of the delivery traceable: the
+/// actor spans become parented children and survive the sampler. The
+/// sending node's half stays a separate trace — kameo 0.20 remote
+/// messaging carries no W3C trace context, so cross-node causality is
+/// not linked (#1485 tracks propagating context on the relay envelopes).
+///
+/// `otel.kind = "consumer"`: this is the receive side of a cross-node
+/// message, per OTel messaging semantics.
 ///
 /// `parent: None` is load-bearing: the handler itself executes inside
 /// kameo's own (suppressed) root `actor.handle_message` span, and a child
@@ -83,6 +89,7 @@ fn relay_dispatch_span(message: &'static str) -> tracing::Span {
     tracing::info_span!(
         parent: None,
         "clustering.relay.dispatch",
+        otel.kind = "consumer",
         relay.message = message,
         jid = tracing::field::Empty,
         stream_id = tracing::field::Empty,
@@ -576,6 +583,7 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let span = relay_dispatch_span("remote_resource_frame");
+        span.record("jid", tracing::field::display(&msg.frame.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         ctx.spawn(
             async move { bridge.deliver_remote_resource_frame_on_socket(msg).await }
@@ -1172,7 +1180,7 @@ impl RelayHandle {
                 None => {
                     return Err(RelayAskError::NotFound {
                         node_id: self.node_id.clone(),
-                    })
+                    });
                 }
             }
         }
@@ -2161,8 +2169,8 @@ mod tests {
 
     #[test]
     fn ask_failures_classify_handler_effect_separately_from_failure_kind() {
-        use std::convert::Infallible;
         use RelaySendEffect::{MaybeCommitted, NoEffect};
+        use std::convert::Infallible;
 
         for (error, expected) in [
             (RemoteSendError::ActorNotRunning, NoEffect),
@@ -2419,6 +2427,55 @@ mod tests {
             opentelemetry::trace::SpanId::INVALID,
             "the dispatch span must root a fresh trace, not inherit the \
              active (suppressed) actor span as its parent"
+        );
+    }
+
+    /// #1483 guard: every delegated relay reply task must carry the
+    /// dispatch span. A `ctx.spawn` whose future is not `.instrument`-ed
+    /// runs the actual delivery — where the actor messages happen —
+    /// outside the root span, silently restoring the #1438 trace loss.
+    /// The field-recording tests above cannot catch that (the span still
+    /// records its fields at creation), so pin it structurally.
+    #[test]
+    fn every_delegated_relay_reply_task_is_instrumented() {
+        let source = include_str!("relay.rs");
+        let production: String = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first segment")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let production = production.as_str();
+        let mut checked = 0usize;
+        for (index, _) in production.match_indices("ctx.spawn(") {
+            let argument_start = index + "ctx.spawn(".len();
+            let mut depth = 1usize;
+            let mut argument_end = argument_start;
+            for (offset, character) in production[argument_start..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            argument_end = argument_start + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                production[argument_start..argument_end].contains(".instrument("),
+                "the ctx.spawn at byte {index} delegates a relay reply \
+                 without instrumenting it with the dispatch span"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 8,
+            "expected the delegated relay handlers to be found; got {checked}"
         );
     }
 }
