@@ -28,6 +28,10 @@
 //! - `janitor.sweep` — one per janitor sweep tick
 //!   (`server::session_janitors::janitor_sweep_span`), carrying the
 //!   canonical `janitor` attribute value.
+//! - `janitor.orphan_work` — one per orphan-reaper work-item attempt
+//!   (`server::session_janitors::orphan_work_span`), linked — not
+//!   parented — to the enqueuing sweep so retry queues can never hold
+//!   a sweep root open.
 //!
 //! Pre-existing named roots (`xmpp.stanza.dispatch`, `xmpp.muc.fanout`,
 //! `http_request`, `clustering.shutdown_drain`, ...) pass through the
@@ -264,7 +268,11 @@ mod tests {
     /// and they must never appear on a suppression list.
     #[test]
     fn dedicated_root_span_names_are_never_suppressed() {
-        const DEDICATED_ROOT_SPAN_NAMES: &[&str] = &["clustering.relay.dispatch", "janitor.sweep"];
+        const DEDICATED_ROOT_SPAN_NAMES: &[&str] = &[
+            "clustering.relay.dispatch",
+            "janitor.sweep",
+            "janitor.orphan_work",
+        ];
         let filter = SpanNoiseFilter::new(Sampler::AlwaysOn);
         for name in DEDICATED_ROOT_SPAN_NAMES {
             assert!(

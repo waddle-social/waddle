@@ -19,6 +19,47 @@ fn janitor_sweep_span(janitor: Janitor) -> tracing::Span {
     tracing::info_span!(parent: None, "janitor.sweep", janitor = janitor.value())
 }
 
+/// The active span's OTel context, captured at work-enqueue time so a
+/// later attempt can *link* back to the sweep that found the work.
+#[cfg(feature = "clustering")]
+fn current_sweep_context() -> opentelemetry::trace::SpanContext {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .clone()
+}
+
+/// Root span for one orphan-reaper work-item attempt (#1483).
+///
+/// Worker attempts must NOT run under the enqueuing sweep's live span:
+/// retry queues and pending inventories would hold that root open
+/// indefinitely — unbounded duration, lost on crash, the very
+/// `actor.lifecycle` pathology the #1438 sampler kills. Each attempt
+/// gets its own short-lived root instead, linked (not parented) to the
+/// enqueuing sweep when its context is valid. The span name is
+/// documented in `telemetry::span_noise` and must never be added to its
+/// suppression lists.
+#[cfg(feature = "clustering")]
+fn orphan_work_span(
+    lane: &'static str,
+    sweep_context: &opentelemetry::trace::SpanContext,
+) -> tracing::Span {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let span = tracing::info_span!(
+        parent: None,
+        "janitor.orphan_work",
+        janitor = Janitor::OrphanReaper.value(),
+        lane,
+    );
+    if sweep_context.is_valid() {
+        span.add_link(sweep_context.clone());
+    }
+    span
+}
+
 /// Default interval for the auth-state TTL janitor.
 const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -1123,7 +1164,10 @@ struct SmHydrationWork {
     entity: waddle_xmpp::ownership::Entity,
     fence: waddle_xmpp::stream_management::persistence::SmClaimFence,
     reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
-    span: tracing::Span,
+    /// The enqueuing sweep's span context, carried for a span *link* on
+    /// each attempt — never a live `Span`, which retry queues and pending
+    /// inventories would hold open indefinitely.
+    sweep_context: opentelemetry::trace::SpanContext,
 }
 
 #[cfg(feature = "clustering")]
@@ -1144,7 +1188,8 @@ struct ExactReleaseWork {
     entity: waddle_xmpp::ownership::Entity,
     owner: waddle_xmpp::ownership::NodeIdentity,
     epoch: waddle_xmpp::ownership::ClaimEpoch,
-    span: tracing::Span,
+    /// See [`SmHydrationWork::sweep_context`].
+    sweep_context: opentelemetry::trace::SpanContext,
 }
 
 #[cfg(feature = "clustering")]
@@ -1270,7 +1315,7 @@ impl OrphanReaperWorkers {
             entity,
             fence,
             reservation,
-            span: tracing::Span::current(),
+            sweep_context: current_sweep_context(),
         };
         let key = Self::hydration_key(&work);
         self.hydration_pending
@@ -1322,7 +1367,7 @@ impl OrphanReaperWorkers {
             entity,
             fence,
             reservation,
-            span: tracing::Span::current(),
+            sweep_context: current_sweep_context(),
         };
         if self
             .hydration_pending
@@ -1591,7 +1636,7 @@ impl OrphanReaperSupervisor {
                             work.reservation,
                         ),
                     )
-                    .instrument(work.span.clone()) => result,
+                    .instrument(orphan_work_span("sm_hydration", &work.sweep_context)) => result,
                 };
                 match result {
                     Ok(Ok(
@@ -1623,7 +1668,7 @@ impl OrphanReaperSupervisor {
                                     work.reservation,
                                 ),
                             )
-                            .instrument(work.span.clone()) => result,
+                            .instrument(orphan_work_span("sm_hydration", &work.sweep_context)) => result,
                         };
                         match cleanup {
                             Ok(Ok(_)) => {
@@ -1659,7 +1704,7 @@ impl OrphanReaperSupervisor {
                                 work.reservation,
                             ),
                         )
-                        .instrument(work.span.clone())
+                        .instrument(orphan_work_span("sm_hydration", &work.sweep_context))
                         .await;
                         match cleanup {
                             Ok(Ok(_)) => {
@@ -1722,7 +1767,7 @@ impl OrphanReaperSupervisor {
                         ORPHANED_ROOM_RELEASE_TIMEOUT,
                         work.claim_store.release_exact(&work.entity, &work.owner, work.epoch),
                     )
-                    .instrument(work.span.clone()) => result,
+                    .instrument(orphan_work_span("room_release", &work.sweep_context)) => result,
                 };
                 match result {
                     Ok(Ok(_)) => {
@@ -1819,6 +1864,10 @@ impl OrphanReaperSupervisor {
             next.workers.remember_room_handoff(handoff);
         }
         for work in hydration {
+            // Re-enqueueing re-captures the (empty) ambient context, so a
+            // restarted item loses its sweep link; its attempts still get
+            // their own `janitor.orphan_work` roots, so the work stays
+            // traced.
             if !next
                 .workers
                 .enqueue_hydration(work.entity, work.fence, work.reservation)
@@ -1890,6 +1939,7 @@ impl OrphanReaperSupervisor {
         }
         futures::future::join_all(hydrations.into_iter().map(|work| {
             let registry = self.registry.clone();
+            let span = orphan_work_span("sm_hydration", &work.sweep_context);
             async move {
                 match tokio::time::timeout(
                     ORPHAN_WORK_ATTEMPT_TIMEOUT,
@@ -1918,33 +1968,38 @@ impl OrphanReaperSupervisor {
                     }
                 }
             }
+            .instrument(span)
         }))
         .await;
         crate::clustering::metrics::record_orphan_work_queue_depth("sm_hydration", 0);
-        futures::future::join_all(releases.into_iter().map(|work| async move {
-            match tokio::time::timeout(
-                ORPHANED_ROOM_RELEASE_TIMEOUT,
-                work.claim_store
-                    .release_exact(&work.entity, &work.owner, work.epoch),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                        "room_release",
-                        "error",
-                    );
-                    debug!(%error, entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup failed");
-                }
-                Err(_) => {
-                    crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                        "room_release",
-                        "timeout",
-                    );
-                    debug!(entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup timed out");
+        futures::future::join_all(releases.into_iter().map(|work| {
+            let span = orphan_work_span("room_release", &work.sweep_context);
+            async move {
+                match tokio::time::timeout(
+                    ORPHANED_ROOM_RELEASE_TIMEOUT,
+                    work.claim_store
+                        .release_exact(&work.entity, &work.owner, work.epoch),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
+                            "room_release",
+                            "error",
+                        );
+                        debug!(%error, entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup failed");
+                    }
+                    Err(_) => {
+                        crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
+                            "room_release",
+                            "timeout",
+                        );
+                        debug!(entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup timed out");
+                    }
                 }
             }
+            .instrument(span)
         }))
         .await;
         crate::clustering::metrics::record_orphan_work_queue_depth("room_release", 0);
@@ -2032,7 +2087,7 @@ async fn register_reclaimed_epoch_or_cleanup(
                         entity: claim_fence.entity.clone(),
                         owner: context.me.clone(),
                         epoch: claim_fence.epoch,
-                        span: tracing::Span::current(),
+                        sweep_context: current_sweep_context(),
                     })
                     .is_accepted()
                 {
@@ -2050,7 +2105,7 @@ async fn register_reclaimed_epoch_or_cleanup(
                     entity: claim_fence.entity.clone(),
                     owner: context.me.clone(),
                     epoch: claim_fence.epoch,
-                    span: tracing::Span::current(),
+                    sweep_context: current_sweep_context(),
                 })
                 .is_accepted()
             {
@@ -2452,7 +2507,6 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         Option<waddle_xmpp::stream_management::persistence::PersistedSession>,
         waddle_xmpp::stream_management::persistence::SmPersistenceError,
     > {
-        drop(tracing::info_span!("orphan.worker.hydration.test"));
         self.read_started.notify_one();
         std::future::pending().await
     }
@@ -2595,7 +2649,6 @@ impl waddle_xmpp::ownership::ClaimStore for HangingExactReleaseStore {
         _mine: waddle_xmpp::ownership::ClaimEpoch,
     ) -> Result<waddle_xmpp::ownership::ExactReleaseOutcome, waddle_xmpp::ownership::ClaimError>
     {
-        drop(tracing::info_span!("orphan.worker.release.test"));
         self.release_started.notify_one();
         std::future::pending().await
     }
@@ -2677,9 +2730,43 @@ async fn hung_sm_hydration_does_not_block_completed_room_lane() {
         .expect("hung hydration worker must cancel and join");
 }
 
+/// #1483 verify round: worker attempts run under their own short-lived
+/// `janitor.orphan_work` root (never the sweep's live span, which retry
+/// queues would pin open) and carry a *link* back to the enqueuing sweep.
+#[cfg(all(test, feature = "clustering"))]
+fn assert_linked_orphan_work_attempt(
+    spans: &waddle_xmpp::telemetry::test_support::SpanTestGuard,
+    sweep_id: opentelemetry::trace::SpanId,
+    lane: &str,
+) {
+    let exported = spans.exported();
+    let attempt = exported
+        .iter()
+        .find(|span| {
+            span.name == "janitor.orphan_work"
+                && span
+                    .attributes
+                    .iter()
+                    .any(|kv| kv.key.as_str() == "lane" && kv.value.as_str() == lane)
+        })
+        .unwrap_or_else(|| panic!("a {lane} attempt span must export"));
+    assert_eq!(
+        attempt.parent_span_id,
+        opentelemetry::trace::SpanId::INVALID,
+        "attempt spans must be roots, never children of the sweep"
+    );
+    assert!(
+        attempt
+            .links
+            .iter()
+            .any(|link| link.span_context.span_id() == sweep_id),
+        "the attempt must link back to the sweep that enqueued it"
+    );
+}
+
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test(flavor = "current_thread")]
-async fn hydration_worker_uses_the_enqueuing_sweep_span() {
+async fn hydration_worker_attempts_link_to_the_enqueuing_sweep() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
@@ -2701,6 +2788,7 @@ async fn hydration_worker_uses_the_enqueuing_sweep_span() {
     let supervisor = OrphanReaperSupervisor::new(registry, cancel.clone());
     let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
     let sweep = janitor_sweep_span(Janitor::OrphanReaper);
+    let sweep_id = sweep.in_scope(current_sweep_context).span_id();
 
     assert!(sweep
         .in_scope(|| supervisor.workers.enqueue_hydration(
@@ -2710,24 +2798,13 @@ async fn hydration_worker_uses_the_enqueuing_sweep_span() {
         ))
         .is_accepted());
     drop(sweep);
-    tokio::time::timeout(Duration::from_secs(1), storage.read_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), storage.read_started.notified())
         .await
         .expect("hydration worker started");
     cancel.cancel();
     supervisor.shutdown().await;
 
-    let exported = spans.exported();
-    let root = exported
-        .iter()
-        .find(|span| span.name == "janitor.sweep")
-        .expect("sweep root exported");
-    assert!(
-        exported
-            .iter()
-            .any(|span| span.name == "orphan.worker.hydration.test"
-                && span.parent_span_id == root.span_context.span_id()),
-        "hydration storage work must remain parented to the sweep that enqueued it"
-    );
+    assert_linked_orphan_work_attempt(&spans, sweep_id, "sm_hydration");
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -2880,7 +2957,7 @@ async fn failed_worker_restart_retains_captured_won_work_for_terminal_cleanup() 
             won_epoch,
         ),
         reservation: won_reservation,
-        span: tracing::Span::none(),
+        sweep_context: opentelemetry::trace::SpanContext::empty_context(),
     };
     supervisor
         .workers
@@ -2910,7 +2987,7 @@ async fn failed_worker_restart_retains_captured_won_work_for_terminal_cleanup() 
         entity: room_entity.clone(),
         owner: me.clone(),
         epoch: room_epoch,
-        span: tracing::Span::current(),
+        sweep_context: current_sweep_context(),
     };
     supervisor
         .workers
@@ -3188,7 +3265,7 @@ async fn hung_exact_release_worker_is_cancelled_and_joined() {
         entity: Entity::new(EntityType::RoomActor, "cancel@muc.example.com"),
         owner: NodeIdentity::new("sweeper", "incarnation"),
         epoch: waddle_xmpp::ownership::ClaimEpoch(1),
-        span: tracing::Span::current(),
+        sweep_context: current_sweep_context(),
     });
     tokio::time::timeout(Duration::from_secs(1), store.release_started.notified())
         .await
@@ -3201,7 +3278,7 @@ async fn hung_exact_release_worker_is_cancelled_and_joined() {
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test(flavor = "current_thread")]
-async fn exact_release_worker_uses_the_enqueuing_sweep_span() {
+async fn exact_release_worker_attempts_link_to_the_enqueuing_sweep() {
     use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
 
     let store = Arc::new(HangingExactReleaseStore {
@@ -3215,6 +3292,7 @@ async fn exact_release_worker_uses_the_enqueuing_sweep_span() {
     );
     let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
     let sweep = janitor_sweep_span(Janitor::OrphanReaper);
+    let sweep_id = sweep.in_scope(current_sweep_context).span_id();
 
     assert!(sweep
         .in_scope(|| supervisor.workers.enqueue_release(ExactReleaseWork {
@@ -3222,28 +3300,17 @@ async fn exact_release_worker_uses_the_enqueuing_sweep_span() {
             entity: Entity::new(EntityType::RoomActor, "traced-release@muc.example.com"),
             owner: NodeIdentity::new("sweeper", "trace-incarnation"),
             epoch: waddle_xmpp::ownership::ClaimEpoch(1),
-            span: tracing::Span::current(),
+            sweep_context: current_sweep_context(),
         }))
         .is_accepted());
     drop(sweep);
-    tokio::time::timeout(Duration::from_secs(1), store.release_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), store.release_started.notified())
         .await
         .expect("release worker started");
     cancel.cancel();
     supervisor.shutdown().await;
 
-    let exported = spans.exported();
-    let root = exported
-        .iter()
-        .find(|span| span.name == "janitor.sweep")
-        .expect("sweep root exported");
-    assert!(
-        exported
-            .iter()
-            .any(|span| span.name == "orphan.worker.release.test"
-                && span.parent_span_id == root.span_context.span_id()),
-        "exact release work must remain parented to the sweep that enqueued it"
-    );
+    assert_linked_orphan_work_attempt(&spans, sweep_id, "room_release");
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -3306,7 +3373,7 @@ async fn full_hydration_channel_retains_and_redrives_pending_work() {
         entity: Entity::new(EntityType::SmSession, "existing"),
         fence: SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(1)),
         reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1),
-        span: tracing::Span::none(),
+        sweep_context: opentelemetry::trace::SpanContext::empty_context(),
     };
     hydration_tx
         .try_send(existing.clone())
@@ -3408,14 +3475,14 @@ fn exact_release_keys_are_structural_when_components_contain_colons() {
         entity: Entity::new(EntityType::RoomActor, "room:part"),
         owner: NodeIdentity::new("node", "epoch"),
         epoch: ClaimEpoch(1),
-        span: tracing::Span::none(),
+        sweep_context: opentelemetry::trace::SpanContext::empty_context(),
     };
     let right = ExactReleaseWork {
         claim_store: Arc::new(InProcessClaimStore::new()),
         entity: Entity::new(EntityType::RoomActor, "room"),
         owner: NodeIdentity::new("part:node", "epoch"),
         epoch: ClaimEpoch(1),
-        span: tracing::Span::none(),
+        sweep_context: opentelemetry::trace::SpanContext::empty_context(),
     };
 
     assert_ne!(
@@ -3440,7 +3507,7 @@ async fn full_release_channel_retains_and_redrives_pending_work() {
         entity: Entity::new(EntityType::RoomActor, "existing@muc.example.com"),
         owner: owner.clone(),
         epoch: ClaimEpoch(1),
-        span: tracing::Span::none(),
+        sweep_context: opentelemetry::trace::SpanContext::empty_context(),
     };
     release_tx
         .try_send(existing.clone())
@@ -3464,7 +3531,7 @@ async fn full_release_channel_retains_and_redrives_pending_work() {
         entity: Entity::new(EntityType::RoomActor, "candidate@muc.example.com"),
         owner,
         epoch: ClaimEpoch(2),
-        span: tracing::Span::none(),
+        sweep_context: opentelemetry::trace::SpanContext::empty_context(),
     };
     let candidate_key = OrphanReaperWorkers::release_key(&candidate);
 
@@ -3513,7 +3580,7 @@ fn closed_release_channel_retains_restart_inventory() {
         entity: Entity::new(EntityType::RoomActor, "candidate@muc.example.com"),
         owner: NodeIdentity::new("node", "incarnation"),
         epoch: ClaimEpoch(2),
-        span: tracing::Span::none(),
+        sweep_context: opentelemetry::trace::SpanContext::empty_context(),
     };
     let candidate_key = OrphanReaperWorkers::release_key(&candidate);
 
