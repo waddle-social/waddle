@@ -343,6 +343,39 @@ describe("telemetry module no-op behaviour", () => {
     expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
   });
 
+  test("queue-depth measurements are deduped per kind until the reading changes (#1443)", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    // Every queue mutation reports both kinds; only the kind that actually
+    // moved may reach Faro, otherwise each send ships two 2-4KB beacons.
+    reportQueueDepthChange({ kind: "dm", persisted: 1, inflight: 0 });
+    reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+    reportQueueDepthChange({ kind: "dm", persisted: 1, inflight: 0 });
+    reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+    reportQueueDepthChange({ kind: "dm", persisted: 1, inflight: 1 });
+    reportQueueDepthChange({ kind: "dm", persisted: 0, inflight: 0 });
+
+    expect(stub.measurements.map((m) => ({ ...m.values, ...m.context }))).toEqual([
+      { persisted: 1, inflight: 0, kind: "dm" },
+      { persisted: 0, inflight: 0, kind: "room" },
+      { persisted: 1, inflight: 1, kind: "dm" },
+      { persisted: 0, inflight: 0, kind: "dm" },
+    ]);
+  });
+
+  test("queue-depth dedupe state resets with the Faro instance (#1443)", () => {
+    const first = createFaroStub();
+    __setFaroForTesting(first as never);
+    reportQueueDepthChange({ kind: "dm", persisted: 3, inflight: 2 });
+
+    const second = createFaroStub();
+    __setFaroForTesting(second as never);
+    reportQueueDepthChange({ kind: "dm", persisted: 3, inflight: 2 });
+
+    expect(second.measurements).toHaveLength(1);
+  });
+
   test("maps displayed-marker failures to low-cardinality latency bands", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);

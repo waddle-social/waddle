@@ -855,6 +855,7 @@ export function __clearSensitiveUrlsForTesting(): void {
 /** For tests only — inject a stub or clear state between test cases. */
 export function __setFaroForTesting(instance: Faro | null): void {
   faro = instance;
+  lastQueueDepth.clear();
   if (!instance) {
     configuredTrustedSpanOrigins = new Set();
     lastGlobalErrorKey = "";
@@ -1182,12 +1183,22 @@ export function reportSendEnqueued(payload: {
   });
 }
 
+/**
+ * Last reported depth per kind. Queue mutations report *both* kinds on every
+ * change, so without this the untouched kind (usually a 0/0 reading) ships a
+ * multi-kilobyte Faro beacon per send (#1443).
+ */
+const lastQueueDepth = new Map<MessageKind, string>();
+
 export function reportQueueDepthChange(payload: {
   kind: MessageKind;
   persisted: number;
   inflight: number;
 }): void {
   if (!faro) return;
+  const reading = `${payload.persisted}/${payload.inflight}`;
+  if (lastQueueDepth.get(payload.kind) === reading) return;
+  lastQueueDepth.set(payload.kind, reading);
   faro.api.pushMeasurement({
     type: "chat.xmpp.queue.depth",
     values: {
