@@ -36,9 +36,13 @@ export type IcePathClass = "relay" | "direct" | "unknown";
  * `not-gathered` means the client has no fallback path — the interesting
  * failure mode, since it only bites when the direct path also fails.
  */
-/** `"unknown"` means the report carried no local-candidate entries at all
- * (gathering not started, or a mid-reconnect report) — distinct from the
- * alert-worthy "gathering ran and produced no relay candidate". */
+/** `"unknown"` means relay availability was not measurable from this
+ * report: either it carried no local-candidate entries at all (gathering
+ * not started, mid-reconnect), or a direct pair won — track-scoped
+ * `getRTCStatsReport()` can omit candidates unreferenced by the selected
+ * pair, so a healthy direct call must not read as "no TURN fallback".
+ * `"not-gathered"` is reserved for the alert-worthy case: candidates were
+ * gathered, none was a relay, and no direct path succeeded. */
 type TurnReachability = "gathered" | "not-gathered" | "unknown";
 
 /** Coarse, low-cardinality bucket over the ICE restart count. */
@@ -174,13 +178,14 @@ export function summarizeIceStats(
   // fallback. Absent relayProtocol → null, never a false `udp`.
   const rawTransport = candidateType === "relay" ? local?.relayProtocol : local?.protocol;
 
+  const pathClass = icePathClass(candidateType);
   return {
-    pathClass: icePathClass(candidateType),
+    pathClass,
     candidateType,
     transport: normalizeTransport(rawTransport),
     turnReachability: relayGathered
       ? "gathered"
-      : localCandidatesSeen
+      : localCandidatesSeen && pathClass !== "direct"
         ? "not-gathered"
         : "unknown",
     restartBucket: iceRestartBucket(restartCount),

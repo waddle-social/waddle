@@ -297,6 +297,13 @@ export type CallEngineEvents = {
    */
   connectionPhaseChanged: (phase: CallConnectionPhase) => void;
   /**
+   * Fires on a full media-transport reconnect (`ConnectionState.Reconnecting`),
+   * i.e. an actual ICE restart — deliberately NOT for
+   * `SignalReconnecting`, which is only the signaling WebSocket
+   * recovering while media keeps flowing (#1452 ICE-restart SLI).
+   */
+  transportReconnecting: () => void;
+  /**
    * Fires when LiveKit re-derives which participants are actively speaking
    * (from audio levels). Carries the full speaking set — including the local
    * participant — as identities, so the UI can highlight the active speaker's
@@ -355,6 +362,7 @@ export class CallEngine {
     verifiedMicProcessingChanged: new Set(),
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
+    transportReconnecting: new Set(),
     activeSpeakersChanged: new Set(),
   };
 
@@ -1202,6 +1210,9 @@ export class CallEngine {
   };
 
   private handleConnectionStateChanged = (state: ConnectionState) => {
+    if (state === ConnectionState.Reconnecting) {
+      this.emit("transportReconnecting");
+    }
     this.emit("connectionPhaseChanged", mapLiveKitConnectionState(state));
   };
 

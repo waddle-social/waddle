@@ -8,6 +8,7 @@ import {
 } from "@/lib/calls/call-store";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
+import { adoptCallCorrelationId } from "@/lib/calls/call-correlation";
 import { iceServersFromExternalServices } from "@/lib/calls/ice-servers";
 import { connectionStore } from "@/lib/connection-store";
 import {
@@ -81,6 +82,10 @@ watch(
       // fetch would otherwise open a LiveKit session against a stale join/sid.
       const current = state.value;
       if (current.phase !== "active" || current.sid !== sid) return;
+      // Adopt the call correlation id BEFORE the connect attempt, not on
+      // the connected event alone: a failed join must still stamp its
+      // lifecycle/failure events with the call's id (#1452).
+      void adoptCallCorrelationId(current.join.room);
       await engine.connect(current.join, { ...current.media, iceServers });
       // Capture is best-effort inside connect(): a missing device or a
       // denied mic/cam permission no longer throws — the user joins as a

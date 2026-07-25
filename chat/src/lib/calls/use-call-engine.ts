@@ -205,13 +205,12 @@ const callMediaPathBeacon = createCallMediaPathBeacon((snapshot) => {
  * Fleet-measurement beacon for the call's ICE/TURN connectivity (#1452):
  * relay-vs-direct media path, whether a TURN relay candidate was gathered at
  * all, and how many times ICE restarted. Fed by the same read-only stats poll
- * as the media-path beacon, plus the transport-phase transitions LiveKit
- * reports (a `reconnecting` transition is an ICE restart). De-dupes to at most
+ * as the media-path beacon, plus the engine's `transportReconnecting`
+ * event (a full media-transport reconnect is an ICE restart; signaling
+ * WebSocket recovery is deliberately excluded). De-dupes to at most
  * one event per distinct ICE state per call; reset on disconnect.
  */
-/** Leading-edge guard for the ICE-restart count: LiveKit can re-emit the
- *  same transport phase, and only the transition into `reconnecting` is a
- *  restart. Reset with the beacon when the call ends. */
+/** The last transport phase LiveKit reported, for the call-bar UI. */
 let lastConnectionPhase: CallConnectionPhase = "disconnected";
 
 const callIceBeacon = createCallIceBeacon((snapshot) => {
@@ -543,15 +542,14 @@ export function useCallEngine(): {
       // bars with a "Reconnecting…" label while the path is re-establishing.
       setCallConnectionPhase(phase);
       observeCallConnectionPhase(phase);
-      // LiveKit enters `reconnecting` when it restarts ICE (or the signal
-      // channel) to recover the transport, so this transition is the
-      // client-observable ICE-restart edge (#1452). Counted on the leading
-      // edge only — a phase re-emitted while already reconnecting is the
-      // same restart.
-      if (phase === "reconnecting" && lastConnectionPhase !== "reconnecting") {
-        callIceBeacon.noteIceRestart();
-      }
       lastConnectionPhase = phase;
+    });
+    singletonEngine.on("transportReconnecting", () => {
+      // A full media-transport reconnect is the client-observable ICE
+      // restart (#1452). The engine deliberately does not fire this for
+      // SignalReconnecting (signaling WebSocket recovery, media intact),
+      // so signaling blips never inflate the ICE-restart SLI.
+      callIceBeacon.noteIceRestart();
     });
     singletonEngine.on("activeSpeakersChanged", (identities) => {
       // LiveKit re-derived who is speaking. Feed it through the brief hold so

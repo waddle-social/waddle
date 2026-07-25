@@ -55,9 +55,11 @@ const MAX_TRACESTATE_LEN: usize = 512;
 ///
 /// The inner `String` is the wire encoding at the serialization boundary,
 /// never a free-form field: it cannot be constructed from arbitrary text
-/// without passing [`Self::new`]'s bound, and the only consumer hands it
-/// straight back to the propagator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// without passing [`Self::new`]'s bound — including through serde, whose
+/// [`Deserialize`] impl enforces the bound inside `visit_str`, *before*
+/// the peer-controlled bytes are owned (a derived transparent impl would
+/// allocate an arbitrarily large string first and check it only later).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct TraceParentHeader(String);
 
@@ -67,14 +69,61 @@ impl TraceParentHeader {
     }
 }
 
+impl<'de> Deserialize<'de> for TraceParentHeader {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer
+            .deserialize_str(BoundedHeaderVisitor {
+                what: "a traceparent header",
+                max_len: MAX_TRACEPARENT_LEN,
+            })
+            .map(Self)
+    }
+}
+
 /// A W3C `tracestate` value. Same contract as [`TraceParentHeader`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct TraceStateHeader(String);
 
 impl TraceStateHeader {
     fn new(value: String) -> Option<Self> {
         (!value.is_empty() && value.len() <= MAX_TRACESTATE_LEN).then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for TraceStateHeader {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer
+            .deserialize_str(BoundedHeaderVisitor {
+                what: "a tracestate header",
+                max_len: MAX_TRACESTATE_LEN,
+            })
+            .map(Self)
+    }
+}
+
+/// Checks the length bound on the borrowed input before the string is
+/// owned, so an oversized peer-supplied header is refused without ever
+/// being allocated. The refusal is a decode error: relay messages are
+/// only exchanged between enrolled cluster peers, and the codec NACKs
+/// (and counts) rejected payloads rather than dropping them silently.
+struct BoundedHeaderVisitor {
+    what: &'static str,
+    max_len: usize,
+}
+
+impl serde::de::Visitor<'_> for BoundedHeaderVisitor {
+    type Value = String;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "{} of 1..={} bytes", self.what, self.max_len)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        if value.is_empty() || value.len() > self.max_len {
+            return Err(E::invalid_length(value.len(), &self));
+        }
+        Ok(value.to_owned())
     }
 }
 
@@ -315,5 +364,29 @@ mod tests {
         assert!(TraceParentHeader::new("x".repeat(MAX_TRACEPARENT_LEN + 1)).is_none());
         assert!(TraceStateHeader::new("x".repeat(MAX_TRACESTATE_LEN + 1)).is_none());
         assert!(TraceParentHeader::new(String::new()).is_none());
+    }
+
+    /// The length bound must hold through serde too: a derived
+    /// transparent impl would own an arbitrarily large peer-controlled
+    /// string before any check ran (Greptile/codex review, PR #1487).
+    #[test]
+    fn an_oversized_header_is_refused_at_decode_time() {
+        #[derive(Serialize)]
+        #[serde(transparent)]
+        struct RawHeader(String);
+
+        let oversized = rmp_serde::to_vec_named(&RawHeader("x".repeat(MAX_TRACEPARENT_LEN + 1)))
+            .expect("encodes");
+        assert!(rmp_serde::from_slice::<TraceParentHeader>(&oversized).is_err());
+        let empty = rmp_serde::to_vec_named(&RawHeader(String::new())).expect("encodes");
+        assert!(rmp_serde::from_slice::<TraceParentHeader>(&empty).is_err());
+
+        let oversized_state =
+            rmp_serde::to_vec_named(&RawHeader("x".repeat(MAX_TRACESTATE_LEN + 1)))
+                .expect("encodes");
+        assert!(rmp_serde::from_slice::<TraceStateHeader>(&oversized_state).is_err());
+
+        let ok = rmp_serde::to_vec_named(&RawHeader("00-abc-def-01".to_string())).expect("encodes");
+        assert!(rmp_serde::from_slice::<TraceParentHeader>(&ok).is_ok());
     }
 }

@@ -47,6 +47,14 @@ fn add_call_setup_attempted(count: u64) {
 /// Count a call setup that produced a usable session for the caller
 /// (a join token was issued and the negotiation stanza was forwarded
 /// or accepted).
+///
+/// Precisely: `ok` means the server authorized the attempt and handed
+/// the invite to the router. A 1:1 invite whose peer then turns out to
+/// be unroutable (offline/stale full JID) still counts `ok` — the
+/// undeliverable IQ error is interpreted after the sans-I/O boundary,
+/// where this tracker is out of scope. Client-side `chat.call.lifecycle`
+/// telemetry captures that failure mode; folding the route disposition
+/// into this counter is tracked as a follow-up (#1452 review).
 pub fn increment_call_setup_ok() {
     add_call_setup_ok(1);
 }

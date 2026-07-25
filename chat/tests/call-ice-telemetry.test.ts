@@ -73,10 +73,24 @@ describe("summarizeIceStats", () => {
     });
   });
 
-  test("flags a client that never gathered a relay candidate", () => {
+  test("a direct win without a visible relay candidate is unknown, not a false alarm", () => {
+    // Track-scoped getRTCStatsReport() can omit candidates unreferenced by
+    // the selected pair, so a healthy direct call must not report
+    // "no TURN fallback" (codex review, PR #1487).
     expect(summarizeIceStats(NO_RELAY_GATHERED, 0)).toMatchObject({
       pathClass: "direct",
       candidateType: "host",
+      turnReachability: "unknown",
+    });
+  });
+
+  test("flags a client whose gathering produced candidates but no relay and no path", () => {
+    const failedNoRelay = [
+      { id: "P1", type: "candidate-pair", state: "failed", localCandidateId: "L1" },
+      { id: "L1", type: "local-candidate", candidateType: "host", protocol: "udp" },
+    ];
+    expect(summarizeIceStats(failedNoRelay, 0)).toMatchObject({
+      pathClass: "unknown",
       turnReachability: "not-gathered",
     });
   });
