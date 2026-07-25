@@ -9,7 +9,7 @@ impl ConnectionRegistry {
     /// If a connection with the same JID already exists, it will be replaced.
     /// This handles reconnection scenarios where a client reconnects with
     /// the same resource before the old connection is cleaned up.
-    #[instrument(skip(self, sender), fields(jid = %jid))]
+    #[instrument(skip(self, sender, jid), fields(jid = %jid))]
     pub fn register(&self, jid: FullJid, sender: mpsc::Sender<OutboundStanza>) -> Arc<AtomicBool> {
         self.register_with_carbons(jid, sender, false)
     }
@@ -18,7 +18,7 @@ impl ConnectionRegistry {
     /// `carbons_enabled`. Used by the XEP-0198 stream-resume path so a
     /// resumed stream keeps the carbons flag it negotiated before the
     /// disconnect instead of silently reverting to the disabled default.
-    #[instrument(skip(self, sender), fields(jid = %jid, carbons = carbons_enabled))]
+    #[instrument(skip(self, sender, jid), fields(jid = %jid, carbons = carbons_enabled))]
     pub fn register_with_carbons(
         &self,
         jid: FullJid,
@@ -29,7 +29,7 @@ impl ConnectionRegistry {
     }
 
     /// Register a connection and seed per-stream feature state.
-    #[instrument(skip(self, sender), fields(jid = %jid, carbons = carbons_enabled, roster_interested = roster_interested, blocklist_interested = blocklist_interested))]
+    #[instrument(skip(self, sender, jid), fields(jid = %jid, carbons = carbons_enabled, roster_interested = roster_interested, blocklist_interested = blocklist_interested))]
     pub fn register_with_stream_state(
         &self,
         jid: FullJid,
@@ -66,7 +66,7 @@ impl ConnectionRegistry {
     /// same [`ConnectionEntry`] so registry-backed fanout surfaces and
     /// actor-backed full-JID routing both drain into the remote-resource
     /// forwarder.
-    #[instrument(skip(self, entry), fields(jid = %jid))]
+    #[instrument(skip(self, entry, jid), fields(jid = %jid))]
     pub fn register_entry(&self, jid: FullJid, entry: ConnectionEntry) -> Arc<AtomicBool> {
         let carbons_handle = entry.carbons_handle();
         let existing = self.connections.insert(jid, entry);
@@ -113,7 +113,7 @@ impl ConnectionRegistry {
     /// Unregister a connection.
     ///
     /// Returns the connection entry if the connection was registered, None otherwise.
-    #[instrument(skip(self), fields(jid = %jid))]
+    #[instrument(skip(self, jid), fields(jid = %jid))]
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove(jid);
         if removed.is_some() {
@@ -128,7 +128,7 @@ impl ConnectionRegistry {
 
     /// Unregister a connection only if the current registry entry belongs to
     /// the provided carbons handle (i.e. this actor still owns the slot).
-    #[instrument(skip(self, carbons_handle), fields(jid = %jid))]
+    #[instrument(skip(self, carbons_handle, jid), fields(jid = %jid))]
     pub fn unregister_if_owner(
         &self,
         jid: &FullJid,
@@ -157,7 +157,7 @@ impl ConnectionRegistry {
     /// fails and nothing is removed. Returns the removed entry only when it is
     /// genuinely S1's, so the caller's actor mirror is gated on S1's own token
     /// too.
-    #[instrument(skip(self), fields(jid = %jid, stream_id = %stream_id))]
+    #[instrument(skip(self, jid), fields(jid = %jid, stream_id = %stream_id))]
     pub fn unregister_if_sm_stream_id(
         &self,
         jid: &FullJid,

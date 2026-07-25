@@ -23,7 +23,7 @@ impl MucRoom {
         skip(self, message),
         fields(
             room = %self.room_jid,
-            message_id = message.id.as_ref().map(|id| id.0.as_str()).unwrap_or_default(),
+            message_id = tracing::field::Empty,
             recipients = tracing::field::Empty,
         )
     )]
@@ -32,6 +32,9 @@ impl MucRoom {
         sender_nick: &str,
         message: &Message,
     ) -> Result<Vec<OutboundMucMessage>, XmppError> {
+        crate::telemetry::messages::record_span_message_id(
+            message.id.as_ref().map(|id| id.0.as_str()).unwrap_or(""),
+        );
         let fanout_started = std::time::Instant::now();
         let sender = self.occupants.get(sender_nick).ok_or_else(|| {
             XmppError::forbidden(Some(format!(

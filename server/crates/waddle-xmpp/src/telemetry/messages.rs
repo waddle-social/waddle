@@ -34,6 +34,18 @@ pub fn fanout_span_message_id(message_id: &str) -> &str {
     &message_id[..end]
 }
 
+/// Record the bounded `message_id` attribute on the current span, or
+/// leave the field unset when the stanza carries no id (#1439).
+///
+/// The span declares `message_id = tracing::field::Empty` and this
+/// helper is the only writer, so an id-less stanza exports a span with
+/// no `message_id` attribute at all instead of `message_id=""`.
+pub fn record_span_message_id(message_id: &str) {
+    if !message_id.is_empty() {
+        tracing::Span::current().record("message_id", fanout_span_message_id(message_id));
+    }
+}
+
 /// Classify a stanza about to be queued for local delivery. `None`
 /// for non-messages and body-less message stanzas.
 pub fn delivered_message_kind(stanza: &Stanza) -> Option<MessageKind> {

@@ -17,6 +17,7 @@ use opentelemetry_sdk::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
+mod span_hygiene;
 mod span_noise;
 
 /// The global tracer provider, stored for shutdown.
@@ -292,11 +293,16 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let resource = build_resource();
 
-    // Build OTLP trace exporter
-    let trace_exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(&otlp_endpoint)
-        .build()?;
+    // Build OTLP trace exporter, wrapped in the attribute-hygiene
+    // scrubber that strips kameo's per-instance `actor.id`, empty-string
+    // attribute values, and build-sandbox `code.file.path` prefixes on
+    // the way to the wire (#1439).
+    let trace_exporter = span_hygiene::HygienicSpanExporter::new(
+        opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&otlp_endpoint)
+            .build()?,
+    );
 
     // Build tracer provider with batch processor. The sampler comes
     // from OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG (default

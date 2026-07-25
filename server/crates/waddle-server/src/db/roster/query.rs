@@ -21,7 +21,7 @@ impl DatabaseRosterStorage {
     ///
     /// Synthesises a fresh version if none exists, matching
     /// [`get_or_create_roster_version`].
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn snapshot_roster(
         &self,
         user_jid: &BareJid,
@@ -67,7 +67,7 @@ impl DatabaseRosterStorage {
     }
 
     /// Get all roster items for a user.
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn get_roster(
         &self,
         user_jid: &BareJid,
@@ -113,7 +113,7 @@ impl DatabaseRosterStorage {
     }
 
     /// Get a single roster item.
-    #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
+    #[instrument(skip(self, user_jid, contact_jid), fields(user = %user_jid, contact = %contact_jid))]
     pub async fn get_roster_item(
         &self,
         user_jid: &BareJid,
@@ -159,7 +159,7 @@ impl DatabaseRosterStorage {
     }
 
     /// Get the current roster version for a user.
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn get_roster_version(
         &self,
         user_jid: &BareJid,
@@ -191,7 +191,7 @@ impl DatabaseRosterStorage {
     ///
     /// Acquires the per-user lock and writes a fresh version when none exists,
     /// matching the atomicity guarantees of [`apply_roster_change`].
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn get_or_create_roster_version(
         &self,
         user_jid: &BareJid,
@@ -220,7 +220,7 @@ impl DatabaseRosterStorage {
     }
 
     /// Check if a roster item exists.
-    #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
+    #[instrument(skip(self, user_jid, contact_jid), fields(user = %user_jid, contact = %contact_jid))]
     pub async fn has_roster_item(
         &self,
         user_jid: &BareJid,
@@ -251,7 +251,7 @@ impl DatabaseRosterStorage {
     /// that fail to parse are dropped with a debug log rather than
     /// surfaced as a per-row error, since corrupted JIDs in the roster
     /// are unactionable for the caller.
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn get_presence_subscribers(
         &self,
         user_jid: &BareJid,
@@ -291,7 +291,7 @@ impl DatabaseRosterStorage {
     ///
     /// Returns contacts with subscription=to or subscription=both.
     #[cfg(test)]
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn get_presence_subscriptions(
         &self,
         user_jid: &BareJid,

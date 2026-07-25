@@ -24,7 +24,7 @@ impl DatabaseBlockingStorage {
     }
 
     /// Get all blocked JIDs for a user as typed XEP-0191 entries.
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn get_blocklist(
         &self,
         user_jid: &BareJid,
@@ -78,7 +78,7 @@ impl DatabaseBlockingStorage {
     /// snapshot is frozen for the duration of the session per #229 Q5
     /// — XEP-0191 IQ-set mutations during the session are reflected
     /// in this method's results on the *next* bind.
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn list_blocked_jids(
         &self,
         user_jid: &BareJid,
@@ -106,7 +106,7 @@ impl DatabaseBlockingStorage {
     /// This preserves full-JID and domain-JID entries for policy checks that
     /// must honor the complete XEP-0191 matching surface. Malformed legacy rows
     /// are skipped with the same warning policy as [`Self::list_blocked_jids`].
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn list_blocked_jid_entries(
         &self,
         user_jid: &BareJid,
@@ -115,7 +115,7 @@ impl DatabaseBlockingStorage {
     }
 
     /// Check if a JID is blocked by a user.
-    #[instrument(skip(self), fields(user = %user_jid, blocked = %blocked_jid))]
+    #[instrument(skip(self, user_jid, blocked_jid), fields(user = %user_jid, blocked = %blocked_jid))]
     pub async fn is_blocked(
         &self,
         user_jid: &BareJid,
@@ -126,7 +126,7 @@ impl DatabaseBlockingStorage {
     }
 
     /// Check if a typed JID is blocked by a user using XEP-0191 matching.
-    #[instrument(skip(self), fields(user = %user_jid, blocked = %blocked_jid))]
+    #[instrument(skip(self, user_jid, blocked_jid), fields(user = %user_jid, blocked = %blocked_jid))]
     pub async fn is_blocked_jid(
         &self,
         user_jid: &BareJid,
@@ -142,7 +142,7 @@ impl DatabaseBlockingStorage {
     /// Add JIDs to the blocklist.
     ///
     /// Returns the number of JIDs that were newly blocked (ignores duplicates).
-    #[instrument(skip(self, blocked_jids), fields(user = %user_jid, count = blocked_jids.len()))]
+    #[instrument(skip(self, blocked_jids, user_jid), fields(user = %user_jid, count = blocked_jids.len()))]
     pub async fn add_blocks(
         &self,
         user_jid: &BareJid,
@@ -170,7 +170,7 @@ impl DatabaseBlockingStorage {
     /// Remove JIDs from the blocklist.
     ///
     /// Returns the number of JIDs that were removed.
-    #[instrument(skip(self, blocked_jids), fields(user = %user_jid, count = blocked_jids.len()))]
+    #[instrument(skip(self, blocked_jids, user_jid), fields(user = %user_jid, count = blocked_jids.len()))]
     pub async fn remove_blocks(
         &self,
         user_jid: &BareJid,
@@ -197,7 +197,7 @@ impl DatabaseBlockingStorage {
     /// Remove all JIDs from the blocklist.
     ///
     /// Returns the number of JIDs that were removed.
-    #[instrument(skip(self), fields(user = %user_jid))]
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn remove_all_blocks(
         &self,
         user_jid: &BareJid,

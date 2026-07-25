@@ -24,11 +24,11 @@ use super::{MamDatabaseBackend, SqlxMamStorage};
 #[async_trait]
 impl MamStorage for SqlxMamStorage {
     #[instrument(
-        skip(self, message),
+        skip(self, message, archive_jid),
         err,
         fields(
             archive = %archive_jid,
-            message_id = message.stanza_id.as_ref().map(|id| id.id.as_str()).unwrap_or_default(),
+            message_id = tracing::field::Empty,
             room = tracing::field::Empty,
         )
     )]
@@ -37,16 +37,16 @@ impl MamStorage for SqlxMamStorage {
         archive_jid: &BareJid,
         message: &ArchivedMessage,
     ) -> Result<StoreOutcome, MamStorageError> {
-        record_archive_room(archive_jid, message);
+        record_archive_span_fields(archive_jid, message);
         super::write::store_message(&self.backend, archive_jid, message).await
     }
 
     #[instrument(
-        skip(self, message, fence),
+        skip(self, message, fence, archive_jid),
         err,
         fields(
             archive = %archive_jid,
-            message_id = message.stanza_id.as_ref().map(|id| id.id.as_str()).unwrap_or_default(),
+            message_id = tracing::field::Empty,
             room = tracing::field::Empty,
         )
     )]
@@ -56,14 +56,14 @@ impl MamStorage for SqlxMamStorage {
         message: &ArchivedMessage,
         fence: &RoomClaimFenceContext,
     ) -> Result<StoreOutcome, MamStorageError> {
-        record_archive_room(archive_jid, message);
+        record_archive_span_fields(archive_jid, message);
         if !self.fencing_enabled {
             return self.store_message(archive_jid, message).await;
         }
         super::write::store_message_fenced(&self.backend, archive_jid, message, fence).await
     }
 
-    #[instrument(skip(self), fields(archive = %archive_jid))]
+    #[instrument(skip(self, archive_jid), fields(archive = %archive_jid))]
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
@@ -454,7 +454,7 @@ impl MamStorage for SqlxMamStorage {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, room_jid), fields(room = %room_jid))]
     async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
         let room_jid_str = room_jid.to_string();
         let count = match &self.backend {
@@ -477,7 +477,7 @@ impl MamStorage for SqlxMamStorage {
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, room_jid), fields(room = %room_jid))]
     async fn delete_before(
         &self,
         room_jid: &BareJid,
@@ -528,8 +528,19 @@ impl MamStorage for SqlxMamStorage {
     }
 }
 
-fn record_archive_room(archive_jid: &BareJid, message: &ArchivedMessage) {
+/// Fill in the deferred span attributes for an archive write: the
+/// `room` label only for groupchat archives, and `message_id` only when
+/// the message actually carries a stanza id — an id-less write leaves
+/// the field unset rather than exporting `message_id=""` (#1439).
+fn record_archive_span_fields(archive_jid: &BareJid, message: &ArchivedMessage) {
     if message.message_type == xmpp_parsers::message::MessageType::Groupchat {
         Span::current().record("room", tracing::field::display(archive_jid));
     }
+    crate::telemetry::messages::record_span_message_id(
+        message
+            .stanza_id
+            .as_ref()
+            .map(|id| id.id.as_str())
+            .unwrap_or(""),
+    );
 }

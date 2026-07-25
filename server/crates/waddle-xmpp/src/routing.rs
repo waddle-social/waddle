@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use jid::{FullJid, Jid};
 use kameo::actor::ActorRef;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, Span};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::presence::Presence;
 
@@ -212,14 +212,24 @@ impl StanzaRouter {
     }
 
     /// Route a presence stanza to its destination.
-    #[instrument(skip(self, presence), fields(to = ?presence.to, presence_type = ?presence.type_))]
+    #[instrument(
+        skip(self, presence, _sender_jid),
+        fields(to = tracing::field::Empty, presence_type = ?presence.type_)
+    )]
     pub async fn route_presence(
         &self,
         presence: Presence,
         _sender_jid: &FullJid,
     ) -> Result<RoutingResult, XmppError> {
         let to_jid = match &presence.to {
-            Some(jid) => jid,
+            Some(jid) => {
+                // Recorded on arrival rather than as a span-creation
+                // field so the JID renders through `Display` instead of
+                // `Debug`'s `Bare(BareJid("…"))` (#1439), and so an
+                // absent destination leaves the attribute off entirely.
+                Span::current().record("to", tracing::field::display(jid));
+                jid
+            }
             None => {
                 // Presence without 'to' is a broadcast - not routed here
                 debug!("Presence has no destination JID (broadcast)");
@@ -303,10 +313,14 @@ impl StanzaRouter {
     }
 
     /// Route an IQ stanza to its destination.
-    #[instrument(skip(self, iq), fields(to = ?iq.to()))]
+    #[instrument(skip(self, iq, sender_jid), fields(to = tracing::field::Empty))]
     pub async fn route_iq(&self, iq: Iq, sender_jid: &FullJid) -> Result<RoutingResult, XmppError> {
         let to_jid = match iq.to() {
-            Some(jid) => jid.clone(),
+            Some(jid) => {
+                // `Display`, not `Debug` — see `route_presence` (#1439).
+                Span::current().record("to", tracing::field::display(jid));
+                jid.clone()
+            }
             None => {
                 // IQ without 'to' is directed at the server
                 debug!("IQ has no destination JID (server query)");

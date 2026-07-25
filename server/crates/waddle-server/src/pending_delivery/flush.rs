@@ -80,7 +80,7 @@ where
 /// `ctx` carries the optional / contextual parameters
 /// (`sm_session`, `blocking_storage`, `archive_resolver`,
 /// `server_domain`) — see [`FlushContext`] for details.
-#[instrument(skip(storage, registry, ctx), fields(recipient = %recipient, resource = %resource))]
+#[instrument(skip(storage, registry, ctx, recipient, resource), fields(recipient = %recipient, resource = %resource))]
 pub async fn flush_for_resource<R>(
     storage: &Arc<dyn PendingDeliveryStorage>,
     registry: &ConnectionRegistry,
