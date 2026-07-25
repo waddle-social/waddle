@@ -60,17 +60,24 @@ fn has_valid_parent(parent_context: Option<&Context>) -> bool {
     parent_context.is_some_and(|cx| cx.span().span_context().is_valid())
 }
 
-/// A valid parent that was itself dropped. Enforced here — not left to
-/// the delegate — so a suppressed root can never leak orphaned
-/// children when the operator dials a non-parent-based sampler
-/// (`OTEL_TRACES_SAMPLER=always_on` / `traceidratio`): `AlwaysOn`
-/// would re-sample the child of a dropped `actor.handle_message` root
-/// and export it pointing at a parent span that never exports.
-fn has_unsampled_parent(parent_context: Option<&Context>) -> bool {
+/// A valid **local** parent that was itself dropped. Enforced here —
+/// not left to the delegate — so a suppressed root can never leak
+/// orphaned children when the operator dials a non-parent-based
+/// sampler (`OTEL_TRACES_SAMPLER=always_on` / `traceidratio`):
+/// `AlwaysOn` would re-sample the child of a dropped
+/// `actor.handle_message` root and export it pointing at a parent span
+/// that never exports.
+///
+/// Remote parents are excluded: an inbound `traceparent` with flags
+/// `00` says the *caller* chose not to sample, and what happens then
+/// is exactly the delegate sampler's decision to make (`ParentBased`
+/// honors it, `AlwaysOn` deliberately overrides it). Only local
+/// unsampled parents can be this filter's own suppressions.
+fn has_unsampled_local_parent(parent_context: Option<&Context>) -> bool {
     parent_context.is_some_and(|cx| {
         let span = cx.span();
         let span_context = span.span_context();
-        span_context.is_valid() && !span_context.is_sampled()
+        span_context.is_valid() && !span_context.is_sampled() && !span_context.is_remote()
     })
 }
 
@@ -98,7 +105,7 @@ impl ShouldSample for SpanNoiseFilter {
     ) -> SamplingResult {
         if ALWAYS_SUPPRESSED_SPAN_NAMES.contains(&name)
             || (ROOT_SUPPRESSED_SPAN_NAMES.contains(&name) && !has_valid_parent(parent_context))
-            || has_unsampled_parent(parent_context)
+            || has_unsampled_local_parent(parent_context)
         {
             return drop_result(parent_context);
         }
@@ -131,7 +138,7 @@ mod tests {
             .decision
     }
 
-    fn parent_context(sampled: bool) -> Context {
+    fn parent_context_with(sampled: bool, remote: bool) -> Context {
         let flags = if sampled {
             TraceFlags::SAMPLED
         } else {
@@ -141,9 +148,21 @@ mod tests {
             TraceId::from(0xabcdu128),
             SpanId::from(0x1234u64),
             flags,
-            true,
+            remote,
             TraceState::default(),
         ))
+    }
+
+    /// A propagated (remote) parent — the shape `make_request_span`
+    /// attaches from an inbound `traceparent`.
+    fn parent_context(sampled: bool) -> Context {
+        parent_context_with(sampled, true)
+    }
+
+    /// An in-process parent — the shape a span suppressed by this
+    /// filter leaves behind for its children.
+    fn local_parent_context(sampled: bool) -> Context {
+        parent_context_with(sampled, false)
     }
 
     #[test]
@@ -238,11 +257,31 @@ mod tests {
     fn orphans_are_prevented_even_under_non_parent_based_samplers() {
         // With OTEL_TRACES_SAMPLER=always_on the delegate would happily
         // re-sample the child of a suppressed root and export it as an
-        // orphan; the filter must enforce parent consistency itself.
+        // orphan; the filter must enforce consistency for LOCAL
+        // unsampled parents itself.
+        let filter = SpanNoiseFilter::new(Sampler::AlwaysOn);
+        let parent = local_parent_context(false);
+        assert_eq!(
+            sample(&filter, Some(&parent), "db.query"),
+            SamplingDecision::Drop
+        );
+    }
+
+    #[test]
+    fn remote_unsampled_parents_stay_the_delegates_decision() {
+        // An inbound traceparent with flags 00 is the CALLER's sampling
+        // choice, not one of this filter's suppressions: always_on is
+        // documented to override it, and the filter must not veto that.
         let filter = SpanNoiseFilter::new(Sampler::AlwaysOn);
         let parent = parent_context(false);
         assert_eq!(
-            sample(&filter, Some(&parent), "db.query"),
+            sample(&filter, Some(&parent), "http_request"),
+            SamplingDecision::RecordAndSample
+        );
+        // The default parent-based delegate keeps honoring it.
+        let parent_based = SpanNoiseFilter::new(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
+        assert_eq!(
+            sample(&parent_based, Some(&parent), "http_request"),
             SamplingDecision::Drop
         );
     }

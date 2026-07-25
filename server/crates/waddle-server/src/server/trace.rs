@@ -382,40 +382,42 @@ mod tests {
         let capture = HttpSpanCapture::default();
         let _subscriber =
             tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
-        let app = Router::new()
-            .route("/health", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn(attach_http_route_template))
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(make_request_span)
-                    .on_response(observe_http_response),
+        for probe in PROBE_ROUTE_TEMPLATES {
+            let app = Router::new()
+                .route(probe, get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn(attach_http_route_template))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(make_request_span)
+                        .on_response(observe_http_response),
+                );
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(*probe)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let fields = capture.fields.lock().expect("HTTP span capture lock");
+            assert!(
+                fields.is_empty(),
+                "{probe} must not create an http_request span: {fields:?}",
             );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let fields = capture.fields.lock().expect("HTTP span capture lock");
-        assert!(
-            fields.is_empty(),
-            "probe request must not create an http_request span: {fields:?}",
-        );
-        drop(fields);
-        assert_eq!(
-            metrics.histogram_count(
-                "http.server.request.duration",
-                &[("route", "/health"), ("status_class", "2xx")],
-            ),
-            Some(1),
-            "suppressing the probe span must not suppress the duration histogram",
-        );
+            drop(fields);
+            assert_eq!(
+                metrics.histogram_count(
+                    "http.server.request.duration",
+                    &[("route", probe), ("status_class", "2xx")],
+                ),
+                Some(1),
+                "suppressing the {probe} span must not suppress the duration histogram",
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

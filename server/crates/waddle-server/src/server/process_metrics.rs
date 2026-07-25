@@ -113,6 +113,10 @@ pub(crate) fn init_process_instruments() {
         _open_fds: opentelemetry::metrics::ObservableGauge<i64>,
     }
     static INSTRUMENTS: OnceLock<ProcessInstruments> = OnceLock::new();
+    // Pin the start timestamp NOW — the observable callback only runs
+    // at the first reader collection (~60 s in), which would otherwise
+    // be the value recorded.
+    let _ = start_time_unix_seconds();
     INSTRUMENTS.get_or_init(|| ProcessInstruments {
         _start_time: meter()
             .i64_observable_gauge("waddle.process.start_time")
