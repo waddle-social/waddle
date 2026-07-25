@@ -100,6 +100,22 @@ fn relay_dispatch_span(message: &'static str) -> tracing::Span {
     )
 }
 
+/// The single seam through which every delegated relay reply task is
+/// spawned (#1483): binding `ctx.spawn` to the dispatch span here means
+/// a handler cannot delegate work outside its root span without
+/// bypassing this helper — and a test pins that no handler does.
+fn spawn_in_dispatch_span<R, F>(
+    ctx: &mut Context<RelayActor, R>,
+    span: tracing::Span,
+    future: F,
+) -> kameo::reply::DelegatedReply<R::Value>
+where
+    R: Reply + ?Sized,
+    F: std::future::Future<Output = R::Value> + Send + 'static,
+{
+    ctx.spawn(future.instrument(span))
+}
+
 /// Backoff between supervised respawn/re-registration attempts.
 const RESPAWN_BACKOFF: Duration = Duration::from_secs(1);
 
@@ -354,15 +370,11 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         // The reservation must stay inline (mailbox-ordered); only the
         // delegated delivery moves onto the instrumented reply task.
         let reservation = receiver.lock().await.reserve(msg.envelope);
-        ctx.spawn(
-            async move {
-                let reply =
-                    finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
-                record_ordered_relay_reply(&reply);
-                reply
-            }
-            .instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            let reply = finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
+            record_ordered_relay_reply(&reply);
+            reply
+        })
     }
 }
 
@@ -409,10 +421,9 @@ impl Message<RelayRegisterRemoteUserResource> for RelayActor {
         let span = relay_dispatch_span("remote_resource_register");
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(
-            async move { bridge.register_remote_user_resource_on_owner(msg).await }
-                .instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.register_remote_user_resource_on_owner(msg).await
+        })
     }
 }
 
@@ -440,10 +451,9 @@ impl Message<RelayUnregisterRemoteUserResource> for RelayActor {
         let span = relay_dispatch_span("remote_resource_unregister");
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(
-            async move { bridge.unregister_remote_user_resource_on_owner(msg).await }
-                .instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.unregister_remote_user_resource_on_owner(msg).await
+        })
     }
 }
 
@@ -479,9 +489,9 @@ impl Message<RelayUpdateRemoteUserResource> for RelayActor {
         let span = relay_dispatch_span("remote_resource_update");
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(
-            async move { bridge.update_remote_user_resource_on_owner(msg).await }.instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.update_remote_user_resource_on_owner(msg).await
+        })
     }
 }
 
@@ -517,10 +527,9 @@ impl Message<RelayRemoteUserSideEffect> for RelayActor {
         let span = relay_dispatch_span("remote_user_side_effect");
         span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(
-            async move { bridge.apply_remote_user_side_effect_on_owner(msg).await }
-                .instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.apply_remote_user_side_effect_on_owner(msg).await
+        })
     }
 }
 
@@ -550,9 +559,9 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
         let span = relay_dispatch_span("remote_resource_route");
         span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(
-            async move { bridge.route_remote_resource_stanza_on_owner(msg).await }.instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.route_remote_resource_stanza_on_owner(msg).await
+        })
     }
 }
 
@@ -585,10 +594,9 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
         let span = relay_dispatch_span("remote_resource_frame");
         span.record("jid", tracing::field::display(&msg.frame.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(
-            async move { bridge.deliver_remote_resource_frame_on_socket(msg).await }
-                .instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.deliver_remote_resource_frame_on_socket(msg).await
+        })
     }
 }
 
@@ -625,14 +633,11 @@ impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
         let span = relay_dispatch_span("remote_resource_force_detach");
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(
-            async move {
-                bridge
-                    .force_detach_remote_user_resource_on_socket(msg)
-                    .await
-            }
-            .instrument(span),
-        )
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge
+                .force_detach_remote_user_resource_on_socket(msg)
+                .await
+        })
     }
 }
 
@@ -697,29 +702,26 @@ impl Message<RelayResumeSteal> for RelayActor {
         span.record("stream_id", tracing::field::display(&msg.stream_id));
         span.record("jid", tracing::field::display(&msg.requester_bare_jid));
         let resume_bridge = Arc::clone(&self.resume_bridge);
-        ctx.spawn(
-            async move {
-                match resume_bridge
-                    .request_forced_detach(
-                        &msg.stream_id,
-                        &msg.requester_bare_jid,
-                        LOCAL_FORCE_DETACH_ACK_TIMEOUT,
-                    )
-                    .await
-                {
-                    super::resume_bridge::LocalForcedDetachOutcome::Detached => {
-                        RelayResumeStealReply::Detached
-                    }
-                    super::resume_bridge::LocalForcedDetachOutcome::IdentityMismatch => {
-                        RelayResumeStealReply::IdentityMismatch
-                    }
-                    super::resume_bridge::LocalForcedDetachOutcome::NotLiveLocally => {
-                        RelayResumeStealReply::NotLiveLocally
-                    }
+        spawn_in_dispatch_span(ctx, span, async move {
+            match resume_bridge
+                .request_forced_detach(
+                    &msg.stream_id,
+                    &msg.requester_bare_jid,
+                    LOCAL_FORCE_DETACH_ACK_TIMEOUT,
+                )
+                .await
+            {
+                super::resume_bridge::LocalForcedDetachOutcome::Detached => {
+                    RelayResumeStealReply::Detached
+                }
+                super::resume_bridge::LocalForcedDetachOutcome::IdentityMismatch => {
+                    RelayResumeStealReply::IdentityMismatch
+                }
+                super::resume_bridge::LocalForcedDetachOutcome::NotLiveLocally => {
+                    RelayResumeStealReply::NotLiveLocally
                 }
             }
-            .instrument(span),
-        )
+        })
     }
 }
 
@@ -2430,52 +2432,31 @@ mod tests {
         );
     }
 
-    /// #1483 guard: every delegated relay reply task must carry the
-    /// dispatch span. A `ctx.spawn` whose future is not `.instrument`-ed
-    /// runs the actual delivery — where the actor messages happen —
-    /// outside the root span, silently restoring the #1438 trace loss.
-    /// The field-recording tests above cannot catch that (the span still
-    /// records its fields at creation), so pin it structurally.
+    /// #1483 guard: every delegated relay reply must be spawned through
+    /// `spawn_in_dispatch_span`, the one seam that binds the reply task
+    /// to its dispatch span. A direct `ctx.spawn` in a handler would run
+    /// the delivery — where the actor messages happen — outside the root
+    /// span, silently restoring the #1438 trace loss, and the
+    /// field-recording tests above cannot catch that (the span still
+    /// records its fields at creation). Comment lines are skipped; no
+    /// parsing beyond that is needed, so string/paren contents cannot
+    /// cause false failures.
     #[test]
-    fn every_delegated_relay_reply_task_is_instrumented() {
+    fn delegated_relay_replies_go_through_the_dispatch_span_helper() {
         let source = include_str!("relay.rs");
-        let production: String = source
+        let production = source
             .split("#[cfg(test)]")
             .next()
-            .expect("split always yields a first segment")
+            .expect("split always yields a first segment");
+        let direct_spawns = production
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<&str>>()
-            .join("\n");
-        let production = production.as_str();
-        let mut checked = 0usize;
-        for (index, _) in production.match_indices("ctx.spawn(") {
-            let argument_start = index + "ctx.spawn(".len();
-            let mut depth = 1usize;
-            let mut argument_end = argument_start;
-            for (offset, character) in production[argument_start..].char_indices() {
-                match character {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            argument_end = argument_start + offset;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            assert!(
-                production[argument_start..argument_end].contains(".instrument("),
-                "the ctx.spawn at byte {index} delegates a relay reply \
-                 without instrumenting it with the dispatch span"
-            );
-            checked += 1;
-        }
-        assert!(
-            checked >= 8,
-            "expected the delegated relay handlers to be found; got {checked}"
+            .filter(|line| line.contains("ctx.spawn("))
+            .count();
+        assert_eq!(
+            direct_spawns, 1,
+            "ctx.spawn must appear exactly once — inside spawn_in_dispatch_span; \
+             route new delegated replies through that helper"
         );
     }
 }
