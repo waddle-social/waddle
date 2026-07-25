@@ -32,6 +32,7 @@ use super::route_bridge::{
     RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
 };
 use super::self_fence::LocallyClaimedEntities;
+use super::trace_context::RelayTraceContext;
 use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
@@ -71,22 +72,28 @@ pub fn relay_name(node_id: &NodeId) -> String {
 /// sampler drops. Opening this dedicated root before any actor message is
 /// sent keeps the receiving node's half of the delivery traceable: the
 /// actor spans become parented children and survive the sampler. The
-/// sending node's half stays a separate trace — kameo 0.20 remote
-/// messaging carries no W3C trace context, so cross-node causality is
-/// not linked (#1485 tracks propagating context on the relay envelopes).
+/// sending node's half joins this one whenever the message carried a
+/// [`RelayTraceContext`] (#1485): the extracted **remote** parent is
+/// applied here, so a cross-node delivery is a single trace.
 ///
 /// `otel.kind = "consumer"`: this is the receive side of a cross-node
 /// message, per OTel messaging semantics.
 ///
-/// `parent: None` is load-bearing: the handler itself executes inside
-/// kameo's own (suppressed) root `actor.handle_message` span, and a child
-/// of a locally-unsampled parent is dropped by the sampler too — this span
-/// must start a fresh root trace.
+/// `parent: None` is load-bearing and stays the no-context fallback: the
+/// handler itself executes inside kameo's own (suppressed) root
+/// `actor.handle_message` span, and a child of a locally-unsampled parent
+/// is dropped by the sampler too — with no propagated context this span
+/// must start a fresh root trace. A propagated parent is safe because it
+/// is *remote*, a case the sampler leaves to the delegate sampler.
+///
+/// Re-parenting must happen here, before the span is entered or cloned:
+/// `tracing-opentelemetry` refuses to move a span whose builder was
+/// already consumed.
 ///
 /// The span name is documented in `telemetry::span_noise` and must never
 /// be added to its suppression lists.
-fn relay_dispatch_span(message: &'static str) -> tracing::Span {
-    tracing::info_span!(
+fn relay_dispatch_span(message: &'static str, trace: &RelayTraceContext) -> tracing::Span {
+    let span = tracing::info_span!(
         parent: None,
         "clustering.relay.dispatch",
         otel.kind = "consumer",
@@ -97,7 +104,9 @@ fn relay_dispatch_span(message: &'static str) -> tracing::Span {
         sequence = tracing::field::Empty,
         origin_node = tracing::field::Empty,
         entity = tracing::field::Empty,
-    )
+    );
+    trace.parent_span(&span);
+    span
 }
 
 /// The single seam through which every delegated relay reply task is
@@ -292,6 +301,11 @@ impl Message<RelayEchoStanza> for RelayActor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayDeliverOrdered {
     pub envelope: RemoteStanzaEnvelope,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 async fn finish_ordered_reservation(
@@ -358,7 +372,7 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         msg: RelayDeliverOrdered,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("deliver_ordered");
+        let span = relay_dispatch_span("deliver_ordered", &msg.trace);
         span.record("channel", tracing::field::debug(&msg.envelope.channel));
         span.record("sequence", msg.envelope.sequence.0);
         span.record(
@@ -394,6 +408,11 @@ pub struct RelayRegisterRemoteUserResource {
     pub socket_generation: RemoteResourceSocketGeneration,
     pub socket_node: NodeId,
     pub state: RemoteResourceStateSnapshot,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,7 +437,7 @@ impl Message<RelayRegisterRemoteUserResource> for RelayActor {
         msg: RelayRegisterRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_register");
+        let span = relay_dispatch_span("remote_resource_register", &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -432,6 +451,11 @@ pub struct RelayUnregisterRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
     pub socket_generation: RemoteResourceSocketGeneration,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
@@ -448,7 +472,7 @@ impl Message<RelayUnregisterRemoteUserResource> for RelayActor {
         msg: RelayUnregisterRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_unregister");
+        let span = relay_dispatch_span("remote_resource_unregister", &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -463,6 +487,11 @@ pub struct RelayUpdateRemoteUserResource {
     pub registration_id: RemoteResourceRegistrationId,
     pub socket_generation: RemoteResourceSocketGeneration,
     pub update: RemoteResourceStateUpdate,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,7 +515,7 @@ impl Message<RelayUpdateRemoteUserResource> for RelayActor {
         msg: RelayUpdateRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_update");
+        let span = relay_dispatch_span("remote_resource_update", &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -501,6 +530,11 @@ pub struct RelayRemoteUserSideEffect {
     pub registration_id: RemoteResourceRegistrationId,
     pub socket_generation: RemoteResourceSocketGeneration,
     pub effect: RemoteUserSideEffect,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,7 +558,7 @@ impl Message<RelayRemoteUserSideEffect> for RelayActor {
         msg: RelayRemoteUserSideEffect,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_user_side_effect");
+        let span = relay_dispatch_span("remote_user_side_effect", &msg.trace);
         span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -539,6 +573,11 @@ pub struct RelayRouteRemoteResourceStanza {
     pub registration_id: RemoteResourceRegistrationId,
     pub socket_generation: RemoteResourceSocketGeneration,
     pub target: RemoteResourceRouteTarget,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
@@ -556,7 +595,7 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
         msg: RelayRouteRemoteResourceStanza,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_route");
+        let span = relay_dispatch_span("remote_resource_route", &msg.trace);
         span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -568,6 +607,11 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayDeliverRemoteResourceFrame {
     pub frame: RemoteResourceOutboundFrame,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,7 +635,7 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
         msg: RelayDeliverRemoteResourceFrame,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_frame");
+        let span = relay_dispatch_span("remote_resource_frame", &msg.trace);
         span.record("jid", tracing::field::display(&msg.frame.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -605,6 +649,11 @@ pub struct RelayForceDetachRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
     pub requester_bare_jid: jid::BareJid,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,7 +679,7 @@ impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
         msg: RelayForceDetachRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_force_detach");
+        let span = relay_dispatch_span("remote_resource_force_detach", &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -653,6 +702,11 @@ impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
 pub struct RelayResumeSteal {
     pub stream_id: waddle_xmpp::pending_delivery::SmSessionId,
     pub requester_bare_jid: jid::BareJid,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 /// Reply to [`RelayResumeSteal`].
@@ -698,7 +752,7 @@ impl Message<RelayResumeSteal> for RelayActor {
         msg: RelayResumeSteal,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("resume_steal");
+        let span = relay_dispatch_span("resume_steal", &msg.trace);
         span.record("stream_id", tracing::field::display(&msg.stream_id));
         span.record("jid", tracing::field::display(&msg.requester_bare_jid));
         let resume_bridge = Arc::clone(&self.resume_bridge);
@@ -739,6 +793,11 @@ impl Message<RelayResumeSteal> for RelayActor {
 pub struct Demote {
     pub entity: Entity,
     pub new_epoch: ClaimEpoch,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
 }
 
 /// Reply to [`Demote`]: always `Acked` — the recipient's local demote
@@ -759,7 +818,7 @@ impl Message<Demote> for RelayActor {
     type Reply = DemoteReply;
 
     async fn handle(&mut self, msg: Demote, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        let span = relay_dispatch_span("demote");
+        let span = relay_dispatch_span("demote", &msg.trace);
         span.record("entity", tracing::field::debug(&msg.entity));
         async {
             self.room_local_claims.demote(&msg.entity).await;
@@ -1011,6 +1070,13 @@ pub fn spawn_supervised(
 /// "a caller awaits these methods from a task that also watches this node's
 /// clustering stop token" case the previous doc comment named as the
 /// trigger for paying this down.
+/// **Trace propagation (#1485)**: every ask method stamps the sending
+/// task's active span context onto its message
+/// ([`RelayTraceContext::capture`]) immediately before the send, so the
+/// receiving node's `clustering.relay.dispatch` root joins the sender's
+/// trace. This is the single seam — construction sites leave the field at
+/// its `Default` (no context) — and it is telemetry only: a message whose
+/// context is absent or unparsable is relayed exactly as before.
 pub struct RelayHandle {
     node_id: NodeId,
     cached: Option<RemoteActorRef<RelayActor>>,
@@ -1349,19 +1415,21 @@ impl RelayHandle {
         &mut self,
         envelope: RemoteStanzaEnvelope,
     ) -> Result<OrderedRelayReply, RelayAskError> {
+        let trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
             _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
-            result = self.deliver_ordered_inner(envelope) => result,
+            result = self.deliver_ordered_inner(envelope, trace) => result,
         }
     }
 
     async fn deliver_ordered_inner(
         &mut self,
         envelope: RemoteStanzaEnvelope,
+        trace: RelayTraceContext,
     ) -> Result<OrderedRelayReply, RelayAskError> {
-        let message = RelayDeliverOrdered { envelope };
+        let message = RelayDeliverOrdered { envelope, trace };
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&message)
@@ -1389,8 +1457,9 @@ impl RelayHandle {
 
     pub async fn register_remote_user_resource(
         &mut self,
-        message: RelayRegisterRemoteUserResource,
+        mut message: RelayRegisterRemoteUserResource,
     ) -> Result<RelayRemoteResourceRegistrationReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
@@ -1427,8 +1496,9 @@ impl RelayHandle {
 
     pub async fn unregister_remote_user_resource(
         &mut self,
-        message: RelayUnregisterRemoteUserResource,
+        mut message: RelayUnregisterRemoteUserResource,
     ) -> Result<RelayRemoteResourceUnregisterReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
@@ -1465,8 +1535,9 @@ impl RelayHandle {
 
     pub async fn update_remote_user_resource(
         &mut self,
-        message: RelayUpdateRemoteUserResource,
+        mut message: RelayUpdateRemoteUserResource,
     ) -> Result<RelayRemoteResourceUpdateReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
@@ -1503,8 +1574,9 @@ impl RelayHandle {
 
     pub async fn remote_user_side_effect(
         &mut self,
-        message: RelayRemoteUserSideEffect,
+        mut message: RelayRemoteUserSideEffect,
     ) -> Result<RelayRemoteUserSideEffectReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
@@ -1528,8 +1600,9 @@ impl RelayHandle {
 
     pub async fn route_remote_resource_stanza(
         &mut self,
-        message: RelayRouteRemoteResourceStanza,
+        mut message: RelayRouteRemoteResourceStanza,
     ) -> Result<RelayRouteRemoteResourceStanzaReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
@@ -1566,8 +1639,9 @@ impl RelayHandle {
 
     pub async fn deliver_remote_resource_frame(
         &mut self,
-        message: RelayDeliverRemoteResourceFrame,
+        mut message: RelayDeliverRemoteResourceFrame,
     ) -> Result<RelayRemoteResourceFrameReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
@@ -1604,8 +1678,9 @@ impl RelayHandle {
 
     pub async fn force_detach_remote_user_resource(
         &mut self,
-        message: RelayForceDetachRemoteUserResource,
+        mut message: RelayForceDetachRemoteUserResource,
     ) -> Result<RelayForceDetachRemoteUserResourceReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
@@ -1654,11 +1729,12 @@ impl RelayHandle {
         stream_id: waddle_xmpp::pending_delivery::SmSessionId,
         requester_bare_jid: jid::BareJid,
     ) -> Result<RelayResumeStealReply, RelayAskError> {
+        let trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
             _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
-            result = self.resume_steal_inner(stream_id, requester_bare_jid) => result,
+            result = self.resume_steal_inner(stream_id, requester_bare_jid, trace) => result,
         }
     }
 
@@ -1666,10 +1742,12 @@ impl RelayHandle {
         &mut self,
         stream_id: waddle_xmpp::pending_delivery::SmSessionId,
         requester_bare_jid: jid::BareJid,
+        trace: RelayTraceContext,
     ) -> Result<RelayResumeStealReply, RelayAskError> {
         let message = RelayResumeSteal {
             stream_id,
             requester_bare_jid,
+            trace,
         };
         let remote_ref = self.resolve().await?;
         match remote_ref
@@ -1706,11 +1784,12 @@ impl RelayHandle {
         entity: Entity,
         new_epoch: ClaimEpoch,
     ) -> Result<DemoteReply, RelayAskError> {
+        let trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {
             biased;
             _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
-            result = self.demote_inner(entity, new_epoch) => result,
+            result = self.demote_inner(entity, new_epoch, trace) => result,
         }
     }
 
@@ -1718,8 +1797,13 @@ impl RelayHandle {
         &mut self,
         entity: Entity,
         new_epoch: ClaimEpoch,
+        trace: RelayTraceContext,
     ) -> Result<DemoteReply, RelayAskError> {
-        let message = Demote { entity, new_epoch };
+        let message = Demote {
+            entity,
+            new_epoch,
+            trace,
+        };
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&message)
@@ -2291,6 +2375,7 @@ mod tests {
                     .ask(RelayResumeSteal {
                         stream_id,
                         requester_bare_jid: requester,
+                        trace: RelayTraceContext::default(),
                     })
                     .await
             }
@@ -2357,6 +2442,7 @@ mod tests {
             .ask(Demote {
                 entity: Entity::new(EntityType::RoomActor, "room@muc.example.com".to_string()),
                 new_epoch: ClaimEpoch(7),
+                trace: RelayTraceContext::default(),
             })
             .await
             .expect("demote ask succeeds");
@@ -2385,6 +2471,7 @@ mod tests {
             .ask(RelayResumeSteal {
                 stream_id: waddle_xmpp::pending_delivery::SmSessionId::new("span-test-stream"),
                 requester_bare_jid: "alice@example.com".parse().expect("valid bare jid"),
+                trace: RelayTraceContext::default(),
             })
             .await
             .expect("resume-steal ask succeeds");
@@ -2415,7 +2502,8 @@ mod tests {
     async fn relay_dispatch_span_is_a_root_even_inside_an_active_span() {
         let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
         let outer = tracing::info_span!("actor.handle_message");
-        let dispatch = outer.in_scope(|| relay_dispatch_span("root_check"));
+        let dispatch =
+            outer.in_scope(|| relay_dispatch_span("root_check", &RelayTraceContext::default()));
         drop(dispatch);
         drop(outer);
 
@@ -2430,6 +2518,117 @@ mod tests {
             "the dispatch span must root a fresh trace, not inherit the \
              active (suppressed) actor span as its parent"
         );
+    }
+
+    /// #1485: when the sending node propagated its W3C trace context, the
+    /// receiving node's dispatch root must join that trace instead of
+    /// starting its own — the whole point of the propagation.
+    #[test]
+    fn relay_dispatch_span_joins_a_propagated_sender_trace() {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+
+        // Sending node: an active span whose context is stamped onto the
+        // relay message at the send seam.
+        let sender = tracing::info_span!("clustering.relay.send-under-test");
+        let (trace, sender_trace_id, sender_span_id) = sender.in_scope(|| {
+            let span_context = tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .clone();
+            (
+                RelayTraceContext::capture(),
+                span_context.trace_id(),
+                span_context.span_id(),
+            )
+        });
+        assert_ne!(
+            trace,
+            RelayTraceContext::default(),
+            "an active, valid sender span must yield a propagatable context"
+        );
+
+        // Receiving node: the same context after a real codec round-trip.
+        let encoded = rmp_serde::to_vec_named(&trace).expect("trace context encodes");
+        let decoded: RelayTraceContext =
+            rmp_serde::from_slice(&encoded).expect("trace context decodes");
+        let dispatch = relay_dispatch_span("cross_node_check", &decoded);
+        drop(dispatch);
+        drop(sender);
+
+        let exported = spans.exported();
+        let dispatch = exported
+            .iter()
+            .find(|span| span.name == "clustering.relay.dispatch")
+            .expect("dispatch span must export");
+        assert_eq!(
+            dispatch.span_context.trace_id(),
+            sender_trace_id,
+            "the receiving node's dispatch span must join the sender's trace"
+        );
+        assert_eq!(
+            dispatch.parent_span_id, sender_span_id,
+            "the dispatch span must be parented on the sending span"
+        );
+    }
+
+    /// #1485 mixed-version rolling deploy, old sender → new receiver: a
+    /// relay message encoded WITHOUT the additive trace field must still
+    /// decode, with an empty context that falls back to a root dispatch
+    /// span.
+    #[test]
+    fn a_relay_message_without_the_trace_field_still_decodes() {
+        /// The pre-#1485 wire shape of [`Demote`].
+        #[derive(Serialize, Deserialize)]
+        struct LegacyDemote {
+            entity: Entity,
+            new_epoch: ClaimEpoch,
+        }
+
+        let entity = Entity::new(EntityType::RoomActor, "room@muc.example.com".to_string());
+        let encoded = rmp_serde::to_vec_named(&LegacyDemote {
+            entity: entity.clone(),
+            new_epoch: ClaimEpoch(11),
+        })
+        .expect("legacy demote encodes");
+
+        let decoded: Demote = rmp_serde::from_slice(&encoded).expect("legacy demote decodes");
+        assert_eq!(decoded.entity, entity);
+        assert_eq!(decoded.new_epoch, ClaimEpoch(11));
+        assert_eq!(
+            decoded.trace,
+            RelayTraceContext::default(),
+            "an absent trace field must default to no context, not fail the decode"
+        );
+    }
+
+    /// #1485 mixed-version rolling deploy, new sender → old receiver: the
+    /// pre-#1485 decoder must ignore the extra field rather than reject the
+    /// message (serde's derived `Deserialize` skips unknown map keys, and
+    /// kameo encodes remote messages as named maps).
+    #[test]
+    fn an_older_decoder_ignores_the_added_trace_field() {
+        #[derive(Serialize, Deserialize)]
+        struct LegacyDemote {
+            entity: Entity,
+            new_epoch: ClaimEpoch,
+        }
+
+        let entity = Entity::new(EntityType::RoomActor, "room@muc.example.com".to_string());
+        let encoded = rmp_serde::to_vec_named(&Demote {
+            entity: entity.clone(),
+            new_epoch: ClaimEpoch(13),
+            trace: RelayTraceContext::default(),
+        })
+        .expect("demote encodes");
+
+        let legacy: LegacyDemote =
+            rmp_serde::from_slice(&encoded).expect("pre-#1485 decoder tolerates the new field");
+        assert_eq!(legacy.entity, entity);
+        assert_eq!(legacy.new_epoch, ClaimEpoch(13));
     }
 
     /// #1483 guard: every delegated relay reply must be spawned through

@@ -7701,6 +7701,7 @@ dependencies = [
  "quick-xml 0.40.1",
  "rand 0.10.1",
  "reqwest 0.13.3",
+ "rmp-serde",
  "rustls",
  "rustls-acme",
  "serde",

@@ -53,6 +53,7 @@ use super::relay::{
     RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelaySendEffect,
     RelaySendFailure, RelayUnregisterRemoteUserResource, RelayUpdateRemoteUserResource,
 };
+use super::trace_context::RelayTraceContext;
 use super::NodeId;
 use crate::config::ClusteringMessagingConfig;
 use crate::server::routes::interpret::{
@@ -1118,6 +1119,7 @@ impl OrderedRelayDeliveryBridge {
                 socket_generation,
                 socket_node,
                 state,
+                trace: RelayTraceContext::default(),
             })
             .await
         {
@@ -1144,6 +1146,7 @@ impl OrderedRelayDeliveryBridge {
                             jid: jid.clone(),
                             registration_id,
                             socket_generation,
+                            trace: RelayTraceContext::default(),
                         })
                         .await;
                     return RemoteResourceRegisterOutcome::Failed;
@@ -1193,6 +1196,7 @@ impl OrderedRelayDeliveryBridge {
                 jid: jid.clone(),
                 registration_id: registration.registration_id,
                 socket_generation: registration.socket_generation,
+                trace: RelayTraceContext::default(),
             })
             .await
         {
@@ -1229,6 +1233,7 @@ impl OrderedRelayDeliveryBridge {
                 registration_id: registration.registration_id,
                 socket_generation: registration.socket_generation,
                 update,
+                trace: RelayTraceContext::default(),
             })
             .await
         {
@@ -1330,6 +1335,7 @@ impl OrderedRelayDeliveryBridge {
                 registration_id: registration.registration_id,
                 socket_generation: registration.socket_generation,
                 effect,
+                trace: RelayTraceContext::default(),
             })
             .await
         {
@@ -2171,6 +2177,7 @@ impl OrderedRelayDeliveryBridge {
                 registration_id: remote_origin.registration_id,
                 socket_generation: remote_origin.socket_generation,
                 target,
+                trace: RelayTraceContext::default(),
             })
             .await
     }
@@ -2530,6 +2537,7 @@ impl OrderedRelayDeliveryBridge {
                     stanza: RemoteStanza(stanza.clone()),
                     kind,
                 },
+                trace: RelayTraceContext::default(),
             })
             .await
         {
@@ -2711,6 +2719,7 @@ impl OrderedRelayDeliveryBridge {
                 jid: jid.clone(),
                 registration_id: registration.registration_id,
                 requester_bare_jid: jid.to_bare(),
+                trace: RelayTraceContext::default(),
             })
             .await;
         self.finish_remote_owner_registration_retire(services, jid, registration, detach)
@@ -3536,7 +3545,10 @@ async fn forward_remote_resource_outbound(
     let mut handle = RelayHandle::new(socket_node.clone(), bridge.stop_token.clone())
         .with_ask_timeouts(bridge.mailbox_timeout, bridge.reply_timeout);
     match handle
-        .deliver_remote_resource_frame(RelayDeliverRemoteResourceFrame { frame })
+        .deliver_remote_resource_frame(RelayDeliverRemoteResourceFrame {
+            frame,
+            trace: RelayTraceContext::default(),
+        })
         .await
     {
         Ok(RelayRemoteResourceFrameReply {
@@ -3589,6 +3601,7 @@ async fn forward_remote_resource_force_detach(
             jid: jid.clone(),
             registration_id,
             requester_bare_jid: request.requester_bare_jid,
+            trace: RelayTraceContext::default(),
         })
         .await
     {
