@@ -15,6 +15,15 @@
   registration API and none may be added: instrument creation happens
   at the increment site, so a registered-but-never-wired metric cannot
   exist.
+- **Alert-worthy counters are zero-registered at startup** (#1436), and
+  that is not an exception to the rule above: the zero goes through the
+  emitting helper's own `counter_add!` call site (a private
+  `add(count: u64)` next to the helper), driven by
+  `telemetry::reliability::register_reliability_counters()` from
+  `waddle-server::telemetry::init`. A new counter whose alert reads
+  `> N` on a healthy pod belongs in that registration path; a counter
+  whose alert reads `== 0` ("did this ever tick") must stay
+  unregistered. See the `telemetry` module docs.
 - **The Prometheus text renderer is frozen.** Never add a new metric
   family to `crates/waddle-xmpp/src/prometheus.rs`; it is being retired
   family-by-family (#1330).

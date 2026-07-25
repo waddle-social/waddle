@@ -3,14 +3,45 @@
 use super::attributes::{PushProvider, PushStage};
 use crate::push::types::{TransientFailure, WebPushOutcome};
 
-fn increment_pipeline(stage: PushStage) {
+fn add_pipeline(stage: PushStage, count: u64) {
     crate::counter_add!(
         "waddle.push.pipeline",
         "{notification}",
         "Push notification pipeline transitions.",
-        1,
+        count,
         stage,
     );
+}
+
+fn increment_pipeline(stage: PushStage) {
+    add_pipeline(stage, 1);
+}
+
+/// The pipeline stages a notification passes through inside Waddle.
+///
+/// The `provider_*` variants of [`PushStage`] belong to the
+/// `waddle.push.provider` family (stage × provider), not this one.
+const PIPELINE_STAGES: [PushStage; 6] = [
+    PushStage::CandidateCreated,
+    PushStage::Suppressed,
+    PushStage::Coalesced,
+    PushStage::Published,
+    PushStage::RetryScheduled,
+    PushStage::DeadLettered,
+];
+
+/// `add(0)` every in-process pipeline stage so a fresh pod exports the
+/// whole `waddle.push.pipeline` family at zero (#1436). Driven from
+/// [`super::reliability::register_reliability_counters`], through the
+/// same call site the emitting helpers use.
+///
+/// The `waddle.push.provider` family is left unregistered on purpose:
+/// its series are only meaningful once a provider has actually
+/// answered, and a pod with no push registrations has nothing to say.
+pub(super) fn register_pipeline_stages() {
+    for stage in PIPELINE_STAGES {
+        add_pipeline(stage, 0);
+    }
 }
 
 /// Record a candidate that entered the durable notification pipeline.

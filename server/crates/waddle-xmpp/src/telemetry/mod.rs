@@ -17,6 +17,35 @@
 //!   [`attributes`]. JIDs, room JIDs, stream ids, and message ids are
 //!   never metric attributes — they belong on spans and logs.
 //!
+//! # Zero-registration of alert-worthy counters (#1436)
+//!
+//! Create-at-increment means an alert-worthy counter does not exist
+//! until it first fires. With several deploys a day,
+//! `increase(waddle_sm_drain_timeout_total[1h]) > 0` then evaluates to
+//! *no data* on a healthy pod instead of `0`. The fix is **not** a
+//! standalone registration API — that would reintroduce
+//! registered-but-never-wired metrics. Instead:
+//!
+//! - Each alert-worthy counter keeps exactly **one** `counter_add!`
+//!   call site, wrapped in a private `add(count: u64)` function. The
+//!   emitting helper calls it with `1`; startup calls it with `0`.
+//!   Same call site, same `OnceLock`, one stream.
+//! - [`reliability::register_reliability_counters`] is the single
+//!   entry point, called from `waddle-server::telemetry::init`
+//!   immediately after the meter provider is installed. Attribute
+//!   dimensions are enumerated from the closed enums in [`attributes`]
+//!   (`PushSuppressReason::ALL`, …), so every expected series exists at
+//!   zero, not just the attribute-free one.
+//! - The table macro in [`reliability`] generates the helper and the
+//!   registration entry from the same row, so a new counter cannot be
+//!   added to that family without being registered.
+//!
+//! Zero-registration is for counters an alert reads as `> N` on a
+//! healthy pod. A counter whose alert asks "did this ever tick"
+//! (`min by (janitor) (increase(waddle_janitor_sweeps_total[30m])) == 0`)
+//! must stay unregistered — a flat-zero series would hold that alert
+//! permanently firing. New counter, new alert: decide which kind it is.
+//!
 //! # Cardinality budget
 //!
 //! Every attribute is a closed enum defined in [`attributes`]; adding

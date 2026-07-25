@@ -351,6 +351,13 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // (#1435).
     crate::server::process_metrics::init_process_instruments();
 
+    // `add(0)` the alert-worthy reliability counters so a fresh healthy
+    // pod exports them at zero: create-at-increment instruments would
+    // otherwise be absent until something goes wrong, and with several
+    // deploys a day the `increase(...) > 0` alerts evaluate to no-data
+    // instead of 0 (#1436).
+    waddle_xmpp::telemetry::reliability::register_reliability_counters();
+
     // Build OTLP logs exporter + provider. The tracing bridge below
     // feeds every `tracing::{info,warn,error,debug,trace}!` event into
     // this provider as an OTLP log record, in addition to stdout.

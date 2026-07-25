@@ -246,6 +246,12 @@ pub enum PushRetryReason {
     Unknown,
 }
 
+impl PushRetryReason {
+    /// Every allowed value. Startup zero-registration (#1436) iterates
+    /// this so every label value exists before the first real retry.
+    pub const ALL: [Self; 1] = [Self::Unknown];
+}
+
 impl sealed::Sealed for PushRetryReason {}
 impl MetricAttribute for PushRetryReason {
     fn key(&self) -> &'static str {
