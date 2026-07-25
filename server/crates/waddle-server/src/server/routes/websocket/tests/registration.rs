@@ -590,6 +590,146 @@ async fn stale_owner_publication_does_not_stamp_replacement_entry() {
     );
 }
 
+/// #1454: a failed authoritative registration used to send the client a
+/// stream `<internal-server-error/>` with NO server-side log or metric —
+/// 32 client-side Faro events over 7 days against zero server log lines.
+/// Drive the real failure path (kill the `UserRegistryActor` so the mirror
+/// ask fails, forcing the ADR-0017 fail-closed rollback) and assert the
+/// failure now logs at `error!` with typed context and increments the
+/// alertable `waddle.session.init.failed` counter. The span-error mark
+/// shares the centrally-tested `mark_span_error` helper; asserting its
+/// export here would race actor scheduling (#1479), so it is deliberately
+/// not export-asserted in this actor-heavy scope.
+#[tokio::test(flavor = "current_thread")]
+async fn failed_authoritative_registration_logs_and_increments_counter() {
+    use std::sync::{Arc as StdArc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(StdArc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let buffer = StdArc::new(Mutex::new(Vec::new()));
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(CaptureWriter(buffer.clone()))
+            .finish(),
+    );
+
+    let state = create_test_websocket_state().await;
+    // Kill the authoritative registry so `mirror_register_outcome`'s ask
+    // fails — exactly the rollback path that was server-silent.
+    state.deps.protocol.user_registry.kill();
+    state.deps.protocol.user_registry.wait_for_shutdown().await;
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+
+    let outcome = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, RegistrationAfterFrame::SessionInitializationFailed),
+        "a failed authoritative registration must fail the bind"
+    );
+    assert!(
+        conn.registry_owner.is_none(),
+        "the rollback must clear the registry owner"
+    );
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.session.init.failed",
+            &[("reason", "authoritative_registration")]
+        ),
+        Some(1),
+        "the failure must increment the alertable counter exactly once"
+    );
+    let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+        .expect("captured logs are valid UTF-8");
+    assert!(
+        logs.contains("session initialization failed")
+            && logs.contains("alice@example.com")
+            && logs.contains("authoritative_registration"),
+        "the failure must be logged at error! with the user and typed reason. Captured:\n{logs}"
+    );
+}
+
+/// #1454, blocklist-load arm + span half of the acceptance criteria. The
+/// blocklist DB failure itself cannot be forced through the public seam
+/// (`db_pool.global()` is a direct backend handle, not the killable
+/// actor), and the arm is a straight-line call into the choke point — so
+/// pin the choke point itself for the `blocklist_load` reason: counter,
+/// and the dedicated `xmpp.session.init` error-status span with typed
+/// attributes. Unlike dispatch-scoped spans (#1479), this span opens and
+/// closes synchronously with no actor children, so asserting its export
+/// does not race actor scheduling.
+#[tokio::test(flavor = "current_thread")]
+async fn session_init_failure_choke_point_counts_and_exports_error_span() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    super::super::registration::record_session_init_failure(
+        waddle_xmpp::telemetry::attributes::SessionInitFailureReason::BlocklistLoad,
+        &jid,
+        Some("stream-7"),
+        Some("XEP-0191 blocklist load failed: simulated".to_string()),
+    );
+
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.session.init.failed",
+            &[("reason", "blocklist_load")]
+        ),
+        Some(1),
+        "the failure must increment the alertable counter exactly once"
+    );
+    assert_eq!(
+        spans.attribute_of("xmpp.session.init", "reason"),
+        Some("blocklist_load".to_string()),
+        "the failure span must carry the typed reason"
+    );
+    assert_eq!(
+        spans.attribute_of("xmpp.session.init", "user"),
+        Some("alice@example.com".to_string()),
+        "the failure span must carry the bare user JID"
+    );
+    assert!(
+        spans.has_error_status("xmpp.session.init"),
+        "the failure span must export with error status (#1428)"
+    );
+}
+
 /// ADR-0017 Phase 1: the dominant (non-SM) disconnect teardown mirrors the
 /// unregister into the actor tree, so a bound-then-closed connection does not
 /// leak its resource — and the empty `UserActor` is pruned. Regression test

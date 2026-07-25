@@ -610,3 +610,33 @@ impl MetricAttribute for PushProvider {
         }
     }
 }
+
+/// `reason` — why post-auth session initialization failed (#1454). One
+/// variant per `SessionInitializationFailed` return site in the WebSocket
+/// registration path, so the `waddle.session.init.failed` rate is
+/// attributable without unbounded values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionInitFailureReason {
+    /// The XEP-0191 blocklist load at bind failed; the bind fails closed
+    /// rather than running the session with an empty blocklist.
+    BlocklistLoad,
+    /// The authoritative `UserActor` registration (or clustered
+    /// remote-resource registration) could not confirm the resource; the
+    /// DashMap registration was rolled back and the bind failed closed
+    /// (ADR-0017 Phase 1: the two views must never disagree in the
+    /// miss-a-resource direction).
+    AuthoritativeRegistration,
+}
+
+impl sealed::Sealed for SessionInitFailureReason {}
+impl MetricAttribute for SessionInitFailureReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::BlocklistLoad => "blocklist_load",
+            Self::AuthoritativeRegistration => "authoritative_registration",
+        }
+    }
+}
