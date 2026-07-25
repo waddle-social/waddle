@@ -66,6 +66,18 @@ pub mod __export {
     pub use std::sync::OnceLock;
 }
 
+/// Explicit bucket boundaries for histograms whose unit is seconds
+/// (`"s"`), spanning 5ms to 10s — the seconds-scaled form of the
+/// OpenTelemetry default advice.
+///
+/// Pass these with the `buckets:` form of [`histogram_record!`]: the
+/// SDK default boundaries are millisecond-scale, so a seconds-unit
+/// instrument left on them reports every sub-second observation in the
+/// lowest bucket and a constant fake p99 (#1453).
+pub const SECOND_SCALE_BUCKETS: [f64; 11] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
 /// The meter every macro-created instrument attaches to. Resolved
 /// from the global meter provider at instrument-creation time, so
 /// production instruments bind to the OTLP pipeline installed by
@@ -231,8 +243,37 @@ macro_rules! counter_add {
 
 /// Record into an `f64` histogram, creating the instrument on first
 /// use. Same naming/unit/attribute rules as [`counter_add!`].
+///
+/// The SDK's default buckets are millisecond-scale
+/// (`[0, 5, 10, …, 10000]`); an instrument recording another scale
+/// must pass its own boundaries with the `buckets:` form, e.g.
+/// `histogram_record!(name, "s", desc, buckets: SECOND_SCALE_BUCKETS, value, attr)`
+/// (see [`SECOND_SCALE_BUCKETS`]). Otherwise every real sample lands
+/// in the lowest bucket and quantiles are constant (#1453).
 #[macro_export]
 macro_rules! histogram_record {
+    (
+        $name:literal, $unit:literal, $desc:literal,
+        buckets: $buckets:expr, $value:expr $(, $attr:expr)* $(,)?
+    ) => {{
+        const _VALIDATED: &str = $crate::telemetry::validate_metric_name($name);
+        static INSTRUMENT: $crate::telemetry::__export::OnceLock<
+            $crate::telemetry::__export::Histogram<f64>,
+        > = $crate::telemetry::__export::OnceLock::new();
+        let attributes: &[$crate::telemetry::__export::KeyValue] = &[
+            $($crate::telemetry::attributes::MetricAttribute::key_value(&$attr)),*
+        ];
+        INSTRUMENT
+            .get_or_init(|| {
+                $crate::telemetry::meter()
+                    .f64_histogram($name)
+                    .with_unit($unit)
+                    .with_description($desc)
+                    .with_boundaries($buckets.to_vec())
+                    .build()
+            })
+            .record($value, attributes);
+    }};
     ($name:literal, $unit:literal, $desc:literal, $value:expr $(, $attr:expr)* $(,)?) => {{
         const _VALIDATED: &str = $crate::telemetry::validate_metric_name($name);
         static INSTRUMENT: $crate::telemetry::__export::OnceLock<

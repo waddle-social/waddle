@@ -138,6 +138,7 @@ pub(crate) fn observe_http_response<B>(response: &Response<B>, latency: Duration
             "http.server.request.duration",
             "s",
             "HTTP server request duration.",
+            buckets: waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS,
             latency.as_secs_f64(),
             *route,
             HttpStatusClass::from_status(status),
@@ -418,6 +419,41 @@ mod tests {
                 "suppressing the {probe} span must not suppress the duration histogram",
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_duration_histogram_uses_second_scale_buckets() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let app = Router::new()
+            .route("/api/auth/session", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        // The instrument records seconds, so its buckets must be
+        // second-scale: the SDK's millisecond-scale defaults put every
+        // sub-second request in the first bucket and pin p99 at ~4.95s
+        // (#1453).
+        assert_eq!(
+            metrics.histogram_bounds("http.server.request.duration"),
+            Some(vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
