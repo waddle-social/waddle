@@ -9,6 +9,7 @@ mod extension_host_tools;
 mod fixed_account;
 mod health;
 mod http;
+pub(crate) mod process_metrics;
 pub(crate) mod profile_publish_route;
 mod room_registry_gauge;
 mod session_janitors;

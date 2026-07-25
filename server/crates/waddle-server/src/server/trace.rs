@@ -49,6 +49,39 @@ const HTTP_ROUTE_TEMPLATES: &[&str] = &[
     "/api/files/{slot_id}/{filename}",
 ];
 
+/// Routes whose request spans are pure kube-probe noise (#1438): the
+/// liveness/readiness endpoints and the `/metrics` liveness stub
+/// (#1426), together ~98% of production `http_request` spans. Requests
+/// to these routes get a disabled span; the
+/// `http.server.request.duration` histogram is unaffected because
+/// `observe_http_response` reads the route from the response extension,
+/// not the span.
+const PROBE_ROUTE_TEMPLATES: &[&str] = &[
+    "/health",
+    "/healthz",
+    "/ready",
+    "/readyz",
+    "/metrics",
+    "/api/v1/health",
+];
+
+/// Decide whether a request deserves a `tracing` span at all (#1438).
+///
+/// - No axum `MatchedPath` means no route matched — hostile-scanner
+///   404s (`/enhancecp`, `/azure/.env`, …) that would each mint a root
+///   trace. Not traced.
+/// - A matched probe route is kube-probe noise. Not traced.
+/// - A `MatchedPath` that is missing from `HTTP_ROUTE_TEMPLATES` is a
+///   real route someone forgot to allowlist: keep tracing it (with an
+///   empty `http.route`) rather than silently untracing an endpoint.
+fn should_trace_request(request: &Request<Body>) -> bool {
+    if request.extensions().get::<MatchedPath>().is_none() {
+        return false;
+    }
+    !matched_route_template(request)
+        .is_some_and(|template| PROBE_ROUTE_TEMPLATES.contains(&template))
+}
+
 /// Build the per-request `tracing` span and attach the inbound W3C
 /// trace context (if any) as its OpenTelemetry parent.
 ///
@@ -61,6 +94,9 @@ const HTTP_ROUTE_TEMPLATES: &[&str] = &[
 /// root span instead of being silently re-parented to whatever the
 /// extractor returns for the empty case.
 pub(crate) fn make_request_span(request: &Request<Body>) -> Span {
+    if !should_trace_request(request) {
+        return Span::none();
+    }
     let span = info_span!(
         "http_request",
         method = %request.method(),
@@ -338,6 +374,128 @@ mod tests {
                 .all(|value| !value.contains(sensitive_token)),
             "request span must not expose the raw calendar token: {fields:?}",
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn probe_routes_get_no_request_span_but_keep_the_duration_histogram() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let capture = HttpSpanCapture::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let fields = capture.fields.lock().expect("HTTP span capture lock");
+        assert!(
+            fields.is_empty(),
+            "probe request must not create an http_request span: {fields:?}",
+        );
+        drop(fields);
+        assert_eq!(
+            metrics.histogram_count(
+                "http.server.request.duration",
+                &[("route", "/health"), ("status_class", "2xx")],
+            ),
+            Some(1),
+            "suppressing the probe span must not suppress the duration histogram",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unrouted_requests_get_no_request_span() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let capture = HttpSpanCapture::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let app = Router::new()
+            .route("/api/auth/session", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/enhancecp")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let fields = capture.fields.lock().expect("HTTP span capture lock");
+        assert!(
+            fields.is_empty(),
+            "scanner 404s must not create an http_request span: {fields:?}",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn matched_route_missing_from_the_allowlist_is_still_traced() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let capture = HttpSpanCapture::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let app = Router::new()
+            .route("/not/in/the/allowlist", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/not/in/the/allowlist")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let fields = capture.fields.lock().expect("HTTP span capture lock");
+        assert_eq!(
+            fields.get("uri").map(String::as_str),
+            Some("/not/in/the/allowlist"),
+            "a real route missing from HTTP_ROUTE_TEMPLATES must stay traced",
+        );
+    }
+
+    #[test]
+    fn probe_routes_are_a_subset_of_the_route_allowlist() {
+        // should_trace_request suppresses via matched_route_template,
+        // which only recognizes HTTP_ROUTE_TEMPLATES entries — a probe
+        // route absent from the allowlist would silently stay traced.
+        for probe in PROBE_ROUTE_TEMPLATES {
+            assert!(
+                HTTP_ROUTE_TEMPLATES.contains(probe),
+                "{probe} must be listed in HTTP_ROUTE_TEMPLATES",
+            );
+        }
     }
 
     #[test]
