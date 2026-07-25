@@ -54,23 +54,13 @@ impl DatabasePool {
             Err(e) => {
                 crate::telemetry::mark_span_error("global database health check failed");
                 tracing::warn!(error = %e, "Global DB health check failed");
+                // Query-level failures count inside
+                // `Database::health_check`; this branch is the one case
+                // that never reaches it (actor unreachable).
+                super::Database::record_health_check_failure();
                 false
             }
         };
-        if !global_healthy {
-            // Covers both the ask failure above and the actor answering
-            // Ok(false) for a failed probe query. The probe-driven
-            // `health_check` spans that used to carry this failure are
-            // suppressed as trace noise (#1438), so the counter is the
-            // alertable signal.
-            waddle_xmpp::counter_add!(
-                "waddle.db.health_check.failed",
-                "1",
-                "Global database health-check failures observed by the \
-                 readiness/liveness path.",
-                1,
-            );
-        }
 
         Ok(PoolHealth {
             global_healthy,

@@ -7,11 +7,13 @@
 //! through the OTLP pipeline:
 //!
 //! - `waddle.process.start_time` (unit `s`): unix-epoch seconds
-//!   captured once at telemetry init. Every restart mints a new series
-//!   (`service.instance.id` carries the pod name + pid, and the value
-//!   is constant within a series), so restart detection is
-//!   young-process presence — `time() - waddle_process_start_time_seconds
-//!   < 600` — or series churn, never `changes()` on one series.
+//!   captured once at telemetry init. Restart shape depends on how the
+//!   process died: a deploy or ecdysis re-exec changes the pid-suffixed
+//!   `service.instance.id` (new series), while a kubelet container
+//!   restart keeps hostname and PID 1 (same series, value jumps). The
+//!   query that covers both is young-process presence —
+//!   `time() - waddle_process_start_time_seconds < 600` — not
+//!   `changes()` alone, which the new-series case never satisfies.
 //!   Verify the normalized series name against the live datasource
 //!   before writing alerts; this stack has produced both `_seconds`-
 //!   and raw-UCUM-suffixed names (see `rules/README.md`).
@@ -122,8 +124,10 @@ pub(crate) fn init_process_instruments() {
             .i64_observable_gauge("waddle.process.start_time")
             .with_description(
                 "Unix time the server process started, captured at telemetry init. \
-                 Each restart is a new series (pid-suffixed instance id), so detect \
-                 restarts via time() - value < threshold, not changes() (#1435).",
+                 Deploys/re-execs mint a new series (pid-suffixed instance id); \
+                 in-place container restarts keep the series and jump the value — \
+                 detect restarts via time() - value < threshold, which covers \
+                 both (#1435).",
             )
             .with_unit("s")
             .with_callback(|observer| observer.observe(start_time_unix_seconds(), &[]))
