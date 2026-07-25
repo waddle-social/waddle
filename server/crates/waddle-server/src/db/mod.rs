@@ -300,14 +300,43 @@ impl Database {
         &self.database_url
     }
 
+    /// Export the alertable DB health-check failure counter. The probe
+    /// spans that used to carry this signal are suppressed as trace
+    /// noise (#1438). Shared with the pool so its ask-failure branch
+    /// (actor unreachable — [`Database::health_check`] never runs)
+    /// counts through the same instrument.
+    pub(crate) fn record_health_check_failure() {
+        waddle_xmpp::counter_add!(
+            "waddle.db.health_check.failed",
+            "1",
+            "Database health-check failures (failed probe query, unavailable \
+             connection, or unreachable DB actor), across the pool and direct \
+             liveness paths.",
+            1,
+        );
+    }
+
     #[instrument(skip_all, fields(name = %self.name), err)]
     pub async fn health_check(&self) -> Result<bool, DatabaseError> {
-        let conn = self.guard().await?;
+        // The deepest common point of every health probe — the pool's
+        // actor ask and the direct /health `/healthz` liveness handlers
+        // both land here. The probe-driven `health_check` spans are
+        // suppressed as trace noise (#1438), so the counter is the
+        // alertable failure signal for all of them.
+        let conn = match self.guard().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                crate::telemetry::mark_span_error("database health check guard failed");
+                Self::record_health_check_failure();
+                return Err(e);
+            }
+        };
         match conn.query("SELECT 1", ()).await {
             Ok(_) => Ok(true),
             Err(e) => {
                 crate::telemetry::mark_span_error("database health check failed");
                 tracing::warn!(error = %e, "Database health check failed");
+                Self::record_health_check_failure();
                 Ok(false)
             }
         }

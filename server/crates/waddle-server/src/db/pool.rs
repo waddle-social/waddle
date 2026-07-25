@@ -54,6 +54,10 @@ impl DatabasePool {
             Err(e) => {
                 crate::telemetry::mark_span_error("global database health check failed");
                 tracing::warn!(error = %e, "Global DB health check failed");
+                // Query-level failures count inside
+                // `Database::health_check`; this branch is the one case
+                // that never reaches it (actor unreachable).
+                super::Database::record_health_check_failure();
                 false
             }
         };
@@ -92,6 +96,25 @@ mod tests {
         let health = pool.health_check().await.unwrap();
         assert!(health.global_healthy);
         assert_eq!(health.loaded_waddle_count, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_health_check_increments_the_failure_counter() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("pool");
+        pool.global_actor().kill();
+        pool.global_actor().wait_for_shutdown().await;
+
+        let health = pool.health_check().await.expect("health result");
+
+        assert!(!health.global_healthy);
+        assert_eq!(
+            metrics.counter_sum("waddle.db.health_check.failed", &[]),
+            Some(1),
+            "a failed DB health check must export the alertable counter"
+        );
     }
 
     #[tokio::test]

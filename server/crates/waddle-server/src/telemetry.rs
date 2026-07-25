@@ -17,6 +17,8 @@ use opentelemetry_sdk::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
+mod span_noise;
+
 /// The global tracer provider, stored for shutdown.
 static TRACER_PROVIDER: std::sync::OnceLock<SdkTracerProvider> = std::sync::OnceLock::new();
 
@@ -299,8 +301,10 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Build tracer provider with batch processor. The sampler comes
     // from OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG (default
     // parentbased_traceidratio 1.0 — today's sample-everything
-    // behavior, but now operator-tunable from helm values).
-    let sampler = sampler_from_env();
+    // behavior, but now operator-tunable from helm values), wrapped in
+    // the span-noise filter that drops root kameo actor spans, root
+    // health-check spans, and whole-life actor.lifecycle spans (#1438).
+    let sampler = span_noise::SpanNoiseFilter::new(sampler_from_env());
     let tracer_provider = SdkTracerProvider::builder()
         .with_batch_exporter(trace_exporter)
         .with_sampler(sampler)
@@ -335,6 +339,11 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // pod exports 0 instead of no series (the waddle_connected_users
     // alias reads absent otherwise — Qodo review on PR #1426).
     waddle_xmpp::metrics::init_pod_gauges();
+
+    // Register the process start-time/CPU/FD instruments eagerly so a
+    // fresh pod exports its restart signal on the first OTLP push
+    // (#1435).
+    crate::server::process_metrics::init_process_instruments();
 
     // Build OTLP logs exporter + provider. The tracing bridge below
     // feeds every `tracing::{info,warn,error,debug,trace}!` event into
