@@ -214,7 +214,11 @@ impl StanzaRouter {
     /// Route a presence stanza to its destination.
     #[instrument(
         skip(self, presence, _sender_jid),
-        fields(to = tracing::field::Empty, presence_type = ?presence.type_)
+        fields(
+            to = tracing::field::Empty,
+            from = %_sender_jid,
+            presence_type = ?presence.type_
+        )
     )]
     pub async fn route_presence(
         &self,
@@ -313,7 +317,10 @@ impl StanzaRouter {
     }
 
     /// Route an IQ stanza to its destination.
-    #[instrument(skip(self, iq, sender_jid), fields(to = tracing::field::Empty))]
+    #[instrument(
+        skip(self, iq, sender_jid),
+        fields(to = tracing::field::Empty, from = %sender_jid)
+    )]
     pub async fn route_iq(&self, iq: Iq, sender_jid: &FullJid) -> Result<RoutingResult, XmppError> {
         let to_jid = match iq.to() {
             Some(jid) => {

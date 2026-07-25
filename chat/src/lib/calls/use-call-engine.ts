@@ -343,15 +343,16 @@ async function sampleAudioTrackMediaPath(
  * ICE path is a property of the connection, not of a track.
  * `getRTCStatsReport()` rejects mid-teardown, so a failure drops this pass.
  */
-async function sampleIcePath(): Promise<void> {
+async function sampleIcePath(): Promise<unknown[] | null> {
   const track = localTracks.value[0] ?? remoteTracks.value[0];
-  if (!track) return;
+  if (!track) return null;
   try {
     const report = await track.track.getRTCStatsReport();
-    if (!report) return;
-    callIceBeacon.observe(iceStatsEntries(report));
+    if (!report) return null;
+    return iceStatsEntries(report);
   } catch {
     // Telemetry must never be the reason a call misbehaves.
+    return null;
   }
 }
 
@@ -362,7 +363,7 @@ async function sampleMediaPaths(generation: number): Promise<void> {
   if (mediaPathSampling) return;
   mediaPathSampling = true;
   try {
-    const [, videoSnapshots, audioResults] = await Promise.all([
+    const [iceEntries, videoSnapshots, audioResults] = await Promise.all([
       sampleIcePath(),
       Promise.all([
         ...localTracks.value
@@ -387,6 +388,9 @@ async function sampleMediaPaths(generation: number): Promise<void> {
     // to a torn-down call and must not observe into the (reset) beacon or seed
     // the next call's bitrate samples.
     if (generation !== mediaPathGeneration) return;
+    // Observed only after the generation check: a pass that outlived the
+    // call must not poison the (reset) ICE beacon for the next call.
+    if (iceEntries) callIceBeacon.observe(iceEntries);
     for (const result of videoSnapshots) {
       if (!result) continue;
       observeCallStats({ rttMs: result.rttMs, packetLossPct: result.packetLossPct });

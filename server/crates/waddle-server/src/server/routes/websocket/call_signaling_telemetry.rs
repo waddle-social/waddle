@@ -51,7 +51,11 @@ fn setup_failure_reason(reason: SfuDenialReason) -> CallSetupFailureReason {
         SfuDenialReason::MembershipDenied => CallSetupFailureReason::MembershipDenied,
         SfuDenialReason::RoomNotFound => CallSetupFailureReason::RoomNotFound,
         SfuDenialReason::NotAuthorized => CallSetupFailureReason::NotAuthorized,
-        SfuDenialReason::InternalError => CallSetupFailureReason::TokenMintFailed,
+        // The gate's internal errors are room-registry/actor faults hit
+        // during the membership check — the SFU was never contacted, so
+        // labelling them `token_mint_failed` would point on-call at
+        // LiveKit credentials during a MUC-registry incident.
+        SfuDenialReason::InternalError => CallSetupFailureReason::MembershipCheckFailed,
     }
 }
 

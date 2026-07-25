@@ -102,7 +102,15 @@ impl RelayTraceContext {
     }
 
     fn from_context(cx: &opentelemetry::Context) -> Self {
-        if !cx.span().span_context().is_valid() {
+        // An unsampled sender must NOT be propagated: a span the
+        // `SpanNoiseFilter` dropped still has a *valid* SpanContext
+        // (flags 00), and a remote-unsampled parent makes the receiving
+        // node's `ParentBased` delegate drop `clustering.relay.dispatch`
+        // and everything under it — undoing #1483 for exactly the
+        // suppressed-sender traffic it protects. Falling back to the
+        // empty context keeps the receiver's `parent: None` root.
+        let span_context = cx.span().span_context().clone();
+        if !span_context.is_valid() || !span_context.is_sampled() {
             return Self::default();
         }
         let mut carrier = RelayTraceCarrier::default();
@@ -127,7 +135,9 @@ impl RelayTraceContext {
     }
 
     /// The extracted remote parent context, or `None` when absent, out of
-    /// bounds, or unparsable.
+    /// bounds, unparsable, or unsampled (a peer running a build without
+    /// the sampled-only send gate can still stamp flags `00` during a
+    /// rolling deploy; parenting on it would drop the dispatch span).
     fn remote_parent(&self) -> Option<opentelemetry::Context> {
         let traceparent = self.traceparent.as_ref()?;
         if traceparent.0.len() > MAX_TRACEPARENT_LEN {
@@ -142,7 +152,10 @@ impl RelayTraceContext {
                 .map(|state| state.0.clone()),
         };
         let cx = propagator().extract(&carrier);
-        cx.span().span_context().is_valid().then_some(cx)
+        {
+            let span_context = cx.span().span_context().clone();
+            (span_context.is_valid() && span_context.is_sampled()).then_some(cx)
+        }
     }
 }
 
@@ -209,6 +222,46 @@ mod tests {
             true,
             TraceState::default(),
         ))
+    }
+
+    fn unsampled_remote_context(trace_id: u128, span_id: u64) -> opentelemetry::Context {
+        opentelemetry::Context::new().with_remote_span_context(SpanContext::new(
+            TraceId::from(trace_id),
+            SpanId::from(span_id),
+            TraceFlags::default(),
+            true,
+            TraceState::default(),
+        ))
+    }
+
+    /// A sender span the `SpanNoiseFilter` dropped still has a valid
+    /// SpanContext with flags 00; propagating it would make the
+    /// receiver's ParentBased delegate drop `clustering.relay.dispatch`
+    /// (adversarial-review finding on #1485).
+    #[test]
+    fn an_unsampled_sender_context_is_not_captured() {
+        let captured =
+            RelayTraceContext::from_context(&unsampled_remote_context(0xdead_beef, 0x0bad_cafe));
+        assert_eq!(captured, RelayTraceContext::default());
+        assert!(captured.remote_parent().is_none());
+    }
+
+    /// Rolling-deploy hardening: a peer without the sampled-only send
+    /// gate can still stamp a flags-00 traceparent; the receiver must
+    /// keep its `parent: None` root rather than parent on it.
+    #[test]
+    fn an_unsampled_traceparent_from_the_wire_falls_back_to_no_parent() {
+        let stale_peer = RelayTraceContext {
+            traceparent: TraceParentHeader::new(
+                "00-123456789abcdef011223344556677ff-00ff00ff00ff00ff-00".to_string(),
+            ),
+            tracestate: None,
+        };
+        assert!(
+            stale_peer.traceparent.is_some(),
+            "header itself is well-formed"
+        );
+        assert!(stale_peer.remote_parent().is_none());
     }
 
     #[test]

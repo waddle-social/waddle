@@ -10,7 +10,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "waddle_process_resident_memory_bytes_By",
+          "expr": "waddle_process_resident_memory_bytes",
           "legendFormat": "{{service_instance_id}}"
         }
       ],

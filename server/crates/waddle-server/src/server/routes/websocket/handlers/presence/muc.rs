@@ -760,8 +760,40 @@ fn deny_join_admission(
     managed_channel_confirmed: bool,
     denial: JoinAdmissionDenial,
 ) -> Vec<String> {
+    record_join_admission_denial(
+        room_jid,
+        sender_jid,
+        nick,
+        managed_channel_confirmed,
+        &denial,
+    );
+    vec![build_muc_presence_error_xml(
+        room_jid,
+        nick,
+        sender_jid,
+        StanzaError::new(
+            denial.error_type,
+            denial.condition.to_xmpp(),
+            "en",
+            denial.message,
+        ),
+    )]
+}
+
+/// The telemetry half of [`deny_join_admission`], for the denial sites
+/// whose wire frame is not the plain presence error the choke point
+/// builds (e.g. the nick-collision `<conflict/>` frame with its status
+/// codes) — those record here and return their own frame, so the
+/// counter and disposition log still cover every join denial (#1440).
+fn record_join_admission_denial(
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: &str,
+    managed_channel_confirmed: bool,
+    denial: &JoinAdmissionDenial,
+) {
     record_stanza_error_condition(denial.condition);
-    if let Some(description) = internal_join_failure_description(&denial) {
+    if let Some(description) = internal_join_failure_description(denial) {
         crate::telemetry::mark_span_error(description);
     }
     info!(
@@ -784,17 +816,6 @@ fn deny_join_admission(
         denial.condition,
         denial.deny_reason,
     );
-    vec![build_muc_presence_error_xml(
-        room_jid,
-        nick,
-        sender_jid,
-        StanzaError::new(
-            denial.error_type,
-            denial.condition.to_xmpp(),
-            "en",
-            denial.message,
-        ),
-    )]
 }
 
 async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'_>) -> Vec<String> {
@@ -1079,17 +1100,21 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     .await
                     .unwrap_or(false)
                 {
-                    return vec![build_muc_presence_error_xml(
+                    return deny_join_admission(
                         room_jid,
-                        &nick,
                         sender_jid,
-                        StanzaError::new(
-                            ErrorType::Cancel,
-                            DefinedCondition::NotAllowed,
-                            "en",
-                            "Creating new MUC rooms is not permitted for this account.",
-                        ),
-                    )];
+                        &nick,
+                        false,
+                        JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::NotAllowed,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomCreationNotPermitted,
+                            error_type: ErrorType::Cancel,
+                            resolver_outcome,
+                            message: "Creating new MUC rooms is not permitted for this account.",
+                        },
+                    );
                 }
 
                 let config = managed_channel
@@ -1347,11 +1372,23 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     )
                 );
                 if nick_collision {
-                    warn!(
-                        room = %room_jid,
-                        nick = %nick,
-                        sender = %sender_jid,
-                        "MUC nick collision; returning conflict"
+                    // The conflict frame carries XEP-0045 §7.2.9 specifics the
+                    // plain choke-point frame does not, so only the telemetry
+                    // half is shared.
+                    record_join_admission_denial(
+                        room_jid,
+                        sender_jid,
+                        &nick,
+                        managed_channel.is_some(),
+                        &JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Conflict,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::NickConflict,
+                            error_type: ErrorType::Cancel,
+                            resolver_outcome,
+                            message: "Nickname is already in use in this room.",
+                        },
                     );
                     return vec![build_muc_conflict_presence_xml(room_jid, &nick, sender_jid)];
                 }
@@ -1373,17 +1410,21 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         sender = %sender_jid,
                         "MUC join under second nick refused (nicknames locked)"
                     );
-                    return vec![build_muc_presence_error_xml(
+                    return deny_join_admission(
                         room_jid,
-                        &nick,
                         sender_jid,
-                        StanzaError::new(
-                            ErrorType::Cancel,
-                            DefinedCondition::NotAcceptable,
-                            "en",
-                            "You are already in this room under a different nickname.",
-                        ),
-                    )];
+                        &nick,
+                        managed_channel.is_some(),
+                        JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::NotAcceptable,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::NickLocked,
+                            error_type: ErrorType::Cancel,
+                            resolver_outcome,
+                            message: "You are already in this room under a different nickname.",
+                        },
+                    );
                 }
                 if let kameo::error::SendError::HandlerError(
                     waddle_xmpp::muc::room_actor::RoomActorError::StaleAdmissionRevision,

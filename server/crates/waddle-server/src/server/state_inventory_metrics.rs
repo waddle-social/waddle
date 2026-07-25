@@ -50,7 +50,7 @@ fn rss_gauge() -> &'static Gauge<i64> {
     static G: OnceLock<Gauge<i64>> = OnceLock::new();
     G.get_or_init(|| {
         meter()
-            .i64_gauge("waddle.process.resident_memory_bytes")
+            .i64_gauge("waddle.process.resident_memory")
             .with_description(
                 "Server process resident set size, sampled from /proc/self/statm \
                  on each state-inventory publisher tick. Plot against \
@@ -260,7 +260,7 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
             // silently leaving the RSS panel empty.
             warn!(
                 target_os = std::env::consts::OS,
-                "state-inventory publisher: RSS sample unavailable; skipping waddle.process.resident_memory_bytes"
+                "state-inventory publisher: RSS sample unavailable; skipping waddle.process.resident_memory"
             );
         }
     }
@@ -369,6 +369,30 @@ mod tests {
         assert_eq!(
             exported, expected,
             "every state-inventory gauge must be pinned in EXPECTED"
+        );
+    }
+
+    /// The RSS gauge publishes only where /proc is available, so it is
+    /// pinned by direct record rather than through `publish_once`: the
+    /// name must not embed its unit (#1437) and the unit must be UCUM
+    /// `By` — the OTLP-normalized series is
+    /// `waddle_process_resident_memory_bytes`.
+    #[tokio::test]
+    async fn process_rss_gauge_name_and_unit_are_pinned() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        rss_gauge().record(0, &[]);
+        assert_eq!(
+            metrics
+                .metric_unit("waddle.process.resident_memory")
+                .as_deref(),
+            Some("By")
+        );
+        assert!(
+            !metrics
+                .metric_names()
+                .iter()
+                .any(|name| name == "waddle.process.resident_memory_bytes"),
+            "the RSS gauge name must not embed its unit"
         );
     }
 

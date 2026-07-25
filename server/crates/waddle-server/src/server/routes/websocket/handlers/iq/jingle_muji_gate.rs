@@ -80,20 +80,31 @@ pub(super) async fn verify_muji_jingle_request(
     let Some(muji_elem) = find_muji(payload) else {
         return GateOutcome::Allow;
     };
+    // A wire-shape rejection of a `session-initiate` is still a complete
+    // call-setup attempt for the #1452 SLI: the gate short-circuits IQ
+    // dispatch, so the Jingle handler's own attempt tracker never opens.
+    // The action attribute is read directly because these branches fire
+    // before (or because) the full `<jingle/>` parse is possible.
+    let is_session_initiate = payload.attr("action") == Some("session-initiate");
+    let reject_wire_shape = |description: &'static str| {
+        if is_session_initiate {
+            waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                waddle_xmpp::telemetry::attributes::CallSetupFailureReason::BadRequest,
+            );
+        }
+        GateOutcome::Deny(Box::new(bad_request_iq_error(description)))
+    };
+
     // Parse the Muji shape so we can read the room JID. Failure
     // here is a wire-shape error returned as `<bad-request/>`.
     let muji = match Muji::try_from(muji_elem) {
         Ok(m) => m,
         Err(_) => {
-            return GateOutcome::Deny(Box::new(bad_request_iq_error(
-                "Muji <muji/> child inside <jingle/> failed to parse",
-            )));
+            return reject_wire_shape("Muji <muji/> child inside <jingle/> failed to parse");
         }
     };
     let Some(room_jid) = muji.room else {
-        return GateOutcome::Deny(Box::new(bad_request_iq_error(
-            "Muji <muji/> inside <jingle/> requires the 'room' attribute",
-        )));
+        return reject_wire_shape("Muji <muji/> inside <jingle/> requires the 'room' attribute");
     };
 
     // Parse the surrounding Jingle to extract the action — we only
@@ -101,7 +112,7 @@ pub(super) async fn verify_muji_jingle_request(
     let jingle = match Jingle::try_from(payload.clone()) {
         Ok(j) => j,
         Err(_) => {
-            return GateOutcome::Deny(Box::new(bad_request_iq_error("malformed <jingle/> stanza")));
+            return reject_wire_shape("malformed <jingle/> stanza");
         }
     };
     let user = full_jid.to_bare();

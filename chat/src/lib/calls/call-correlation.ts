@@ -58,6 +58,10 @@ export async function deriveCallCorrelationId(roomName: string): Promise<string>
  */
 let currentCallCorrelationId: string = UNKNOWN_CALL_CORRELATION_ID;
 
+/** Bumped on every adopt/clear so a digest that settles after the call
+ *  ended (or after a newer call adopted) cannot re-arm a stale id. */
+let correlationEpoch = 0;
+
 /** Read the correlation id to stamp onto call-scoped telemetry. */
 export function callCorrelationId(): string {
   return currentCallCorrelationId;
@@ -69,13 +73,16 @@ export function callCorrelationId(): string {
  * production callers may fire-and-forget.
  */
 export async function adoptCallCorrelationId(roomName: string): Promise<string> {
+  correlationEpoch += 1;
+  const epoch = correlationEpoch;
   const id = await deriveCallCorrelationId(roomName);
-  currentCallCorrelationId = id;
+  if (epoch === correlationEpoch) currentCallCorrelationId = id;
   return id;
 }
 
 /** Drop the correlation id when the call ends, so a later event that
  *  escapes the call scope cannot be attributed to the previous call. */
 export function clearCallCorrelationId(): void {
+  correlationEpoch += 1;
   currentCallCorrelationId = UNKNOWN_CALL_CORRELATION_ID;
 }

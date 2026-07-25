@@ -1192,8 +1192,15 @@ export function reportSendEnqueued(payload: {
  * Last reported depth per kind. Queue mutations report *both* kinds on every
  * change, so without this the untouched kind (usually a 0/0 reading) ships a
  * multi-kilobyte Faro beacon per send (#1443).
+ *
+ * Unchanged *non-zero* readings still re-emit once per minute: the
+ * client-experience dashboard reads the series through a short
+ * `max_over_time` window, and a permanently stuck queue must stay visible
+ * there rather than fading to no-data after its last transition.
  */
-const lastQueueDepth = new Map<MessageKind, string>();
+const lastQueueDepth = new Map<MessageKind, { reading: string; at: number }>();
+
+const QUEUE_DEPTH_REEMIT_MS = 60_000;
 
 export function reportQueueDepthChange(payload: {
   kind: MessageKind;
@@ -1202,8 +1209,11 @@ export function reportQueueDepthChange(payload: {
 }): void {
   if (!faro) return;
   const reading = `${payload.persisted}/${payload.inflight}`;
-  if (lastQueueDepth.get(payload.kind) === reading) return;
-  lastQueueDepth.set(payload.kind, reading);
+  const prior = lastQueueDepth.get(payload.kind);
+  const stuckNonZero =
+    reading !== "0/0" && prior !== undefined && Date.now() - prior.at >= QUEUE_DEPTH_REEMIT_MS;
+  if (prior?.reading === reading && !stuckNonZero) return;
+  lastQueueDepth.set(payload.kind, { reading, at: Date.now() });
   faro.api.pushMeasurement({
     type: "chat.xmpp.queue.depth",
     values: {

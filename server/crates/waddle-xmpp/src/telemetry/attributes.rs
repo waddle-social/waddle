@@ -532,12 +532,16 @@ pub enum CallSetupFailureReason {
     FederationUnsupported,
     /// The SFU refused or failed to mint the join token.
     TokenMintFailed,
+    /// The server-side membership check itself failed (room-registry
+    /// lookup or room-actor ask error) before the SFU was ever
+    /// contacted.
+    MembershipCheckFailed,
 }
 
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -546,6 +550,7 @@ impl CallSetupFailureReason {
         Self::UnsupportedTransport,
         Self::FederationUnsupported,
         Self::TokenMintFailed,
+        Self::MembershipCheckFailed,
     ];
 }
 
@@ -564,6 +569,7 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::UnsupportedTransport => "unsupported_transport",
             Self::FederationUnsupported => "federation_unsupported",
             Self::TokenMintFailed => "token_mint_failed",
+            Self::MembershipCheckFailed => "membership_check_failed",
         }
     }
 }
@@ -800,6 +806,13 @@ pub enum MucJoinDenyReason {
     /// The room actor refused the join with an otherwise unclassified
     /// error (typed fail-safe).
     RoomActorError,
+    /// The room does not exist and the joiner may not create rooms.
+    RoomCreationNotPermitted,
+    /// The requested nickname is already in use by another occupant.
+    NickConflict,
+    /// The session is already in the room under a different nickname
+    /// (XEP-0045 §7.6, nicknames locked to identity).
+    NickLocked,
 }
 
 impl sealed::Sealed for MucJoinDenyReason {}
@@ -828,6 +841,9 @@ impl MetricAttribute for MucJoinDenyReason {
             Self::RoomMembersOnly => "room_members_only",
             Self::RoomFull => "room_full",
             Self::RoomActorError => "room_actor_error",
+            Self::RoomCreationNotPermitted => "room_creation_not_permitted",
+            Self::NickConflict => "nick_conflict",
+            Self::NickLocked => "nick_locked",
         }
     }
 }

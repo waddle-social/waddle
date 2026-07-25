@@ -36,7 +36,10 @@ export type IcePathClass = "relay" | "direct" | "unknown";
  * `not-gathered` means the client has no fallback path — the interesting
  * failure mode, since it only bites when the direct path also fails.
  */
-type TurnReachability = "gathered" | "not-gathered";
+/** `"unknown"` means the report carried no local-candidate entries at all
+ * (gathering not started, or a mid-reconnect report) — distinct from the
+ * alert-worthy "gathering ran and produced no relay candidate". */
+type TurnReachability = "gathered" | "not-gathered" | "unknown";
 
 /** Coarse, low-cardinality bucket over the ICE restart count. */
 export type IceRestartBucket = "none" | "once" | "few" | "many";
@@ -145,6 +148,7 @@ export function summarizeIceStats(
   const byId = new Map<string, IceStatLike>();
   let selectedPairId: string | undefined;
   let relayGathered = false;
+  let localCandidatesSeen = false;
 
   for (const raw of report) {
     // Browsers ship partial, version-skewed `RTCStats` dictionaries; the
@@ -156,8 +160,9 @@ export function summarizeIceStats(
       selectedPairId = stat.selectedCandidatePairId;
     } else if (stat.type === "candidate-pair") {
       pairs.push(stat);
-    } else if (stat.type === "local-candidate" && stat.candidateType === "relay") {
-      relayGathered = true;
+    } else if (stat.type === "local-candidate") {
+      localCandidatesSeen = true;
+      if (stat.candidateType === "relay") relayGathered = true;
     }
   }
 
@@ -173,7 +178,11 @@ export function summarizeIceStats(
     pathClass: icePathClass(candidateType),
     candidateType,
     transport: normalizeTransport(rawTransport),
-    turnReachability: relayGathered ? "gathered" : "not-gathered",
+    turnReachability: relayGathered
+      ? "gathered"
+      : localCandidatesSeen
+        ? "not-gathered"
+        : "unknown",
     restartBucket: iceRestartBucket(restartCount),
   };
 }
@@ -250,6 +259,9 @@ export function createCallIceBeacon(
     },
     observe(statsReport) {
       const snapshot = summarizeIceStats(statsReport, restarts);
+      // A report with no path and no candidate data measured nothing —
+      // beaconing it would ship a false "no TURN" signal mid-gathering.
+      if (snapshot.pathClass === "unknown" && snapshot.turnReachability === "unknown") return;
       if (seen.some((prior) => sameIceSnapshot(prior, snapshot))) return;
       seen.push(snapshot);
       report(snapshot);

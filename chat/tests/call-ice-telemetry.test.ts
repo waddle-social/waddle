@@ -86,7 +86,9 @@ describe("summarizeIceStats", () => {
       pathClass: "unknown",
       candidateType: null,
       transport: null,
-      turnReachability: "not-gathered",
+      // No local-candidate entries were present at all, so TURN
+      // reachability is unknowable — not the alertable "not-gathered".
+      turnReachability: "unknown",
       restartBucket: "none",
     });
   });
@@ -166,6 +168,19 @@ describe("callIceEventAttributes", () => {
 });
 
 describe("createCallIceBeacon", () => {
+  test("a report that measured nothing is not beaconed", () => {
+    const seen: CallIceSnapshot[] = [];
+    const beacon = createCallIceBeacon((snapshot) => seen.push(snapshot));
+
+    // Pre-gathering / mid-reconnect: no pair, no local candidates. A
+    // beacon here would ship a false "no TURN path" signal.
+    beacon.observe([]);
+    expect(seen).toHaveLength(0);
+
+    beacon.observe(DIRECT_WITH_TURN_AVAILABLE);
+    expect(seen).toHaveLength(1);
+  });
+
   test("beacons each distinct ICE state at most once per call", () => {
     const seen: CallIceSnapshot[] = [];
     const beacon = createCallIceBeacon((snapshot) => seen.push(snapshot));
