@@ -14,16 +14,16 @@ groups:
     - name: waddle-clustering
       rules:
         - alert: ClusterHeartbeatStale
-          expr: max(waddle_clustering_node_heartbeat_age_ms_milliseconds or waddle_clustering_node_heartbeat_age_ms_ms or waddle_clustering_node_heartbeat_age_ms) > 60000
+          expr: max(waddle_clustering_node_heartbeat_age_milliseconds or waddle_clustering_node_heartbeat_age) > 60000
           for: 5m
           labels:
             severity: critical
             team: waddle
           annotations:
-            runbook: Identify the stale node via the per-pod series, check its pod and Postgres lease writes. Node-death scenarios (claim leaks, orphaned sessions) follow if this persists. The instrument is `waddle.clustering.node_heartbeat_age_ms` (unit ms); the expression ORs the plausible OTLP-exported spellings — after verifying the live series name in Grafana, prune to the real one. Caveat - the gauge is self-reported, so a fully dead node goes stale rather than large; ScrapeAbsent is the backstop for that case.
+            runbook: Identify the stale node via the per-pod series, check its pod and Postgres lease writes. Node-death scenarios (claim leaks, orphaned sessions) follow if this persists. The instrument is `waddle.clustering.node_heartbeat_age` (unit ms, no unit in the name — #1437); the expression ORs the two plausible OTLP-exported spellings (with and without the translated `_milliseconds` suffix) — after verifying the live series name in Grafana, prune to the real one. Caveat - the gauge is self-reported, so a fully dead node goes stale rather than large; ScrapeAbsent is the backstop for that case.
             summary: A cluster node heartbeat is older than 60s (healthy steady-state is ~10s) — node death or lease-write stall.
         - alert: ClusterHeartbeatMissing
-          expr: absent(waddle_clustering_node_heartbeat_age_ms_milliseconds) and absent(waddle_clustering_node_heartbeat_age_ms_ms) and absent(waddle_clustering_node_heartbeat_age_ms)
+          expr: absent(waddle_clustering_node_heartbeat_age_milliseconds) and absent(waddle_clustering_node_heartbeat_age)
           for: 15m
           labels:
             severity: warning
