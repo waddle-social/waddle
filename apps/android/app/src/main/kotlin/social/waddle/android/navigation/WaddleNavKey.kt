@@ -47,4 +47,8 @@ sealed interface WaddleNavKey : NavKey {
     /** Community-admin users list (owner-gated settings entry). */
     @Serializable
     data object CommunityUsers : WaddleNavKey
+
+    /** XEP-0472 community surface (Feed tab; Events join later). */
+    @Serializable
+    data object Community : WaddleNavKey
 }

@@ -8,6 +8,7 @@ import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
 import social.waddle.android.feature.admin.CommunityUsersScreen
 import social.waddle.android.feature.channel.ChannelScreen
+import social.waddle.android.feature.community.CommunityScreen
 import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
@@ -36,8 +37,12 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                         backStack.add(WaddleNavKey.Channel(roomJid = roomJid, name = name))
                     },
                     onOpenDmList = { backStack.add(WaddleNavKey.DmList) },
+                    onOpenCommunity = { backStack.add(WaddleNavKey.Community) },
                     onOpenSettings = { backStack.add(WaddleNavKey.Settings) },
                 )
+            }
+            entry<WaddleNavKey.Community> {
+                CommunityScreen(onBack = { backStack.popSafely() })
             }
             entry<WaddleNavKey.Channel> { key ->
                 ChannelScreen(

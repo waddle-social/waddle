@@ -49,6 +49,7 @@ class CreateChannelDialogTest {
                 HomeScreen(
                     onOpenChannel = { roomJid, name -> openedChannels += roomJid to name },
                     onOpenDmList = {},
+                    onOpenCommunity = {},
                     onOpenSettings = {},
                 )
             }

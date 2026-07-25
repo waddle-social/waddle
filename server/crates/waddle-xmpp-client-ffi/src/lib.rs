@@ -27,6 +27,7 @@ mod profile_verbs;
 mod push;
 mod room_admin;
 mod send_outcome;
+mod social_feed;
 mod stanza;
 mod sticker_verbs;
 mod types;
@@ -53,6 +54,8 @@ mod notify_settings_tests;
 mod profile_verbs_tests;
 #[cfg(test)]
 mod room_admin_tests;
+#[cfg(test)]
+mod social_feed_tests;
 #[cfg(test)]
 mod sticker_verbs_tests;
 

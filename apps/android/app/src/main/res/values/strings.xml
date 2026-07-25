@@ -353,4 +353,18 @@
     <string name="call_roster_muted">Muted</string>
     <string name="call_leave_retained">Leave call</string>
     <string name="home_channel_call_badge">Active call</string>
+    <string name="community_title">Community</string>
+    <string name="community_tab_feed">Feed</string>
+    <string name="community_feed_empty">No posts yet. Share the first update with your community.</string>
+    <string name="community_feed_load_failed">Couldn\'t load the feed. Pull to retry.</string>
+    <string name="community_post_hint">Share an update…</string>
+    <string name="community_post_send">Post to the community feed</string>
+    <string name="community_post_failed">Couldn\'t publish the post.</string>
+    <string name="community_author_unknown">Community member</string>
+    <string name="community_source_mood">Mood update</string>
+    <string name="community_source_activity">Activity</string>
+    <string name="community_source_tune">Now listening</string>
+    <string name="community_source_avatar">New avatar</string>
+    <string name="community_source_vcard">Profile update</string>
+    <string name="community_source_rsvp">Event RSVP</string>
 </resources>

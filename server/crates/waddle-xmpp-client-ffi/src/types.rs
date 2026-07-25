@@ -831,6 +831,41 @@ pub struct WaddleStickerRef {
     pub pack_node: Option<String>,
 }
 
+// ── Community social feed (XEP-0472) ─────────────────────────────────────────
+
+/// PEP-bridge source kind on a bridged community feed entry
+/// (`<source xmlns='urn:waddle:feed-source:0' kind='…'/>`). Mirrors
+/// `waddle_xmpp_client::social_feed::FeedSourceKind` 1:1; unknown wire
+/// kinds never cross the FFI (they parse to no source).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleFeedSourceKind {
+    Mood,
+    Activity,
+    Tune,
+    Avatar,
+    Vcard,
+    Rsvp,
+}
+
+/// One XEP-0472 community feed entry: the typed Atom `<entry/>` from
+/// the `urn:xmpp:pubsub-social-feed:1` node on `community.<domain>`.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleFeedEntry {
+    /// Pubsub item id (`post-<uuid>` for manual posts).
+    pub id: String,
+    pub title: Option<String>,
+    pub body: String,
+    /// Author bare JID (Atom `<author><uri>xmpp:…</uri></author>`,
+    /// stamped by the server on member posts) or display name.
+    pub author: Option<String>,
+    /// Atom `<published/>` as unix millis (inbox `last_updated`
+    /// precedent).
+    pub published_epoch_ms: Option<i64>,
+    pub link: Option<String>,
+    /// PEP-bridge source kind; `None` on manual posts.
+    pub source: Option<WaddleFeedSourceKind>,
+}
+
 /// Options bag attached to an outbound chat or groupchat send.
 #[derive(uniffi::Record, Clone, Default)]
 pub struct WaddleSendOptions {

@@ -313,8 +313,8 @@ class XmppSessionManagerCatchupTest {
         runCurrent()
 
         val client = harness.factory.clients.single()
-        assertEquals(1, client.fetchUserBookmarksCalls)
-        assertEquals(1, client.fetchDmBookmarksCalls)
+        assertEquals(1, client.bookmarks.fetchUserBookmarksCalls)
+        assertEquals(1, client.bookmarks.fetchDmBookmarksCalls)
         harness.manager.logout()
     }
 
@@ -323,7 +323,7 @@ class XmppSessionManagerCatchupTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.clients.single().dmBookmarks = listOf(
+        harness.factory.clients.single().bookmarks.dmBookmarks = listOf(
             WaddleDmBookmarkItem(
                 jid = "bob@waddle.test",
                 notifyMode = WaddleNotifyMode.NEVER,
@@ -353,7 +353,7 @@ class XmppSessionManagerCatchupTest {
         runCurrent()
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
-        assertEquals(1, harness.factory.clients.single().fetchUserBookmarksCalls)
+        assertEquals(1, harness.factory.clients.single().bookmarks.fetchUserBookmarksCalls)
 
         harness.factory.emit(WaddleClientEvent.ResumeStateChanged(testResumeState()))
         runCurrent()
@@ -368,7 +368,7 @@ class XmppSessionManagerCatchupTest {
         assertEquals(
             "resumed session must not refetch bookmarks",
             0,
-            harness.factory.clients.last().fetchUserBookmarksCalls,
+            harness.factory.clients.last().bookmarks.fetchUserBookmarksCalls,
         )
         harness.manager.logout()
     }
@@ -378,7 +378,7 @@ class XmppSessionManagerCatchupTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.clients.single().dmBookmarks = listOf(
+        harness.factory.clients.single().bookmarks.dmBookmarks = listOf(
             WaddleDmBookmarkItem(
                 jid = "bob@waddle.test",
                 notifyMode = WaddleNotifyMode.NEVER,
