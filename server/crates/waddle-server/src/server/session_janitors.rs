@@ -1007,10 +1007,16 @@ mod orphan_sweep_supervision_tests {
         supervisor.shutdown().await;
     }
 
-    /// The worker loops wrap each attempt in an `async` block inside their
-    /// `select!` arms because `select!` evaluates branch expressions
-    /// eagerly — this pins the mechanism: an attempt future the cancel arm
-    /// beats to the first poll must not export a phantom attempt root.
+    /// Documents WHY the worker loops wrap each attempt in an `async`
+    /// block inside their `select!` arms: `select!` evaluates branch
+    /// expressions eagerly, and only the block's lazy body keeps a
+    /// cancel-beaten attempt from exporting a phantom root. This test
+    /// pins that language mechanism on a hand-built future — it does NOT
+    /// guard the three worker select sites themselves (no deterministic
+    /// seam exists: a pre-cancelled token exits the loop before the
+    /// attempt select is ever reached). The load-bearing guard is the
+    /// `async` block + comment at each site; do not "simplify" those
+    /// blocks away.
     #[tokio::test(flavor = "current_thread")]
     async fn dropped_unpolled_attempt_exports_no_phantom_span() {
         use tracing::Instrument;
