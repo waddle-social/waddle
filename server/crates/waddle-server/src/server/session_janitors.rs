@@ -1007,6 +1007,37 @@ mod orphan_sweep_supervision_tests {
         supervisor.shutdown().await;
     }
 
+    /// The worker loops wrap each attempt in an `async` block inside their
+    /// `select!` arms because `select!` evaluates branch expressions
+    /// eagerly — this pins the mechanism: an attempt future the cancel arm
+    /// beats to the first poll must not export a phantom attempt root.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_unpolled_attempt_exports_no_phantom_span() {
+        use tracing::Instrument;
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+
+        let sweep_context = opentelemetry::trace::SpanContext::empty_context();
+        let attempt = async {
+            std::future::ready(())
+                .instrument(orphan_work_span("sm_hydration", &sweep_context))
+                .await
+        };
+        drop(attempt);
+
+        assert_eq!(
+            spans.recorded_field("janitor.orphan_work", "lane"),
+            None,
+            "an attempt future dropped before its first poll must never create a span"
+        );
+        assert!(
+            spans
+                .exported()
+                .iter()
+                .all(|span| span.name != "janitor.orphan_work"),
+            "a dropped-unpolled attempt must not export a phantom root"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn executed_orphan_sweep_records_its_lazy_span() {
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
@@ -1626,17 +1657,24 @@ impl OrphanReaperSupervisor {
                 let Some(work) = queue.pop_front() else {
                     continue;
                 };
+                // The async block defers span creation to first poll:
+                // select! evaluates every branch expression eagerly, and a
+                // cancel-arm win would otherwise export a phantom attempt
+                // root for work that never ran.
                 let result = tokio::select! {
                     _ = hydration_cancel.cancelled() => break,
-                    result = tokio::time::timeout(
-                        ORPHAN_WORK_ATTEMPT_TIMEOUT,
-                        hydration_registry.hydrate_reclaimed_typed(
-                            &work.entity,
-                            &work.fence,
-                            work.reservation,
-                        ),
-                    )
-                    .instrument(orphan_work_span("sm_hydration", &work.sweep_context)) => result,
+                    result = async {
+                        tokio::time::timeout(
+                            ORPHAN_WORK_ATTEMPT_TIMEOUT,
+                            hydration_registry.hydrate_reclaimed_typed(
+                                &work.entity,
+                                &work.fence,
+                                work.reservation,
+                            ),
+                        )
+                        .instrument(orphan_work_span("sm_hydration", &work.sweep_context))
+                        .await
+                    } => result,
                 };
                 match result {
                     Ok(Ok(
@@ -1660,15 +1698,18 @@ impl OrphanReaperSupervisor {
                     )) => {
                         let cleanup = tokio::select! {
                             _ = hydration_cancel.cancelled() => break,
-                            result = tokio::time::timeout(
-                                ORPHAN_WORK_ATTEMPT_TIMEOUT,
-                                hydration_registry.release_reclaimed_claim(
-                                    &work.entity,
-                                    &work.fence,
-                                    work.reservation,
-                                ),
-                            )
-                            .instrument(orphan_work_span("sm_hydration", &work.sweep_context)) => result,
+                            result = async {
+                                tokio::time::timeout(
+                                    ORPHAN_WORK_ATTEMPT_TIMEOUT,
+                                    hydration_registry.release_reclaimed_claim(
+                                        &work.entity,
+                                        &work.fence,
+                                        work.reservation,
+                                    ),
+                                )
+                                .instrument(orphan_work_span("sm_hydration", &work.sweep_context))
+                                .await
+                            } => result,
                         };
                         match cleanup {
                             Ok(Ok(_)) => {
@@ -1761,13 +1802,19 @@ impl OrphanReaperSupervisor {
                 let Some(work) = queue.pop_front() else {
                     continue;
                 };
+                // async block: see the hydration lane — select! would
+                // otherwise create (and export) the span even when the
+                // cancel arm wins before this branch is ever polled.
                 let result = tokio::select! {
                     _ = release_cancel.cancelled() => break,
-                    result = tokio::time::timeout(
-                        ORPHANED_ROOM_RELEASE_TIMEOUT,
-                        work.claim_store.release_exact(&work.entity, &work.owner, work.epoch),
-                    )
-                    .instrument(orphan_work_span("room_release", &work.sweep_context)) => result,
+                    result = async {
+                        tokio::time::timeout(
+                            ORPHANED_ROOM_RELEASE_TIMEOUT,
+                            work.claim_store.release_exact(&work.entity, &work.owner, work.epoch),
+                        )
+                        .instrument(orphan_work_span("room_release", &work.sweep_context))
+                        .await
+                    } => result,
                 };
                 match result {
                     Ok(Ok(_)) => {
@@ -2507,6 +2554,7 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         Option<waddle_xmpp::stream_management::persistence::PersistedSession>,
         waddle_xmpp::stream_management::persistence::SmPersistenceError,
     > {
+        drop(tracing::info_span!("orphan.worker.hydration.test"));
         self.read_started.notify_one();
         std::future::pending().await
     }
@@ -2649,6 +2697,7 @@ impl waddle_xmpp::ownership::ClaimStore for HangingExactReleaseStore {
         _mine: waddle_xmpp::ownership::ClaimEpoch,
     ) -> Result<waddle_xmpp::ownership::ExactReleaseOutcome, waddle_xmpp::ownership::ClaimError>
     {
+        drop(tracing::info_span!("orphan.worker.release.test"));
         self.release_started.notify_one();
         std::future::pending().await
     }
@@ -2738,6 +2787,7 @@ fn assert_linked_orphan_work_attempt(
     spans: &waddle_xmpp::telemetry::test_support::SpanTestGuard,
     sweep_id: opentelemetry::trace::SpanId,
     lane: &str,
+    work_marker: &str,
 ) {
     let exported = spans.exported();
     let attempt = exported
@@ -2761,6 +2811,19 @@ fn assert_linked_orphan_work_attempt(
             .iter()
             .any(|link| link.span_context.span_id() == sweep_id),
         "the attempt must link back to the sweep that enqueued it"
+    );
+    // The marker span the hanging store mints proves the store call ran
+    // INSIDE an attempt span — not merely that an attempt span exists.
+    let marker = exported
+        .iter()
+        .find(|span| span.name == work_marker)
+        .unwrap_or_else(|| panic!("the {work_marker} marker span must export"));
+    assert!(
+        exported
+            .iter()
+            .any(|span| span.name == "janitor.orphan_work"
+                && span.span_context.span_id() == marker.parent_span_id),
+        "the store call must run inside an attempt span"
     );
 }
 
@@ -2804,7 +2867,12 @@ async fn hydration_worker_attempts_link_to_the_enqueuing_sweep() {
     cancel.cancel();
     supervisor.shutdown().await;
 
-    assert_linked_orphan_work_attempt(&spans, sweep_id, "sm_hydration");
+    assert_linked_orphan_work_attempt(
+        &spans,
+        sweep_id,
+        "sm_hydration",
+        "orphan.worker.hydration.test",
+    );
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -3310,7 +3378,12 @@ async fn exact_release_worker_attempts_link_to_the_enqueuing_sweep() {
     cancel.cancel();
     supervisor.shutdown().await;
 
-    assert_linked_orphan_work_attempt(&spans, sweep_id, "room_release");
+    assert_linked_orphan_work_attempt(
+        &spans,
+        sweep_id,
+        "room_release",
+        "orphan.worker.release.test",
+    );
 }
 
 #[cfg(all(test, feature = "clustering"))]
