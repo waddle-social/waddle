@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity};
 
 /// Bound on this node's own wait for a local force-detach to complete when
@@ -59,6 +60,60 @@ const LOCAL_FORCE_DETACH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// kademlia name (O(1) registrations per node, never per entity).
 pub fn relay_name(node_id: &NodeId) -> String {
     format!("waddle-relay/{node_id}")
+}
+
+/// Named root span for one inbound relay dispatch (#1483).
+///
+/// Every substantive `#[kameo::remote_message]` handler on [`RelayActor`]
+/// runs with no active local span (the receive path has no upstream
+/// instrumentation), so the kameo `actor.handle_message` spans its work
+/// mints would root the trace — exactly the shape the #1438 span-noise
+/// sampler drops. Opening this dedicated root before any actor message is
+/// sent keeps the receiving node's half of the delivery traceable: the
+/// actor spans become parented children and survive the sampler. The
+/// sending node's half stays a separate trace — kameo 0.20 remote
+/// messaging carries no W3C trace context, so cross-node causality is
+/// not linked (#1485 tracks propagating context on the relay envelopes).
+///
+/// `otel.kind = "consumer"`: this is the receive side of a cross-node
+/// message, per OTel messaging semantics.
+///
+/// `parent: None` is load-bearing: the handler itself executes inside
+/// kameo's own (suppressed) root `actor.handle_message` span, and a child
+/// of a locally-unsampled parent is dropped by the sampler too — this span
+/// must start a fresh root trace.
+///
+/// The span name is documented in `telemetry::span_noise` and must never
+/// be added to its suppression lists.
+fn relay_dispatch_span(message: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        parent: None,
+        "clustering.relay.dispatch",
+        otel.kind = "consumer",
+        relay.message = message,
+        jid = tracing::field::Empty,
+        stream_id = tracing::field::Empty,
+        channel = tracing::field::Empty,
+        sequence = tracing::field::Empty,
+        origin_node = tracing::field::Empty,
+        entity = tracing::field::Empty,
+    )
+}
+
+/// The single seam through which every delegated relay reply task is
+/// spawned (#1483): binding `ctx.spawn` to the dispatch span here means
+/// a handler cannot delegate work outside its root span without
+/// bypassing this helper — and a test pins that no handler does.
+fn spawn_in_dispatch_span<R, F>(
+    ctx: &mut Context<RelayActor, R>,
+    span: tracing::Span,
+    future: F,
+) -> kameo::reply::DelegatedReply<R::Value>
+where
+    R: Reply + ?Sized,
+    F: std::future::Future<Output = R::Value> + Send + 'static,
+{
+    ctx.spawn(future.instrument(span))
 }
 
 /// Backoff between supervised respawn/re-registration attempts.
@@ -303,10 +358,19 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         msg: RelayDeliverOrdered,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("deliver_ordered");
+        span.record("channel", tracing::field::debug(&msg.envelope.channel));
+        span.record("sequence", msg.envelope.sequence.0);
+        span.record(
+            "origin_node",
+            tracing::field::display(&msg.envelope.asserted_origin_node),
+        );
         let receiver = Arc::clone(&self.ordered_receiver);
         let delivery_bridge = Arc::clone(&self.ordered_delivery_bridge);
+        // The reservation must stay inline (mailbox-ordered); only the
+        // delegated delivery moves onto the instrumented reply task.
         let reservation = receiver.lock().await.reserve(msg.envelope);
-        ctx.spawn(async move {
+        spawn_in_dispatch_span(ctx, span, async move {
             let reply = finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
             record_ordered_relay_reply(&reply);
             reply
@@ -354,8 +418,12 @@ impl Message<RelayRegisterRemoteUserResource> for RelayActor {
         msg: RelayRegisterRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("remote_resource_register");
+        span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move { bridge.register_remote_user_resource_on_owner(msg).await })
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.register_remote_user_resource_on_owner(msg).await
+        })
     }
 }
 
@@ -380,8 +448,12 @@ impl Message<RelayUnregisterRemoteUserResource> for RelayActor {
         msg: RelayUnregisterRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("remote_resource_unregister");
+        span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move { bridge.unregister_remote_user_resource_on_owner(msg).await })
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.unregister_remote_user_resource_on_owner(msg).await
+        })
     }
 }
 
@@ -414,8 +486,12 @@ impl Message<RelayUpdateRemoteUserResource> for RelayActor {
         msg: RelayUpdateRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("remote_resource_update");
+        span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move { bridge.update_remote_user_resource_on_owner(msg).await })
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.update_remote_user_resource_on_owner(msg).await
+        })
     }
 }
 
@@ -448,8 +524,12 @@ impl Message<RelayRemoteUserSideEffect> for RelayActor {
         msg: RelayRemoteUserSideEffect,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("remote_user_side_effect");
+        span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move { bridge.apply_remote_user_side_effect_on_owner(msg).await })
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.apply_remote_user_side_effect_on_owner(msg).await
+        })
     }
 }
 
@@ -476,8 +556,12 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
         msg: RelayRouteRemoteResourceStanza,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("remote_resource_route");
+        span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move { bridge.route_remote_resource_stanza_on_owner(msg).await })
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.route_remote_resource_stanza_on_owner(msg).await
+        })
     }
 }
 
@@ -507,8 +591,12 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
         msg: RelayDeliverRemoteResourceFrame,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("remote_resource_frame");
+        span.record("jid", tracing::field::display(&msg.frame.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move { bridge.deliver_remote_resource_frame_on_socket(msg).await })
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.deliver_remote_resource_frame_on_socket(msg).await
+        })
     }
 }
 
@@ -542,8 +630,10 @@ impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
         msg: RelayForceDetachRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("remote_resource_force_detach");
+        span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move {
+        spawn_in_dispatch_span(ctx, span, async move {
             bridge
                 .force_detach_remote_user_resource_on_socket(msg)
                 .await
@@ -608,8 +698,11 @@ impl Message<RelayResumeSteal> for RelayActor {
         msg: RelayResumeSteal,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let span = relay_dispatch_span("resume_steal");
+        span.record("stream_id", tracing::field::display(&msg.stream_id));
+        span.record("jid", tracing::field::display(&msg.requester_bare_jid));
         let resume_bridge = Arc::clone(&self.resume_bridge);
-        ctx.spawn(async move {
+        spawn_in_dispatch_span(ctx, span, async move {
             match resume_bridge
                 .request_forced_detach(
                     &msg.stream_id,
@@ -666,8 +759,14 @@ impl Message<Demote> for RelayActor {
     type Reply = DemoteReply;
 
     async fn handle(&mut self, msg: Demote, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.room_local_claims.demote(&msg.entity).await;
-        DemoteReply::Acked
+        let span = relay_dispatch_span("demote");
+        span.record("entity", tracing::field::debug(&msg.entity));
+        async {
+            self.room_local_claims.demote(&msg.entity).await;
+            DemoteReply::Acked
+        }
+        .instrument(span)
+        .await
     }
 }
 
@@ -1083,7 +1182,7 @@ impl RelayHandle {
                 None => {
                     return Err(RelayAskError::NotFound {
                         node_id: self.node_id.clone(),
-                    })
+                    });
                 }
             }
         }
@@ -2227,5 +2326,137 @@ mod tests {
             .expect("resume-steal task did not panic")
             .expect("resume-steal ask succeeds");
         assert_eq!(resume_steal_reply, RelayResumeStealReply::Detached);
+    }
+
+    fn spawn_test_relay_actor() -> kameo::actor::ActorRef<RelayActor> {
+        use kameo::actor::Spawn;
+        let resume_bridge = ResumeStealBridge::new();
+        resume_bridge.wire(Arc::new(waddle_xmpp::registry::ConnectionRegistry::new()));
+        RelayActor::spawn(RelayActor::new(
+            NodeId::new("span-test-node".to_string()),
+            false,
+            resume_bridge,
+            RoomLocalClaims::new(),
+            OrderedRelayDeliveryBridge::new(
+                CancellationToken::new(),
+                &crate::config::ClusteringMessagingConfig::default(),
+            ),
+        ))
+    }
+
+    /// #1483: an inbound relay ask handled inline (no delegated reply) must
+    /// open the named `clustering.relay.dispatch` root span, so the actor
+    /// work it triggers is parented and survives the #1438 span-noise
+    /// sampler.
+    #[tokio::test(flavor = "current_thread")]
+    async fn inline_relay_ask_records_the_dispatch_span() {
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let actor_ref = spawn_test_relay_actor();
+
+        let reply = actor_ref
+            .ask(Demote {
+                entity: Entity::new(EntityType::RoomActor, "room@muc.example.com".to_string()),
+                new_epoch: ClaimEpoch(7),
+            })
+            .await
+            .expect("demote ask succeeds");
+        assert_eq!(reply, DemoteReply::Acked);
+
+        assert_eq!(
+            spans
+                .recorded_field("clustering.relay.dispatch", "relay.message")
+                .as_deref(),
+            Some("demote"),
+            "demote handling must run under the named relay dispatch root span"
+        );
+    }
+
+    /// #1483: a delegated-reply relay ask must carry the named dispatch span
+    /// onto the spawned reply task, so the whole delivery — not just the
+    /// mailbox slice — is covered by the root span.
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegated_relay_ask_records_the_dispatch_span() {
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let actor_ref = spawn_test_relay_actor();
+
+        // No live local connection for the stream: the delegated task
+        // resolves quickly with NotLiveLocally.
+        let reply = actor_ref
+            .ask(RelayResumeSteal {
+                stream_id: waddle_xmpp::pending_delivery::SmSessionId::new("span-test-stream"),
+                requester_bare_jid: "alice@example.com".parse().expect("valid bare jid"),
+            })
+            .await
+            .expect("resume-steal ask succeeds");
+        assert_eq!(reply, RelayResumeStealReply::NotLiveLocally);
+
+        assert_eq!(
+            spans
+                .recorded_field("clustering.relay.dispatch", "relay.message")
+                .as_deref(),
+            Some("resume_steal"),
+            "resume-steal handling must run under the named relay dispatch root span"
+        );
+        assert_eq!(
+            spans
+                .recorded_field("clustering.relay.dispatch", "stream_id")
+                .as_deref(),
+            Some("span-test-stream"),
+            "the dispatch span must carry the stream id"
+        );
+    }
+
+    /// #1483: `parent: None` is the load-bearing property — the handlers
+    /// run inside kameo's own suppressed root `actor.handle_message` span,
+    /// and a child of a locally-unsampled parent is dropped by the #1438
+    /// sampler too. Pin that the production constructor starts a fresh
+    /// root even when a span is active.
+    #[tokio::test(flavor = "current_thread")]
+    async fn relay_dispatch_span_is_a_root_even_inside_an_active_span() {
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let outer = tracing::info_span!("actor.handle_message");
+        let dispatch = outer.in_scope(|| relay_dispatch_span("root_check"));
+        drop(dispatch);
+        drop(outer);
+
+        let exported = spans.exported();
+        let dispatch = exported
+            .iter()
+            .find(|span| span.name == "clustering.relay.dispatch")
+            .expect("dispatch span must export");
+        assert_eq!(
+            dispatch.parent_span_id,
+            opentelemetry::trace::SpanId::INVALID,
+            "the dispatch span must root a fresh trace, not inherit the \
+             active (suppressed) actor span as its parent"
+        );
+    }
+
+    /// #1483 guard: every delegated relay reply must be spawned through
+    /// `spawn_in_dispatch_span`, the one seam that binds the reply task
+    /// to its dispatch span. A direct `ctx.spawn` in a handler would run
+    /// the delivery — where the actor messages happen — outside the root
+    /// span, silently restoring the #1438 trace loss, and the
+    /// field-recording tests above cannot catch that (the span still
+    /// records its fields at creation). Comment lines are skipped; no
+    /// parsing beyond that is needed, so string/paren contents cannot
+    /// cause false failures.
+    #[test]
+    fn delegated_relay_replies_go_through_the_dispatch_span_helper() {
+        let source = include_str!("relay.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first segment");
+        let direct_spawns = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains("ctx.spawn("))
+            .count();
+        assert_eq!(
+            direct_spawns, 1,
+            "ctx.spawn must appear exactly once — inside spawn_in_dispatch_span; \
+             route new delegated replies through that helper"
+        );
     }
 }

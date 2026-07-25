@@ -13,6 +13,29 @@
 //! whole noise trace: the filter drops every span under an unsampled
 //! parent itself, so no orphaned child spans reach Tempo no matter
 //! which `OTEL_TRACES_SAMPLER` the operator dials.
+//!
+//! # Dedicated root spans (#1483)
+//!
+//! Dispatch paths that do real work with no upstream span open a named
+//! root of their own so their `actor.handle_message` children are
+//! parented and survive this filter. These names are load-bearing and
+//! MUST NEVER be added to the suppression lists below:
+//!
+//! - `clustering.relay.dispatch` — one per inbound clustering relay
+//!   message (`clustering::relay::relay_dispatch_span`); covers
+//!   remote-relayed stanza delivery, cross-node resume steals, and
+//!   remote-resource bookkeeping.
+//! - `janitor.sweep` — one per janitor sweep tick
+//!   (`server::session_janitors::janitor_sweep_span`), carrying the
+//!   canonical `janitor` attribute value.
+//! - `janitor.orphan_work` — one per orphan-reaper work-item attempt
+//!   (`server::session_janitors::orphan_work_span`), linked — not
+//!   parented — to the enqueuing sweep so retry queues can never hold
+//!   a sweep root open.
+//!
+//! Pre-existing named roots (`xmpp.stanza.dispatch`, `xmpp.muc.fanout`,
+//! `http_request`, `clustering.shutdown_drain`, ...) pass through the
+//! same way: anything not on the lists delegates to the inner sampler.
 
 use opentelemetry::{
     trace::{Link, SpanKind, TraceContextExt, TraceId},
@@ -239,6 +262,32 @@ mod tests {
         );
     }
 
+    /// #1483: the dedicated dispatch/sweep roots exist precisely so work
+    /// that used to root at a suppressed `actor.handle_message` stays
+    /// traceable — the filter must pass them straight to the delegate
+    /// and they must never appear on a suppression list.
+    #[test]
+    fn dedicated_root_span_names_are_never_suppressed() {
+        const DEDICATED_ROOT_SPAN_NAMES: &[&str] = &[
+            "clustering.relay.dispatch",
+            "janitor.sweep",
+            "janitor.orphan_work",
+        ];
+        let filter = SpanNoiseFilter::new(Sampler::AlwaysOn);
+        for name in DEDICATED_ROOT_SPAN_NAMES {
+            assert!(
+                !ROOT_SUPPRESSED_SPAN_NAMES.contains(name)
+                    && !ALWAYS_SUPPRESSED_SPAN_NAMES.contains(name),
+                "{name} is a dedicated root span and must never be suppressed"
+            );
+            assert_eq!(
+                sample(&filter, None, name),
+                SamplingDecision::RecordAndSample,
+                "root {name} must delegate to the inner sampler"
+            );
+        }
+    }
+
     #[test]
     fn children_of_unsampled_parents_stay_dropped_via_parent_based_delegate() {
         // Production wires ParentBased(...) as the inner sampler, so a
@@ -351,6 +400,61 @@ mod tests {
         assert!(
             !names.contains(&"db.query".to_string()),
             "children of a suppressed root must not export as orphans: {names:?}"
+        );
+    }
+
+    /// #1483 acceptance: the dedicated relay/janitor roots export through
+    /// the production sampler wiring, and the `actor.handle_message` work
+    /// under them is parented — it survives instead of being dropped as a
+    /// root the way it was before those paths opened named roots.
+    #[test]
+    fn pipeline_exports_dedicated_roots_with_parented_actor_children() {
+        let exported = Arc::new(Mutex::new(Vec::new()));
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(CaptureSpanExporter(Arc::clone(&exported)))
+            .with_sampler(SpanNoiseFilter::new(Sampler::ParentBased(Box::new(
+                Sampler::AlwaysOn,
+            ))))
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("span-noise-test")));
+
+        tracing::subscriber::with_default(subscriber, || {
+            // `parent: None` mirrors the production spans: the relay spans
+            // are minted inside kameo's own suppressed root.
+            let relay = tracing::info_span!(parent: None, "clustering.relay.dispatch");
+            relay.in_scope(|| {
+                tracing::info_span!("actor.handle_message").in_scope(|| {});
+            });
+            drop(relay);
+
+            let sweep = tracing::info_span!(parent: None, "janitor.sweep");
+            sweep.in_scope(|| {
+                tracing::info_span!("actor.handle_message").in_scope(|| {});
+            });
+            drop(sweep);
+        });
+
+        let spans = exported.lock().expect("capture lock").clone();
+        let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+        for root_name in ["clustering.relay.dispatch", "janitor.sweep"] {
+            let root = spans
+                .iter()
+                .find(|span| span.name == root_name)
+                .unwrap_or_else(|| panic!("{root_name} must export: {names:?}"));
+            assert!(
+                spans.iter().any(|span| span.name == "actor.handle_message"
+                    && span.parent_span_id == root.span_context.span_id()),
+                "actor work under {root_name} must export parented to it: {names:?}"
+            );
+        }
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "actor.handle_message")
+                .count(),
+            2,
+            "exactly the two parented actor spans may export: {names:?}"
         );
     }
 
