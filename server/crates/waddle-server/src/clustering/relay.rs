@@ -18,7 +18,6 @@
 //! Phase 4 wires DM/MUC/presence routing through this relay. Kademlia still
 //! discovers node relays only; entity ownership remains in Postgres claims.
 
-use super::NodeId;
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
 use super::metrics;
@@ -33,6 +32,7 @@ use super::route_bridge::{
     RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
 };
 use super::self_fence::LocallyClaimedEntities;
+use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
 use kameo::message::{Context, Message};
@@ -40,7 +40,7 @@ use kameo::{Actor, RemoteActor, Reply};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity};
@@ -2169,8 +2169,8 @@ mod tests {
 
     #[test]
     fn ask_failures_classify_handler_effect_separately_from_failure_kind() {
-        use RelaySendEffect::{MaybeCommitted, NoEffect};
         use std::convert::Infallible;
+        use RelaySendEffect::{MaybeCommitted, NoEffect};
 
         for (error, expected) in [
             (RemoteSendError::ActorNotRunning, NoEffect),

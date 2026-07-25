@@ -169,183 +169,55 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            async {
-                let mut sweep_failed = false;
-                let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .drain_expired()
-                    .await
-                {
-                Ok(sessions) => sessions,
-                Err(err) => {
-                    sweep_failed = true;
-                    warn!(error = %err, "SM janitor: drain_expired failed");
-                    Vec::new()
-                }
-            };
-            if !drained.is_empty() {
-                info!(
-                    count = drained.len(),
-                    "SM janitor: cleaning up expired detached sessions"
-                );
+            run_sm_expiry_sweep(&state).await;
+        }
+    });
+}
+
+async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
+    async {
+        let mut sweep_failed = false;
+        let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .drain_expired()
+            .await
+        {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                sweep_failed = true;
+                warn!(error = %err, "SM janitor: drain_expired failed");
+                Vec::new()
             }
-            let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
-                &state.deps.protocol.sm_session_registry,
-                drained,
+        };
+        if !drained.is_empty() {
+            info!(
+                count = drained.len(),
+                "SM janitor: cleaning up expired detached sessions"
             );
-            while let Some(pending_session) = promotion_batch.pop() {
-                let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
-                    &state.deps.protocol.sm_session_registry,
-                    pending_session,
-                );
-                let session = promotion_guard.session().clone();
-                let blocklist = match state
-                    .deps
-                    .protocol
-                    .blocking_storage
-                    .list_blocked_jid_entries(&session.jid.to_bare())
-                    .await
-                {
-                    Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
-                    Err(error) => {
-                        sweep_failed = true;
-                        waddle_xmpp::telemetry::reliability::increment_sm_promotion_blocklist_failed();
-                        let attempts = match state
-                            .deps
-                            .protocol
-                            .sm_session_registry
-                            .record_promotion_failure(&session.stream_id)
-                            .await
-                        {
-                            Ok(n) => n,
-                            Err(record_error) => {
-                                warn!(
-                                    jid = %session.jid,
-                                    error = %error,
-                                    record_error = %record_error,
-                                    "SM janitor: blocklist load failed and \
-                                     record_promotion_failure also failed; preserving \
-                                     session state for retry"
-                                );
-                                if crate::sm_promotion::reinsert_failed_session_for_retry(
-                                    &state.deps.protocol.sm_session_registry,
-                                    session.clone(),
-                                )
-                                .await
-                                {
-                                    promotion_guard.complete();
-                                }
-                                continue;
-                            }
-                        };
-                        if attempts >= max_promotion_attempts_from_env() {
-                            waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
-                            error!(
-                                jid = %session.jid,
-                                stream_id = %session.stream_id,
-                                attempts,
-                                error = %error,
-                                "SM janitor: blocklist load has repeatedly failed; \
-                                 dead-lettering the durable row to break the retry loop"
-                            );
-                            if state
-                                .deps
-                                .protocol
-                                .sm_session_registry
-                                .confirm_drained(&session.stream_id)
-                                .await
-                            {
-                                promotion_guard.complete();
-                            }
-                            continue;
-                        }
-                        warn!(
-                            jid = %session.jid,
-                            attempts,
-                            error = %error,
-                            "SM janitor: blocklist load failed; SKIPPING promotion to \
-                             preserve fail-closed XEP-0191 policy. Durable SM row will \
-                             be retried on the next janitor pass."
-                        );
-                        // Make the retry promise true: drain_expired scans only
-                        // memory, so the drained session must go back into the
-                        // map for the next tick to see it.
-                        if crate::sm_promotion::reinsert_failed_session_for_retry(
-                            &state.deps.protocol.sm_session_registry,
-                            session.clone(),
-                        )
-                        .await
-                        {
-                            promotion_guard.complete();
-                        }
-                        continue;
-                    }
-                };
-                // Round-2 review R2 + round-3 finding 1: retractions
-                // racing this drain window are invisible to the registry
-                // scrub (the sessions are off both maps); fetch the
-                // recent-tombstone record PER SESSION, immediately
-                // before this session's promotion, so even a retraction
-                // landing mid-batch is still seen.
-                let recent_tombstones = match crate::sm_promotion::recent_tombstones_for_promotion(
-                    &state.deps.protocol.sm_session_registry,
-                    "SM janitor",
-                ) {
-                    Ok(records) => records,
-                    Err(_) => {
-                        sweep_failed = true;
-                        Vec::new()
-                    }
-                };
-                let summary = crate::sm_promotion::promote_session_unacked(
-                    &session,
-                    &state.deps.protocol.connection_registry,
-                    &state.deps.protocol.user_registry,
-                    &state.deps.protocol.pending_delivery_storage,
-                    &blocklist,
-                    state.deps.auth_state.xmpp_domain.as_str(),
-                    &recent_tombstones,
-                )
-                .await;
-                // Finding B (retraction-vs-promotion TOCTOU): a
-                // retraction recorded after the snapshot above raced
-                // this session's promotion — re-scrub the pending rows
-                // it may have just inserted BEFORE confirm_drained.
-                if crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
-                    &state.deps.protocol.sm_session_registry,
-                    &state.deps.protocol.pending_delivery_storage,
-                    &recent_tombstones,
-                    "SM janitor",
-                )
+        }
+        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+            &state.deps.protocol.sm_session_registry,
+            drained,
+        );
+        while let Some(pending_session) = promotion_batch.pop() {
+            let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                &state.deps.protocol.sm_session_registry,
+                pending_session,
+            );
+            let session = promotion_guard.session().clone();
+            let blocklist = match state
+                .deps
+                .protocol
+                .blocking_storage
+                .list_blocked_jid_entries(&session.jid.to_bare())
                 .await
-                    == crate::sm_promotion::PromotionScrubOutcome::Failed
-                {
+            {
+                Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                Err(error) => {
                     sweep_failed = true;
-                }
-                if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
-                    > 0
-                    || summary.storage_failed > 0
-                {
-                    info!(
-                        jid = %session.jid,
-                        redelivered = summary.redelivered,
-                        queued = summary.queued,
-                        bounced = summary.bounced,
-                        dropped = summary.dropped,
-                        not_promotable = summary.not_promotable,
-                        unparseable = summary.unparseable,
-                        scrubbed = summary.scrubbed,
-                        storage_failed = summary.storage_failed,
-                        "SM janitor: Q6 promotion completed"
-                    );
-                }
-                if summary.has_storage_failure() {
-                    sweep_failed = true;
-                    waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(
-                        u64::from(summary.storage_failed),
-                    );
+                    waddle_xmpp::telemetry::reliability::increment_sm_promotion_blocklist_failed();
                     let attempts = match state
                         .deps
                         .protocol
@@ -354,17 +226,18 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         .await
                     {
                         Ok(n) => n,
-                        Err(error) => {
+                        Err(record_error) => {
                             warn!(
                                 jid = %session.jid,
-                                %error,
-                                "SM janitor: record_promotion_failure failed; \
-                                 preserving session state for retry"
+                                error = %error,
+                                record_error = %record_error,
+                                "SM janitor: blocklist load failed and \
+                                 record_promotion_failure also failed; preserving \
+                                 session state for retry"
                             );
-                            if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                            if crate::sm_promotion::reinsert_failed_session_for_retry(
                                 &state.deps.protocol.sm_session_registry,
                                 session.clone(),
-                                &summary,
                             )
                             .await
                             {
@@ -379,8 +252,8 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             jid = %session.jid,
                             stream_id = %session.stream_id,
                             attempts,
-                            storage_failed = summary.storage_failed,
-                            "SM janitor: Q6 promotion repeatedly failed; \
+                            error = %error,
+                            "SM janitor: blocklist load has repeatedly failed; \
                              dead-lettering the durable row to break the retry loop"
                         );
                         if state
@@ -397,14 +270,17 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     warn!(
                         jid = %session.jid,
                         attempts,
-                        storage_failed = summary.storage_failed,
-                        "SM janitor: promotion had storage failures; \
-                         preserving session state for retry"
+                        error = %error,
+                        "SM janitor: blocklist load failed; SKIPPING promotion to \
+                         preserve fail-closed XEP-0191 policy. Durable SM row will \
+                         be retried on the next janitor pass."
                     );
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    // Make the retry promise true: drain_expired scans only
+                    // memory, so the drained session must go back into the
+                    // map for the next tick to see it.
+                    if crate::sm_promotion::reinsert_failed_session_for_retry(
                         &state.deps.protocol.sm_session_registry,
                         session.clone(),
-                        &summary,
                     )
                     .await
                     {
@@ -412,175 +288,303 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     }
                     continue;
                 }
-                if state
+            };
+            // Round-2 review R2 + round-3 finding 1: retractions
+            // racing this drain window are invisible to the registry
+            // scrub (the sessions are off both maps); fetch the
+            // recent-tombstone record PER SESSION, immediately
+            // before this session's promotion, so even a retraction
+            // landing mid-batch is still seen.
+            let recent_tombstones = match crate::sm_promotion::recent_tombstones_for_promotion(
+                &state.deps.protocol.sm_session_registry,
+                "SM janitor",
+            ) {
+                Ok(records) => records,
+                Err(_) => {
+                    sweep_failed = true;
+                    Vec::new()
+                }
+            };
+            let summary = crate::sm_promotion::promote_session_unacked(
+                &session,
+                &state.deps.protocol.connection_registry,
+                &state.deps.protocol.user_registry,
+                &state.deps.protocol.pending_delivery_storage,
+                &blocklist,
+                state.deps.auth_state.xmpp_domain.as_str(),
+                &recent_tombstones,
+            )
+            .await;
+            // Finding B (retraction-vs-promotion TOCTOU): a
+            // retraction recorded after the snapshot above raced
+            // this session's promotion — re-scrub the pending rows
+            // it may have just inserted BEFORE confirm_drained.
+            if crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                &state.deps.protocol.sm_session_registry,
+                &state.deps.protocol.pending_delivery_storage,
+                &recent_tombstones,
+                "SM janitor",
+            )
+            .await
+                == crate::sm_promotion::PromotionScrubOutcome::Failed
+            {
+                sweep_failed = true;
+            }
+            if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
+                > 0
+                || summary.storage_failed > 0
+            {
+                info!(
+                    jid = %session.jid,
+                    redelivered = summary.redelivered,
+                    queued = summary.queued,
+                    bounced = summary.bounced,
+                    dropped = summary.dropped,
+                    not_promotable = summary.not_promotable,
+                    unparseable = summary.unparseable,
+                    scrubbed = summary.scrubbed,
+                    storage_failed = summary.storage_failed,
+                    "SM janitor: Q6 promotion completed"
+                );
+            }
+            if summary.has_storage_failure() {
+                sweep_failed = true;
+                waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(
+                    u64::from(summary.storage_failed),
+                );
+                let attempts = match state
                     .deps
                     .protocol
                     .sm_session_registry
-                    .confirm_drained(&session.stream_id)
+                    .record_promotion_failure(&session.stream_id)
                     .await
                 {
-                    promotion_guard.complete();
-                } else {
-                    sweep_failed = true;
+                    Ok(n) => n,
+                    Err(error) => {
+                        warn!(
+                            jid = %session.jid,
+                            %error,
+                            "SM janitor: record_promotion_failure failed; \
+                             preserving session state for retry"
+                        );
+                        if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                            &state.deps.protocol.sm_session_registry,
+                            session.clone(),
+                            &summary,
+                        )
+                        .await
+                        {
+                            promotion_guard.complete();
+                        }
+                        continue;
+                    }
+                };
+                if attempts >= max_promotion_attempts_from_env() {
+                    waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
+                    error!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        attempts,
+                        storage_failed = summary.storage_failed,
+                        "SM janitor: Q6 promotion repeatedly failed; \
+                         dead-lettering the durable row to break the retry loop"
+                    );
+                    if state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .confirm_drained(&session.stream_id)
+                        .await
+                    {
+                        promotion_guard.complete();
+                    }
                     continue;
                 }
-                let session_id =
-                    waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
-
-                // Same replacement re-check as the unclean-disconnect
-                // path: a fresh bind that superseded this expired
-                // detached session broadcasts its own presence, so a
-                // late unavailable would pin subscribers on offline for
-                // an online JID.
-                if routes::websocket::broadcast_unavailable_if_no_replacement(
-                    &state,
-                    &session.jid,
-                    session.presence_available,
+                warn!(
+                    jid = %session.jid,
+                    attempts,
+                    storage_failed = summary.storage_failed,
+                    "SM janitor: promotion had storage failures; \
+                     preserving session state for retry"
+                );
+                if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    &state.deps.protocol.sm_session_registry,
+                    session.clone(),
+                    &summary,
                 )
                 .await
-                    == routes::websocket::handlers::presence::TerminatedPresenceBroadcastOutcome::Failed
+                {
+                    promotion_guard.complete();
+                }
+                continue;
+            }
+            if state
+                .deps
+                .protocol
+                .sm_session_registry
+                .confirm_drained(&session.stream_id)
+                .await
+            {
+                promotion_guard.complete();
+            } else {
+                sweep_failed = true;
+                continue;
+            }
+            let session_id =
+                waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+
+            // Same replacement re-check as the unclean-disconnect
+            // path: a fresh bind that superseded this expired
+            // detached session broadcasts its own presence, so a
+            // late unavailable would pin subscribers on offline for
+            // an online JID.
+            if routes::websocket::broadcast_unavailable_if_no_replacement(
+                state,
+                &session.jid,
+                session.presence_available,
+            )
+            .await
+                == routes::websocket::handlers::presence::TerminatedPresenceBroadcastOutcome::Failed
+            {
+                sweep_failed = true;
+            }
+            state
+                .deps
+                .protocol
+                .resumable_sessions
+                .remove(&session.stream_id);
+            // ADR-0017 Phase 1 (Greptile P1 on PR #1177): gate the DashMap
+            // removal on the EXPIRED session's own SM stream id, not a plain
+            // `unregister`. A plain unregister removes whatever currently
+            // holds the full JID — which is a live REPLACEMENT session S2 if
+            // it rebound the same resource after this session (S1) detached.
+            // The removed entry's `carbons_enabled` would then be S2's token,
+            // so the actor mirror below would evict S2's actor-tree entry
+            // too — and under Slice 1 the actor tree is the bare-JID
+            // selection source, so S2 would silently stop receiving
+            // messages. `unregister_if_sm_stream_id` removes only when the
+            // current entry is genuinely S1's (matching published stream id),
+            // so S2 is left untouched.
+            //
+            // For the common case, S1 already had its DashMap + actor
+            // entries pruned at detach time (`cleanup_connection_shutdown`),
+            // so this returns `None` and the mirror is skipped — the actor
+            // entry is already gone, not leaked.
+            let removed_entry = state
+                .deps
+                .protocol
+                .connection_registry
+                .unregister_if_sm_stream_id(
+                    &session.jid,
+                    &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone()),
+                );
+            // Mirror the (S1-gated) unregister into the actor tree. The
+            // removed entry is guaranteed to be S1's, so its token cannot
+            // evict a replacement.
+            if let Some(entry) = removed_entry {
+                if crate::server::dual_registration::mirror_unregister(
+                    &state.deps.protocol.user_registry,
+                    &session.jid,
+                    Some(std::sync::Arc::clone(&entry.carbons_enabled)),
+                )
+                .await
+                    == crate::server::dual_registration::MirrorUnregisterOutcome::Failed
                 {
                     sweep_failed = true;
                 }
-                state
-                    .deps
-                    .protocol
-                    .resumable_sessions
-                    .remove(&session.stream_id);
-                // ADR-0017 Phase 1 (Greptile P1 on PR #1177): gate the DashMap
-                // removal on the EXPIRED session's own SM stream id, not a plain
-                // `unregister`. A plain unregister removes whatever currently
-                // holds the full JID — which is a live REPLACEMENT session S2 if
-                // it rebound the same resource after this session (S1) detached.
-                // The removed entry's `carbons_enabled` would then be S2's token,
-                // so the actor mirror below would evict S2's actor-tree entry
-                // too — and under Slice 1 the actor tree is the bare-JID
-                // selection source, so S2 would silently stop receiving
-                // messages. `unregister_if_sm_stream_id` removes only when the
-                // current entry is genuinely S1's (matching published stream id),
-                // so S2 is left untouched.
-                //
-                // For the common case, S1 already had its DashMap + actor
-                // entries pruned at detach time (`cleanup_connection_shutdown`),
-                // so this returns `None` and the mirror is skipped — the actor
-                // entry is already gone, not leaked.
-                let removed_entry = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .unregister_if_sm_stream_id(
+            }
+            // PR #438 review (Qodo issue #2): the periodic SM expiry
+            // janitor takes its own cleanup path; without this drop
+            // it leaks `resource_to_ver` and `pending` entries for
+            // every detached session that times out. The other
+            // disconnect/expiry paths already call this; mirror it
+            // here so the caps state is bounded across all five
+            // tear-down code paths.
+            state
+                .deps
+                .protocol
+                .caps_resolver
+                .drop_resource(&session.jid);
+            // MUC occupancy is keyed by FULL JID: a live same-JID
+            // replacement session (fresh bind after this expired
+            // session detached) shares the room occupancies, so
+            // evicting them here would kick the replacement out of
+            // its rooms. Skip room cleanup whenever any live
+            // registry entry exists for the JID (same guard as
+            // cleanup_invalidated_detached_session).
+            if state
+                .deps
+                .protocol
+                .connection_registry
+                .get_entry(&session.jid)
+                .is_none()
+            {
+                #[cfg(feature = "clustering")]
+                {
+                    let cleanup_origin =
+                        crate::server::routes::interpret::OrderedRelayRouteOrigin {
+                            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
+                                session_id.clone(),
+                            ),
+                            sender_entity: waddle_xmpp::ownership::Entity::new(
+                                waddle_xmpp::ownership::EntityType::UserActor,
+                                session.jid.to_bare().to_string(),
+                            ),
+                            inbound_sequence: 0,
+                            handoff: None,
+                        };
+                    if routes::websocket::cleanup_muc_presence_for_jid_with_origin(
+                        state,
                         &session.jid,
-                        &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone()),
-                    );
-                // Mirror the (S1-gated) unregister into the actor tree. The
-                // removed entry is guaranteed to be S1's, so its token cannot
-                // evict a replacement.
-                if let Some(entry) = removed_entry {
-                    if crate::server::dual_registration::mirror_unregister(
-                        &state.deps.protocol.user_registry,
-                        &session.jid,
-                        Some(std::sync::Arc::clone(&entry.carbons_enabled)),
+                        cleanup_origin,
                     )
                     .await
-                        == crate::server::dual_registration::MirrorUnregisterOutcome::Failed
+                        == routes::websocket::MucCleanupOutcome::Failed
                     {
                         sweep_failed = true;
                     }
                 }
-                // PR #438 review (Qodo issue #2): the periodic SM expiry
-                // janitor takes its own cleanup path; without this drop
-                // it leaks `resource_to_ver` and `pending` entries for
-                // every detached session that times out. The other
-                // disconnect/expiry paths already call this; mirror it
-                // here so the caps state is bounded across all five
-                // tear-down code paths.
-                state
-                    .deps
-                    .protocol
-                    .caps_resolver
-                    .drop_resource(&session.jid);
-                // MUC occupancy is keyed by FULL JID: a live same-JID
-                // replacement session (fresh bind after this expired
-                // session detached) shares the room occupancies, so
-                // evicting them here would kick the replacement out of
-                // its rooms. Skip room cleanup whenever any live
-                // registry entry exists for the JID (same guard as
-                // cleanup_invalidated_detached_session).
-                if state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .get_entry(&session.jid)
-                    .is_none()
+                #[cfg(not(feature = "clustering"))]
                 {
-                    #[cfg(feature = "clustering")]
-                    {
-                        let cleanup_origin =
-                            crate::server::routes::interpret::OrderedRelayRouteOrigin {
-                                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
-                                    session_id.clone(),
-                                ),
-                                sender_entity: waddle_xmpp::ownership::Entity::new(
-                                    waddle_xmpp::ownership::EntityType::UserActor,
-                                    session.jid.to_bare().to_string(),
-                                ),
-                                inbound_sequence: 0,
-                                handoff: None,
-                            };
-                        if routes::websocket::cleanup_muc_presence_for_jid_with_origin(
-                            &state,
-                            &session.jid,
-                            cleanup_origin,
-                        )
+                    if routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid)
                         .await
-                            == routes::websocket::MucCleanupOutcome::Failed
-                        {
-                            sweep_failed = true;
-                        }
-                    }
-                    #[cfg(not(feature = "clustering"))]
+                        == routes::websocket::MucCleanupOutcome::Failed
                     {
-                        if routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid)
-                            .await
-                            == routes::websocket::MucCleanupOutcome::Failed
-                        {
-                            sweep_failed = true;
-                        }
+                        sweep_failed = true;
                     }
                 }
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .release_claim(&session_id)
-                    .await
-                {
-                    sweep_failed = true;
-                    warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        error = %error,
-                        "SM janitor: pending_delivery release_claim failed; \
-                         rows remain claimed and will be released by claim-expiry janitor"
-                    );
-                }
             }
-            if !retry_pending_sm_ownership(&state).await {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .release_claim(&session_id)
+                .await
+            {
                 sweep_failed = true;
+                warn!(
+                    jid = %session.jid,
+                    stream_id = %session.stream_id,
+                    error = %error,
+                    "SM janitor: pending_delivery release_claim failed; \
+                     rows remain claimed and will be released by claim-expiry janitor"
+                );
             }
-            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                Janitor::SmExpiry,
-                if sweep_failed {
-                    SweepOutcome::Failed
-                } else {
-                    SweepOutcome::Completed
-                },
-            );
-            }
-            .instrument(janitor_sweep_span(Janitor::SmExpiry))
-            .await;
         }
-    });
+        if !retry_pending_sm_ownership(state).await {
+            sweep_failed = true;
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::SmExpiry,
+            if sweep_failed {
+                SweepOutcome::Failed
+            } else {
+                SweepOutcome::Completed
+            },
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::SmExpiry))
+    .await;
 }
 
 async fn retry_pending_sm_ownership(state: &WebSocketState) -> bool {
@@ -732,8 +736,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                     &supervisor.workers.cancel,
                     &supervisor.workers.fatal_fence,
                     ORPHAN_REAPER_SWEEP_TIMEOUT,
-                    run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers)
-                        .instrument(janitor_sweep_span(Janitor::OrphanReaper)),
+                    run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers),
                 )
                 .await;
                 let mut workers_healthy = supervisor.is_healthy();
@@ -924,6 +927,65 @@ mod orphan_sweep_supervision_tests {
         assert!(!fatal_fence.is_cancelled());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_unpolled_sweep_does_not_export_a_phantom_span() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let worker_cancel = tokio_util::sync::CancellationToken::new();
+        let supervisor = OrphanReaperSupervisor::new(
+            state.deps.protocol.sm_session_registry.clone(),
+            worker_cancel.clone(),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let fatal_fence = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+
+        let outcome = supervise_orphan_reaper_sweep(
+            &cancel,
+            &fatal_fence,
+            Duration::from_secs(1),
+            run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers),
+        )
+        .await;
+
+        assert_eq!(outcome, OrphanSweepOutcome::Cancelled);
+        assert_eq!(
+            spans.recorded_field("janitor.sweep", "janitor"),
+            None,
+            "a sweep that loses the biased cancellation race must never create a span"
+        );
+        assert!(
+            spans
+                .exported()
+                .iter()
+                .all(|span| span.name != "janitor.sweep"),
+            "a cancelled-before-poll sweep must not export a phantom root"
+        );
+
+        worker_cancel.cancel();
+        supervisor.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn executed_orphan_sweep_records_its_lazy_span() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let worker_cancel = tokio_util::sync::CancellationToken::new();
+        let supervisor = OrphanReaperSupervisor::new(
+            state.deps.protocol.sm_session_registry.clone(),
+            worker_cancel.clone(),
+        );
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+
+        assert!(run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers).await);
+        assert_eq!(
+            spans.recorded_field("janitor.sweep", "janitor").as_deref(),
+            Some("orphan_reaper"),
+        );
+
+        worker_cancel.cancel();
+        supervisor.shutdown().await;
+    }
+
     #[tokio::test]
     async fn fatal_fence_cancels_a_sweep_before_it_can_make_progress() {
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -1061,6 +1123,7 @@ struct SmHydrationWork {
     entity: waddle_xmpp::ownership::Entity,
     fence: waddle_xmpp::stream_management::persistence::SmClaimFence,
     reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation,
+    span: tracing::Span,
 }
 
 #[cfg(feature = "clustering")]
@@ -1081,6 +1144,7 @@ struct ExactReleaseWork {
     entity: waddle_xmpp::ownership::Entity,
     owner: waddle_xmpp::ownership::NodeIdentity,
     epoch: waddle_xmpp::ownership::ClaimEpoch,
+    span: tracing::Span,
 }
 
 #[cfg(feature = "clustering")]
@@ -1206,6 +1270,7 @@ impl OrphanReaperWorkers {
             entity,
             fence,
             reservation,
+            span: tracing::Span::current(),
         };
         let key = Self::hydration_key(&work);
         self.hydration_pending
@@ -1257,6 +1322,7 @@ impl OrphanReaperWorkers {
             entity,
             fence,
             reservation,
+            span: tracing::Span::current(),
         };
         if self
             .hydration_pending
@@ -1524,7 +1590,8 @@ impl OrphanReaperSupervisor {
                             &work.fence,
                             work.reservation,
                         ),
-                    ) => result,
+                    )
+                    .instrument(work.span.clone()) => result,
                 };
                 match result {
                     Ok(Ok(
@@ -1555,7 +1622,8 @@ impl OrphanReaperSupervisor {
                                     &work.fence,
                                     work.reservation,
                                 ),
-                            ) => result,
+                            )
+                            .instrument(work.span.clone()) => result,
                         };
                         match cleanup {
                             Ok(Ok(_)) => {
@@ -1591,6 +1659,7 @@ impl OrphanReaperSupervisor {
                                 work.reservation,
                             ),
                         )
+                        .instrument(work.span.clone())
                         .await;
                         match cleanup {
                             Ok(Ok(_)) => {
@@ -1652,7 +1721,8 @@ impl OrphanReaperSupervisor {
                     result = tokio::time::timeout(
                         ORPHANED_ROOM_RELEASE_TIMEOUT,
                         work.claim_store.release_exact(&work.entity, &work.owner, work.epoch),
-                    ) => result,
+                    )
+                    .instrument(work.span.clone()) => result,
                 };
                 match result {
                     Ok(Ok(_)) => {
@@ -1962,6 +2032,7 @@ async fn register_reclaimed_epoch_or_cleanup(
                         entity: claim_fence.entity.clone(),
                         owner: context.me.clone(),
                         epoch: claim_fence.epoch,
+                        span: tracing::Span::current(),
                     })
                     .is_accepted()
                 {
@@ -1979,6 +2050,7 @@ async fn register_reclaimed_epoch_or_cleanup(
                     entity: claim_fence.entity.clone(),
                     owner: context.me.clone(),
                     epoch: claim_fence.epoch,
+                    span: tracing::Span::current(),
                 })
                 .is_accepted()
             {
@@ -2380,6 +2452,7 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         Option<waddle_xmpp::stream_management::persistence::PersistedSession>,
         waddle_xmpp::stream_management::persistence::SmPersistenceError,
     > {
+        drop(tracing::info_span!("orphan.worker.hydration.test"));
         self.read_started.notify_one();
         std::future::pending().await
     }
@@ -2522,6 +2595,7 @@ impl waddle_xmpp::ownership::ClaimStore for HangingExactReleaseStore {
         _mine: waddle_xmpp::ownership::ClaimEpoch,
     ) -> Result<waddle_xmpp::ownership::ExactReleaseOutcome, waddle_xmpp::ownership::ClaimError>
     {
+        drop(tracing::info_span!("orphan.worker.release.test"));
         self.release_started.notify_one();
         std::future::pending().await
     }
@@ -2601,6 +2675,59 @@ async fn hung_sm_hydration_does_not_block_completed_room_lane() {
     tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
         .await
         .expect("hung hydration worker must cancel and join");
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test(flavor = "current_thread")]
+async fn hydration_worker_uses_the_enqueuing_sweep_span() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+
+    let storage = Arc::new(HangingSmReadPersistence::default());
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let me = NodeIdentity::new("sweeper", "trace-incarnation");
+    let registry = Arc::new(
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+            .with_persistence(storage.clone())
+            .with_claim_store(claim_store.clone(), SharedNodeIdentity::new(me.clone())),
+    );
+    let entity = Entity::new(EntityType::SmSession, "traced-hydration");
+    let epoch = claim_store.acquire(&entity, &me).await.expect("claim");
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("hydration reservation");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let supervisor = OrphanReaperSupervisor::new(registry, cancel.clone());
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let sweep = janitor_sweep_span(Janitor::OrphanReaper);
+
+    assert!(sweep
+        .in_scope(|| supervisor.workers.enqueue_hydration(
+            entity,
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(me, epoch),
+            reservation,
+        ))
+        .is_accepted());
+    drop(sweep);
+    tokio::time::timeout(Duration::from_secs(1), storage.read_started.notified())
+        .await
+        .expect("hydration worker started");
+    cancel.cancel();
+    supervisor.shutdown().await;
+
+    let exported = spans.exported();
+    let root = exported
+        .iter()
+        .find(|span| span.name == "janitor.sweep")
+        .expect("sweep root exported");
+    assert!(
+        exported
+            .iter()
+            .any(|span| span.name == "orphan.worker.hydration.test"
+                && span.parent_span_id == root.span_context.span_id()),
+        "hydration storage work must remain parented to the sweep that enqueued it"
+    );
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -2753,6 +2880,7 @@ async fn failed_worker_restart_retains_captured_won_work_for_terminal_cleanup() 
             won_epoch,
         ),
         reservation: won_reservation,
+        span: tracing::Span::none(),
     };
     supervisor
         .workers
@@ -2782,6 +2910,7 @@ async fn failed_worker_restart_retains_captured_won_work_for_terminal_cleanup() 
         entity: room_entity.clone(),
         owner: me.clone(),
         epoch: room_epoch,
+        span: tracing::Span::current(),
     };
     supervisor
         .workers
@@ -3059,6 +3188,7 @@ async fn hung_exact_release_worker_is_cancelled_and_joined() {
         entity: Entity::new(EntityType::RoomActor, "cancel@muc.example.com"),
         owner: NodeIdentity::new("sweeper", "incarnation"),
         epoch: waddle_xmpp::ownership::ClaimEpoch(1),
+        span: tracing::Span::current(),
     });
     tokio::time::timeout(Duration::from_secs(1), store.release_started.notified())
         .await
@@ -3067,6 +3197,53 @@ async fn hung_exact_release_worker_is_cancelled_and_joined() {
     tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
         .await
         .expect("hung exact-release worker must cancel and join");
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test(flavor = "current_thread")]
+async fn exact_release_worker_uses_the_enqueuing_sweep_span() {
+    use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
+
+    let store = Arc::new(HangingExactReleaseStore {
+        inner: waddle_xmpp::ownership::InProcessClaimStore::new(),
+        release_started: tokio::sync::Notify::new(),
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let supervisor = OrphanReaperSupervisor::new(
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+        cancel.clone(),
+    );
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let sweep = janitor_sweep_span(Janitor::OrphanReaper);
+
+    assert!(sweep
+        .in_scope(|| supervisor.workers.enqueue_release(ExactReleaseWork {
+            claim_store: store.clone(),
+            entity: Entity::new(EntityType::RoomActor, "traced-release@muc.example.com"),
+            owner: NodeIdentity::new("sweeper", "trace-incarnation"),
+            epoch: waddle_xmpp::ownership::ClaimEpoch(1),
+            span: tracing::Span::current(),
+        }))
+        .is_accepted());
+    drop(sweep);
+    tokio::time::timeout(Duration::from_secs(1), store.release_started.notified())
+        .await
+        .expect("release worker started");
+    cancel.cancel();
+    supervisor.shutdown().await;
+
+    let exported = spans.exported();
+    let root = exported
+        .iter()
+        .find(|span| span.name == "janitor.sweep")
+        .expect("sweep root exported");
+    assert!(
+        exported
+            .iter()
+            .any(|span| span.name == "orphan.worker.release.test"
+                && span.parent_span_id == root.span_context.span_id()),
+        "exact release work must remain parented to the sweep that enqueued it"
+    );
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -3129,6 +3306,7 @@ async fn full_hydration_channel_retains_and_redrives_pending_work() {
         entity: Entity::new(EntityType::SmSession, "existing"),
         fence: SmClaimFence::new(NodeIdentity::new("node", "incarnation"), ClaimEpoch(1)),
         reservation: waddle_xmpp::stream_management::ReclaimedClaimReservation::from_generation(1),
+        span: tracing::Span::none(),
     };
     hydration_tx
         .try_send(existing.clone())
@@ -3230,12 +3408,14 @@ fn exact_release_keys_are_structural_when_components_contain_colons() {
         entity: Entity::new(EntityType::RoomActor, "room:part"),
         owner: NodeIdentity::new("node", "epoch"),
         epoch: ClaimEpoch(1),
+        span: tracing::Span::none(),
     };
     let right = ExactReleaseWork {
         claim_store: Arc::new(InProcessClaimStore::new()),
         entity: Entity::new(EntityType::RoomActor, "room"),
         owner: NodeIdentity::new("part:node", "epoch"),
         epoch: ClaimEpoch(1),
+        span: tracing::Span::none(),
     };
 
     assert_ne!(
@@ -3260,6 +3440,7 @@ async fn full_release_channel_retains_and_redrives_pending_work() {
         entity: Entity::new(EntityType::RoomActor, "existing@muc.example.com"),
         owner: owner.clone(),
         epoch: ClaimEpoch(1),
+        span: tracing::Span::none(),
     };
     release_tx
         .try_send(existing.clone())
@@ -3283,6 +3464,7 @@ async fn full_release_channel_retains_and_redrives_pending_work() {
         entity: Entity::new(EntityType::RoomActor, "candidate@muc.example.com"),
         owner,
         epoch: ClaimEpoch(2),
+        span: tracing::Span::none(),
     };
     let candidate_key = OrphanReaperWorkers::release_key(&candidate);
 
@@ -3331,6 +3513,7 @@ fn closed_release_channel_retains_restart_inventory() {
         entity: Entity::new(EntityType::RoomActor, "candidate@muc.example.com"),
         owner: NodeIdentity::new("node", "incarnation"),
         epoch: ClaimEpoch(2),
+        span: tracing::Span::none(),
     };
     let candidate_key = OrphanReaperWorkers::release_key(&candidate);
 
@@ -3428,695 +3611,699 @@ async fn run_orphan_reaper_sweep_with_workers(
     state: &Arc<WebSocketState>,
     workers: &OrphanReaperWorkers,
 ) -> bool {
-    use waddle_xmpp::ownership::ClaimError;
+    async {
+        use waddle_xmpp::ownership::ClaimError;
 
-    let mut sweep_failed = false;
+        let mut sweep_failed = false;
 
-    let clustering = &state.deps.app_state.clustering_claims;
-    let Some((claim_store, identity_handle)) = clustering.claim_pair() else {
-        return true;
-    };
-    let Some(node_lease) = clustering.node_lease.clone() else {
-        return true;
-    };
-    let Some(lease_ttl) = clustering.lease_ttl else {
-        return true;
-    };
+        let clustering = &state.deps.app_state.clustering_claims;
+        let Some((claim_store, identity_handle)) = clustering.claim_pair() else {
+            return true;
+        };
+        let Some(node_lease) = clustering.node_lease.clone() else {
+            return true;
+        };
+        let Some(lease_ttl) = clustering.lease_ttl else {
+            return true;
+        };
 
-    let me = identity_handle.current();
-    if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "start").await {
-        return false;
-    }
+        let me = identity_handle.current();
+        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "start").await {
+            return false;
+        }
 
-    match node_lease
-        .list_heartbeat_stale_nodes(lease_ttl, STALE_NODE_WATCHDOG_CANDIDATE_LIMIT)
-        .await
-    {
-        Ok(stale_nodes) => {
-            let candidate_count = stale_nodes.len();
-            let mut expired_nodes = 0usize;
-            let mut renewed_nodes = 0usize;
-            let mut failed_nodes = 0usize;
-            for stale_node in stale_nodes {
-                if stale_node == me {
-                    debug!(
-                        node_id = %me.node_id,
-                        node_epoch = %me.node_epoch,
-                        "orphan reaper: stale-node watchdog found this node's own heartbeat stale; aborting sweep"
-                    );
-                    return false;
-                }
-                match node_lease.expire(&stale_node, lease_ttl).await {
-                    Ok(true) => expired_nodes += 1,
-                    Ok(false) => renewed_nodes += 1,
-                    Err(error) => {
-                        failed_nodes += 1;
-                        warn!(
-                            node_id = %stale_node.node_id,
-                            node_epoch = %stale_node.node_epoch,
-                            %error,
-                            "orphan reaper: stale-node watchdog expire failed; retrying next sweep"
+        match node_lease
+            .list_heartbeat_stale_nodes(lease_ttl, STALE_NODE_WATCHDOG_CANDIDATE_LIMIT)
+            .await
+        {
+            Ok(stale_nodes) => {
+                let candidate_count = stale_nodes.len();
+                let mut expired_nodes = 0usize;
+                let mut renewed_nodes = 0usize;
+                let mut failed_nodes = 0usize;
+                for stale_node in stale_nodes {
+                    if stale_node == me {
+                        debug!(
+                            node_id = %me.node_id,
+                            node_epoch = %me.node_epoch,
+                            "orphan reaper: stale-node watchdog found this node's own heartbeat stale; aborting sweep"
                         );
-                    }
-                }
-            }
-            if expired_nodes > 0 {
-                info!(
-                    expired_nodes,
-                    candidate_count,
-                    limit = STALE_NODE_WATCHDOG_CANDIDATE_LIMIT,
-                    "orphan reaper: stale-node watchdog committed expired nodes"
-                );
-            }
-            if renewed_nodes > 0 {
-                debug!(
-                    renewed_nodes,
-                    candidate_count,
-                    "orphan reaper: stale-node watchdog candidates renewed before expire"
-                );
-            }
-            if failed_nodes > 0 {
-                sweep_failed = true;
-                warn!(
-                    failed_nodes,
-                    candidate_count,
-                    "orphan reaper: stale-node watchdog failed to expire some candidates"
-                );
-            }
-        }
-        Err(error) => {
-            sweep_failed = true;
-            warn!(%error, "orphan reaper: stale-node watchdog candidate scan failed");
-        }
-    }
-
-    if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "post-watchdog")
-        .await
-    {
-        return false;
-    }
-
-    // ADR-0017 Phase 3 Slice 10 (Q5's rollout-aware placement rule): an
-    // old-generation node backs off before racing a matching/newer
-    // -generation node for a just-orphaned claim, so each entity moves
-    // approximately once per deploy instead of up to N times. Resolved
-    // once per sweep (not per candidate) — the current generation cannot
-    // meaningfully change mid-sweep, and this keeps the hot per-candidate
-    // loop below to a single extra comparison, no extra Postgres round
-    // trip per candidate.
-    let backoff_delay = match node_lease.current_generation().await {
-        Ok(current_generation) => crate::clustering::drain::rollout_backoff_delay(
-            clustering.pod_template_hash.as_deref(),
-            current_generation.as_deref(),
-        ),
-        Err(error) => {
-            sweep_failed = true;
-            debug!(%error, "orphan reaper: current_generation lookup failed; proceeding without backoff");
-            std::time::Duration::ZERO
-        }
-    };
-
-    let room_registry =
-        waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
-    let mut room_hydrated = 0u64;
-    let mut room_released = 0u64;
-    let mut room_already_live = 0u64;
-    let mut room_pending_retry = 0u64;
-    let mut room_lost_race = 0u64;
-    let mut room_failed = 0u64;
-
-    // Ordinary destroy/dead-actor/eviction releases use the same orphan
-    // reaper cadence, but retry one exact fence per sweep so a slow ownership
-    // backend cannot monopolize the registry mailbox.
-    if let Err(error) = room_registry.retry_pending_room_releases(1).await {
-        sweep_failed = true;
-        debug!(%error, "orphan reaper: pending ordinary RoomActor release retry failed");
-    }
-
-    // Retry epochs won on an earlier sweep before discovering new work.
-    // Each retry is its own bounded registry ask, so a slow store operation
-    // cannot monopolize the registry actor as one large batch handler.
-    match room_registry
-        .list_pending_reclaimed_rooms(ORPHANED_ROOM_CANDIDATE_LIMIT)
-        .await
-    {
-        Ok(pending) => {
-            for pending_room in pending {
-                match reconcile_registered_room_or_self_fence(
-                    workers,
-                    &room_registry,
-                    pending_room.room_jid,
-                    pending_room.claim_fence,
-                    pending_room.previous_owner,
-                )
-                .await
-                {
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
-                        room_hydrated += 1;
-                    }
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
-                        room_released += 1;
-                    }
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
-                    ) => room_already_live += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
-                    ) => {
-                        room_pending_retry += 1;
-                    }
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
-                        room_lost_race += 1;
-                    }
-                    Err(error) => {
-                        debug!(%error, "orphan reaper: pending RoomActor retry ask failed");
                         return false;
                     }
-                }
-            }
-        }
-        Err(error) => {
-            debug!(%error, "orphan reaper: pending RoomActor listing failed");
-            workers.fatal_fence.cancel();
-            return false;
-        }
-    }
-    if let Ok(mut backlog) = room_registry.pending_reclaimed_room_backlog().await {
-        if let Ok(releases) = room_registry.pending_room_release_backlog().await {
-            backlog.depth = backlog.depth.saturating_add(releases.depth);
-            backlog.oldest_age_ms = backlog.oldest_age_ms.max(releases.oldest_age_ms);
-        }
-        crate::clustering::metrics::record_room_orphan_pending_backlog(
-            backlog.depth,
-            backlog.oldest_age_ms,
-        );
-    }
-
-    // RoomActor counterpart: proactively move a bounded set of claims off
-    // committed-dead owners. Unlike detached SM sessions, a room claim may
-    // have no durable state at all (for example an ephemeral instant room).
-    // The serialized registry adoption below therefore either hydrates the
-    // exact won epoch, observes demand-side creation already did so, or
-    // releases the unusable claim.
-    let (room_candidates, room_page_next_cursor, room_page_has_more, room_scan_succeeded) =
-        match node_lease
-            .list_orphaned_room_actor_claims_page(
-                workers.room_cursor(),
-                ORPHANED_ROOM_CANDIDATE_LIMIT,
-            )
-            .await
-        {
-            Ok(page) => {
-                if page.quarantined > 0 {
-                    debug!(
-                        quarantined = page.quarantined,
-                        "orphan reaper: quarantined malformed stale RoomActor claims"
-                    );
-                }
-                (page.candidates, page.next_cursor, page.has_more, true)
-            }
-            Err(error) => {
-                warn!(%error, "orphan reaper: list_orphaned_room_actor_claims_page failed");
-                (Vec::new(), workers.room_cursor(), false, false)
-            }
-        };
-    let mut room_page_processed = true;
-    for candidate in room_candidates {
-        if workers.cancel.is_cancelled() {
-            return false;
-        }
-        if !workers.has_release_capacity() {
-            room_page_processed = false;
-            crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
-            warn!("orphan reaper: pausing RoomActor steals because exact-release cleanup capacity is exhausted");
-            break;
-        }
-        let Ok(room_jid) = candidate.entity.id.parse::<jid::BareJid>() else {
-            room_page_processed = false;
-            room_failed += 1;
-            debug!(
-                entity_id = %candidate.entity.id,
-                "orphan reaper: RoomActor claim id is not a bare JID; leaving stale claim for repair"
-            );
-            continue;
-        };
-        match room_registry
-            .reserve_pending_reclaimed_room(room_jid.clone())
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                room_page_processed = false;
-                crate::clustering::metrics::record_orphan_work_queue_backpressure("room_adoption");
-                warn!("orphan reaper: pausing RoomActor steals because adoption capacity is exhausted");
-                break;
-            }
-            Err(error) => {
-                room_page_processed = false;
-                room_failed += 1;
-                debug!(room = %room_jid, %error, "orphan reaper: room adoption reservation failed");
-                break;
-            }
-        }
-        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-room").await
-        {
-            let _ = room_registry
-                .cancel_pending_reclaimed_room_reservation(room_jid.clone())
-                .await;
-            return false;
-        }
-        if let Err(error) = node_lease.expire(&candidate.owner, lease_ttl).await {
-            room_page_processed = false;
-            let _ = room_registry
-                .cancel_pending_reclaimed_room_reservation(room_jid.clone())
-                .await;
-            room_failed += 1;
-            debug!(
-                entity_id = %candidate.entity.id,
-                %error,
-                "orphan reaper: room owner's expire CAS failed"
-            );
-            continue;
-        }
-        if !backoff_delay.is_zero() {
-            tokio::time::sleep(backoff_delay).await;
-        }
-        if workers.cancel.is_cancelled() {
-            let _ = room_registry
-                .cancel_pending_reclaimed_room_reservation(room_jid.clone())
-                .await;
-            return false;
-        }
-        match node_lease
-            .steal_orphaned_room_actor_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
-            .await
-        {
-            Ok(new_epoch) => {
-                let pending_handoff = waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
-                    room_jid: room_jid.clone(),
-                    claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(
-                        candidate.entity.clone(),
-                        me.clone(),
-                        new_epoch,
-                    ),
-                    previous_owner: candidate.owner.clone(),
-                };
-                // This must remain the first operation after observing the
-                // steal CAS succeed. It is synchronous, so cancellation of
-                // the outer sweep cannot drop the exact won epoch before
-                // terminal shutdown can transfer it into RoomRegistry.
-                workers.remember_room_handoff(pending_handoff.clone());
-                match register_reclaimed_epoch_or_cleanup(
-                    ReclaimedRegistrationContext {
-                        workers,
-                        room_registry: &room_registry,
-                        claim_store: &claim_store,
-                        me: &me,
-                    },
-                    pending_handoff.clone(),
-                )
-                .await
-                {
-                    ReclaimedRegistration::Registered => {}
-                    ReclaimedRegistration::Released => {
-                        room_released += 1;
-                        continue;
-                    }
-                    ReclaimedRegistration::LostRace => {
-                        room_lost_race += 1;
-                        continue;
-                    }
-                    ReclaimedRegistration::CleanupScheduled => {
-                        room_failed += 1;
-                        continue;
-                    }
-                }
-                let reconciliation = reconcile_registered_room_or_self_fence(
-                    workers,
-                    &room_registry,
-                    room_jid.clone(),
-                    pending_handoff.claim_fence,
-                    candidate.owner.clone(),
-                )
-                .await;
-                let notify_previous_owner = !matches!(
-                    reconciliation,
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace)
-                        | Err(_)
-                );
-                if notify_previous_owner {
-                    if let Some(store) = clustering.muc_durable_store.as_ref() {
-                        if let Err(error) = store
-                            .notify_previous_owner_demoted(
-                                &room_jid,
-                                &candidate.owner.node_id,
-                                &candidate.owner.node_epoch,
-                                new_epoch,
-                            )
-                            .await
-                        {
-                            sweep_failed = true;
-                            debug!(
-                                room = %room_jid,
+                    match node_lease.expire(&stale_node, lease_ttl).await {
+                        Ok(true) => expired_nodes += 1,
+                        Ok(false) => renewed_nodes += 1,
+                        Err(error) => {
+                            failed_nodes += 1;
+                            warn!(
+                                node_id = %stale_node.node_id,
+                                node_epoch = %stale_node.node_epoch,
                                 %error,
-                                "orphan reaper: best-effort room demotion notification failed"
+                                "orphan reaper: stale-node watchdog expire failed; retrying next sweep"
                             );
                         }
                     }
                 }
-                match reconciliation {
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
-                        room_hydrated += 1;
-                    }
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
-                        room_released += 1;
-                    }
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
-                    ) => room_already_live += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
-                    ) => room_pending_retry += 1,
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
-                        room_lost_race += 1;
-                    }
-                    Err(error) => {
-                        debug!(
-                            room = %room_jid,
-                            %error,
-                            "orphan reaper: reclaimed-room registry adoption ask failed; node self-fenced"
-                        );
-                        return false;
-                    }
+                if expired_nodes > 0 {
+                    info!(
+                        expired_nodes,
+                        candidate_count,
+                        limit = STALE_NODE_WATCHDOG_CANDIDATE_LIMIT,
+                        "orphan reaper: stale-node watchdog committed expired nodes"
+                    );
                 }
-            }
-            Err(ClaimError::Conflict) => {
-                room_lost_race += 1;
-                if let Err(error) = room_registry
-                    .cancel_pending_reclaimed_room_reservation(room_jid.clone())
-                    .await
-                {
+                if renewed_nodes > 0 {
+                    debug!(
+                        renewed_nodes,
+                        candidate_count,
+                        "orphan reaper: stale-node watchdog candidates renewed before expire"
+                    );
+                }
+                if failed_nodes > 0 {
                     sweep_failed = true;
-                    debug!(room = %room_jid, %error, "orphan reaper: failed to cancel lost-race room adoption reservation");
+                    warn!(
+                        failed_nodes,
+                        candidate_count,
+                        "orphan reaper: stale-node watchdog failed to expire some candidates"
+                    );
                 }
             }
             Err(error) => {
+                sweep_failed = true;
+                warn!(%error, "orphan reaper: stale-node watchdog candidate scan failed");
+            }
+        }
+
+        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "post-watchdog")
+            .await
+        {
+            return false;
+        }
+
+        // ADR-0017 Phase 3 Slice 10 (Q5's rollout-aware placement rule): an
+        // old-generation node backs off before racing a matching/newer
+        // -generation node for a just-orphaned claim, so each entity moves
+        // approximately once per deploy instead of up to N times. Resolved
+        // once per sweep (not per candidate) — the current generation cannot
+        // meaningfully change mid-sweep, and this keeps the hot per-candidate
+        // loop below to a single extra comparison, no extra Postgres round
+        // trip per candidate.
+        let backoff_delay = match node_lease.current_generation().await {
+            Ok(current_generation) => crate::clustering::drain::rollout_backoff_delay(
+                clustering.pod_template_hash.as_deref(),
+                current_generation.as_deref(),
+            ),
+            Err(error) => {
+                sweep_failed = true;
+                debug!(%error, "orphan reaper: current_generation lookup failed; proceeding without backoff");
+                std::time::Duration::ZERO
+            }
+        };
+
+        let room_registry =
+            waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
+        let mut room_hydrated = 0u64;
+        let mut room_released = 0u64;
+        let mut room_already_live = 0u64;
+        let mut room_pending_retry = 0u64;
+        let mut room_lost_race = 0u64;
+        let mut room_failed = 0u64;
+
+        // Ordinary destroy/dead-actor/eviction releases use the same orphan
+        // reaper cadence, but retry one exact fence per sweep so a slow ownership
+        // backend cannot monopolize the registry mailbox.
+        if let Err(error) = room_registry.retry_pending_room_releases(1).await {
+            sweep_failed = true;
+            debug!(%error, "orphan reaper: pending ordinary RoomActor release retry failed");
+        }
+
+        // Retry epochs won on an earlier sweep before discovering new work.
+        // Each retry is its own bounded registry ask, so a slow store operation
+        // cannot monopolize the registry actor as one large batch handler.
+        match room_registry
+            .list_pending_reclaimed_rooms(ORPHANED_ROOM_CANDIDATE_LIMIT)
+            .await
+        {
+            Ok(pending) => {
+                for pending_room in pending {
+                    match reconcile_registered_room_or_self_fence(
+                        workers,
+                        &room_registry,
+                        pending_room.room_jid,
+                        pending_room.claim_fence,
+                        pending_room.previous_owner,
+                    )
+                    .await
+                    {
+                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
+                            room_hydrated += 1;
+                        }
+                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
+                            room_released += 1;
+                        }
+                        Ok(
+                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
+                        ) => room_already_live += 1,
+                        Ok(
+                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
+                        ) => {
+                            room_pending_retry += 1;
+                        }
+                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
+                            room_lost_race += 1;
+                        }
+                        Err(error) => {
+                            debug!(%error, "orphan reaper: pending RoomActor retry ask failed");
+                            return false;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                debug!(%error, "orphan reaper: pending RoomActor listing failed");
+                workers.fatal_fence.cancel();
+                return false;
+            }
+        }
+        if let Ok(mut backlog) = room_registry.pending_reclaimed_room_backlog().await {
+            if let Ok(releases) = room_registry.pending_room_release_backlog().await {
+                backlog.depth = backlog.depth.saturating_add(releases.depth);
+                backlog.oldest_age_ms = backlog.oldest_age_ms.max(releases.oldest_age_ms);
+            }
+            crate::clustering::metrics::record_room_orphan_pending_backlog(
+                backlog.depth,
+                backlog.oldest_age_ms,
+            );
+        }
+
+        // RoomActor counterpart: proactively move a bounded set of claims off
+        // committed-dead owners. Unlike detached SM sessions, a room claim may
+        // have no durable state at all (for example an ephemeral instant room).
+        // The serialized registry adoption below therefore either hydrates the
+        // exact won epoch, observes demand-side creation already did so, or
+        // releases the unusable claim.
+        let (room_candidates, room_page_next_cursor, room_page_has_more, room_scan_succeeded) =
+            match node_lease
+                .list_orphaned_room_actor_claims_page(
+                    workers.room_cursor(),
+                    ORPHANED_ROOM_CANDIDATE_LIMIT,
+                )
+                .await
+            {
+                Ok(page) => {
+                    if page.quarantined > 0 {
+                        debug!(
+                            quarantined = page.quarantined,
+                            "orphan reaper: quarantined malformed stale RoomActor claims"
+                        );
+                    }
+                    (page.candidates, page.next_cursor, page.has_more, true)
+                }
+                Err(error) => {
+                    warn!(%error, "orphan reaper: list_orphaned_room_actor_claims_page failed");
+                    (Vec::new(), workers.room_cursor(), false, false)
+                }
+            };
+        let mut room_page_processed = true;
+        for candidate in room_candidates {
+            if workers.cancel.is_cancelled() {
+                return false;
+            }
+            if !workers.has_release_capacity() {
+                room_page_processed = false;
+                crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
+                warn!("orphan reaper: pausing RoomActor steals because exact-release cleanup capacity is exhausted");
+                break;
+            }
+            let Ok(room_jid) = candidate.entity.id.parse::<jid::BareJid>() else {
                 room_page_processed = false;
                 room_failed += 1;
+                debug!(
+                    entity_id = %candidate.entity.id,
+                    "orphan reaper: RoomActor claim id is not a bare JID; leaving stale claim for repair"
+                );
+                continue;
+            };
+            match room_registry
+                .reserve_pending_reclaimed_room(room_jid.clone())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    room_page_processed = false;
+                    crate::clustering::metrics::record_orphan_work_queue_backpressure("room_adoption");
+                    warn!("orphan reaper: pausing RoomActor steals because adoption capacity is exhausted");
+                    break;
+                }
+                Err(error) => {
+                    room_page_processed = false;
+                    room_failed += 1;
+                    debug!(room = %room_jid, %error, "orphan reaper: room adoption reservation failed");
+                    break;
+                }
+            }
+            if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-room").await
+            {
                 let _ = room_registry
                     .cancel_pending_reclaimed_room_reservation(room_jid.clone())
                     .await;
+                return false;
+            }
+            if let Err(error) = node_lease.expire(&candidate.owner, lease_ttl).await {
+                room_page_processed = false;
+                let _ = room_registry
+                    .cancel_pending_reclaimed_room_reservation(room_jid.clone())
+                    .await;
+                room_failed += 1;
                 debug!(
                     entity_id = %candidate.entity.id,
                     %error,
-                    "orphan reaper: RoomActor claim steal failed"
+                    "orphan reaper: room owner's expire CAS failed"
                 );
+                continue;
             }
-        }
-    }
-    if room_scan_succeeded && room_page_processed {
-        let committed_cursor = if room_page_has_more {
-            room_page_next_cursor
-        } else {
-            None
-        };
-        workers.set_room_cursor(committed_cursor.clone());
-        if let Err(error) = node_lease
-            .persist_orphan_reaper_cursor(
-                crate::clustering::claims::OrphanReaperCursorUpdate::RoomActor(committed_cursor),
-            )
-            .await
-        {
-            sweep_failed = true;
-            warn!(%error, "orphan reaper: failed to persist RoomActor scan cursor");
-        }
-    }
-    if !room_scan_succeeded || room_failed > 0 {
-        sweep_failed = true;
-    }
-    for (outcome, count) in [
-        ("hydrated", room_hydrated),
-        ("released", room_released),
-        ("already_live", room_already_live),
-        ("pending_retry", room_pending_retry),
-        ("lost_race", room_lost_race),
-        ("failed", room_failed),
-    ] {
-        if count > 0 {
-            crate::clustering::metrics::record_room_orphan_reconciliation(outcome, count);
-        }
-    }
-    let room_reconciled = room_hydrated + room_released + room_already_live;
-    if room_pending_retry > 0 || room_failed > 0 {
-        warn!(
-            hydrated = room_hydrated,
-            released = room_released,
-            already_live = room_already_live,
-            pending_retry = room_pending_retry,
-            lost_race = room_lost_race,
-            failed = room_failed,
-            limit = ORPHANED_ROOM_CANDIDATE_LIMIT,
-            "orphan reaper: RoomActor reconciliation completed with pending work"
-        );
-    } else if room_reconciled > 0 {
-        info!(
-            hydrated = room_hydrated,
-            released = room_released,
-            already_live = room_already_live,
-            pending_retry = room_pending_retry,
-            lost_race = room_lost_race,
-            failed = room_failed,
-            limit = ORPHANED_ROOM_CANDIDATE_LIMIT,
-            "orphan reaper: reconciled orphaned RoomActor claims"
-        );
-    }
-    let (page, scan_succeeded) = match tokio::time::timeout(
-        ORPHANED_SM_SCAN_TIMEOUT,
-        node_lease.list_orphaned_sm_session_claims_page(
-            workers.sm_cursor(),
-            STALE_NODE_WATCHDOG_CANDIDATE_LIMIT,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(page)) => (page, true),
-        Ok(Err(error)) => {
-            debug!(%error, "orphan reaper: SM-session candidate page failed; room lane already completed");
-            (
-                crate::clustering::claims::OrphanedSmSessionClaimPage {
-                    candidates: Vec::new(),
-                    next_cursor: workers.sm_cursor(),
-                    has_more: false,
-                    quarantined: 0,
-                },
-                false,
-            )
-        }
-        Err(_) => {
-            debug!(
-                "orphan reaper: SM-session candidate scan timed out; room lane already completed"
-            );
-            (
-                crate::clustering::claims::OrphanedSmSessionClaimPage {
-                    candidates: Vec::new(),
-                    next_cursor: workers.sm_cursor(),
-                    has_more: false,
-                    quarantined: 0,
-                },
-                false,
-            )
-        }
-    };
-    crate::clustering::metrics::record_sm_orphan_candidate_page(
-        page.candidates.len(),
-        page.has_more,
-        page.quarantined,
-    );
-    let page_has_more = page.has_more;
-    let page_next_cursor = page.next_cursor.clone();
-    let candidates = page.candidates;
-    let mut stolen = 0usize;
-    let mut page_processed = true;
-    for candidate in candidates {
-        let Some(reservation) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .reserve_reclaimed_claim_capacity(&candidate.entity)
-        else {
-            page_processed = false;
-            break;
-        };
-        if !workers.reserve_hydration(&candidate.entity, &me, reservation) {
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
-            warn!("orphan reaper: pausing SM steals because hydration capacity is exhausted");
-            page_processed = false;
-            break;
-        }
-        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-candidate")
-            .await
-        {
-            workers.cancel_hydration_reservation(&candidate.entity);
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
-            return false;
-        }
-        // Element 9's ordering requirement: commit the expire CAS on the
-        // dead owner's row FIRST. Idempotent/best-effort — a failure here
-        // just means the steal below is also likely to lose (the owner
-        // row is not yet committed-expired), retried next sweep.
-        if let Err(error) = node_lease.expire(&candidate.owner, lease_ttl).await {
-            sweep_failed = true;
-            page_processed = false;
-            workers.cancel_hydration_reservation(&candidate.entity);
-            debug!(
-                entity_id = %candidate.entity.id,
-                %error,
-                "orphan reaper: expire on the dead owner's row failed; retrying next sweep"
-            );
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
-            continue;
-        }
-        // ADR-0017 Phase 3 Slice 10: a placement heuristic only — never
-        // affects correctness. The reaper-specific stale-owner epoch CAS
-        // remains the sole authority over who actually wins; this only
-        // decides who tries first.
-        if !backoff_delay.is_zero() {
-            tokio::time::sleep(backoff_delay).await;
-        }
-        if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-steal")
-            .await
-        {
-            workers.cancel_hydration_reservation(&candidate.entity);
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
-            return false;
-        }
-        match node_lease
-            .steal_orphaned_sm_session_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
-            .await
-        {
-            Ok(new_epoch) => {
-                stolen += 1;
-                match workers.enqueue_reserved_hydration(
-                    candidate.entity,
-                    waddle_xmpp::stream_management::persistence::SmClaimFence::new(
-                        me.clone(),
-                        new_epoch,
-                    ),
-                    reservation,
-                ) {
-                    WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
-                    WorkEnqueueOutcome::RetainedForRestart => debug!("orphan reaper: hydration worker stopped after steal; responsibility retained for supervisor restart"),
-                    WorkEnqueueOutcome::RetainedForRedrive => debug!("orphan reaper: hydration channel full after steal; responsibility retained for active redrive"),
-                    WorkEnqueueOutcome::Rejected => debug!("orphan reaper: reserved hydration channel rejected work after steal; claim remains fenced until node expiry"),
+            if !backoff_delay.is_zero() {
+                tokio::time::sleep(backoff_delay).await;
+            }
+            if workers.cancel.is_cancelled() {
+                let _ = room_registry
+                    .cancel_pending_reclaimed_room_reservation(room_jid.clone())
+                    .await;
+                return false;
+            }
+            match node_lease
+                .steal_orphaned_room_actor_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
+                .await
+            {
+                Ok(new_epoch) => {
+                    let pending_handoff = waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
+                        room_jid: room_jid.clone(),
+                        claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(
+                            candidate.entity.clone(),
+                            me.clone(),
+                            new_epoch,
+                        ),
+                        previous_owner: candidate.owner.clone(),
+                    };
+                    // This must remain the first operation after observing the
+                    // steal CAS succeed. It is synchronous, so cancellation of
+                    // the outer sweep cannot drop the exact won epoch before
+                    // terminal shutdown can transfer it into RoomRegistry.
+                    workers.remember_room_handoff(pending_handoff.clone());
+                    match register_reclaimed_epoch_or_cleanup(
+                        ReclaimedRegistrationContext {
+                            workers,
+                            room_registry: &room_registry,
+                            claim_store: &claim_store,
+                            me: &me,
+                        },
+                        pending_handoff.clone(),
+                    )
+                    .await
+                    {
+                        ReclaimedRegistration::Registered => {}
+                        ReclaimedRegistration::Released => {
+                            room_released += 1;
+                            continue;
+                        }
+                        ReclaimedRegistration::LostRace => {
+                            room_lost_race += 1;
+                            continue;
+                        }
+                        ReclaimedRegistration::CleanupScheduled => {
+                            room_failed += 1;
+                            continue;
+                        }
+                    }
+                    let reconciliation = reconcile_registered_room_or_self_fence(
+                        workers,
+                        &room_registry,
+                        room_jid.clone(),
+                        pending_handoff.claim_fence,
+                        candidate.owner.clone(),
+                    )
+                    .await;
+                    let notify_previous_owner = !matches!(
+                        reconciliation,
+                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace)
+                            | Err(_)
+                    );
+                    if notify_previous_owner {
+                        if let Some(store) = clustering.muc_durable_store.as_ref() {
+                            if let Err(error) = store
+                                .notify_previous_owner_demoted(
+                                    &room_jid,
+                                    &candidate.owner.node_id,
+                                    &candidate.owner.node_epoch,
+                                    new_epoch,
+                                )
+                                .await
+                            {
+                                sweep_failed = true;
+                                debug!(
+                                    room = %room_jid,
+                                    %error,
+                                    "orphan reaper: best-effort room demotion notification failed"
+                                );
+                            }
+                        }
+                    }
+                    match reconciliation {
+                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
+                            room_hydrated += 1;
+                        }
+                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
+                            room_released += 1;
+                        }
+                        Ok(
+                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
+                        ) => room_already_live += 1,
+                        Ok(
+                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
+                        ) => room_pending_retry += 1,
+                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
+                            room_lost_race += 1;
+                        }
+                        Err(error) => {
+                            debug!(
+                                room = %room_jid,
+                                %error,
+                                "orphan reaper: reclaimed-room registry adoption ask failed; node self-fenced"
+                            );
+                            return false;
+                        }
+                    }
+                }
+                Err(ClaimError::Conflict) => {
+                    room_lost_race += 1;
+                    if let Err(error) = room_registry
+                        .cancel_pending_reclaimed_room_reservation(room_jid.clone())
+                        .await
+                    {
+                        sweep_failed = true;
+                        debug!(room = %room_jid, %error, "orphan reaper: failed to cancel lost-race room adoption reservation");
+                    }
+                }
+                Err(error) => {
+                    room_page_processed = false;
+                    room_failed += 1;
+                    let _ = room_registry
+                        .cancel_pending_reclaimed_room_reservation(room_jid.clone())
+                        .await;
+                    debug!(
+                        entity_id = %candidate.entity.id,
+                        %error,
+                        "orphan reaper: RoomActor claim steal failed"
+                    );
                 }
             }
-            Err(ClaimError::Conflict) => {
-                workers.cancel_hydration_reservation(&candidate.entity);
-                state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
-                // Another node (or this same node's own re-registration
-                // reacquisition step, ADR-0017 Phase 3 plan deviation #19)
-                // already reclaimed it, or the "dead" owner actually
-                // renewed concurrently — safe, no-op.
-            }
-            Err(error) => {
+        }
+        if room_scan_succeeded && room_page_processed {
+            let committed_cursor = if room_page_has_more {
+                room_page_next_cursor
+            } else {
+                None
+            };
+            workers.set_room_cursor(committed_cursor.clone());
+            if let Err(error) = node_lease
+                .persist_orphan_reaper_cursor(
+                    crate::clustering::claims::OrphanReaperCursorUpdate::RoomActor(committed_cursor),
+                )
+                .await
+            {
                 sweep_failed = true;
-                page_processed = false;
-                workers.cancel_hydration_reservation(&candidate.entity);
-                state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
-                warn!(
-                    entity_id = %candidate.entity.id,
-                    %error,
-                    "orphan reaper: steal_orphaned_sm_session_claim failed"
-                );
+                warn!(%error, "orphan reaper: failed to persist RoomActor scan cursor");
             }
         }
-    }
-    if scan_succeeded && page_processed {
-        let committed_cursor = if page_has_more {
-            page_next_cursor
-        } else {
-            None
-        };
-        workers.set_sm_cursor(committed_cursor.clone());
-        if let Err(error) = node_lease
-            .persist_orphan_reaper_cursor(
-                crate::clustering::claims::OrphanReaperCursorUpdate::SmSession(committed_cursor),
-            )
-            .await
-        {
+        if !room_scan_succeeded || room_failed > 0 {
             sweep_failed = true;
-            warn!(%error, "orphan reaper: failed to persist SM-session scan cursor");
         }
-    }
-    if !scan_succeeded {
-        sweep_failed = true;
-    }
-    if stolen > 0 {
-        info!(
-            stolen,
-            "orphan reaper: reclaimed orphaned SM-session claims"
-        );
-    }
-
-    // Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): a
-    // `clustering_isr_tokens` row is never reaped by the ordinary
-    // `consume` path alone (a token issued but never resumed, or whose SM
-    // session this very sweep just reaped above, leaves an otherwise
-    // -permanent orphan). No cascade hook exists from the SM session
-    // claim's own release/reap paths — the SM session registry
-    // (`waddle-xmpp`) has no reason to depend on ISR (`waddle-server`
-    // -local, Postgres-only) at all, the same crate separation
-    // `ClaimStore`/`IsrTokenStore` already keep — so this rides the same
-    // janitor cadence as a bounded, deadline-armed TTL sweep instead.
-    if let Some(isr_token_store) = clustering.isr_token_store() {
-        match tokio::time::timeout(
-            ISR_TOKEN_SWEEP_TIMEOUT,
-            isr_token_store.sweep_expired(ISR_TOKEN_SWEEP_MAX_AGE),
+        for (outcome, count) in [
+            ("hydrated", room_hydrated),
+            ("released", room_released),
+            ("already_live", room_already_live),
+            ("pending_retry", room_pending_retry),
+            ("lost_race", room_lost_race),
+            ("failed", room_failed),
+        ] {
+            if count > 0 {
+                crate::clustering::metrics::record_room_orphan_reconciliation(outcome, count);
+            }
+        }
+        let room_reconciled = room_hydrated + room_released + room_already_live;
+        if room_pending_retry > 0 || room_failed > 0 {
+            warn!(
+                hydrated = room_hydrated,
+                released = room_released,
+                already_live = room_already_live,
+                pending_retry = room_pending_retry,
+                lost_race = room_lost_race,
+                failed = room_failed,
+                limit = ORPHANED_ROOM_CANDIDATE_LIMIT,
+                "orphan reaper: RoomActor reconciliation completed with pending work"
+            );
+        } else if room_reconciled > 0 {
+            info!(
+                hydrated = room_hydrated,
+                released = room_released,
+                already_live = room_already_live,
+                pending_retry = room_pending_retry,
+                lost_race = room_lost_race,
+                failed = room_failed,
+                limit = ORPHANED_ROOM_CANDIDATE_LIMIT,
+                "orphan reaper: reconciled orphaned RoomActor claims"
+            );
+        }
+        let (page, scan_succeeded) = match tokio::time::timeout(
+            ORPHANED_SM_SCAN_TIMEOUT,
+            node_lease.list_orphaned_sm_session_claims_page(
+                workers.sm_cursor(),
+                STALE_NODE_WATCHDOG_CANDIDATE_LIMIT,
+            ),
         )
         .await
         {
-            Ok(Ok(deleted)) if deleted > 0 => {
-                info!(deleted, "orphan reaper: swept expired ISR tokens");
-            }
-            Ok(Ok(_)) => {}
+            Ok(Ok(page)) => (page, true),
             Ok(Err(error)) => {
-                sweep_failed = true;
-                warn!(%error, "orphan reaper: ISR token sweep failed");
+                debug!(%error, "orphan reaper: SM-session candidate page failed; room lane already completed");
+                (
+                    crate::clustering::claims::OrphanedSmSessionClaimPage {
+                        candidates: Vec::new(),
+                        next_cursor: workers.sm_cursor(),
+                        has_more: false,
+                        quarantined: 0,
+                    },
+                    false,
+                )
             }
-            Err(_timeout) => {
-                sweep_failed = true;
-                warn!(
-                    timeout = ?ISR_TOKEN_SWEEP_TIMEOUT,
-                    "orphan reaper: ISR token sweep timed out"
+            Err(_) => {
+                debug!(
+                    "orphan reaper: SM-session candidate scan timed out; room lane already completed"
                 );
+                (
+                    crate::clustering::claims::OrphanedSmSessionClaimPage {
+                        candidates: Vec::new(),
+                        next_cursor: workers.sm_cursor(),
+                        has_more: false,
+                        quarantined: 0,
+                    },
+                    false,
+                )
+            }
+        };
+        crate::clustering::metrics::record_sm_orphan_candidate_page(
+            page.candidates.len(),
+            page.has_more,
+            page.quarantined,
+        );
+        let page_has_more = page.has_more;
+        let page_next_cursor = page.next_cursor.clone();
+        let candidates = page.candidates;
+        let mut stolen = 0usize;
+        let mut page_processed = true;
+        for candidate in candidates {
+            let Some(reservation) = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .reserve_reclaimed_claim_capacity(&candidate.entity)
+            else {
+                page_processed = false;
+                break;
+            };
+            if !workers.reserve_hydration(&candidate.entity, &me, reservation) {
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
+                warn!("orphan reaper: pausing SM steals because hydration capacity is exhausted");
+                page_processed = false;
+                break;
+            }
+            if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-candidate")
+                .await
+            {
+                workers.cancel_hydration_reservation(&candidate.entity);
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
+                return false;
+            }
+            // Element 9's ordering requirement: commit the expire CAS on the
+            // dead owner's row FIRST. Idempotent/best-effort — a failure here
+            // just means the steal below is also likely to lose (the owner
+            // row is not yet committed-expired), retried next sweep.
+            if let Err(error) = node_lease.expire(&candidate.owner, lease_ttl).await {
+                sweep_failed = true;
+                page_processed = false;
+                workers.cancel_hydration_reservation(&candidate.entity);
+                debug!(
+                    entity_id = %candidate.entity.id,
+                    %error,
+                    "orphan reaper: expire on the dead owner's row failed; retrying next sweep"
+                );
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
+                continue;
+            }
+            // ADR-0017 Phase 3 Slice 10: a placement heuristic only — never
+            // affects correctness. The reaper-specific stale-owner epoch CAS
+            // remains the sole authority over who actually wins; this only
+            // decides who tries first.
+            if !backoff_delay.is_zero() {
+                tokio::time::sleep(backoff_delay).await;
+            }
+            if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "pre-steal")
+                .await
+            {
+                workers.cancel_hydration_reservation(&candidate.entity);
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
+                return false;
+            }
+            match node_lease
+                .steal_orphaned_sm_session_claim(&candidate.entity, candidate.epoch, &me, lease_ttl)
+                .await
+            {
+                Ok(new_epoch) => {
+                    stolen += 1;
+                    match workers.enqueue_reserved_hydration(
+                        candidate.entity,
+                        waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                            me.clone(),
+                            new_epoch,
+                        ),
+                        reservation,
+                    ) {
+                        WorkEnqueueOutcome::Enqueued | WorkEnqueueOutcome::AlreadyTracked => {}
+                        WorkEnqueueOutcome::RetainedForRestart => debug!("orphan reaper: hydration worker stopped after steal; responsibility retained for supervisor restart"),
+                        WorkEnqueueOutcome::RetainedForRedrive => debug!("orphan reaper: hydration channel full after steal; responsibility retained for active redrive"),
+                        WorkEnqueueOutcome::Rejected => debug!("orphan reaper: reserved hydration channel rejected work after steal; claim remains fenced until node expiry"),
+                    }
+                }
+                Err(ClaimError::Conflict) => {
+                    workers.cancel_hydration_reservation(&candidate.entity);
+                    state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
+                    // Another node (or this same node's own re-registration
+                    // reacquisition step, ADR-0017 Phase 3 plan deviation #19)
+                    // already reclaimed it, or the "dead" owner actually
+                    // renewed concurrently — safe, no-op.
+                }
+                Err(error) => {
+                    sweep_failed = true;
+                    page_processed = false;
+                    workers.cancel_hydration_reservation(&candidate.entity);
+                    state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .cancel_reclaimed_claim_capacity(&candidate.entity, reservation);
+                    warn!(
+                        entity_id = %candidate.entity.id,
+                        %error,
+                        "orphan reaper: steal_orphaned_sm_session_claim failed"
+                    );
+                }
             }
         }
+        if scan_succeeded && page_processed {
+            let committed_cursor = if page_has_more {
+                page_next_cursor
+            } else {
+                None
+            };
+            workers.set_sm_cursor(committed_cursor.clone());
+            if let Err(error) = node_lease
+                .persist_orphan_reaper_cursor(
+                    crate::clustering::claims::OrphanReaperCursorUpdate::SmSession(committed_cursor),
+                )
+                .await
+            {
+                sweep_failed = true;
+                warn!(%error, "orphan reaper: failed to persist SM-session scan cursor");
+            }
+        }
+        if !scan_succeeded {
+            sweep_failed = true;
+        }
+        if stolen > 0 {
+            info!(
+                stolen,
+                "orphan reaper: reclaimed orphaned SM-session claims"
+            );
+        }
+
+        // Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): a
+        // `clustering_isr_tokens` row is never reaped by the ordinary
+        // `consume` path alone (a token issued but never resumed, or whose SM
+        // session this very sweep just reaped above, leaves an otherwise
+        // -permanent orphan). No cascade hook exists from the SM session
+        // claim's own release/reap paths — the SM session registry
+        // (`waddle-xmpp`) has no reason to depend on ISR (`waddle-server`
+        // -local, Postgres-only) at all, the same crate separation
+        // `ClaimStore`/`IsrTokenStore` already keep — so this rides the same
+        // janitor cadence as a bounded, deadline-armed TTL sweep instead.
+        if let Some(isr_token_store) = clustering.isr_token_store() {
+            match tokio::time::timeout(
+                ISR_TOKEN_SWEEP_TIMEOUT,
+                isr_token_store.sweep_expired(ISR_TOKEN_SWEEP_MAX_AGE),
+            )
+            .await
+            {
+                Ok(Ok(deleted)) if deleted > 0 => {
+                    info!(deleted, "orphan reaper: swept expired ISR tokens");
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    sweep_failed = true;
+                    warn!(%error, "orphan reaper: ISR token sweep failed");
+                }
+                Err(_timeout) => {
+                    sweep_failed = true;
+                    warn!(
+                        timeout = ?ISR_TOKEN_SWEEP_TIMEOUT,
+                        "orphan reaper: ISR token sweep timed out"
+                    );
+                }
+            }
+        }
+        !sweep_failed
     }
-    !sweep_failed
+    .instrument(janitor_sweep_span(Janitor::OrphanReaper))
+    .await
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -6268,6 +6455,39 @@ mod user_reaper_tests {
         assert_eq!(
             spans.recorded_field("janitor.sweep", "janitor").as_deref(),
             Some("user_actor_reaper"),
+        );
+    }
+
+    /// #1483 acceptance, production path: the registry asks a real sweep
+    /// makes must export `actor.handle_message` spans parented under the
+    /// exported `janitor.sweep` root — the property the sampler needs to
+    /// keep sweep work traceable. This is the test that fails if the
+    /// sweep body escapes the instrumented scope (e.g. a dropped
+    /// `.instrument` or a wrapper around the wrong future).
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_actor_reaper_actor_children_are_parented_under_the_sweep_root() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let state = create_test_websocket_state().await;
+
+        run_user_actor_reaper_sweep(&state).await;
+
+        let exported = spans.exported();
+        let root = exported
+            .iter()
+            .find(|span| span.name == "janitor.sweep")
+            .expect("the sweep root must export once the sweep completes");
+        assert!(
+            exported
+                .iter()
+                .any(|span| span.name == "actor.handle_message"
+                    && span.parent_span_id == root.span_context.span_id()),
+            "the sweep's registry asks must export actor.handle_message \
+             spans parented under the janitor.sweep root; exported: {:?}",
+            exported
+                .iter()
+                .map(|span| span.name.as_ref())
+                .collect::<Vec<&str>>()
         );
     }
 
