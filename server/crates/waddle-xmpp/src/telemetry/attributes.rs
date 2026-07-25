@@ -640,3 +640,84 @@ impl MetricAttribute for SessionInitFailureReason {
         }
     }
 }
+
+/// `deny_reason` — why a MUC join was refused (#1440). The stanza
+/// error condition alone collapses several very different operational
+/// faults into `resource-constraint`/`internal-server-error`, so every
+/// denial also carries the concrete refusal site. One variant per
+/// join-denial return site in the WebSocket presence handler; the set
+/// is closed by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucJoinDenyReason {
+    /// The managed-channel lookup for the room failed.
+    ManagedChannelLookup,
+    /// The room-registry lookup performed before the join failed.
+    RoomLookup,
+    /// Snapshotting the existing room actor before the join failed.
+    RoomSnapshot,
+    /// A managed channel was joined without an authenticated session.
+    SessionMissing,
+    /// The authenticated session carried an unparsable identity.
+    SessionIdentityMalformed,
+    /// The permission graph reports the joiner as a channel outcast.
+    ChannelBan,
+    /// The managed channel is members-only and the joiner has no
+    /// membership.
+    MembershipRequired,
+    /// The managed-channel affiliation resolver itself failed.
+    AffiliationResolver,
+    /// Another cluster node currently holds this room's claim and the
+    /// ordered relay could not proxy the join.
+    OwnershipHeldByAnotherNode,
+    /// This room's ownership claim is mid-reconciliation.
+    OwnershipReconciling,
+    /// The room actor could not resolve its ownership at all.
+    OwnershipUnavailable,
+    /// The room's durable state had not finished restoring.
+    DurableRestorePending,
+    /// Getting or creating the room actor failed.
+    RoomCreate,
+    /// The room actor was evicted underneath the join, twice.
+    RoomEvicted,
+    /// The admission revision kept changing under the join.
+    StaleAdmissionRevision,
+    /// The room actor reports the joiner as banned from the room.
+    RoomBan,
+    /// The room actor is members-only and the joiner is unaffiliated.
+    RoomMembersOnly,
+    /// The room has reached its configured occupant limit.
+    RoomFull,
+    /// The room actor refused the join with an otherwise unclassified
+    /// error (typed fail-safe).
+    RoomActorError,
+}
+
+impl sealed::Sealed for MucJoinDenyReason {}
+impl MetricAttribute for MucJoinDenyReason {
+    fn key(&self) -> &'static str {
+        "deny_reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::ManagedChannelLookup => "managed_channel_lookup",
+            Self::RoomLookup => "room_lookup",
+            Self::RoomSnapshot => "room_snapshot",
+            Self::SessionMissing => "session_missing",
+            Self::SessionIdentityMalformed => "session_identity_malformed",
+            Self::ChannelBan => "channel_ban",
+            Self::MembershipRequired => "membership_required",
+            Self::AffiliationResolver => "affiliation_resolver",
+            Self::OwnershipHeldByAnotherNode => "ownership_held_by_another_node",
+            Self::OwnershipReconciling => "ownership_reconciling",
+            Self::OwnershipUnavailable => "ownership_unavailable",
+            Self::DurableRestorePending => "durable_restore_pending",
+            Self::RoomCreate => "room_create",
+            Self::RoomEvicted => "room_evicted",
+            Self::StaleAdmissionRevision => "stale_admission_revision",
+            Self::RoomBan => "room_ban",
+            Self::RoomMembersOnly => "room_members_only",
+            Self::RoomFull => "room_full",
+            Self::RoomActorError => "room_actor_error",
+        }
+    }
+}

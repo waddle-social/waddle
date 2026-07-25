@@ -662,12 +662,16 @@ impl ManagedAdmissionResolverOutcome {
 }
 
 /// The typed descriptor of a single join-admission denial: the
-/// XEP-0045 §7.2 stanza error it maps to plus the resolver outcome
-/// recorded when the room is a managed channel.
+/// XEP-0045 §7.2 stanza error it maps to, the concrete refusal site,
+/// and the resolver outcome recorded when the room is a managed
+/// channel.
 struct JoinAdmissionDenial {
-    /// The RFC 6120 §8.3.3 stanza error condition; the counter keys on
-    /// this alone.
+    /// The RFC 6120 §8.3.3 stanza error condition the counter keys on.
     condition: waddle_xmpp::telemetry::attributes::StanzaErrorCondition,
+    /// Which refusal site produced the denial (#1440). Several very
+    /// different wait-type faults share `resource-constraint`, so the
+    /// condition alone cannot tell them apart.
+    deny_reason: waddle_xmpp::telemetry::attributes::MucJoinDenyReason,
     /// The `<error type=.../>` class carried on the presence error.
     error_type: ErrorType,
     /// What the affiliation/membership resolver reported.
@@ -685,25 +689,70 @@ fn record_stanza_error_condition(
     tracing::Span::current().record("condition", condition.as_str());
 }
 
-fn mark_internal_join_failure(
-    condition: waddle_xmpp::telemetry::attributes::StanzaErrorCondition,
-    description: &'static str,
-) {
-    record_stanza_error_condition(condition);
-    crate::telemetry::mark_span_error(description);
+/// The span-error description for denials that are server-side
+/// failures rather than protocol policy.
+///
+/// `internal-server-error` is failure by definition; the wait-type
+/// infrastructure faults (#1440) are recoverable for the client but
+/// still failed operations for us, so they keep the ERROR span status
+/// they had before they were routed through the denial choke point.
+/// Everything else — bans, missing membership, a full room — is
+/// successful protocol handling and leaves the span UNSET.
+fn internal_join_failure_description(denial: &JoinAdmissionDenial) -> Option<&'static str> {
+    use waddle_xmpp::telemetry::attributes::MucJoinDenyReason;
+    match denial.deny_reason {
+        MucJoinDenyReason::DurableRestorePending => Some("MUC durable restore remained pending"),
+        MucJoinDenyReason::OwnershipUnavailable => Some("MUC ownership reconciliation unavailable"),
+        _ => matches!(
+            denial.condition,
+            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError
+        )
+        .then_some("MUC join admission failed internally"),
+    }
 }
 
-/// Central choke point for join-admission denials covered by #1315.
+/// The leave-side twin of the join denial choke point (#1440): a leave
+/// bounced because the owning node is unreachable was equally silent
+/// server-side. It is not an admission decision, so it stays off the
+/// `waddle.muc.admission.denied` counter and only records the
+/// disposition log, keyed the same way as a join denial.
+fn bounce_muc_leave_ownership_unreachable(
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: &str,
+) -> Vec<String> {
+    let condition = waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint;
+    record_stanza_error_condition(condition);
+    info!(
+        room = %room_jid,
+        user = %sender_jid.to_bare(),
+        nick = %nick,
+        condition = condition.as_str(),
+        "MUC leave bounced: room ownership unreachable"
+    );
+    vec![build_muc_presence_error_xml(
+        room_jid,
+        nick,
+        sender_jid,
+        StanzaError::new(
+            ErrorType::Wait,
+            condition.to_xmpp(),
+            "en",
+            "This room's ownership is currently unreachable; please retry.",
+        ),
+    )]
+}
+
+/// Central choke point for join denials (#1315, #1440).
 ///
-/// Every managed-channel join rejection routes through here so the
-/// denial is never invisible again: it emits one info-level structured
-/// log (bare room JID, bare user JID, condition, and resolver outcome)
-/// and increments the
+/// Every join rejection routes through here so the denial is never
+/// invisible: it emits one info-level structured log (bare room JID,
+/// bare user JID, nick, condition, deny reason, managed flag, and
+/// resolver outcome) and increments the
 /// `waddle.muc.admission.denied` counter keyed by the stanza error
-/// condition, then returns the XEP-0045 §7.2 presence-error frame
-/// unchanged. Unmanaged joins reuse the typed error builder without
-/// emitting this managed-channel telemetry. JIDs live on the log only
-/// — never as a metric attribute.
+/// condition and the refusal site, then returns the XEP-0045 §7.2
+/// presence-error frame unchanged. JIDs live on the log only — never
+/// as a metric attribute.
 fn deny_join_admission(
     room_jid: &BareJid,
     sender_jid: &FullJid,
@@ -712,31 +761,29 @@ fn deny_join_admission(
     denial: JoinAdmissionDenial,
 ) -> Vec<String> {
     record_stanza_error_condition(denial.condition);
-    if matches!(
+    if let Some(description) = internal_join_failure_description(&denial) {
+        crate::telemetry::mark_span_error(description);
+    }
+    info!(
+        room = %room_jid,
+        user = %sender_jid.to_bare(),
+        nick = %nick,
+        condition = denial.condition.as_str(),
+        deny_reason = waddle_xmpp::telemetry::attributes::MetricAttribute::value(
+            &denial.deny_reason
+        ),
+        managed_channel = managed_channel_confirmed,
+        resolver_outcome = denial.resolver_outcome.as_str(),
+        "MUC join admission denied"
+    );
+    waddle_xmpp::counter_add!(
+        "waddle.muc.admission.denied",
+        "1",
+        "MUC join admission denials by stanza error condition and refusal site.",
+        1,
         denial.condition,
-        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError
-    ) {
-        // `internal-server-error` is emitted only for server-side admission
-        // failures; policy conditions such as `registration-required` remain
-        // successful protocol handling with an UNSET span status.
-        crate::telemetry::mark_span_error("MUC join admission failed internally");
-    }
-    if managed_channel_confirmed {
-        info!(
-            room = %room_jid,
-            user = %sender_jid.to_bare(),
-            condition = denial.condition.as_str(),
-            resolver_outcome = denial.resolver_outcome.as_str(),
-            "managed-channel admission denied"
-        );
-        waddle_xmpp::counter_add!(
-            "waddle.muc.admission.denied",
-            "1",
-            "Managed-channel admission denials by stanza error condition.",
-            1,
-            denial.condition,
-        );
-    }
+        denial.deny_reason,
+    );
     vec![build_muc_presence_error_xml(
         room_jid,
         nick,
@@ -786,23 +833,16 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             Ok(channel) => channel,
             Err(error) => {
                 warn!(room = %room_jid, error = %error, "Failed to resolve managed MUC channel");
-                let condition =
-                    waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError;
-                info!(
-                    room = %room_jid,
-                    user = %sender_jid.to_bare(),
-                    condition = condition.as_str(),
-                    resolver_outcome =
-                        ManagedAdmissionResolverOutcome::ManagedChannelLookupError.as_str(),
-                    "managed-channel admission denied"
-                );
                 return deny_join_admission(
                     room_jid,
                     sender_jid,
                     &nick,
                     false,
                     JoinAdmissionDenial {
-                        condition,
+                        condition:
+                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
+                        deny_reason:
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::ManagedChannelLookup,
                         error_type: ErrorType::Wait,
                         resolver_outcome:
                             ManagedAdmissionResolverOutcome::ManagedChannelLookupError,
@@ -828,6 +868,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             condition:
                                 waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                             error_type: ErrorType::Wait,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomLookup,
                             resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
                             message: "Failed to look up room before join.",
                         },
@@ -856,6 +898,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             condition:
                                 waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                             error_type: ErrorType::Wait,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomSnapshot,
                             resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
                             message: "Failed to snapshot room before join.",
                         },
@@ -880,6 +924,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         condition:
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::NotAuthorized,
                         error_type: ErrorType::Auth,
+                        deny_reason:
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::SessionMissing,
                         resolver_outcome: ManagedAdmissionResolverOutcome::SessionMissing,
                         message: "Authentication required to join managed channel.",
                     },
@@ -899,6 +945,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         condition:
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                         error_type: ErrorType::Wait,
+                        deny_reason:
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::SessionIdentityMalformed,
                         resolver_outcome: ManagedAdmissionResolverOutcome::SessionJidMalformed,
                         message: "Failed to resolve managed-channel affiliation.",
                     },
@@ -947,6 +995,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             condition:
                                 waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
                             error_type: ErrorType::Auth,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::ChannelBan,
                             resolver_outcome: ManagedAdmissionResolverOutcome::Banned,
                             message: "Banned from managed channel.",
                         },
@@ -982,6 +1032,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                 condition:
                                     waddle_xmpp::telemetry::attributes::StanzaErrorCondition::RegistrationRequired,
                                 error_type: ErrorType::Auth,
+                                deny_reason:
+                                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
                                 resolver_outcome: ManagedAdmissionResolverOutcome::NoAffiliation,
                                 message: "Membership required to join managed channel.",
                             },
@@ -999,6 +1051,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             condition:
                                 waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                             error_type: ErrorType::Wait,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::AffiliationResolver,
                             resolver_outcome: ManagedAdmissionResolverOutcome::ResolverError,
                             message: "Failed to resolve managed-channel affiliation.",
                         },
@@ -1150,33 +1204,41 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                 }
                             }
                         }
-                        return vec![build_muc_presence_error_xml(
+                        return deny_join_admission(
                             room_jid,
-                            &nick,
                             sender_jid,
-                            StanzaError::new(
-                                ErrorType::Wait,
-                                DefinedCondition::ResourceConstraint,
-                                "en",
-                                "This room's ownership is currently held by another node; \
-                                 please retry.",
-                            ),
-                        )];
+                            &nick,
+                            managed_channel.is_some(),
+                            JoinAdmissionDenial {
+                                condition:
+                                    waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
+                                deny_reason:
+                                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::OwnershipHeldByAnotherNode,
+                                error_type: ErrorType::Wait,
+                                resolver_outcome,
+                                message: "This room's ownership is currently held by another \
+                                          node; please retry.",
+                            },
+                        );
                     }
                     Err(
                         waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(_),
                     ) => {
-                        return vec![build_muc_presence_error_xml(
+                        return deny_join_admission(
                             room_jid,
-                            &nick,
                             sender_jid,
-                            StanzaError::new(
-                                ErrorType::Wait,
-                                DefinedCondition::ResourceConstraint,
-                                "en",
-                                "This room's ownership is being reconciled; please retry.",
-                            ),
-                        )];
+                            &nick,
+                            managed_channel.is_some(),
+                            JoinAdmissionDenial {
+                                condition:
+                                    waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
+                                deny_reason:
+                                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::OwnershipReconciling,
+                                error_type: ErrorType::Wait,
+                                resolver_outcome,
+                                message: "This room's ownership is being reconciled; please retry.",
+                            },
+                        );
                     }
                     Err(error) => {
                         warn!(
@@ -1193,6 +1255,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                 condition:
                                     waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                                 error_type: ErrorType::Wait,
+                                deny_reason:
+                                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomCreate,
                                 resolver_outcome,
                                 message: "Failed to get or create the room.",
                             },
@@ -1269,6 +1333,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             condition:
                                 waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                             error_type: ErrorType::Wait,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomEvicted,
                             resolver_outcome,
                             message: "Room was evicted while joining; please retry.",
                         },
@@ -1336,6 +1402,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             condition:
                                 waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                             error_type: ErrorType::Wait,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::StaleAdmissionRevision,
                             resolver_outcome,
                             message: "Room admission changed while joining; please retry.",
                         },
@@ -1347,13 +1415,15 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 {
                     // XEP-0045 §7.2.8: bans map to <forbidden/> even in
                     // members-only rooms (#1265 item 1).
-                    let (condition, message) = match reason {
+                    let (condition, deny_reason, message) = match reason {
                         waddle_xmpp::muc::room_actor::JoinDenialReason::MembersOnly => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::RegistrationRequired,
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomMembersOnly,
                             "Membership required to join this room.",
                         ),
                         waddle_xmpp::muc::room_actor::JoinDenialReason::Banned => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomBan,
                             "You are banned from this room.",
                         ),
                     };
@@ -1364,6 +1434,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         managed_channel.is_some(),
                         JoinAdmissionDenial {
                             condition,
+                            deny_reason,
                             error_type: ErrorType::Auth,
                             resolver_outcome,
                             message,
@@ -1382,21 +1453,22 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         waddle_xmpp::muc::room_actor::RoomActorError::RestorePending
                     )
                 ) {
-                    mark_internal_join_failure(
-                        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
-                        "MUC durable restore remained pending",
-                    );
-                    return vec![build_muc_presence_error_xml(
+                    return deny_join_admission(
                         room_jid,
-                        &nick,
                         sender_jid,
-                        StanzaError::new(
-                            ErrorType::Wait,
-                            DefinedCondition::ResourceConstraint,
-                            "en",
-                            "This room's durable state has not finished loading; please retry.",
-                        ),
-                    )];
+                        &nick,
+                        managed_channel.is_some(),
+                        JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::DurableRestorePending,
+                            error_type: ErrorType::Wait,
+                            resolver_outcome,
+                            message:
+                                "This room's durable state has not finished loading; please retry.",
+                        },
+                    );
                 }
                 if matches!(
                     &error,
@@ -1404,21 +1476,21 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         waddle_xmpp::muc::room_actor::RoomActorError::OwnershipUnavailable
                     )
                 ) {
-                    mark_internal_join_failure(
-                        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
-                        "MUC ownership reconciliation unavailable",
-                    );
-                    return vec![build_muc_presence_error_xml(
+                    return deny_join_admission(
                         room_jid,
-                        &nick,
                         sender_jid,
-                        StanzaError::new(
-                            ErrorType::Wait,
-                            DefinedCondition::ResourceConstraint,
-                            "en",
-                            "This room's ownership is being reconciled; please retry.",
-                        ),
-                    )];
+                        &nick,
+                        managed_channel.is_some(),
+                        JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ResourceConstraint,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::OwnershipUnavailable,
+                            error_type: ErrorType::Wait,
+                            resolver_outcome,
+                            message: "This room's ownership is being reconciled; please retry.",
+                        },
+                    );
                 }
                 if matches!(
                     &error,
@@ -1431,23 +1503,21 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     // error of type "wait" carrying <service-unavailable/>.
                     // Returning an empty reply here left the client
                     // stalled forever waiting for self-presence (#1111).
-                    warn!(
-                        room = %room_jid,
-                        nick = %nick,
-                        sender = %sender_jid,
-                        "MUC join refused: room is full"
-                    );
-                    return vec![build_muc_presence_error_xml(
+                    return deny_join_admission(
                         room_jid,
-                        &nick,
                         sender_jid,
-                        StanzaError::new(
-                            ErrorType::Wait,
-                            DefinedCondition::ServiceUnavailable,
-                            "en",
-                            "The room has reached its maximum number of occupants.",
-                        ),
-                    )];
+                        &nick,
+                        managed_channel.is_some(),
+                        JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ServiceUnavailable,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomFull,
+                            error_type: ErrorType::Wait,
+                            resolver_outcome,
+                            message: "The room has reached its maximum number of occupants.",
+                        },
+                    );
                 }
                 // FIX 6 / #1111: no remaining error variant may silently
                 // drop the join with no presence reply at all — bounce
@@ -1467,6 +1537,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         condition:
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
                         error_type: ErrorType::Wait,
+                        deny_reason:
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomActorError,
                         resolver_outcome,
                         message: "Failed to join the room; please retry.",
                     },
@@ -1745,34 +1817,16 @@ pub async fn handle_muc_leave(
                         return Vec::new();
                     }
                     RemoteMucLeaveDecision::RetryableNoEffect => {
-                        return vec![build_muc_presence_error_xml(
-                            room_jid,
-                            nick,
-                            sender_jid,
-                            StanzaError::new(
-                                ErrorType::Wait,
-                                DefinedCondition::ResourceConstraint,
-                                "en",
-                                "This room's ownership is currently unreachable; please retry.",
-                            ),
-                        )];
+                        return bounce_muc_leave_ownership_unreachable(
+                            room_jid, sender_jid, nick,
+                        );
                     }
                     RemoteMucLeaveDecision::LocalFallback => {}
                 }
             }
         }
         if known_remote_membership {
-            return vec![build_muc_presence_error_xml(
-                room_jid,
-                nick,
-                sender_jid,
-                StanzaError::new(
-                    ErrorType::Wait,
-                    DefinedCondition::ResourceConstraint,
-                    "en",
-                    "This room's ownership is currently unreachable; please retry.",
-                ),
-            )];
+            return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
 
         debug!(room = %room_jid, "Room not found for leave");
@@ -2937,5 +2991,113 @@ mod resolver_sync_retry_tests {
             Affiliation::Member,
         );
         assert_eq!(old_store.checks(), 1);
+    }
+}
+
+#[cfg(test)]
+mod join_denial_telemetry_tests {
+    use super::*;
+    use waddle_xmpp::telemetry::attributes::{MucJoinDenyReason, StanzaErrorCondition};
+
+    fn resource_constraint_denial(deny_reason: MucJoinDenyReason) -> JoinAdmissionDenial {
+        JoinAdmissionDenial {
+            condition: StanzaErrorCondition::ResourceConstraint,
+            deny_reason,
+            error_type: ErrorType::Wait,
+            resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
+            message: "This room's ownership is currently held by another node; please retry.",
+        }
+    }
+
+    /// #1440: the wait-type ownership bounces used to answer the client
+    /// with `<resource-constraint/>` and record nothing at all. Assert
+    /// through the metric-reader seam that the denial is now counted
+    /// under both its condition and its refusal site, so the distinct
+    /// wait reasons stay distinguishable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn resource_constraint_join_denial_is_counted_with_its_deny_reason() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let room_jid: BareJid = "wait-room@muc.example.com".parse().expect("room jid");
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+        let frames = deny_join_admission(
+            &room_jid,
+            &sender_jid,
+            "alice",
+            false,
+            resource_constraint_denial(MucJoinDenyReason::OwnershipHeldByAnotherNode),
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("resource-constraint"), "{frames:?}");
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.muc.admission.denied",
+                &[
+                    ("condition", "resource-constraint"),
+                    ("deny_reason", "ownership_held_by_another_node"),
+                ]
+            ),
+            Some(1),
+            "the wait denial must increment the admission counter exactly once"
+        );
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.muc.admission.denied",
+                &[("deny_reason", "ownership_reconciling")]
+            ),
+            Some(0),
+            "a different wait reason must not be conflated with this one"
+        );
+        assert_eq!(
+            metrics.metric_unit("waddle.muc.admission.denied"),
+            Some("1".to_string()),
+            "the admission denial counter must use the dimensionless unit"
+        );
+    }
+
+    /// The wait-type infrastructure faults stay failed operations even
+    /// though their condition is not `internal-server-error`; policy
+    /// denials must not be promoted to span errors.
+    #[test]
+    fn only_server_side_faults_mark_the_join_span_as_failed() {
+        assert_eq!(
+            internal_join_failure_description(&resource_constraint_denial(
+                MucJoinDenyReason::DurableRestorePending
+            )),
+            Some("MUC durable restore remained pending")
+        );
+        assert_eq!(
+            internal_join_failure_description(&resource_constraint_denial(
+                MucJoinDenyReason::OwnershipUnavailable
+            )),
+            Some("MUC ownership reconciliation unavailable")
+        );
+        assert_eq!(
+            internal_join_failure_description(&resource_constraint_denial(
+                MucJoinDenyReason::OwnershipHeldByAnotherNode
+            )),
+            None
+        );
+        assert_eq!(
+            internal_join_failure_description(&JoinAdmissionDenial {
+                condition: StanzaErrorCondition::RegistrationRequired,
+                deny_reason: MucJoinDenyReason::MembershipRequired,
+                error_type: ErrorType::Auth,
+                resolver_outcome: ManagedAdmissionResolverOutcome::NoAffiliation,
+                message: "Membership required to join this room.",
+            }),
+            None
+        );
+        assert_eq!(
+            internal_join_failure_description(&JoinAdmissionDenial {
+                condition: StanzaErrorCondition::InternalServerError,
+                deny_reason: MucJoinDenyReason::RoomLookup,
+                error_type: ErrorType::Wait,
+                resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
+                message: "Failed to look up room before join.",
+            }),
+            Some("MUC join admission failed internally")
+        );
     }
 }
