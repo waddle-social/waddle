@@ -141,12 +141,26 @@ fn sampler_from_env() -> opentelemetry_sdk::trace::Sampler {
 /// resource collapse into one clobbered series downstream, so every
 /// process needs a distinct, stable-for-its-lifetime identity.
 /// Precedence: explicit `OTEL_SERVICE_INSTANCE_ID` override, then
-/// `HOSTNAME` (the kubelet sets it to the pod name in every pod)
-/// suffixed with the pid so several processes sharing a hostname —
-/// bare metal, docker-compose — stay distinguishable, then a
-/// pid+entropy fallback: pids alone repeat across PID namespaces, so
-/// hostname-less containers need the per-process entropy to avoid
-/// colliding. Blank values are skipped.
+/// `HOSTNAME` verbatim (the kubelet sets it to the pod name in every
+/// pod), then a pid+entropy fallback: pids alone repeat across PID
+/// namespaces, so hostname-less hosts need the per-process entropy to
+/// avoid colliding. Blank values are skipped.
+///
+/// The hostname is used **verbatim, with no pid suffix** (#1434). The
+/// Prometheus scrape path labels the same pod `instance=<pod name>`,
+/// so a suffixed OTLP identity made every pod appear as two phantom
+/// entities in Grafana Cloud (`target_info` doubled, and joins such as
+/// `up * on(instance) group_right waddle_connected_users` matched
+/// nothing). Matching the scrape label exactly is worth more than
+/// distinguishing several waddle-server processes on one host, which
+/// only happens outside containers and is served by setting
+/// `OTEL_SERVICE_INSTANCE_ID` explicitly.
+///
+/// This does not weaken restart detection (#1435): the recommended
+/// query `time() - waddle_process_start_time_seconds < threshold`
+/// reads the value, not the series identity. Deploys still mint new
+/// series because the pod name changes; in-place container restarts
+/// already reused one series (hostname plus PID 1) before this change.
 fn resolve_service_instance_id(
     explicit: Option<String>,
     hostname: Option<String>,
@@ -157,7 +171,7 @@ fn resolve_service_instance_id(
         return id;
     }
     if let Some(host) = nonblank(hostname) {
-        return format!("{host}-{pid}");
+        return host;
     }
     format!("waddle-server-{pid}-{fallback_entropy}")
 }
@@ -250,8 +264,9 @@ fn build_log_filter() -> EnvFilter {
 /// - `OTEL_SERVICE_NAME`: Service name (default: waddle-server)
 /// - `OTEL_SERVICE_VERSION`: Service version (default: crate version)
 /// - `OTEL_SERVICE_INSTANCE_ID`: Per-replica instance id (default:
-///   `<HOSTNAME>-<pid>` — the pod name in Kubernetes — then a
-///   pid+entropy fallback when no hostname is available)
+///   `HOSTNAME` verbatim — the pod name in Kubernetes, matching the
+///   scrape path's `instance` label — then a pid+entropy fallback when
+///   no hostname is available)
 /// - `OTEL_RESOURCE_ATTRIBUTES`: Standard comma-separated resource
 ///   attributes (helm sets `deployment.environment=<env>` here),
 ///   merged by the SDK's env detector
@@ -568,16 +583,28 @@ mod tests {
     }
 
     #[test]
-    fn instance_id_uses_hostname_with_pid_suffix() {
-        // The pid suffix keeps several processes sharing a hostname
-        // (bare metal, docker-compose) from publishing one identity.
+    fn instance_id_uses_hostname_verbatim() {
+        // #1434: the identity must equal the pod name exactly so it
+        // matches the Prometheus scrape path's `instance` label. No
+        // pid/ordinal suffix.
         let id = super::resolve_service_instance_id(
             None,
             Some("waddle-server-abc-xyz".to_string()),
             7,
             "entropy",
         );
-        assert_eq!(id, "waddle-server-abc-xyz-7");
+        assert_eq!(id, "waddle-server-abc-xyz");
+    }
+
+    #[test]
+    fn instance_id_is_independent_of_pid() {
+        // Two processes on the same pod resolve to the same identity;
+        // a restart under a new pid keeps the pod's series stable.
+        let host = Some("waddle-server-abc-xyz".to_string());
+        assert_eq!(
+            super::resolve_service_instance_id(None, host.clone(), 1, "entropy"),
+            super::resolve_service_instance_id(None, host, 4242, "other-entropy"),
+        );
     }
 
     #[test]
@@ -596,8 +623,8 @@ mod tests {
     #[test]
     fn instance_id_trims_surrounding_whitespace() {
         let id =
-            super::resolve_service_instance_id(None, Some(" pod-1 \n".to_string()), 7, "entropy");
-        assert_eq!(id, "pod-1-7");
+            super::resolve_service_instance_id(None, Some(" pod-a \n".to_string()), 7, "entropy");
+        assert_eq!(id, "pod-a");
     }
 
     #[test]
