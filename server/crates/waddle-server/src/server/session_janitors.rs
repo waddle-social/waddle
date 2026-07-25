@@ -3,8 +3,21 @@ use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
-use waddle_xmpp::telemetry::attributes::{Janitor, SweepOutcome};
+use tracing::{debug, error, info, warn, Instrument};
+use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome};
+
+/// Named root span for one janitor sweep tick (#1483).
+///
+/// Janitor loops run with no active span, so the actor.handle_message
+/// spans their asks mint would root the trace — exactly the shape the
+/// #1438 span-noise sampler drops. One root per sweep (never per actor
+/// message) keeps the sweep's actor work parented and traceable.
+/// `parent: None` guarantees root semantics even if a caller is
+/// instrumented. The span name is documented in `telemetry::span_noise`
+/// and must never be added to its suppression lists.
+fn janitor_sweep_span(janitor: Janitor) -> tracing::Span {
+    tracing::info_span!(parent: None, "janitor.sweep", janitor = janitor.value())
+}
 
 /// Default interval for the auth-state TTL janitor.
 const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
@@ -156,14 +169,15 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            let mut sweep_failed = false;
-            let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
-                .deps
-                .protocol
-                .sm_session_registry
-                .drain_expired()
-                .await
-            {
+            async {
+                let mut sweep_failed = false;
+                let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .drain_expired()
+                    .await
+                {
                 Ok(sessions) => sessions,
                 Err(err) => {
                     sweep_failed = true;
@@ -562,6 +576,9 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     SweepOutcome::Completed
                 },
             );
+            }
+            .instrument(janitor_sweep_span(Janitor::SmExpiry))
+            .await;
         }
     });
 }
@@ -715,7 +732,8 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                     &supervisor.workers.cancel,
                     &supervisor.workers.fatal_fence,
                     ORPHAN_REAPER_SWEEP_TIMEOUT,
-                    run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers),
+                    run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers)
+                        .instrument(janitor_sweep_span(Janitor::OrphanReaper)),
                 )
                 .await;
                 let mut workers_healthy = supervisor.is_healthy();
@@ -4665,175 +4683,185 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            let mut sweep_failed = false;
-            let detached_live: Option<Vec<waddle_xmpp::pending_delivery::SmSessionId>> = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .live_session_ids()
-                .map(|ids| {
-                    ids.into_iter()
-                        .map(waddle_xmpp::pending_delivery::SmSessionId::new)
-                        .collect()
-                });
-            let detached_live = match detached_live {
-                Some(v) => v,
-                None => {
-                    warn!(
-                        "claim-expiry janitor: SM session registry locks poisoned; \
-                         skipping sweep to avoid mass-release"
-                    );
-                    waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                        Janitor::PendingDeliveryClaim,
-                        SweepOutcome::Failed,
-                    );
-                    continue;
-                }
-            };
-            let active_live = state
-                .deps
-                .protocol
-                .connection_registry
-                .active_sm_stream_ids();
-            let mut live_sessions = detached_live;
-            live_sessions.extend(active_live);
-            // #1124 claim recency floor: only release claims older
-            // than several janitor intervals. Non-SM flushes claim
-            // rows under a synthetic `transient:` session id that is
-            // never in the live-set; without the floor, a janitor
-            // pass overlapping an in-flight flush releases its claims
-            // mid-flight and a second resource re-pushes the same
-            // offline messages. Fresh claims are skipped this pass and
-            // re-examined on later sweeps, so genuinely orphaned
-            // (post-crash) claims are still released — just a few
-            // intervals later.
-            let claim_release_floor_ms = i64::try_from(interval_secs)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(1_000)
-                .saturating_mul(PENDING_CLAIM_RELEASE_FLOOR_INTERVALS);
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            let claimed_before_ms = now_ms.saturating_sub(claim_release_floor_ms);
-            // Adopt claims written without a recency stamp (a
-            // pre-#1124 binary during a rolling deploy) so they age
-            // into release-eligibility instead of being skipped
-            // forever — `list_orphaned_claims` ignores unstamped rows.
-            match state
-                .deps
-                .protocol
-                .pending_delivery_storage
-                .stamp_unstamped_claims(now_ms)
-                .await
-            {
-                Ok(adopted) if adopted > 0 => {
-                    debug!(
-                        adopted,
-                        "claim-expiry janitor: adopted unstamped pending_delivery claims"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    sweep_failed = true;
-                    warn!(error = %error, "claim-expiry janitor: stamp_unstamped_claims failed");
-                }
-            }
-            match state
-                .deps
-                .protocol
-                .pending_delivery_storage
-                .list_orphaned_claims(&live_sessions, claimed_before_ms)
-                .await
-            {
-                Ok(orphans) if !orphans.is_empty() => {
-                    let candidate_count = orphans.len();
-                    let mut released = 0u64;
-                    let mut skipped_reclaimed = 0u64;
-                    for (row_id, session) in orphans {
-                        match state
-                            .deps
-                            .protocol
-                            .pending_delivery_storage
-                            .release_row_if_session(&row_id, &session)
-                            .await
-                        {
-                            Ok(0) => skipped_reclaimed += 1,
-                            Ok(_) => released += 1,
-                            Err(error) => {
-                                sweep_failed = true;
-                                warn!(
-                                    row_id = %row_id,
-                                    session = %session,
-                                    error = %error,
-                                    "claim-expiry janitor: release_row_if_session failed; row stays \
-                                     claimed and will be retried next sweep"
-                                );
-                            }
-                        }
-                    }
-                    info!(
-                        candidate_count,
-                        released,
-                        skipped_reclaimed,
-                        "claim-expiry janitor: released orphaned pending_delivery claims"
-                    );
-                    waddle_xmpp::telemetry::reliability::add_pending_delivery_orphan_claims_released(released);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    sweep_failed = true;
-                    warn!(error = %error, "claim-expiry janitor: list_orphaned_claims failed");
-                }
-            }
-
-            let swept = state
-                .deps
-                .protocol
-                .pending_delivery_storage
-                .sweep_internal_bookkeeping();
-            if swept > 0 {
-                debug!(
-                    swept,
-                    "claim-expiry janitor: pruned idle per-recipient insert locks"
-                );
-            }
-
-            let max_age_days = i64::from(pending_delivery_max_age_days_from_env());
-            let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
-            match state
-                .deps
-                .protocol
-                .pending_delivery_storage
-                .delete_older_than(cutoff)
-                .await
-            {
-                Ok(0) => {}
-                Ok(removed) => {
-                    waddle_xmpp::telemetry::reliability::add_pending_delivery_aged_out(removed);
-                    info!(
-                        removed,
-                        cutoff = %cutoff,
-                        max_age_days,
-                        "pending_delivery aging janitor: dropped expired rows"
-                    );
-                }
-                Err(error) => {
-                    sweep_failed = true;
-                    warn!(
-                        %error,
-                        "pending_delivery aging janitor: delete_older_than failed; \
-                         will retry on next sweep"
-                    );
-                }
-            }
-            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                Janitor::PendingDeliveryClaim,
-                if sweep_failed {
-                    SweepOutcome::Failed
-                } else {
-                    SweepOutcome::Completed
-                },
-            );
+            run_pending_delivery_claim_sweep(&state, interval_secs).await;
         }
     });
+}
+
+async fn run_pending_delivery_claim_sweep(state: &WebSocketState, interval_secs: u64) {
+    async {
+        let mut sweep_failed = false;
+        let detached_live: Option<Vec<waddle_xmpp::pending_delivery::SmSessionId>> = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .live_session_ids()
+            .map(|ids| {
+                ids.into_iter()
+                    .map(waddle_xmpp::pending_delivery::SmSessionId::new)
+                    .collect()
+            });
+        let detached_live = match detached_live {
+            Some(v) => v,
+            None => {
+                warn!(
+                    "claim-expiry janitor: SM session registry locks poisoned; \
+                     skipping sweep to avoid mass-release"
+                );
+                waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                    Janitor::PendingDeliveryClaim,
+                    SweepOutcome::Failed,
+                );
+                return;
+            }
+        };
+        let active_live = state
+            .deps
+            .protocol
+            .connection_registry
+            .active_sm_stream_ids();
+        let mut live_sessions = detached_live;
+        live_sessions.extend(active_live);
+        // #1124 claim recency floor: only release claims older
+        // than several janitor intervals. Non-SM flushes claim
+        // rows under a synthetic `transient:` session id that is
+        // never in the live-set; without the floor, a janitor
+        // pass overlapping an in-flight flush releases its claims
+        // mid-flight and a second resource re-pushes the same
+        // offline messages. Fresh claims are skipped this pass and
+        // re-examined on later sweeps, so genuinely orphaned
+        // (post-crash) claims are still released — just a few
+        // intervals later.
+        let claim_release_floor_ms = i64::try_from(interval_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000)
+            .saturating_mul(PENDING_CLAIM_RELEASE_FLOOR_INTERVALS);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let claimed_before_ms = now_ms.saturating_sub(claim_release_floor_ms);
+        // Adopt claims written without a recency stamp (a
+        // pre-#1124 binary during a rolling deploy) so they age
+        // into release-eligibility instead of being skipped
+        // forever — `list_orphaned_claims` ignores unstamped rows.
+        match state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .stamp_unstamped_claims(now_ms)
+            .await
+        {
+            Ok(adopted) if adopted > 0 => {
+                debug!(
+                    adopted,
+                    "claim-expiry janitor: adopted unstamped pending_delivery claims"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                sweep_failed = true;
+                warn!(error = %error, "claim-expiry janitor: stamp_unstamped_claims failed");
+            }
+        }
+        match state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list_orphaned_claims(&live_sessions, claimed_before_ms)
+            .await
+        {
+            Ok(orphans) if !orphans.is_empty() => {
+                let candidate_count = orphans.len();
+                let mut released = 0u64;
+                let mut skipped_reclaimed = 0u64;
+                for (row_id, session) in orphans {
+                    match state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_row_if_session(&row_id, &session)
+                        .await
+                    {
+                        Ok(0) => skipped_reclaimed += 1,
+                        Ok(_) => released += 1,
+                        Err(error) => {
+                            sweep_failed = true;
+                            warn!(
+                                row_id = %row_id,
+                                session = %session,
+                                error = %error,
+                                "claim-expiry janitor: release_row_if_session failed; row stays \
+                                 claimed and will be retried next sweep"
+                            );
+                        }
+                    }
+                }
+                info!(
+                    candidate_count,
+                    released,
+                    skipped_reclaimed,
+                    "claim-expiry janitor: released orphaned pending_delivery claims"
+                );
+                waddle_xmpp::telemetry::reliability::add_pending_delivery_orphan_claims_released(
+                    released,
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                sweep_failed = true;
+                warn!(error = %error, "claim-expiry janitor: list_orphaned_claims failed");
+            }
+        }
+
+        let swept = state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .sweep_internal_bookkeeping();
+        if swept > 0 {
+            debug!(
+                swept,
+                "claim-expiry janitor: pruned idle per-recipient insert locks"
+            );
+        }
+
+        let max_age_days = i64::from(pending_delivery_max_age_days_from_env());
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
+        match state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .delete_older_than(cutoff)
+            .await
+        {
+            Ok(0) => {}
+            Ok(removed) => {
+                waddle_xmpp::telemetry::reliability::add_pending_delivery_aged_out(removed);
+                info!(
+                    removed,
+                    cutoff = %cutoff,
+                    max_age_days,
+                    "pending_delivery aging janitor: dropped expired rows"
+                );
+            }
+            Err(error) => {
+                sweep_failed = true;
+                warn!(
+                    %error,
+                    "pending_delivery aging janitor: delete_older_than failed; \
+                     will retry on next sweep"
+                );
+            }
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::PendingDeliveryClaim,
+            if sweep_failed {
+                SweepOutcome::Failed
+            } else {
+                SweepOutcome::Completed
+            },
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::PendingDeliveryClaim))
+    .await;
 }
 
 pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSocketState>) {
@@ -4856,35 +4884,40 @@ pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSo
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            let outcome = match state
-                .deps
-                .protocol
-                .push_service
-                .drain_queued_notification_publish_jobs(batch_size)
-                .await
-            {
-                Ok(results) if !results.is_empty() => {
-                    debug!(
-                        drained = results.len(),
-                        "Push Service publish-job janitor drained queued XEP-0357 jobs"
-                    );
-                    SweepOutcome::Completed
-                }
-                Ok(_) => SweepOutcome::Completed,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "Push Service publish-job janitor failed; queued jobs remain durable"
-                    );
-                    SweepOutcome::Failed
-                }
-            };
-            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                Janitor::PushPublishJob,
-                outcome,
-            );
+            run_push_service_publish_job_sweep(&state, batch_size).await;
         }
     });
+}
+
+async fn run_push_service_publish_job_sweep(state: &WebSocketState, batch_size: usize) {
+    async {
+        let outcome = match state
+            .deps
+            .protocol
+            .push_service
+            .drain_queued_notification_publish_jobs(batch_size)
+            .await
+        {
+            Ok(results) if !results.is_empty() => {
+                debug!(
+                    drained = results.len(),
+                    "Push Service publish-job janitor drained queued XEP-0357 jobs"
+                );
+                SweepOutcome::Completed
+            }
+            Ok(_) => SweepOutcome::Completed,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Push Service publish-job janitor failed; queued jobs remain durable"
+                );
+                SweepOutcome::Failed
+            }
+        };
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(Janitor::PushPublishJob, outcome);
+    }
+    .instrument(janitor_sweep_span(Janitor::PushPublishJob))
+    .await;
 }
 
 pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketState>) {
@@ -4929,175 +4962,187 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            let mut sweep_failed = false;
-            let first_party_service_jid = match state.deps.service_domains.push.parse() {
-                Ok(jid) => jid,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        push_service = %state.deps.service_domains.push,
-                        "Notification outbox janitor cannot parse first-party Push Service JID"
-                    );
-                    waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                        Janitor::NotificationOutbox,
-                        SweepOutcome::Failed,
-                    );
-                    continue;
-                }
-            };
-            let recovered = routes::interpret::reconcile_xep0357_notification_candidates_for_sweep(
-                state.as_ref(),
-                batch_size,
-            )
-            .await;
-            sweep_failed |= recovered.had_failure;
-            if recovered.completed > 0 {
-                debug!(
-                    recovered = recovered.completed,
-                    "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
-                );
-            }
-            let recovered_groupchat =
-                routes::interpret::reconcile_groupchat_notification_candidates_for_sweep(
-                    state.as_ref(),
-                    batch_size,
-                )
+            run_notification_outbox_sweep(&state, batch_size, retention_days, prune_batch_size)
                 .await;
-            sweep_failed |= recovered_groupchat.had_failure;
-            if recovered_groupchat.completed > 0 {
-                debug!(
-                    recovered = recovered_groupchat.completed,
-                    "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
-                );
-            }
-            let room_policy =
-                RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
-            let dnd_reader = state.deps.protocol.dnd_reader.as_ref();
-            let activity_reader = state.deps.protocol.notification_activity.as_ref();
-            let deps = crate::notification_outbox::NotificationDrainDeps::new(
-                &room_policy,
-                dnd_reader,
-                activity_reader,
-            );
-            match state
-                .deps
-                .protocol
-                .notification_outbox
-                .drain_pending_candidates_into_outbox(
-                    state.deps.protocol.push_store.as_ref(),
-                    state.deps.protocol.blocking_storage.as_ref(),
-                    state
-                        .deps
-                        .protocol
-                        .notification_settings_projection
-                        .as_ref(),
-                    deps,
-                    &first_party_service_jid,
-                    batch_size,
-                )
-                .await
-            {
-                Ok(processed) if processed > 0 => {
-                    debug!(
-                        processed,
-                        "Notification outbox janitor expanded XEP-0357 candidates into outbox jobs"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    sweep_failed = true;
-                    warn!(
-                        error = %error,
-                        "Notification outbox janitor failed to process candidates; candidates remain durable"
-                    );
-                }
-            }
-            match state
-                .deps
-                .protocol
-                .notification_outbox
-                .drain_due_outbox_jobs(
-                    state.deps.protocol.push_service.as_ref(),
-                    state.deps.protocol.push_store.as_ref(),
-                    state.deps.protocol.inbox_storage.as_ref(),
-                    state.deps.protocol.blocking_storage.as_ref(),
-                    &first_party_service_jid,
-                    batch_size,
-                )
-                .await
-            {
-                Ok(results) if !results.is_empty() => {
-                    debug!(
-                        drained = results.len(),
-                        "Notification outbox janitor emitted durable XEP-0357 PubSub publish jobs"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    sweep_failed = true;
-                    warn!(
-                        error = %error,
-                        "Notification outbox janitor failed; outbox jobs remain durable"
-                    );
-                }
-            }
-            let cutoff_ms = crate::time::now_ms()
-                .saturating_sub(i64::from(retention_days) * 24 * 60 * 60 * 1_000);
-            match state
-                .deps
-                .protocol
-                .notification_outbox
-                .prune_completed_before(cutoff_ms, prune_batch_size)
-                .await
-            {
-                Ok(outcome) if outcome.total_deleted() > 0 => {
-                    debug!(
-                        candidates_deleted = outcome.candidates_deleted,
-                        jobs_deleted = outcome.jobs_deleted,
-                        "Notification outbox janitor pruned completed rows"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    sweep_failed = true;
-                    warn!(
-                        error = %error,
-                        "Notification outbox janitor prune failed; completed rows remain durable"
-                    );
-                }
-            }
-            match state
-                .deps
-                .protocol
-                .inbox_storage
-                .prune_completed_groupchat_notification_recoveries(cutoff_ms, prune_batch_size)
-                .await
-            {
-                Ok(deleted) if deleted > 0 => {
-                    debug!(
-                        deleted,
-                        "Notification outbox janitor pruned completed groupchat notification recovery rows"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    sweep_failed = true;
-                    warn!(
-                        error = %error,
-                        "Notification outbox janitor failed to prune completed groupchat notification recovery rows"
-                    );
-                }
-            }
-            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                Janitor::NotificationOutbox,
-                if sweep_failed {
-                    SweepOutcome::Failed
-                } else {
-                    SweepOutcome::Completed
-                },
-            );
         }
     });
+}
+
+async fn run_notification_outbox_sweep(
+    state: &WebSocketState,
+    batch_size: usize,
+    retention_days: u32,
+    prune_batch_size: usize,
+) {
+    async {
+        let mut sweep_failed = false;
+        let first_party_service_jid = match state.deps.service_domains.push.parse() {
+            Ok(jid) => jid,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    push_service = %state.deps.service_domains.push,
+                    "Notification outbox janitor cannot parse first-party Push Service JID"
+                );
+                waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                    Janitor::NotificationOutbox,
+                    SweepOutcome::Failed,
+                );
+                return;
+            }
+        };
+        let recovered =
+            routes::interpret::reconcile_xep0357_notification_candidates_for_sweep(
+                state, batch_size,
+            )
+            .await;
+        sweep_failed |= recovered.had_failure;
+        if recovered.completed > 0 {
+            debug!(
+                recovered = recovered.completed,
+                "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
+            );
+        }
+        let recovered_groupchat =
+            routes::interpret::reconcile_groupchat_notification_candidates_for_sweep(
+                state, batch_size,
+            )
+            .await;
+        sweep_failed |= recovered_groupchat.had_failure;
+        if recovered_groupchat.completed > 0 {
+            debug!(
+                recovered = recovered_groupchat.completed,
+                "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
+            );
+        }
+        let room_policy = RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
+        let dnd_reader = state.deps.protocol.dnd_reader.as_ref();
+        let activity_reader = state.deps.protocol.notification_activity.as_ref();
+        let deps = crate::notification_outbox::NotificationDrainDeps::new(
+            &room_policy,
+            dnd_reader,
+            activity_reader,
+        );
+        match state
+            .deps
+            .protocol
+            .notification_outbox
+            .drain_pending_candidates_into_outbox(
+                state.deps.protocol.push_store.as_ref(),
+                state.deps.protocol.blocking_storage.as_ref(),
+                state
+                    .deps
+                    .protocol
+                    .notification_settings_projection
+                    .as_ref(),
+                deps,
+                &first_party_service_jid,
+                batch_size,
+            )
+            .await
+        {
+            Ok(processed) if processed > 0 => {
+                debug!(
+                    processed,
+                    "Notification outbox janitor expanded XEP-0357 candidates into outbox jobs"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                sweep_failed = true;
+                warn!(
+                    error = %error,
+                    "Notification outbox janitor failed to process candidates; candidates remain durable"
+                );
+            }
+        }
+        match state
+            .deps
+            .protocol
+            .notification_outbox
+            .drain_due_outbox_jobs(
+                state.deps.protocol.push_service.as_ref(),
+                state.deps.protocol.push_store.as_ref(),
+                state.deps.protocol.inbox_storage.as_ref(),
+                state.deps.protocol.blocking_storage.as_ref(),
+                &first_party_service_jid,
+                batch_size,
+            )
+            .await
+        {
+            Ok(results) if !results.is_empty() => {
+                debug!(
+                    drained = results.len(),
+                    "Notification outbox janitor emitted durable XEP-0357 PubSub publish jobs"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                sweep_failed = true;
+                warn!(
+                    error = %error,
+                    "Notification outbox janitor failed; outbox jobs remain durable"
+                );
+            }
+        }
+        let cutoff_ms = crate::time::now_ms()
+            .saturating_sub(i64::from(retention_days) * 24 * 60 * 60 * 1_000);
+        match state
+            .deps
+            .protocol
+            .notification_outbox
+            .prune_completed_before(cutoff_ms, prune_batch_size)
+            .await
+        {
+            Ok(outcome) if outcome.total_deleted() > 0 => {
+                debug!(
+                    candidates_deleted = outcome.candidates_deleted,
+                    jobs_deleted = outcome.jobs_deleted,
+                    "Notification outbox janitor pruned completed rows"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                sweep_failed = true;
+                warn!(
+                    error = %error,
+                    "Notification outbox janitor prune failed; completed rows remain durable"
+                );
+            }
+        }
+        match state
+            .deps
+            .protocol
+            .inbox_storage
+            .prune_completed_groupchat_notification_recoveries(cutoff_ms, prune_batch_size)
+            .await
+        {
+            Ok(deleted) if deleted > 0 => {
+                debug!(
+                    deleted,
+                    "Notification outbox janitor pruned completed groupchat notification recovery rows"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                sweep_failed = true;
+                warn!(
+                    error = %error,
+                    "Notification outbox janitor failed to prune completed groupchat notification recovery rows"
+                );
+            }
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::NotificationOutbox,
+            if sweep_failed {
+                SweepOutcome::Failed
+            } else {
+                SweepOutcome::Completed
+            },
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::NotificationOutbox))
+    .await;
 }
 
 /// ADR-0017 Phase 3 Slice 10: feed the SM-session Q6 drain's outcomes into
@@ -5479,48 +5524,56 @@ pub(crate) fn spawn_auth_state_janitor(websocket_state: &Arc<WebSocketState>) {
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            let counts = match state
-                .deps
-                .auth_state
-                .auth_handshake
-                .sweep_expired(chrono::Utc::now())
-                .await
-            {
-                Ok(counts) => counts,
-                Err(error) => {
-                    warn!(error = %error, "auth janitor: sweep failed; will retry next tick");
-                    waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                        Janitor::AuthState,
-                        SweepOutcome::Failed,
-                    );
-                    continue;
-                }
-            };
-            let total = counts.pending_pruned + counts.device_pruned + counts.xmpp_pruned;
-            if total > 0 {
-                info!(
-                    pending_auth_pruned = counts.pending_pruned,
-                    device_auth_pruned = counts.device_pruned,
-                    xmpp_auth_codes_pruned = counts.xmpp_pruned,
-                    pending_auth_remaining = counts.pending_remaining,
-                    device_auth_remaining = counts.device_remaining,
-                    xmpp_auth_codes_remaining = counts.xmpp_remaining,
-                    "auth janitor: pruned expired entries"
-                );
-            } else {
-                debug!(
-                    pending_auth_remaining = counts.pending_remaining,
-                    device_auth_remaining = counts.device_remaining,
-                    xmpp_auth_codes_remaining = counts.xmpp_remaining,
-                    "auth janitor: no expired entries"
-                );
-            }
-            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                Janitor::AuthState,
-                SweepOutcome::Completed,
-            );
+            run_auth_state_sweep(&state).await;
         }
     });
+}
+
+async fn run_auth_state_sweep(state: &WebSocketState) {
+    async {
+        let counts = match state
+            .deps
+            .auth_state
+            .auth_handshake
+            .sweep_expired(chrono::Utc::now())
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => {
+                warn!(error = %error, "auth janitor: sweep failed; will retry next tick");
+                waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                    Janitor::AuthState,
+                    SweepOutcome::Failed,
+                );
+                return;
+            }
+        };
+        let total = counts.pending_pruned + counts.device_pruned + counts.xmpp_pruned;
+        if total > 0 {
+            info!(
+                pending_auth_pruned = counts.pending_pruned,
+                device_auth_pruned = counts.device_pruned,
+                xmpp_auth_codes_pruned = counts.xmpp_pruned,
+                pending_auth_remaining = counts.pending_remaining,
+                device_auth_remaining = counts.device_remaining,
+                xmpp_auth_codes_remaining = counts.xmpp_remaining,
+                "auth janitor: pruned expired entries"
+            );
+        } else {
+            debug!(
+                pending_auth_remaining = counts.pending_remaining,
+                device_auth_remaining = counts.device_remaining,
+                xmpp_auth_codes_remaining = counts.xmpp_remaining,
+                "auth janitor: no expired entries"
+            );
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::AuthState,
+            SweepOutcome::Completed,
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::AuthState))
+    .await;
 }
 
 /// Per-sweep counts returned by [`sweep_dormant_rooms_once`].
@@ -5676,29 +5729,33 @@ pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>)
 }
 
 async fn run_room_dormancy_sweep(state: &WebSocketState) {
-    let counts = sweep_dormant_rooms_once(state).await;
-    if counts.evicted > 0 {
-        info!(
-            examined = counts.examined,
-            evicted = counts.evicted,
-            remaining = counts.remaining,
-            "room dormancy janitor: evicted dormant rooms"
-        );
-    } else {
-        debug!(
-            examined = counts.examined,
-            remaining = counts.remaining,
-            "room dormancy janitor: no dormant rooms"
+    async {
+        let counts = sweep_dormant_rooms_once(state).await;
+        if counts.evicted > 0 {
+            info!(
+                examined = counts.examined,
+                evicted = counts.evicted,
+                remaining = counts.remaining,
+                "room dormancy janitor: evicted dormant rooms"
+            );
+        } else {
+            debug!(
+                examined = counts.examined,
+                remaining = counts.remaining,
+                "room dormancy janitor: no dormant rooms"
+            );
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::RoomDormancy,
+            if counts.failed {
+                SweepOutcome::Failed
+            } else {
+                SweepOutcome::Completed
+            },
         );
     }
-    waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-        Janitor::RoomDormancy,
-        if counts.failed {
-            SweepOutcome::Failed
-        } else {
-            SweepOutcome::Completed
-        },
-    );
+    .instrument(janitor_sweep_span(Janitor::RoomDormancy))
+    .await;
 }
 
 /// Per-sweep counts returned by [`sweep_empty_user_actors_once`].
@@ -5814,31 +5871,39 @@ pub(crate) fn spawn_user_actor_reaper(websocket_state: &Arc<WebSocketState>) {
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            let counts = sweep_empty_user_actors_once(&state).await;
-            if counts.reaped > 0 {
-                info!(
-                    examined = counts.examined,
-                    reaped = counts.reaped,
-                    remaining = counts.remaining,
-                    "user actor reaper: reaped empty UserActors"
-                );
-            } else {
-                debug!(
-                    examined = counts.examined,
-                    remaining = counts.remaining,
-                    "user actor reaper: no empty UserActors"
-                );
-            }
-            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                Janitor::UserActorReaper,
-                if counts.failed {
-                    SweepOutcome::Failed
-                } else {
-                    SweepOutcome::Completed
-                },
-            );
+            run_user_actor_reaper_sweep(&state).await;
         }
     });
+}
+
+async fn run_user_actor_reaper_sweep(state: &WebSocketState) {
+    async {
+        let counts = sweep_empty_user_actors_once(state).await;
+        if counts.reaped > 0 {
+            info!(
+                examined = counts.examined,
+                reaped = counts.reaped,
+                remaining = counts.remaining,
+                "user actor reaper: reaped empty UserActors"
+            );
+        } else {
+            debug!(
+                examined = counts.examined,
+                remaining = counts.remaining,
+                "user actor reaper: no empty UserActors"
+            );
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::UserActorReaper,
+            if counts.failed {
+                SweepOutcome::Failed
+            } else {
+                SweepOutcome::Completed
+            },
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::UserActorReaper))
+    .await;
 }
 
 #[cfg(test)]
@@ -5876,6 +5941,20 @@ mod room_dormancy_tests {
                 &[("janitor", "room_dormancy"), ("outcome", "completed")],
             ),
             Some(1),
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn room_dormancy_sweep_records_the_janitor_span() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let state = create_test_websocket_state().await;
+
+        run_room_dormancy_sweep(&state).await;
+
+        assert_eq!(
+            spans.recorded_field("janitor.sweep", "janitor").as_deref(),
+            Some("room_dormancy"),
         );
     }
 
@@ -6135,7 +6214,7 @@ mod room_dormancy_tests {
 
 #[cfg(test)]
 mod user_reaper_tests {
-    use super::sweep_empty_user_actors_once;
+    use super::{run_user_actor_reaper_sweep, sweep_empty_user_actors_once};
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use waddle_xmpp::registry::{
         ConnectionEntry, GetUser, RegisterUserResource, TrySendPeer, UserCount,
@@ -6151,6 +6230,20 @@ mod user_reaper_tests {
         msg.bodies
             .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
         waddle_xmpp::Stanza::Message(msg)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_actor_reaper_sweep_records_the_janitor_span() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let state = create_test_websocket_state().await;
+
+        run_user_actor_reaper_sweep(&state).await;
+
+        assert_eq!(
+            spans.recorded_field("janitor.sweep", "janitor").as_deref(),
+            Some("user_actor_reaper"),
+        );
     }
 
     /// End-to-end sweep over the actor tree: register a resource, force the
@@ -6338,49 +6431,58 @@ pub(crate) fn spawn_remote_muc_membership_reconciler(websocket_state: &Arc<WebSo
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            let candidates = collect_remote_muc_reconcile_candidates(&state).await;
-            if candidates.occupants.is_empty() {
-                waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                    Janitor::RemoteMucMembership,
-                    remote_muc_sweep_outcome(candidates.had_failure),
-                );
-                continue;
-            }
-            info!(
-                candidates = candidates.occupants.len(),
-                "remote MUC reconciler: re-driving unavailable relays for departed occupants"
-            );
-            let mut sweep_failed = candidates.had_failure;
-            for occupant in candidates.occupants {
-                // Re-check liveness IMMEDIATELY before the re-drive
-                // (codex review P1 on PR #1277): the candidate list was
-                // collected before earlier awaited re-drives, and the
-                // same full JID may have reconnected in that gap. A
-                // registered connection means the occupancy is
-                // legitimate again; the membership-generation guards
-                // inside the cleanup protect the map but cannot undo a
-                // relayed remote leave.
-                if state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .get_entry(&occupant)
-                    .is_some()
-                {
-                    continue;
-                }
-                if routes::websocket::redrive_remote_muc_cleanup(&state, &occupant).await
-                    == routes::websocket::MucCleanupOutcome::Failed
-                {
-                    sweep_failed = true;
-                }
-            }
-            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                Janitor::RemoteMucMembership,
-                remote_muc_sweep_outcome(sweep_failed),
-            );
+            run_remote_muc_membership_sweep(&state).await;
         }
     });
+}
+
+#[cfg(feature = "clustering")]
+async fn run_remote_muc_membership_sweep(state: &WebSocketState) {
+    async {
+        let candidates = collect_remote_muc_reconcile_candidates(state).await;
+        if candidates.occupants.is_empty() {
+            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                Janitor::RemoteMucMembership,
+                remote_muc_sweep_outcome(candidates.had_failure),
+            );
+            return;
+        }
+        info!(
+            candidates = candidates.occupants.len(),
+            "remote MUC reconciler: re-driving unavailable relays for departed occupants"
+        );
+        let mut sweep_failed = candidates.had_failure;
+        for occupant in candidates.occupants {
+            // Re-check liveness IMMEDIATELY before the re-drive
+            // (codex review P1 on PR #1277): the candidate list was
+            // collected before earlier awaited re-drives, and the
+            // same full JID may have reconnected in that gap. A
+            // registered connection means the occupancy is
+            // legitimate again; the membership-generation guards
+            // inside the cleanup protect the map but cannot undo a
+            // relayed remote leave.
+            if state
+                .deps
+                .protocol
+                .connection_registry
+                .get_entry(&occupant)
+                .is_some()
+            {
+                continue;
+            }
+            if routes::websocket::redrive_remote_muc_cleanup(state, &occupant).await
+                == routes::websocket::MucCleanupOutcome::Failed
+            {
+                sweep_failed = true;
+            }
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::RemoteMucMembership,
+            remote_muc_sweep_outcome(sweep_failed),
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::RemoteMucMembership))
+    .await;
 }
 
 #[cfg(all(test, feature = "clustering"))]
