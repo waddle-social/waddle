@@ -569,6 +569,17 @@ mod tests {
     fn every_xmpp_counter_in_the_mimir_rules_is_registered() {
         let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        // The nix test derivations build from a source tree filtered to
+        // server/, so the rules file is absent there; the guard runs in
+        // full checkouts (local dev, non-nix lanes) where drift is
+        // introduced.
+        if !rules_path.exists() {
+            eprintln!(
+                "skipping: {} not present in this build's source tree",
+                rules_path.display()
+            );
+            return;
+        }
         let rules = std::fs::read_to_string(&rules_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
 
