@@ -208,7 +208,17 @@ export type CallEngineEvents = {
    * `$mucCallParticipants` without missing peers that connected
    * before our event listener attached.
    */
-  connected: (snapshot: { localIdentity: string; remoteIdentities: string[] }) => void;
+  connected: (snapshot: {
+    localIdentity: string;
+    remoteIdentities: string[];
+    /**
+     * The LiveKit room name this call joined. Carried so telemetry can
+     * derive the #1452 call correlation id from the one identifier the
+     * client, the server call-setup path, and the inbound LiveKit
+     * webhook all already share — no new wire field.
+     */
+    roomName: string;
+  }) => void;
   disconnected: (reason: "local" | "transport") => void;
   /**
    * Fires when LiveKit reports whether remote audio can currently
@@ -529,6 +539,7 @@ export class CallEngine {
     this.emit("connected", {
       localIdentity: room.localParticipant.identity,
       remoteIdentities: Array.from(room.remoteParticipants.values()).map((p) => p.identity),
+      roomName: room.name || join.room,
     });
     // Publishing is BEST-EFFORT and decoupled from joining. `room.connect`
     // above already succeeded, so the user is a fully working receive-only

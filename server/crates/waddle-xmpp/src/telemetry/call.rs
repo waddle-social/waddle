@@ -2,7 +2,7 @@
 //! the protocol-layer Jingle handler and the server-side Muji gate so
 //! one family is never emitted from divergent macro sites.
 
-use super::attributes::SfuDenialReason;
+use super::attributes::{CallSetupFailureReason, SfuDenialReason};
 
 /// Count a minted LiveKit SFU token.
 pub fn increment_sfu_token_minted() {
@@ -23,4 +23,56 @@ pub fn increment_sfu_token_denied(reason: SfuDenialReason) {
         1,
         reason,
     );
+}
+
+/// Count one Jingle `session-initiate` entering call setup (#1452).
+///
+/// This is the denominator of the call success rate. It is emitted
+/// exactly once per attempt, at the point the action is known to be a
+/// `session-initiate`; every attempt then terminates in exactly one
+/// [`increment_call_setup_ok`] or [`increment_call_setup_failed`].
+pub fn increment_call_setup_attempted() {
+    crate::counter_add!(
+        "waddle.call.setup.attempted",
+        "1",
+        "Jingle call setups attempted (session-initiate).",
+        1,
+    );
+}
+
+/// Count a call setup that produced a usable session for the caller
+/// (a join token was issued and the negotiation stanza was forwarded
+/// or accepted).
+pub fn increment_call_setup_ok() {
+    crate::counter_add!(
+        "waddle.call.setup.ok",
+        "1",
+        "Jingle call setups that completed successfully.",
+        1,
+    );
+}
+
+/// Count a call setup that terminated in an error, by reason.
+pub fn increment_call_setup_failed(reason: CallSetupFailureReason) {
+    crate::counter_add!(
+        "waddle.call.setup.failed",
+        "1",
+        "Jingle call setups that failed, by reason.",
+        1,
+        reason,
+    );
+}
+
+/// Count a call setup rejected at a gate that runs *before* the
+/// per-attempt tracker in the Jingle handler opens — the server-side
+/// Muji membership gate (which short-circuits IQ dispatch entirely),
+/// the `session-initiate` rate limiter, and the handler's own
+/// pre-routing wire-shape checks.
+///
+/// Emits the attempted/failed pair together so `attempted` stays a
+/// true denominator: a gate rejection is a complete attempt that
+/// simply never reached the negotiation path.
+pub fn record_call_setup_rejected(reason: CallSetupFailureReason) {
+    increment_call_setup_attempted();
+    increment_call_setup_failed(reason);
 }

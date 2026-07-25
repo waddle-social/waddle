@@ -502,6 +502,95 @@ impl MetricAttribute for SfuDenialReason {
     }
 }
 
+/// `reason` — why a Jingle call setup failed (#1452).
+///
+/// Counted on `waddle.call.setup.failed`, whose denominator is
+/// `waddle.call.setup.attempted`. Every terminal failure of a
+/// `session-initiate` maps into exactly one of these buckets, so the
+/// success rate is `ok / attempted` and the failure taxonomy is
+/// closed. Distinct from [`SfuDenialReason`], which counts only the
+/// token-mint gate: a setup can fail for reasons that never reach the
+/// SFU (rate limit, bad wire shape, unsupported transport).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSetupFailureReason {
+    /// The Muji room has no live room actor — nobody has joined it.
+    RoomNotFound,
+    /// The requester is not an occupant of the requested Muji room.
+    MembershipDenied,
+    /// The `initiator`/`responder` attribute did not match the
+    /// authenticated session (XEP-0166 §7.1 spoofing defense).
+    NotAuthorized,
+    /// The per-JID `session-initiate` rate limit rejected the attempt.
+    RateLimited,
+    /// The stanza was malformed or addressed somewhere it may not be
+    /// (missing `to`, wrong mixer JID, foreign Muji room, unusable sid).
+    BadRequest,
+    /// The offered Jingle transport is not the Waddle LiveKit
+    /// placeholder, or the client tried to supply its own credentials.
+    UnsupportedTransport,
+    /// Cross-domain Jingle: federation is not implemented.
+    FederationUnsupported,
+    /// The SFU refused or failed to mint the join token.
+    TokenMintFailed,
+}
+
+impl sealed::Sealed for CallSetupFailureReason {}
+impl MetricAttribute for CallSetupFailureReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::RoomNotFound => "room_not_found",
+            Self::MembershipDenied => "membership_denied",
+            Self::NotAuthorized => "not_authorized",
+            Self::RateLimited => "rate_limited",
+            Self::BadRequest => "bad_request",
+            Self::UnsupportedTransport => "unsupported_transport",
+            Self::FederationUnsupported => "federation_unsupported",
+            Self::TokenMintFailed => "token_mint_failed",
+        }
+    }
+}
+
+/// `event` — which LiveKit webhook payload kind a delivery carried
+/// (#1452). Closed set: everything LiveKit sends that Waddle does not
+/// model collapses into [`Self::Other`], and a delivery that failed
+/// verification before the body could be typed is [`Self::Unknown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookEventType {
+    /// `participant_joined`.
+    ParticipantJoined,
+    /// `participant_left`.
+    ParticipantLeft,
+    /// `participant_connection_aborted`.
+    ParticipantConnectionAborted,
+    /// `room_finished`.
+    RoomFinished,
+    /// A signature-valid delivery Waddle does not model.
+    Other,
+    /// The delivery never decoded into a typed event (signature or
+    /// JSON failure), so its kind is not knowable.
+    Unknown,
+}
+
+impl sealed::Sealed for WebhookEventType {}
+impl MetricAttribute for WebhookEventType {
+    fn key(&self) -> &'static str {
+        "event"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::ParticipantJoined => "participant_joined",
+            Self::ParticipantLeft => "participant_left",
+            Self::ParticipantConnectionAborted => "participant_connection_aborted",
+            Self::RoomFinished => "room_finished",
+            Self::Other => "other",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// `outcome` — LiveKit webhook ingestion outcome (#1319).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebhookOutcome {

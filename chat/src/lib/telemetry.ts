@@ -47,6 +47,11 @@ import {
   callMediaPathEventAttributes,
   type CallMediaPathSnapshot,
 } from "./calls/call-media-path-telemetry";
+import {
+  callIceEventAttributes,
+  type CallIceSnapshot,
+} from "./calls/call-ice-telemetry";
+import { callCorrelationId } from "./calls/call-correlation";
 import type {
   CallKind,
   CallLifecyclePayload,
@@ -1231,6 +1236,7 @@ export function reportCallAudioProcessing(
   faro?.api.pushEvent("chat.call.audio_processing", {
     ...callAudioProcessingEventAttributes(state),
     call_kind: callKind,
+    call_id: callCorrelationId(),
   });
 }
 
@@ -1248,6 +1254,26 @@ export function reportCallMediaPath(snapshot: CallMediaPathSnapshot, callKind: C
   faro?.api.pushEvent("chat.call.media_path", {
     ...callMediaPathEventAttributes(snapshot),
     call_kind: callKind,
+    call_id: callCorrelationId(),
+  });
+}
+
+/**
+ * Beacon the call's ICE/TURN connectivity (#1452): relay-vs-direct media
+ * path, whether a TURN relay candidate was gathered at all, and how many
+ * times ICE had to restart. Complements {@link reportCallMediaPath}, which
+ * is per-track and blind to both "no relay candidate exists" and restart
+ * churn. The payload is the PII-free attribute set from
+ * {@link callIceEventAttributes} — candidate types and buckets, never an IP
+ * address, port, or TURN hostname. Pure observability — no XMPP/Jingle wire
+ * effect. De-dup (at most once per call per distinct state) is the caller's
+ * job via `createCallIceBeacon`.
+ */
+export function reportCallIce(snapshot: CallIceSnapshot, callKind: CallKind): void {
+  faro?.api.pushEvent("chat.call.ice", {
+    ...callIceEventAttributes(snapshot),
+    call_kind: callKind,
+    call_id: callCorrelationId(),
   });
 }
 
@@ -1261,6 +1287,10 @@ export function reportCallLifecycle(payload: CallLifecyclePayload): void {
     packet_loss_band: payload.packetLossBand,
     connection_quality: payload.connectionQuality,
     reconnect_count: payload.reconnectCount,
+    // The #1452 join key: the same bounded, non-PII value the server's
+    // call-setup logs and the LiveKit webhook logs carry, derived from the
+    // LiveKit room name all three already know.
+    call_id: callCorrelationId(),
   });
 }
 

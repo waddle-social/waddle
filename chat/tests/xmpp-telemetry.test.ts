@@ -19,6 +19,7 @@ import {
   initTelemetry,
   markSensitiveUrlForTelemetry,
   reportCallAudioProcessing,
+  reportCallIce,
   reportCallMediaPath,
   reportCatchup,
   reportError,
@@ -34,6 +35,10 @@ import {
   setXmppResourceForTelemetry,
   websocketUrlWithTraceparent,
 } from "../src/lib/telemetry";
+import {
+  adoptCallCorrelationId,
+  clearCallCorrelationId,
+} from "../src/lib/calls/call-correlation";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
@@ -195,6 +200,7 @@ describe("reportCallAudioProcessing", () => {
           auto_gain_control: "unknown",
           ai_noise_filter: "rnnoise",
           call_kind: "muc",
+          call_id: "unknown",
         },
       },
     ]);
@@ -226,6 +232,40 @@ describe("call beacon kind tagging", () => {
         ice_transport: "udp",
         video_resolution_band: "720p",
         call_kind: "dm",
+        call_id: "unknown",
+      },
+    });
+  });
+
+  test("adds call_kind and the shared correlation id to ICE events", async () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    await adoptCallCorrelationId("general@muc.example.com");
+
+    reportCallIce(
+      {
+        pathClass: "relay",
+        candidateType: "relay",
+        transport: "tcp",
+        turnReachability: "gathered",
+        restartBucket: "once",
+      },
+      "muc",
+    );
+    clearCallCorrelationId();
+
+    expect(stub.events[0]).toEqual({
+      name: "chat.call.ice",
+      attributes: {
+        ice_path: "relay",
+        ice_candidate_type: "relay",
+        ice_transport: "tcp",
+        turn_reachability: "gathered",
+        ice_restarts: "once",
+        call_kind: "muc",
+        // The #1452 join key — the same digest the server's call-setup
+        // logs and the LiveKit webhook logs carry for this room.
+        call_id: "ba2798ebd1a58db8",
       },
     });
   });

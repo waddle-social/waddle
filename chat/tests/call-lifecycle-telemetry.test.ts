@@ -89,6 +89,9 @@ describe("call lifecycle mappings", () => {
         packet_loss_band: "unknown",
         connection_quality: "unknown",
         reconnect_count: "none",
+        // #1452: no call was adopted in this unit test, so the shared
+        // correlation attribute is present but unresolved.
+        call_id: "unknown",
       },
     }]);
   });

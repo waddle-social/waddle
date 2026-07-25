@@ -390,6 +390,63 @@ mod tests {
         );
     }
 
+    /// #1452: the inbound LiveKit webhook must be a *templated,
+    /// allowlisted* route. Per #1438 an unmatched path gets
+    /// `Span::none()`, and a matched-but-unlisted one gets a span with
+    /// an empty `http.route` — either way the webhook's ingestion
+    /// traces would be unqueryable by route. Pins both the allowlist
+    /// entry and the resulting span fields.
+    #[tokio::test(flavor = "current_thread")]
+    async fn livekit_webhook_route_is_templated_and_carries_route_and_status() {
+        const WEBHOOK_ROUTE: &str = "/api/v1/livekit/webhook";
+        assert!(
+            HTTP_ROUTE_TEMPLATES.contains(&WEBHOOK_ROUTE),
+            "the LiveKit webhook route must stay in the route-template allowlist",
+        );
+        assert!(
+            !PROBE_ROUTE_TEMPLATES.contains(&WEBHOOK_ROUTE),
+            "the LiveKit webhook is not probe noise; it must keep its span",
+        );
+
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let capture = HttpSpanCapture::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let app = Router::new()
+            .route(
+                WEBHOOK_ROUTE,
+                axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+            )
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri(WEBHOOK_ROUTE)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let fields = capture.fields.lock().expect("HTTP span capture lock");
+        assert_eq!(
+            fields.get("http.route").map(String::as_str),
+            Some(WEBHOOK_ROUTE),
+        );
+        assert_eq!(
+            fields.get("http.status_code").map(String::as_str),
+            Some("401"),
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn probe_routes_get_no_request_span_but_keep_the_duration_histogram() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
