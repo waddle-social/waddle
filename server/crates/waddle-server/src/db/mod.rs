@@ -326,6 +326,7 @@ impl Database {
         let conn = match self.guard().await {
             Ok(conn) => conn,
             Err(e) => {
+                crate::telemetry::mark_span_error("database health check guard failed");
                 Self::record_health_check_failure();
                 return Err(e);
             }
