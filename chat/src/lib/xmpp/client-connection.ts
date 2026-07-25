@@ -424,8 +424,11 @@ export class OfflineSendQueue {
     }
     // A queue restored from localStorage may never see another mutation
     // (a flush that cannot proceed raises no events), so report it —
-    // and arm the stuck-queue heartbeat — right away (#1443).
-    this.emitQueueDepth();
+    // and arm the stuck-queue heartbeat — as soon as the current task
+    // completes. A microtask, not a direct call: on the construction
+    // path the instrumentation subscribes right after the constructor
+    // returns, and a synchronous emit would fire into zero listeners.
+    queueMicrotask(() => this.emitQueueDepth());
   }
 
   /** Stop the stuck-queue heartbeat; called from the client's

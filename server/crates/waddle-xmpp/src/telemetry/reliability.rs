@@ -569,19 +569,17 @@ mod tests {
     fn every_xmpp_counter_in_the_mimir_rules_is_registered() {
         let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
-        // The nix test derivations build from a source tree filtered to
-        // server/, so the rules file is absent there; the guard runs in
-        // full checkouts (local dev, non-nix lanes) where drift is
-        // introduced.
-        if !rules_path.exists() {
-            eprintln!(
-                "skipping: {} not present in this build's source tree",
+        // Full checkouts have the file, and the nix test derivations
+        // copy it into the build tree (flake.nix testArgs postUnpack),
+        // so a missing file is a broken copy path, not an expected
+        // environment — fail loudly rather than silently skipping the
+        // guard (#1436).
+        let rules = std::fs::read_to_string(&rules_path).unwrap_or_else(|error| {
+            panic!(
+                "read {}: {error} — if this is a filtered build tree, the flake.nix                  testArgs postUnpack copy is broken",
                 rules_path.display()
-            );
-            return;
-        }
-        let rules = std::fs::read_to_string(&rules_path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
+            )
+        });
 
         let registered: Vec<String> = registered_counter_names()
             .into_iter()

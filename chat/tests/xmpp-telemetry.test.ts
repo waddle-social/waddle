@@ -1663,9 +1663,12 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0].kind).toBe("dm");
-    expect(depths).toHaveLength(2);
-    expect(depths.find((depth) => depth.kind === "dm")?.persisted).toBe(1);
-    expect(depths.find((depth) => depth.kind === "room")?.persisted).toBe(0);
+    // Four readings: the construction-time baseline (both kinds, via
+    // the seed microtask that ran while awaiting the send) plus the
+    // enqueue's report (both kinds).
+    expect(depths).toHaveLength(4);
+    expect(depths.filter((depth) => depth.kind === "dm").at(-1)?.persisted).toBe(1);
+    expect(depths.filter((depth) => depth.kind === "room").at(-1)?.persisted).toBe(0);
   });
 
   test("hook exceptions are swallowed and do not break chat", () => {
