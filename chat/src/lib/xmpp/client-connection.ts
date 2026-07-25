@@ -386,6 +386,7 @@ export class OfflineSendQueue {
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
+  private depthHeartbeat: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly deps: OfflineSendQueueDeps) {}
 
@@ -626,6 +627,16 @@ export class OfflineSendQueue {
         persisted: kindEntries.length,
         inflight: kindEntries.filter((entry) => this.inflightQueuedIds.has(entry.id)).length,
       });
+    }
+    // A stuck, otherwise-idle queue raises no further mutation events,
+    // so a non-empty queue keeps a heartbeat that re-reports it (the
+    // telemetry layer dedupes unchanged readings inside its re-emit
+    // window, #1443). Self-clears once the queue drains.
+    if (entries.length > 0) {
+      this.depthHeartbeat ??= setInterval(() => this.emitQueueDepth(), 65_000);
+    } else if (this.depthHeartbeat !== null) {
+      clearInterval(this.depthHeartbeat);
+      this.depthHeartbeat = null;
     }
   }
 

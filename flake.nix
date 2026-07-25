@@ -233,6 +233,13 @@
           serverTestArgs = testArgs // {
             postUnpack = ''
               cp -R ${./server/charts} "$sourceRoot/charts"
+              # The Mimir-rules drift guard test reads the rules file at
+              # <manifest>/../../../infrastructure/... — i.e. the parent
+              # of the source root. Without this copy the guard
+              # silently skips in every nix test lane (#1436).
+              mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir"
+              cp ${./infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml} \
+                "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
             '';
           };
           serverPostgresTestArgs = serverTestArgs // {

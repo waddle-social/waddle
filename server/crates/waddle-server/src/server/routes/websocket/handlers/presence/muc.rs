@@ -1403,12 +1403,13 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     // identity; a session already in the room under
                     // another nick is refused with <not-acceptable/>
                     // instead of being admitted as a ghost occupancy.
-                    warn!(
+                    // The held nick is context the choke-point log
+                    // lacks; DEBUG so the denial has one disposition
+                    // line, not two.
+                    debug!(
                         room = %room_jid,
-                        nick = %nick,
                         current_nick = %current_nick,
-                        sender = %sender_jid,
-                        "MUC join under second nick refused (nicknames locked)"
+                        "second-nick join refused; session already present under another nick"
                     );
                     return deny_join_admission(
                         room_jid,

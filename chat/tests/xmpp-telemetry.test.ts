@@ -404,6 +404,36 @@ describe("telemetry module no-op behaviour", () => {
     ]);
   });
 
+  test("a stuck non-zero reading re-emits once its minute is up (#1443)", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    const realNow = Date.now;
+    try {
+      let now = 1_000_000;
+      Date.now = () => now;
+
+      reportQueueDepthChange({ kind: "room", persisted: 3, inflight: 0 });
+      // Unchanged, inside the window: deduped.
+      now += 30_000;
+      reportQueueDepthChange({ kind: "room", persisted: 3, inflight: 0 });
+      expect(stub.measurements).toHaveLength(1);
+
+      // Unchanged but stale: the heartbeat-driven event re-emits so the
+      // dashboard's max_over_time window keeps seeing the stuck queue.
+      now += 31_000;
+      reportQueueDepthChange({ kind: "room", persisted: 3, inflight: 0 });
+      expect(stub.measurements).toHaveLength(2);
+
+      // A stale-but-zero reading stays deduped: nothing is stuck.
+      reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+      now += 61_000;
+      reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+      expect(stub.measurements).toHaveLength(3);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test("queue-depth dedupe state resets with the Faro instance (#1443)", () => {
     const first = createFaroStub();
     __setFaroForTesting(first as never);
