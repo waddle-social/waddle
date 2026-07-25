@@ -232,14 +232,45 @@ async fn livekit_webhook_handler(
 }
 
 fn record_webhook_outcome(event: WebhookEventType, outcome: WebhookOutcome) {
+    add_webhook_event(1, event, outcome);
+}
+
+fn add_webhook_event(count: u64, event: WebhookEventType, outcome: WebhookOutcome) {
     waddle_xmpp::counter_add!(
         "waddle.call.webhook.events",
         "1",
         "LiveKit webhook ingestion events by event type and outcome.",
-        1,
+        count,
         event,
         outcome,
     );
+}
+
+/// `add(0)` the reachable (event, outcome) webhook series so a fresh
+/// pod exports them before the first delivery of a deploy (#1436):
+/// `LiveKitWebhookRejections` reads the failure outcomes via
+/// `increase()` and would otherwise evaluate to no-data. Only the
+/// combinations the handler can actually emit are registered — a
+/// delivery that fails verification is never typed, and a typed event
+/// is never a verification failure.
+pub(crate) fn register_webhook_counters() {
+    for outcome in [
+        WebhookOutcome::SignatureFailed,
+        WebhookOutcome::DecodeFailed,
+    ] {
+        add_webhook_event(0, WebhookEventType::Unknown, outcome);
+    }
+    for event in [
+        WebhookEventType::ParticipantJoined,
+        WebhookEventType::ParticipantLeft,
+        WebhookEventType::ParticipantConnectionAborted,
+        WebhookEventType::RoomFinished,
+        WebhookEventType::Other,
+    ] {
+        for outcome in [WebhookOutcome::Received, WebhookOutcome::Duplicate] {
+            add_webhook_event(0, event, outcome);
+        }
+    }
 }
 
 /// How often the reconciliation backstop polls LiveKit for the true
@@ -424,6 +455,35 @@ mod tests {
         assert!(!seen.observe(Some("EV_1")));
         assert!(seen.observe(Some("EV_2")));
         assert!(!seen.observe(Some("EV_2")));
+    }
+
+    /// #1436 acceptance for the webhook family: a pod that has received
+    /// no deliveries still exports every reachable (event, outcome)
+    /// series at 0, so `LiveKitWebhookRejections` reads 0, not no-data.
+    #[tokio::test(flavor = "current_thread")]
+    async fn registration_exports_reachable_webhook_series_at_zero() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        register_webhook_counters();
+
+        for (event, outcome) in [
+            ("unknown", "signature_failed"),
+            ("unknown", "decode_failed"),
+            ("participant_joined", "received"),
+            ("participant_left", "received"),
+            ("participant_connection_aborted", "received"),
+            ("room_finished", "received"),
+            ("other", "received"),
+            ("room_finished", "duplicate"),
+        ] {
+            assert_eq!(
+                metrics.counter_sum(
+                    "waddle.call.webhook.events",
+                    &[("event", event), ("outcome", outcome)]
+                ),
+                Some(0),
+                "webhook series ({event}, {outcome}) missing from startup zero-registration"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

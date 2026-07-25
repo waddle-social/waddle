@@ -358,6 +358,10 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // instead of 0 (#1436).
     waddle_xmpp::telemetry::reliability::register_reliability_counters();
 
+    // Same rationale for the LiveKit webhook family, whose emitting
+    // helper lives with the webhook route in this crate (#1436, #1452).
+    crate::server::routes::livekit_webhook::register_webhook_counters();
+
     // Build OTLP logs exporter + provider. The tracing bridge below
     // feeds every `tracing::{info,warn,error,debug,trace}!` event into
     // this provider as an OTLP log record, in addition to stdout.

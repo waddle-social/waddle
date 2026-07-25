@@ -200,6 +200,7 @@ pub fn register_reliability_counters() {
         add_push_suppressed(0, reason);
     }
     super::push_pipeline::register_pipeline_stages();
+    super::call::register_call_setup_counters();
 }
 
 // The push helpers below are hand-written rather than table rows
@@ -439,6 +440,11 @@ mod tests {
             .copied()
             .chain(REGISTERED_PUSH_COUNTERS.iter().copied())
             .chain(["xmpp.push.outbox_retry_scheduled", "xmpp.push.suppressed"])
+            .chain([
+                "waddle.call.setup.attempted",
+                "waddle.call.setup.ok",
+                "waddle.call.setup.failed",
+            ])
             .collect()
     }
 
@@ -497,6 +503,19 @@ mod tests {
                 guard.counter_sum("waddle.push.pipeline", &[("stage", stage)]),
                 Some(0),
                 "pipeline stage {stage} not registered"
+            );
+        }
+        for reason in crate::telemetry::attributes::CallSetupFailureReason::ALL {
+            assert_eq!(
+                guard.counter_sum(
+                    "waddle.call.setup.failed",
+                    &[(
+                        "reason",
+                        crate::telemetry::attributes::MetricAttribute::value(&reason)
+                    )]
+                ),
+                Some(0),
+                "call setup failure reason not registered"
             );
         }
     }
@@ -559,7 +578,15 @@ mod tests {
             .collect();
 
         for word in rules.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            if !word.starts_with("xmpp_") || !word.ends_with("_total") {
+            if !(word.starts_with("xmpp_") || word.starts_with("waddle_call_"))
+                || !word.ends_with("_total")
+            {
+                continue;
+            }
+            // Registered from waddle-server (its emitting helper lives in
+            // the webhook route), with its own zero-registration test
+            // there — this crate cannot reach it.
+            if word == "waddle_call_webhook_events_total" {
                 continue;
             }
             assert!(

@@ -32,11 +32,15 @@ pub fn increment_sfu_token_denied(reason: SfuDenialReason) {
 /// `session-initiate`; every attempt then terminates in exactly one
 /// [`increment_call_setup_ok`] or [`increment_call_setup_failed`].
 pub fn increment_call_setup_attempted() {
+    add_call_setup_attempted(1);
+}
+
+fn add_call_setup_attempted(count: u64) {
     crate::counter_add!(
         "waddle.call.setup.attempted",
         "1",
         "Jingle call setups attempted (session-initiate).",
-        1,
+        count,
     );
 }
 
@@ -44,23 +48,44 @@ pub fn increment_call_setup_attempted() {
 /// (a join token was issued and the negotiation stanza was forwarded
 /// or accepted).
 pub fn increment_call_setup_ok() {
+    add_call_setup_ok(1);
+}
+
+fn add_call_setup_ok(count: u64) {
     crate::counter_add!(
         "waddle.call.setup.ok",
         "1",
         "Jingle call setups that completed successfully.",
-        1,
+        count,
     );
 }
 
 /// Count a call setup that terminated in an error, by reason.
 pub fn increment_call_setup_failed(reason: CallSetupFailureReason) {
+    add_call_setup_failed(1, reason);
+}
+
+fn add_call_setup_failed(count: u64, reason: CallSetupFailureReason) {
     crate::counter_add!(
         "waddle.call.setup.failed",
         "1",
         "Jingle call setups that failed, by reason.",
-        1,
+        count,
         reason,
     );
+}
+
+/// `add(0)` the call setup SLI family — and every failure reason — so
+/// a fresh pod exports it before the first call of a deploy (#1436):
+/// `CallSetupFailureRate` and `CallSetupRoomNotFound` read these via
+/// `increase()` and would otherwise evaluate to no-data. Called from
+/// [`super::reliability::register_reliability_counters`].
+pub(super) fn register_call_setup_counters() {
+    add_call_setup_attempted(0);
+    add_call_setup_ok(0);
+    for reason in CallSetupFailureReason::ALL {
+        add_call_setup_failed(0, reason);
+    }
 }
 
 /// Count a call setup rejected at a gate that runs *before* the

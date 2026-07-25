@@ -534,6 +534,21 @@ pub enum CallSetupFailureReason {
     TokenMintFailed,
 }
 
+impl CallSetupFailureReason {
+    /// Every allowed value. Startup zero-registration (#1436) iterates
+    /// this so every failure series exists before the first real call.
+    pub const ALL: [Self; 8] = [
+        Self::RoomNotFound,
+        Self::MembershipDenied,
+        Self::NotAuthorized,
+        Self::RateLimited,
+        Self::BadRequest,
+        Self::UnsupportedTransport,
+        Self::FederationUnsupported,
+        Self::TokenMintFailed,
+    ];
+}
+
 impl sealed::Sealed for CallSetupFailureReason {}
 impl MetricAttribute for CallSetupFailureReason {
     fn key(&self) -> &'static str {
