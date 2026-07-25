@@ -229,17 +229,21 @@
             WADDLE_UPLOAD_DIR = "./uploads";
             RUST_BACKTRACE = "1";
           };
-          testArgs = baseArgs // testRuntimeEnv;
-          serverTestArgs = testArgs // {
+          testArgs = baseArgs // testRuntimeEnv // {
+            # The Mimir-rules drift guard test (waddle-xmpp) reads the
+            # rules file at <manifest>/../../../infrastructure/... — the
+            # parent of the source root. Without this copy the guard
+            # silently skips in every nix test lane, including the
+            # dedicated xmpp unit/XEP lanes built from testArgs (#1436).
             postUnpack = ''
-              cp -R ${./server/charts} "$sourceRoot/charts"
-              # The Mimir-rules drift guard test reads the rules file at
-              # <manifest>/../../../infrastructure/... — i.e. the parent
-              # of the source root. Without this copy the guard
-              # silently skips in every nix test lane (#1436).
               mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir"
               cp ${./infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml} \
                 "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
+            '';
+          };
+          serverTestArgs = testArgs // {
+            postUnpack = testArgs.postUnpack + ''
+              cp -R ${./server/charts} "$sourceRoot/charts"
             '';
           };
           serverPostgresTestArgs = serverTestArgs // {

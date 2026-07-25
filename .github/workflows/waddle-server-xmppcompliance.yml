@@ -13,6 +13,8 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
+    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
     - server/Cargo.lock
@@ -37,6 +39,8 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
+    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
     - server/Cargo.lock

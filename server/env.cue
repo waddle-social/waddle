@@ -21,6 +21,10 @@ let _rustInputs = [
 let _nixInputs = [
 	"../flake.nix",
 	"../flake.lock",
+	// The nix test derivations copy the Mimir reliability rules into the
+	// build tree for the #1436 registration drift guard, so rules edits
+	// must re-run the Rust test lanes.
+	"../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
 	"Cargo.toml",
 	"Cargo.lock",
 	".config/nextest.toml",

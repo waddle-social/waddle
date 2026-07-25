@@ -422,6 +422,20 @@ export class OfflineSendQueue {
         this.resumeReplayQueuedIds.add(id);
       }
     }
+    // A queue restored from localStorage may never see another mutation
+    // (a flush that cannot proceed raises no events), so report it —
+    // and arm the stuck-queue heartbeat — right away (#1443).
+    this.emitQueueDepth();
+  }
+
+  /** Stop the stuck-queue heartbeat; called from the client's
+   *  destroying `disconnect()` so a logged-out client neither beacons
+   *  a signed-out account's queue nor pins the object graph. */
+  dispose(): void {
+    if (this.depthHeartbeat !== null) {
+      clearInterval(this.depthHeartbeat);
+      this.depthHeartbeat = null;
+    }
   }
 
   handleAck(id: string): void {
