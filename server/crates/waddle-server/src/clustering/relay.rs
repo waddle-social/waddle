@@ -2395,4 +2395,30 @@ mod tests {
             "the dispatch span must carry the stream id"
         );
     }
+
+    /// #1483: `parent: None` is the load-bearing property — the handlers
+    /// run inside kameo's own suppressed root `actor.handle_message` span,
+    /// and a child of a locally-unsampled parent is dropped by the #1438
+    /// sampler too. Pin that the production constructor starts a fresh
+    /// root even when a span is active.
+    #[tokio::test(flavor = "current_thread")]
+    async fn relay_dispatch_span_is_a_root_even_inside_an_active_span() {
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let outer = tracing::info_span!("actor.handle_message");
+        let dispatch = outer.in_scope(|| relay_dispatch_span("root_check"));
+        drop(dispatch);
+        drop(outer);
+
+        let exported = spans.exported();
+        let dispatch = exported
+            .iter()
+            .find(|span| span.name == "clustering.relay.dispatch")
+            .expect("dispatch span must export");
+        assert_eq!(
+            dispatch.parent_span_id,
+            opentelemetry::trace::SpanId::INVALID,
+            "the dispatch span must root a fresh trace, not inherit the \
+             active (suppressed) actor span as its parent"
+        );
+    }
 }

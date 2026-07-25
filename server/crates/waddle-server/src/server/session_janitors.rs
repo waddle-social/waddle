@@ -5958,6 +5958,31 @@ mod room_dormancy_tests {
         );
     }
 
+    /// #1483: `parent: None` is the load-bearing property — a sweep span
+    /// that inherited an active local span could be dropped along with it
+    /// by the #1438 sampler. Pin that the production constructor starts a
+    /// fresh root even when a span is active.
+    #[tokio::test(flavor = "current_thread")]
+    async fn janitor_sweep_span_is_a_root_even_inside_an_active_span() {
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let outer = tracing::info_span!("actor.handle_message");
+        let sweep = outer.in_scope(|| super::janitor_sweep_span(super::Janitor::RoomDormancy));
+        drop(sweep);
+        drop(outer);
+
+        let exported = spans.exported();
+        let sweep = exported
+            .iter()
+            .find(|span| span.name == "janitor.sweep")
+            .expect("sweep span must export");
+        assert_eq!(
+            sweep.parent_span_id,
+            opentelemetry::trace::SpanId::INVALID,
+            "the sweep span must root a fresh trace, not inherit the \
+             active span as its parent"
+        );
+    }
+
     #[tokio::test]
     async fn sweep_evicts_dormant_persistent_rooms() {
         let state = create_test_websocket_state().await;

@@ -412,19 +412,19 @@ mod tests {
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("span-noise-test")));
 
         tracing::subscriber::with_default(subscriber, || {
-            for root_name in ["clustering.relay.dispatch", "janitor.sweep"] {
-                // `parent: None` mirrors the production spans: the relay
-                // spans are minted inside kameo's own suppressed root.
-                let root = if root_name == "clustering.relay.dispatch" {
-                    tracing::info_span!(parent: None, "clustering.relay.dispatch")
-                } else {
-                    tracing::info_span!(parent: None, "janitor.sweep")
-                };
-                root.in_scope(|| {
-                    tracing::info_span!("actor.handle_message").in_scope(|| {});
-                });
-                drop(root);
-            }
+            // `parent: None` mirrors the production spans: the relay spans
+            // are minted inside kameo's own suppressed root.
+            let relay = tracing::info_span!(parent: None, "clustering.relay.dispatch");
+            relay.in_scope(|| {
+                tracing::info_span!("actor.handle_message").in_scope(|| {});
+            });
+            drop(relay);
+
+            let sweep = tracing::info_span!(parent: None, "janitor.sweep");
+            sweep.in_scope(|| {
+                tracing::info_span!("actor.handle_message").in_scope(|| {});
+            });
+            drop(sweep);
         });
 
         let spans = exported.lock().expect("capture lock").clone();
