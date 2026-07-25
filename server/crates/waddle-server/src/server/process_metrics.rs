@@ -7,8 +7,14 @@
 //! through the OTLP pipeline:
 //!
 //! - `waddle.process.start_time` (unit `s`): unix-epoch seconds
-//!   captured once at telemetry init. A restart is detectable from
-//!   metrics alone via `changes(waddle_process_start_time_seconds[1h]) > 0`.
+//!   captured once at telemetry init. Every restart mints a new series
+//!   (`service.instance.id` carries the pod name + pid, and the value
+//!   is constant within a series), so restart detection is
+//!   young-process presence — `time() - waddle_process_start_time_seconds
+//!   < 600` — or series churn, never `changes()` on one series.
+//!   Verify the normalized series name against the live datasource
+//!   before writing alerts; this stack has produced both `_seconds`-
+//!   and raw-UCUM-suffixed names (see `rules/README.md`).
 //! - `waddle.process.cpu.time` (unit `s`, monotonic sum): user+system
 //!   CPU seconds from `/proc/self/stat`.
 //! - `waddle.process.open_file_descriptors` (unit `{fd}`): entry count
@@ -112,7 +118,8 @@ pub(crate) fn init_process_instruments() {
             .i64_observable_gauge("waddle.process.start_time")
             .with_description(
                 "Unix time the server process started, captured at telemetry init. \
-                 changes(...) > 0 detects a restart from metrics alone (#1435).",
+                 Each restart is a new series (pid-suffixed instance id), so detect \
+                 restarts via time() - value < threshold, not changes() (#1435).",
             )
             .with_unit("s")
             .with_callback(|observer| observer.observe(start_time_unix_seconds(), &[]))

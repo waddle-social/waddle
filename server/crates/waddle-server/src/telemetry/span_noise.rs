@@ -10,8 +10,9 @@
 //! the seam.
 //!
 //! Sampling a span out (rather than filtering at export) kills the
-//! whole noise trace: children inherit the drop through the
-//! parent-based delegate, so no orphaned child spans reach Tempo.
+//! whole noise trace: the filter drops every span under an unsampled
+//! parent itself, so no orphaned child spans reach Tempo no matter
+//! which `OTEL_TRACES_SAMPLER` the operator dials.
 
 use opentelemetry::{
     trace::{Link, SpanKind, TraceContextExt, TraceId},
@@ -59,6 +60,20 @@ fn has_valid_parent(parent_context: Option<&Context>) -> bool {
     parent_context.is_some_and(|cx| cx.span().span_context().is_valid())
 }
 
+/// A valid parent that was itself dropped. Enforced here — not left to
+/// the delegate — so a suppressed root can never leak orphaned
+/// children when the operator dials a non-parent-based sampler
+/// (`OTEL_TRACES_SAMPLER=always_on` / `traceidratio`): `AlwaysOn`
+/// would re-sample the child of a dropped `actor.handle_message` root
+/// and export it pointing at a parent span that never exports.
+fn has_unsampled_parent(parent_context: Option<&Context>) -> bool {
+    parent_context.is_some_and(|cx| {
+        let span = cx.span();
+        let span_context = span.span_context();
+        span_context.is_valid() && !span_context.is_sampled()
+    })
+}
+
 /// Mirror the SDK samplers: never set extra attributes, and preserve
 /// the parent's trace state on the way out.
 fn drop_result(parent_context: Option<&Context>) -> SamplingResult {
@@ -83,6 +98,7 @@ impl ShouldSample for SpanNoiseFilter {
     ) -> SamplingResult {
         if ALWAYS_SUPPRESSED_SPAN_NAMES.contains(&name)
             || (ROOT_SUPPRESSED_SPAN_NAMES.contains(&name) && !has_valid_parent(parent_context))
+            || has_unsampled_parent(parent_context)
         {
             return drop_result(parent_context);
         }
@@ -211,6 +227,19 @@ mod tests {
         // handler span inside a suppressed probe request — inherits
         // the drop.
         let filter = SpanNoiseFilter::new(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
+        let parent = parent_context(false);
+        assert_eq!(
+            sample(&filter, Some(&parent), "db.query"),
+            SamplingDecision::Drop
+        );
+    }
+
+    #[test]
+    fn orphans_are_prevented_even_under_non_parent_based_samplers() {
+        // With OTEL_TRACES_SAMPLER=always_on the delegate would happily
+        // re-sample the child of a suppressed root and export it as an
+        // orphan; the filter must enforce parent consistency itself.
+        let filter = SpanNoiseFilter::new(Sampler::AlwaysOn);
         let parent = parent_context(false);
         assert_eq!(
             sample(&filter, Some(&parent), "db.query"),
