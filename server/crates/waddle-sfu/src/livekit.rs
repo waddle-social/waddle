@@ -154,9 +154,10 @@ pub struct LiveKitSfu {
     /// Per-`(call, identity)` lock serializing grant pushes, so two
     /// concurrent `UpdateParticipant` requests for one participant
     /// cannot race on HTTP timing (see
-    /// [`Self::schedule_permission_update`]). Entries are dropped once
-    /// no task holds them, and in `clear_local_state` with the rest of
-    /// the participant's state.
+    /// [`Self::schedule_permission_update`]). Entries are reaped by the
+    /// last task to release them ([`reap_grant_lock`]) — deliberately
+    /// NOT in `clear_local_state`, so a key's serialization survives an
+    /// unregister/rejoin while a push is still in flight.
     grant_locks: GrantLocks,
     /// LiveKit admin REST client. Used to evict participants and
     /// delete empty rooms when a teardown signal arrives over XMPP —
@@ -469,6 +470,10 @@ impl LiveKitSfu {
                 return;
             };
             let Ok(mut permit) = Arc::clone(&permits).acquire_owned().await else {
+                // Only reachable if `admin_permits` is closed, which
+                // nothing does today; reap anyway so no path leaks.
+                drop(serialized);
+                reap_grant_lock(&locks, &key);
                 return;
             };
             // A downgrade is a security-relevant convergence, so a
@@ -518,6 +523,8 @@ impl LiveKitSfu {
                 drop(permit);
                 tokio::time::sleep(GRANT_RETRY_BACKOFF * attempt).await;
                 let Ok(next) = Arc::clone(&permits).acquire_owned().await else {
+                    drop(serialized);
+                    reap_grant_lock(&locks, &key);
                     return;
                 };
                 permit = next;
@@ -1040,9 +1047,11 @@ mod tests {
         remove_calls: Mutex<Vec<(CallId, Identity)>>,
         delete_calls: Mutex<Vec<CallId>>,
         update_calls: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
-        /// Artificial latency for `update_participant`, so ordering
-        /// tests can force two pushes to genuinely overlap.
-        update_delay: Mutex<Option<StdDuration>>,
+        /// Per-call artificial latency for `update_participant`,
+        /// consumed in call order. Ordering tests queue a SLOW first
+        /// delay and a FAST second one so that, without per-key
+        /// serialization, the older push would complete last.
+        update_delays: Mutex<std::collections::VecDeque<StdDuration>>,
         /// What LiveKit "reports" as connected per call. A call absent
         /// from the map lists as empty (room not found). Drives the
         /// reconciliation tests.
@@ -1066,8 +1075,8 @@ mod tests {
             self.update_calls.lock().expect("recording lock").clone()
         }
 
-        fn set_update_delay(&self, delay: StdDuration) {
-            *self.update_delay.lock().expect("recording lock") = Some(delay);
+        fn queue_update_delays(&self, delays: impl IntoIterator<Item = StdDuration>) {
+            *self.update_delays.lock().expect("recording lock") = delays.into_iter().collect();
         }
 
         fn set_live(&self, call: &CallId, identities: Vec<Identity>) {
@@ -1122,7 +1131,11 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
             let room = room.clone();
             let identity = identity.clone();
-            let delay = *self.update_delay.lock().expect("recording lock");
+            let delay = self
+                .update_delays
+                .lock()
+                .expect("recording lock")
+                .pop_front();
             Box::pin(async move {
                 // Honour the configured latency so ordering tests
                 // produce genuinely overlapping in-flight requests.
@@ -1303,7 +1316,11 @@ mod tests {
         let admin = Arc::new(RecordingAdmin::default());
         // Make every UpdateParticipant take a real await point so the
         // two pushes genuinely overlap in time.
-        admin.set_update_delay(StdDuration::from_millis(50));
+        // The FIRST push is slow, the second fast: without per-key
+        // serialization the stale promotion would therefore complete
+        // AFTER the newer revoke, which is precisely the failure this
+        // test must catch.
+        admin.queue_update_delays([StdDuration::from_millis(300), StdDuration::from_millis(10)]);
         let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
         let call = CallId::new("r-order").unwrap();
         let alice = fixture_identity("alice");
