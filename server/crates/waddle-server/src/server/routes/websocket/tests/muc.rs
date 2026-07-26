@@ -1416,19 +1416,26 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
             .is_some_and(|frame| frame.contains("internal-server-error")),
         "malformed identity must fail closed: {denied:?}"
     );
-    // This assertion has failed in CI twice while the frame assertion
-    // above passed, and has never reproduced locally (including under
-    // CI's exact `--workspace --all-features --lib --tests` nextest
-    // command). Dump what was actually exported so the next occurrence
-    // distinguishes the candidate causes instead of just reporting
-    // `None`: no dispatch span exported at all (span held open by a
-    // stray clone), a dispatch span present without the attribute (the
-    // stamp landed elsewhere), or several same-named spans where the
-    // first one carries no attribute.
-    let exported_dispatch_spans: Vec<String> = spans
+
+    // The span assertions below have failed in CI twice while the frame
+    // assertion above passed, and have never reproduced locally
+    // (including under CI's exact `--workspace --all-features --lib
+    // --tests` nextest command). Take ONE snapshot and assert against
+    // it: `attribute_of`/`status_of` each force-flush and re-read, so
+    // asserting through them after building a debug string would compare
+    // a different snapshot than the one printed. Dumping the snapshot
+    // lets the next occurrence distinguish the candidates instead of
+    // just reporting `None` — no dispatch span exported at all (held
+    // open by a stray span clone), one present without the attribute
+    // (the stamp landed on another span), or several same-named spans
+    // where only a later one carries it.
+    let dispatch_spans: Vec<_> = spans
         .exported()
         .into_iter()
         .filter(|span| span.name == "xmpp.stanza.dispatch")
+        .collect();
+    let rendered = dispatch_spans
+        .iter()
         .map(|span| {
             let attributes: Vec<String> = span
                 .attributes
@@ -1441,20 +1448,25 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
                 attributes.join(", ")
             )
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let condition = dispatch_spans.iter().find_map(|span| {
+        span.attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == "condition")
+            .map(|attribute| attribute.value.to_string())
+    });
     assert_eq!(
-        spans.attribute_of("xmpp.stanza.dispatch", "condition"),
+        condition,
         Some("internal-server-error".to_string()),
-        "exported xmpp.stanza.dispatch spans: [{}]",
-        exported_dispatch_spans.join(", "),
+        "exported xmpp.stanza.dispatch spans: [{rendered}]",
     );
     assert!(
-        matches!(
-            spans.status_of("xmpp.stanza.dispatch"),
-            Some(opentelemetry::trace::Status::Error { .. })
-        ),
-        "exported xmpp.stanza.dispatch spans: [{}]",
-        exported_dispatch_spans.join(", "),
+        dispatch_spans
+            .iter()
+            .any(|span| matches!(span.status, opentelemetry::trace::Status::Error { .. })),
+        "exported xmpp.stanza.dispatch spans: [{rendered}]",
     );
 }
 

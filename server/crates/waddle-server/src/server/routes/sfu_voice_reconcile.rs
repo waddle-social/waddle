@@ -44,11 +44,16 @@ pub(super) async fn reconcile_voice_grants(state: &WebSocketState, reconciler: &
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         return;
     };
+    // Bounded like the per-room asks below. `reconcile_once` is awaited
+    // inside the interval loop, so an unbounded wait here would stall
+    // every future pass on this node — including the pre-existing ghost
+    // sweep, not just voice convergence.
     let rooms = match state
         .deps
         .protocol
         .room_registry
         .ask(waddle_xmpp::muc::room_registry_actor::LocalRoomJids)
+        .reply_timeout(ROOM_ACTOR_ASK_TIMEOUT)
         .await
     {
         Ok(rooms) => rooms,

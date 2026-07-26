@@ -335,6 +335,21 @@ impl LiveKitAdmin for RecordingAdmin {
     }
 }
 
+/// Wait until `admin` has recorded at least `expected` grant updates, or
+/// the deadline elapses. Returns on the first observation at or above
+/// `expected` so callers assert against settled state without assuming
+/// how long the spawned tasks take.
+async fn await_update_count(admin: &RecordingAdmin, expected: usize, within: StdDuration) -> usize {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let observed = admin.update_snapshot().len();
+        if observed >= expected || tokio::time::Instant::now() >= deadline {
+            return observed;
+        }
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+}
+
 /// Yield enough times for any spawned admin task on the current
 /// runtime to make progress. The spawned future does a couple of
 /// `Mutex` operations and returns, so two yields are more than
@@ -500,7 +515,10 @@ async fn a_superseded_grant_push_never_lands_after_a_newer_one() {
     tokio::task::yield_now().await;
     sfu.update_participant_capabilities(&call, &alice, muted);
 
-    tokio::time::sleep(StdDuration::from_millis(400)).await;
+    // Poll to a bounded deadline instead of sleeping a fixed budget: a
+    // fixed wall-clock wait is exactly the kind of assumption that turns
+    // into an intermittent CI failure on a loaded runner.
+    await_update_count(&admin, 2, StdDuration::from_secs(10)).await;
 
     let updates = admin.update_snapshot();
     assert!(
