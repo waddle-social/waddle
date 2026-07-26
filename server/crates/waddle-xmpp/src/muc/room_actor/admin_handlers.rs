@@ -859,11 +859,20 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         // Report voice losses for occupants who survived the
         // members-only sweep; ejected sessions are carried by
         // `removed_by_moderation` and must not be double-reported.
+        // Expand per occupant (not per bare JID) so a bare seated under
+        // two nicks is not counted twice.
+        let moderation = self.room.moderation();
         let voices_after: Vec<(FullJid, Voice)> = self
             .room
             .occupants
             .values()
-            .flat_map(|occupant| session_voices(&self.room, &occupant.real_jid.to_bare()))
+            .flat_map(|occupant| {
+                let voice = occupant.role.voice(moderation);
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(move |session| (session, voice))
+            })
             .collect();
         applied.voice_changes = changed_session_voices(&voices_before, &voices_after)
             .into_iter()

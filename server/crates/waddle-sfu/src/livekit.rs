@@ -81,6 +81,17 @@ type ParticipantKey = (CallId, Identity);
 /// is ever in flight.
 type GrantLocks = Arc<DashMap<ParticipantKey, Arc<tokio::sync::Mutex<()>>>>;
 
+/// Drop a `(call, identity)` grant lock once this task is the last
+/// holder, so the map cannot grow without bound.
+///
+/// The count to compare against is 2, not 1: the map holds one `Arc`
+/// and the calling task holds its own clone. Callers MUST have dropped
+/// their `MutexGuard` first — the guard borrows the `Arc`, so a live
+/// guard means a live reference.
+fn reap_grant_lock(locks: &GrantLocks, key: &ParticipantKey) {
+    locks.remove_if(key, |_, held| Arc::strong_count(held) == 2);
+}
+
 /// Result of [`LiveKitSfu::clear_local_state`].
 #[derive(Debug, Clone, Copy)]
 struct ClearOutcome {
@@ -291,8 +302,12 @@ impl LiveKitSfu {
             .remove(&(call_id.clone(), identity.clone()));
         self.desired_grants
             .remove(&(call_id.clone(), identity.clone()));
-        self.grant_locks
-            .remove(&(call_id.clone(), identity.clone()));
+        // `grant_locks` is deliberately NOT cleared here: a push task
+        // may still hold this key's mutex, and dropping the entry would
+        // let a post-rejoin push create a fresh mutex and run
+        // concurrently with it — the exact interleaving the per-key
+        // lock exists to prevent. The lock is reaped by the last task
+        // to release it (see `schedule_permission_update`).
         self.sweep_expired_revoked(Utc::now());
 
         // Atomic conditional removal: only drop the call entry if it
@@ -444,12 +459,13 @@ impl LiveKitSfu {
         let desired = Arc::clone(&self.desired_grants);
         let locks = Arc::clone(&self.grant_locks);
         runtime.spawn(async move {
-            let _serialized = lock.lock().await;
+            let serialized = lock.lock().await;
             // Take the latest intent. Absent => a task that ran before
             // us already applied it (or the participant was cleared),
             // so there is nothing left to converge.
             let Some((_, capabilities)) = desired.remove(&key) else {
-                locks.remove_if(&key, |_, held| Arc::strong_count(held) == 1);
+                drop(serialized);
+                reap_grant_lock(&locks, &key);
                 return;
             };
             let Ok(mut permit) = Arc::clone(&permits).acquire_owned().await else {
@@ -506,7 +522,8 @@ impl LiveKitSfu {
                 };
                 permit = next;
             }
-            locks.remove_if(&key, |_, held| Arc::strong_count(held) == 1);
+            drop(serialized);
+            reap_grant_lock(&locks, &key);
         });
     }
 
@@ -1105,7 +1122,13 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
             let room = room.clone();
             let identity = identity.clone();
+            let delay = *self.update_delay.lock().expect("recording lock");
             Box::pin(async move {
+                // Honour the configured latency so ordering tests
+                // produce genuinely overlapping in-flight requests.
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
                 self.update_calls.lock().expect("recording lock").push((
                     room,
                     identity,
@@ -1347,6 +1370,15 @@ mod tests {
         assert_eq!(updates.len(), 2, "both settled changes push: {updates:?}");
         assert_eq!(updates[0].2, muted);
         assert_eq!(updates[1].2, voiced);
+        // The per-key side tables must not leak once every push has
+        // drained — grant pushes are deliberately ungated on local
+        // registration, so these keys never reach `clear_local_state`.
+        assert_eq!(
+            sfu.grant_locks.len(),
+            0,
+            "grant locks must be reaped by the last task to release them"
+        );
+        assert_eq!(sfu.desired_grants.len(), 0, "desired intents are consumed");
     }
 
     #[tokio::test]

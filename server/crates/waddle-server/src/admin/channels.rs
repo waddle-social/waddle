@@ -39,7 +39,7 @@ use waddle_xmpp::muc::{
     room_actor::{
         ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
         GetAffiliation, GetConfig, LeaveByRealJid, ListAffiliations, ListOccupants, OccupantCount,
-        RoomActor, UpdateConfig,
+        OccupantVoices, RoomActor, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -3196,6 +3196,15 @@ async fn run_update(
         broadcast_presence_updates(connections, applied.presence_updates).await;
     }
 
+    // A channel-type change flips `moderated` in both directions
+    // (`apply_channel_type`), which silently re-decides XEP-0045 voice
+    // for every seated visitor without touching any role. Converge the
+    // live SFU grants or a Chat -> Announcement switch mid-call leaves
+    // every non-moderator publishing.
+    if existing.moderated != updated.moderated {
+        converge_moderation_flip_via_sfu(sfu, &actor, &args.channel_jid).await;
+    }
+
     // XEP-0045 §10.2.1 (#1265 item 15): a config change applied through
     // the admin channels path notifies occupants exactly like the
     // muc#owner IQ path — status 104 (plus 170/171 when the logging
@@ -4029,6 +4038,43 @@ async fn run_kick(
     Ok(ChannelsKickResult {
         occupant_jid: args.occupant_jid.clone(),
     })
+}
+
+/// Push every in-call occupant's current XEP-0045 voice to the SFU
+/// after a room-configuration change flipped `moderated`. Only
+/// occupants the SFU registry holds are pushed, so a toggle on a large
+/// room does not fan out one admin request per occupant.
+async fn converge_moderation_flip_via_sfu(
+    sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
+    actor: &ActorRef<RoomActor>,
+    room_jid: &BareJid,
+) {
+    let Some(sfu) = sfu else {
+        return;
+    };
+    let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) else {
+        return;
+    };
+    let voices = match actor.ask(OccupantVoices).await {
+        Ok(voices) => voices,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                error = ?error,
+                "could not read occupant voices after a moderation flip; \
+                 live media grants now lag the room configuration",
+            );
+            return;
+        }
+    };
+    let in_call = sfu.participants_for_call(&call_id);
+    for (session, voice) in voices {
+        if in_call.iter().any(|identity| identity.as_jid() == &session) {
+            crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
+                sfu, room_jid, &session, voice,
+            );
+        }
+    }
 }
 
 /// Converge the live SFU media grants of every session whose XEP-0045

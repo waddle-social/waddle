@@ -225,6 +225,8 @@ pub(super) async fn apply_muc_owner_config(
                     .try_send_to(&recipient, Stanza::Presence(presence));
             }
         }
+        converge_voice_on_moderation_flip(state, room_jid, &room_actor, &previous_config, &config)
+            .await;
         let post_update_snapshot = room_actor
             .ask(GetSnapshot)
             .await
@@ -312,23 +314,8 @@ pub(super) async fn apply_muc_owner_config(
         }
     }
 
-    // Flipping `moderated` silently re-decides XEP-0045 voice for every
-    // seated visitor without changing anyone's role: turning moderation
-    // ON takes their voice, turning it OFF restores it (§5.1.2
-    // footnote). Nothing else in the config path touches an occupant,
-    // so without this the SFU keeps the pre-flip grants and a visitor
-    // who just lost text voice would keep publishing media.
-    if previous_config.moderated != config.moderated {
-        let voices = room_actor
-            .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
-            .await
-            .unwrap_or_default();
-        for (session, voice) in voices {
-            super::super::super::muc_call_sfu::apply_voice_grants_for_room(
-                state, room_jid, &session, voice,
-            );
-        }
-    }
+    converge_voice_on_moderation_flip(state, room_jid, &room_actor, &previous_config, &config)
+        .await;
 
     let post_update_snapshot = room_actor
         .ask(GetSnapshot)
@@ -366,6 +353,63 @@ fn broadcast_muc_config_change(
                 .protocol
                 .connection_registry
                 .try_send_to(&recipient_jid, Stanza::Message(message));
+        }
+    }
+}
+
+/// Converge live SFU media grants when a config change flips
+/// `moderated`.
+///
+/// Flipping moderation silently re-decides XEP-0045 voice for every
+/// seated visitor without changing anyone's role: turning it ON takes
+/// their voice, turning it OFF restores it (§5.1.2 footnote). Nothing
+/// else in the config path touches an occupant, so without this the SFU
+/// keeps the pre-flip grants and a visitor who just lost text voice
+/// would keep publishing media.
+///
+/// Only occupants the SFU registry actually holds are pushed: a
+/// moderation toggle on a large room would otherwise fan out one
+/// `UpdateParticipant` per occupant, nearly all resolving to
+/// `not_found`.
+pub(super) async fn converge_voice_on_moderation_flip(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    previous: &waddle_xmpp::muc::RoomConfig,
+    updated: &waddle_xmpp::muc::RoomConfig,
+) {
+    if previous.moderated == updated.moderated {
+        return;
+    }
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) else {
+        return;
+    };
+    let voices = match room_actor
+        .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
+        .await
+    {
+        Ok(voices) => voices,
+        Err(error) => {
+            // Security-relevant convergence: a silent skip leaves
+            // occupants publishing against the new moderation policy.
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "could not read occupant voices after a moderation flip; \
+                 live media grants now lag the room configuration",
+            );
+            return;
+        }
+    };
+    let in_call = sfu.participants_for_call(&call_id);
+    for (session, voice) in voices {
+        if in_call.iter().any(|identity| identity.as_jid() == &session) {
+            super::super::super::muc_call_sfu::apply_voice_grants_for_room(
+                state, room_jid, &session, voice,
+            );
         }
     }
 }

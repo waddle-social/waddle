@@ -401,34 +401,43 @@ async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, 
         );
         return;
     };
-    let Ok(room_jid) = room_name.parse::<BareJid>() else {
+    // Use the shared classifier: a domain-only id like `c-abc123`
+    // parses as a valid `BareJid` without being a room.
+    if !is_muc_call(room_name) {
         // 1:1 scoped call id — no MUC roles apply.
+        return;
+    }
+    let Ok(room_jid) = room_name.parse::<BareJid>() else {
         return;
     };
     let actor =
         match crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await {
             Ok(Some(actor)) => actor,
             Ok(None) => {
-                // No room actor anywhere in this process's view: nobody is
-                // joined, so a LiveKit participant here holds a token for a
-                // room they are not in.
+                // `GetRoom` only consults THIS process's room map, so a
+                // room claimed by another cluster node also answers
+                // `Ok(None)`. Webhooks arrive through one load-balanced
+                // URL across replicas, so this is the common case, NOT
+                // evidence that the participant is unauthorized —
+                // evicting here would eject legitimate occupants from
+                // roughly every join that lands on a non-owning node.
+                // Absence of a local actor means "cannot determine",
+                // which is exactly the `Err` case below.
                 warn!(
                     room = %room_jid,
                     user = %full_jid.to_bare(),
-                    "LiveKit reports a participant in a room with no actor; evicting",
-                );
-                crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
-                    sfu, &room_jid, &full_jid,
+                    "no local room actor on this node; \
+                     live media grants are unenforced for this join",
                 );
                 return;
             }
             Err(error) => {
-                // Typically `ClaimHeldByAnotherNode`: the room lives on
-                // another cluster node, so this node cannot resolve the
-                // occupant's role. Deliberately NOT an eviction — the
-                // participant is probably legitimate and we simply can't
-                // see the room — but it does mean a stale token is
-                // unenforced on this path, so it must be visible.
+                // The room lives elsewhere or the lookup failed, so this
+                // node cannot resolve the occupant's role. Deliberately
+                // NOT an eviction — the participant is probably
+                // legitimate and we simply cannot see the room — but a
+                // stale token goes unenforced on this path, so it must
+                // be visible.
                 warn!(
                     room = %room_jid,
                     user = %full_jid.to_bare(),
@@ -456,9 +465,12 @@ async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, 
             );
         }
         Ok(None) => {
-            // Joined the SFU room while not an occupant of the MUC —
-            // occupancy is the precondition for call participation, so
-            // this is a stale-token join and must end.
+            // A LOCAL room actor answered, so it owns this room and its
+            // occupant set is authoritative: this participant joined the
+            // SFU room while not being an occupant of the MUC.
+            // Occupancy is the precondition for call participation, so
+            // this is a stale-token join and must end. (Contrast the
+            // absent-actor case above, which proves nothing.)
             warn!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
