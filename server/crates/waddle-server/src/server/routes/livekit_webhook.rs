@@ -388,7 +388,7 @@ async fn reconcile_once(
             }
         }
     }
-    reconcile_voice_grants(state).await;
+    reconcile_voice_grants(state, reconciler).await;
 }
 
 /// Re-derive and push the current XEP-0045 voice of every occupant of
@@ -403,21 +403,29 @@ async fn reconcile_once(
 /// exactly once across the cluster, with no cross-node request and no
 /// new relay protocol.
 ///
-/// Pushes are idempotent: `UpdateParticipant` for a participant whose
-/// grants already match is a no-op on LiveKit's side, and an unknown
-/// participant resolves to `not_found`, which the admin client treats as
-/// success.
-async fn reconcile_voice_grants(state: &WebSocketState) {
+/// Whether a room has a call to converge is decided by asking the SFU
+/// itself (`SfuReconciler::live_participants`), NOT by
+/// `SfuService::participants_for_call`. The latter is the calling
+/// process's registry, and the whole point of this pass is that the node
+/// claiming a room is frequently NOT the node that registered the
+/// participant — filtering on it would skip exactly the joins this
+/// backstop exists to cover, which is the same fail-open the
+/// `update_participant_capabilities` contract warns about.
+///
+/// Cost per pass is one `ListParticipants` per claimed room that has
+/// occupants, and an `UpdateParticipant` only for occupants LiveKit
+/// actually reports as connected. Both are idempotent.
+async fn reconcile_voice_grants(state: &WebSocketState, reconciler: &dyn SfuReconciler) {
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         return;
     };
-    let rooms = state
+    let rooms = match state
         .deps
         .protocol
         .room_registry
         .ask(waddle_xmpp::muc::room_registry_actor::LocalRoomJids)
-        .await;
-    let rooms = match rooms {
+        .await
+    {
         Ok(rooms) => rooms,
         Err(error) => {
             warn!(error = ?error, "could not list locally-claimed rooms for voice reconciliation");
@@ -425,24 +433,37 @@ async fn reconcile_voice_grants(state: &WebSocketState) {
         }
     };
     for room_jid in rooms {
-        // Only rooms with an active call have anything to converge.
         let Ok(call_id) = CallId::new(room_jid.to_string()) else {
             continue;
         };
-        if sfu.participants_for_call(&call_id).is_empty() {
-            continue;
-        }
         let Ok(Some(actor)) =
             crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await
         else {
             continue;
         };
-        crate::server::routes::websocket::muc_call_sfu::converge_room_voice_after_moderation_flip(
-            Some(sfu),
-            &actor,
-            &room_jid,
-        )
-        .await;
+        // A room with no occupants cannot have a legitimate call
+        // participant, and this is a cheap local actor ask — it keeps
+        // idle rooms from costing an HTTP round-trip every pass.
+        let Ok(voices) = actor
+            .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
+            .await
+        else {
+            continue;
+        };
+        if voices.is_empty() {
+            continue;
+        }
+        let live = reconciler.live_participants(&call_id).await;
+        if live.is_empty() {
+            continue;
+        }
+        for (session, voice) in voices {
+            if live.iter().any(|identity| identity.as_jid() == &session) {
+                crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
+                    sfu, &room_jid, &session, voice,
+                );
+            }
+        }
     }
 }
 

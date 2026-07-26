@@ -197,4 +197,20 @@ pub trait SfuReconciler: Send + Sync + 'static {
     /// `(call, identity)` pairs swept so the caller can clear the
     /// corresponding MUC Muji presence idempotently.
     fn reconcile_active_calls(&self, grace: chrono::Duration) -> ReconcileFuture<'_>;
+
+    /// The identities the SFU itself reports as currently connected to
+    /// `call_id`, or an empty vec when the SFU does not know the room.
+    ///
+    /// Authoritative and cluster-wide, unlike
+    /// [`SfuService::participants_for_call`], which only sees the
+    /// calling process's registry. Any convergence decision that must
+    /// hold across nodes — notably the voice-grant reconciliation
+    /// backstop, which runs on whichever node claims a room and not
+    /// necessarily the node that registered the participant — MUST use
+    /// this rather than the local registry, or it silently skips
+    /// participants and fails open.
+    fn live_participants<'a>(&'a self, call_id: &'a CallId) -> LiveParticipantsFuture<'a>;
 }
+
+/// Future returned by [`SfuReconciler::live_participants`].
+pub type LiveParticipantsFuture<'a> = Pin<Box<dyn Future<Output = Vec<Identity>> + Send + 'a>>;

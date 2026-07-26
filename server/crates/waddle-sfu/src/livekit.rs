@@ -669,6 +669,25 @@ impl LiveKitSfu {
 }
 
 impl crate::SfuReconciler for LiveKitSfu {
+    fn live_participants<'a>(&'a self, call_id: &'a CallId) -> crate::LiveParticipantsFuture<'a> {
+        Box::pin(async move {
+            match self.admin.list_participant_identities(call_id).await {
+                Ok(identities) => identities,
+                Err(error) => {
+                    // Absence cannot be confirmed, so report nobody and
+                    // let the next pass retry rather than acting on a
+                    // guess.
+                    tracing::debug!(
+                        call_id = %call_id,
+                        error = %error,
+                        "LiveKit ListParticipants failed while resolving live participants"
+                    );
+                    Vec::new()
+                }
+            }
+        })
+    }
+
     fn reconcile_active_calls(&self, grace: ChronoDuration) -> crate::ReconcileFuture<'_> {
         Box::pin(self.reconcile_active_calls_inner(grace))
     }
@@ -1403,6 +1422,50 @@ mod tests {
             "grant locks must be reaped by the last task to release them"
         );
         assert_eq!(sfu.desired_grants.len(), 0, "desired intents are consumed");
+    }
+
+    /// `live_participants` must answer from LiveKit, not from the
+    /// process-local registry. The voice-reconciliation backstop runs on
+    /// whichever node claims a room, which is frequently NOT the node
+    /// that registered the participant — resolving from the local
+    /// registry there skips the participant and fails open.
+    #[tokio::test]
+    async fn live_participants_reports_livekit_truth_not_the_local_registry() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-authoritative").unwrap();
+        let alice = fixture_identity("alice");
+        // LiveKit holds alice; this process's registry does not (the
+        // cross-node case).
+        admin.set_live(&call, vec![alice.clone()]);
+        assert!(
+            !sfu.has_call_participant(&call, &alice),
+            "fixture models an empty local registry"
+        );
+
+        let live = crate::SfuReconciler::live_participants(&sfu, &call).await;
+        assert_eq!(
+            live.iter()
+                .map(|identity| identity.as_livekit_identity())
+                .collect::<Vec<_>>(),
+            vec![alice.as_livekit_identity()],
+            "must report the SFU's participants, not the local registry's"
+        );
+    }
+
+    /// A `ListParticipants` failure must not be read as "nobody is
+    /// connected": absence is unconfirmed, so the pass reports empty and
+    /// retries next tick rather than acting on a guess.
+    #[tokio::test]
+    async fn live_participants_reports_empty_when_livekit_cannot_be_reached() {
+        let admin = Arc::new(RecordingAdmin::default());
+        admin.fail_list();
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-list-fails").unwrap();
+
+        assert!(crate::SfuReconciler::live_participants(&sfu, &call)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
