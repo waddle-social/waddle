@@ -84,6 +84,20 @@ describe("summarizeIceStats", () => {
     });
   });
 
+  test("a succeeded pair with unmeasurable candidate fields is unknown, not not-gathered", () => {
+    // pathClass degrades to "unknown" when the selected local-candidate's
+    // fields are missing, but the call IS working — that must not read as
+    // the alert-worthy "no TURN fallback" (Qodo review, PR #1487).
+    const succeededButUnmeasurable = [
+      { id: "P1", type: "candidate-pair", state: "succeeded", localCandidateId: "L-gone" },
+      { id: "L1", type: "local-candidate" },
+    ];
+    expect(summarizeIceStats(succeededButUnmeasurable, 0)).toMatchObject({
+      pathClass: "unknown",
+      turnReachability: "unknown",
+    });
+  });
+
   test("flags a client whose gathering produced candidates but no relay and no path", () => {
     const failedNoRelay = [
       { id: "P1", type: "candidate-pair", state: "failed", localCandidateId: "L1" },

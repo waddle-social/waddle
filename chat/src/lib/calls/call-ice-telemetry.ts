@@ -179,13 +179,20 @@ export function summarizeIceStats(
   const rawTransport = candidateType === "relay" ? local?.relayProtocol : local?.protocol;
 
   const pathClass = icePathClass(candidateType);
+  // "not-gathered" requires positive evidence of failure-without-relay:
+  // candidates were gathered, none was a relay, and no candidate pair
+  // succeeded. A succeeded pair whose local-candidate fields were
+  // unmeasurable (pathClass "unknown") is a working call, not a missing
+  // TURN fallback.
+  const pathEstablished =
+    pair?.state === "succeeded" || (selectedPairId !== undefined && pair !== undefined);
   return {
     pathClass,
     candidateType,
     transport: normalizeTransport(rawTransport),
     turnReachability: relayGathered
       ? "gathered"
-      : localCandidatesSeen && pathClass !== "direct"
+      : localCandidatesSeen && !pathEstablished
         ? "not-gathered"
         : "unknown",
     restartBucket: iceRestartBucket(restartCount),

@@ -210,8 +210,6 @@ const callMediaPathBeacon = createCallMediaPathBeacon((snapshot) => {
  * WebSocket recovery is deliberately excluded). De-dupes to at most
  * one event per distinct ICE state per call; reset on disconnect.
  */
-/** The last transport phase LiveKit reported, for the call-bar UI. */
-let lastConnectionPhase: CallConnectionPhase = "disconnected";
 
 const callIceBeacon = createCallIceBeacon((snapshot) => {
   const callKind = currentCallKind();
@@ -542,7 +540,6 @@ export function useCallEngine(): {
       // bars with a "Reconnecting…" label while the path is re-establishing.
       setCallConnectionPhase(phase);
       observeCallConnectionPhase(phase);
-      lastConnectionPhase = phase;
     });
     singletonEngine.on("transportReconnecting", () => {
       // A full media-transport reconnect is the client-observable ICE
@@ -603,7 +600,6 @@ export function useCallEngine(): {
       // Same for the ICE beacon: drop this call's seen-set and restart
       // count so the next call measures its own connectivity.
       callIceBeacon.reset();
-      lastConnectionPhase = "disconnected";
       // Drop the correlation id so a stray post-call event cannot be
       // attributed to the call that just ended.
       clearCallCorrelationId();

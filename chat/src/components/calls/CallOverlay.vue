@@ -8,7 +8,7 @@ import {
 } from "@/lib/calls/call-store";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
-import { adoptCallCorrelationId } from "@/lib/calls/call-correlation";
+import { adoptCallCorrelationId, clearCallCorrelationId } from "@/lib/calls/call-correlation";
 import { iceServersFromExternalServices } from "@/lib/calls/ice-servers";
 import { connectionStore } from "@/lib/connection-store";
 import {
@@ -104,6 +104,11 @@ watch(
       await tearDownActiveCall(getSender(), "gone");
       await engine.disconnect();
       reportCallError(err);
+      // A connect() failure before a room exists never emits the engine's
+      // `disconnected` event, so the disconnected-handler cleanup does not
+      // run — clear the correlation id here (after the failure telemetry
+      // above, which must still carry it) or it would stamp later calls.
+      clearCallCorrelationId();
     } finally {
       $callConnecting.set(false);
     }
