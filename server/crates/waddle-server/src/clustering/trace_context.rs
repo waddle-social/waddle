@@ -85,7 +85,7 @@ fn deserialize_traceparent<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<TraceParentHeader>, D::Error> {
     deserializer
-        .deserialize_str(LenientBoundedHeaderVisitor {
+        .deserialize_any(LenientBoundedHeaderVisitor {
             what: "a traceparent header",
             max_len: MAX_TRACEPARENT_LEN,
         })
@@ -96,7 +96,7 @@ fn deserialize_tracestate<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<TraceStateHeader>, D::Error> {
     deserializer
-        .deserialize_str(LenientBoundedHeaderVisitor {
+        .deserialize_any(LenientBoundedHeaderVisitor {
             what: "a tracestate header",
             max_len: MAX_TRACESTATE_LEN,
         })
@@ -105,16 +105,19 @@ fn deserialize_tracestate<'de, D: serde::Deserializer<'de>>(
 
 /// Checks the length bound on the borrowed input before the string is
 /// owned, so an oversized peer-supplied header is never allocated — and
-/// resolves a violation to `None` rather than a serde error: trace
-/// context is telemetry only, and a malformed header from a peer must
-/// cost the trace link, never the delivery of the relay message that
-/// carries it (Greptile/Qodo review, PR #1487).
+/// resolves EVERY violation to `None` rather than a serde error: trace
+/// context is telemetry only, and a malformed header from a peer —
+/// wrong length or wrong MessagePack type entirely — must cost the
+/// trace link, never the delivery of the relay message that carries it
+/// (Greptile/Qodo review, PR #1487). Non-string shapes are drained
+/// (sequences/maps element by element) so the decoder stays positioned
+/// for the fields that follow.
 struct LenientBoundedHeaderVisitor {
     what: &'static str,
     max_len: usize,
 }
 
-impl serde::de::Visitor<'_> for LenientBoundedHeaderVisitor {
+impl<'de> serde::de::Visitor<'de> for LenientBoundedHeaderVisitor {
     type Value = Option<String>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -128,11 +131,59 @@ impl serde::de::Visitor<'_> for LenientBoundedHeaderVisitor {
         Ok(Some(value.to_owned()))
     }
 
+    fn visit_bytes<E: serde::de::Error>(self, _: &[u8]) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
     fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
         Ok(None)
     }
 
     fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_newtype_struct<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(None)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map
+            .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+            .is_some()
+        {}
         Ok(None)
     }
 }
@@ -425,5 +476,51 @@ mod tests {
         let decoded: RelayTraceContext = rmp_serde::from_slice(&ok).expect("valid headers decode");
         assert!(decoded.traceparent.is_some());
         assert!(decoded.tracestate.is_some());
+    }
+
+    /// A version-skewed or malformed peer may encode the trace fields as
+    /// non-string MessagePack values entirely; those must also decode to
+    /// no-context — and the decoder must stay positioned so fields AFTER
+    /// the discarded value still parse (Greptile review, PR #1487).
+    #[test]
+    fn a_non_string_trace_field_decodes_to_no_context_and_preserves_later_fields() {
+        #[derive(Serialize)]
+        struct WrongTypes {
+            traceparent: u64,
+            tracestate: Vec<u32>,
+            after: String,
+        }
+        #[derive(Deserialize)]
+        struct Enclosing {
+            #[serde(flatten)]
+            trace: RelayTraceContext,
+            after: String,
+        }
+
+        let wire = rmp_serde::to_vec_named(&WrongTypes {
+            traceparent: 42,
+            tracestate: vec![1, 2, 3],
+            after: "delivered".to_string(),
+        })
+        .expect("encodes");
+        let decoded: Enclosing =
+            rmp_serde::from_slice(&wire).expect("non-string trace fields must not fail the decode");
+        assert_eq!(decoded.trace, RelayTraceContext::default());
+        assert_eq!(decoded.after, "delivered");
+
+        #[derive(Serialize)]
+        struct MapShaped {
+            traceparent: std::collections::BTreeMap<String, String>,
+            after: String,
+        }
+        let wire = rmp_serde::to_vec_named(&MapShaped {
+            traceparent: std::collections::BTreeMap::from([("k".to_string(), "v".to_string())]),
+            after: "delivered".to_string(),
+        })
+        .expect("encodes");
+        let decoded: Enclosing =
+            rmp_serde::from_slice(&wire).expect("map-shaped trace fields must not fail the decode");
+        assert_eq!(decoded.trace, RelayTraceContext::default());
+        assert_eq!(decoded.after, "delivered");
     }
 }
