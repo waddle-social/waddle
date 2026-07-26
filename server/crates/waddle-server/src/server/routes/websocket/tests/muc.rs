@@ -1411,17 +1411,51 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
     .await;
 
     assert!(
-        denied[0].contains("internal-server-error"),
+        denied
+            .first()
+            .is_some_and(|frame| frame.contains("internal-server-error")),
         "malformed identity must fail closed: {denied:?}"
     );
+    // This assertion has failed in CI twice while the frame assertion
+    // above passed, and has never reproduced locally (including under
+    // CI's exact `--workspace --all-features --lib --tests` nextest
+    // command). Dump what was actually exported so the next occurrence
+    // distinguishes the candidate causes instead of just reporting
+    // `None`: no dispatch span exported at all (span held open by a
+    // stray clone), a dispatch span present without the attribute (the
+    // stamp landed elsewhere), or several same-named spans where the
+    // first one carries no attribute.
+    let exported_dispatch_spans: Vec<String> = spans
+        .exported()
+        .into_iter()
+        .filter(|span| span.name == "xmpp.stanza.dispatch")
+        .map(|span| {
+            let attributes: Vec<String> = span
+                .attributes
+                .iter()
+                .map(|attribute| format!("{}={}", attribute.key.as_str(), attribute.value))
+                .collect();
+            format!(
+                "{{status={:?} attrs=[{}]}}",
+                span.status,
+                attributes.join(", ")
+            )
+        })
+        .collect();
     assert_eq!(
         spans.attribute_of("xmpp.stanza.dispatch", "condition"),
-        Some("internal-server-error".to_string())
+        Some("internal-server-error".to_string()),
+        "exported xmpp.stanza.dispatch spans: [{}]",
+        exported_dispatch_spans.join(", "),
     );
-    assert!(matches!(
-        spans.status_of("xmpp.stanza.dispatch"),
-        Some(opentelemetry::trace::Status::Error { .. })
-    ));
+    assert!(
+        matches!(
+            spans.status_of("xmpp.stanza.dispatch"),
+            Some(opentelemetry::trace::Status::Error { .. })
+        ),
+        "exported xmpp.stanza.dispatch spans: [{}]",
+        exported_dispatch_spans.join(", "),
+    );
 }
 
 /// #1440: a managed-channel lookup failure bounces the join with a
