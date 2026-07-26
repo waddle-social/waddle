@@ -352,13 +352,22 @@ fn is_muc_call(call_id: &str) -> bool {
 pub fn spawn_reconciliation_task(state: Arc<WebSocketState>, reconciler: Arc<dyn SfuReconciler>) {
     let grace = chrono::Duration::seconds(RECONCILE_GRACE_SECONDS);
     tokio::spawn(async move {
+        // Owned by the loop so the non-occupant confirmation streaks
+        // survive across ticks.
+        let mut non_occupant_streaks = super::sfu_voice_reconcile::NonOccupantStreaks::default();
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         // Drop the immediate first tick `interval` yields so we don't
         // reconcile at boot before any call exists.
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            reconcile_once(&state, reconciler.as_ref(), grace).await;
+            reconcile_once(
+                &state,
+                reconciler.as_ref(),
+                grace,
+                &mut non_occupant_streaks,
+            )
+            .await;
         }
     });
 }
@@ -370,6 +379,7 @@ async fn reconcile_once(
     state: &WebSocketState,
     reconciler: &dyn SfuReconciler,
     grace: chrono::Duration,
+    non_occupant_streaks: &mut super::sfu_voice_reconcile::NonOccupantStreaks,
 ) {
     let swept = reconciler.reconcile_active_calls(grace).await;
     if !swept.is_empty() {
@@ -388,7 +398,8 @@ async fn reconcile_once(
             }
         }
     }
-    super::sfu_voice_reconcile::reconcile_voice_grants(state, reconciler).await;
+    super::sfu_voice_reconcile::reconcile_voice_grants(state, reconciler, non_occupant_streaks)
+        .await;
 }
 
 async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvelope) {

@@ -5,10 +5,27 @@
 //! the guarantee that the enforcement happens at all regardless of which
 //! replica received that webhook.
 
-use tracing::warn;
+use tracing::{debug, warn};
 use waddle_sfu::{CallId, SfuReconciler};
 
 use super::websocket::WebSocketState;
+
+/// Consecutive reconciliation passes a LiveKit participant must be
+/// observed as a non-occupant before being evicted.
+///
+/// One observation is a weak signal: a room actor claimed by this node
+/// moments ago legitimately reports no occupants until its clients
+/// rejoin, so acting immediately would drop a whole live call during a
+/// failover. Mirrors the SFU reconciler's own `RECONCILE_ABSENT_PASSES`
+/// rule for exactly the same reason.
+const NON_OCCUPANT_PASSES_BEFORE_EVICTION: u32 = 2;
+
+/// Consecutive passes each `(call, session)` has been seen connected to
+/// the SFU while absent from its room's occupant set. Owned by the
+/// reconciliation task so it survives across ticks; entries are dropped
+/// as soon as the session is seen as an occupant again, or once it is
+/// evicted.
+pub(super) type NonOccupantStreaks = std::collections::HashMap<(CallId, jid::FullJid), u32>;
 
 /// Reply budget for the room-actor asks this pass makes. Bounded so a
 /// single wedged room actor cannot stall the pass and starve every later
@@ -40,7 +57,11 @@ const ROOM_ACTOR_ASK_TIMEOUT: std::time::Duration = waddle_xmpp::muc::ROOM_REGIS
 /// Cost per pass is one `ListParticipants` per claimed room that has
 /// occupants, and an `UpdateParticipant` only for occupants LiveKit
 /// actually reports as connected. Both are idempotent.
-pub(super) async fn reconcile_voice_grants(state: &WebSocketState, reconciler: &dyn SfuReconciler) {
+pub(super) async fn reconcile_voice_grants(
+    state: &WebSocketState,
+    reconciler: &dyn SfuReconciler,
+    non_occupant_streaks: &mut NonOccupantStreaks,
+) {
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         return;
     };
@@ -94,9 +115,14 @@ pub(super) async fn reconcile_voice_grants(state: &WebSocketState, reconciler: &
                 continue;
             }
         };
-        if voices.is_empty() {
-            continue;
-        }
+        // NOTE: an empty occupant set is deliberately NOT skipped. It is
+        // the case where a stale-token holder is most exposed — nobody is
+        // in the room, so no other path will ever evict them — and it is
+        // also the case where a room actor freshly claimed by this node
+        // has not yet seen its clients rejoin. Those are distinguished
+        // below by requiring the observation across consecutive passes,
+        // not by guessing here.
+        //
         // `None` means the SFU could not be reached, so absence is
         // unconfirmed — treating it as "nobody is connected" would let a
         // LiveKit outage silently disable this backstop. The impl warns.
@@ -108,11 +134,35 @@ pub(super) async fn reconcile_voice_grants(state: &WebSocketState, reconciler: &
         }
         let RoomVoiceReconciliation { converge, evict } = plan_room_reconciliation(&voices, &live);
         for (session, voice) in converge {
+            // Seen as an occupant: any prior non-occupant observation was
+            // transient, so the streak resets.
+            non_occupant_streaks.remove(&(call_id.clone(), session.clone()));
             crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
                 sfu, &room_jid, &session, voice,
             );
         }
         for session in evict {
+            // Require the observation across consecutive passes before
+            // acting, mirroring the SFU reconciler's own
+            // `RECONCILE_ABSENT_PASSES` rule. A room actor claimed by
+            // this node moments ago legitimately reports no occupants
+            // until its clients rejoin; evicting on a single observation
+            // would drop an entire live call during a failover. A real
+            // stale-token holder is still connected on the next pass.
+            let streak = non_occupant_streaks
+                .entry((call_id.clone(), session.clone()))
+                .or_insert(0);
+            *streak += 1;
+            if *streak < NON_OCCUPANT_PASSES_BEFORE_EVICTION {
+                debug!(
+                    room = %room_jid,
+                    user = %session.to_bare(),
+                    streak = *streak,
+                    "LiveKit participant is not a MUC occupant; waiting for confirmation",
+                );
+                continue;
+            }
+            non_occupant_streaks.remove(&(call_id.clone(), session.clone()));
             // Occupancy is the precondition for call participation, and
             // this node owns the room, so its occupant set is
             // authoritative: a participant LiveKit reports as connected
@@ -220,6 +270,23 @@ mod tests {
             plan.converge,
             vec![(jid("alice@example.com/web"), Voice::Voiced)]
         );
+        assert_eq!(plan.evict, vec![jid("mallory@example.com/web")]);
+    }
+
+    /// The empty-occupant case is the one a stale-token holder is most
+    /// exposed in — nobody is in the room, so no other path evicts them.
+    /// It must therefore still produce an eviction candidate, not be
+    /// skipped. (The consecutive-pass rule at the call site, not this
+    /// plan, is what keeps a freshly-claimed room actor from dropping a
+    /// live call.)
+    #[test]
+    fn an_empty_room_still_yields_eviction_candidates() {
+        let voices: Vec<(jid::FullJid, Voice)> = Vec::new();
+        let live = vec![Identity::from_jid(jid("mallory@example.com/web"))];
+
+        let plan = plan_room_reconciliation(&voices, &live);
+
+        assert!(plan.converge.is_empty());
         assert_eq!(plan.evict, vec![jid("mallory@example.com/web")]);
     }
 
