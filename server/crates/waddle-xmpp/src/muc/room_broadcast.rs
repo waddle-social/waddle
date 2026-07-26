@@ -8,7 +8,6 @@ use xmpp_parsers::message::{Message, MessageType};
 use super::messages::OutboundMucMessage;
 use super::room::{MucRoom, Occupant};
 use super::subject::{RoomSubjectTexts, SubjectState};
-use crate::types::Role;
 use crate::XmppError;
 
 impl MucRoom {
@@ -43,7 +42,10 @@ impl MucRoom {
             )))
         })?;
 
-        if self.config.moderated && sender.role == Role::Visitor {
+        // XEP-0045 §7.5. Shares its voice predicate with the SFU
+        // media-grant derivation so text and media authorization can
+        // never disagree about who may speak.
+        if !sender.role.voice(self.moderation()).is_voiced() {
             return Err(XmppError::forbidden(Some(
                 "Visitors cannot speak in moderated rooms".to_string(),
             )));

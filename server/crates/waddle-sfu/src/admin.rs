@@ -562,9 +562,9 @@ mod tests {
         let body = UpdateParticipantRequest {
             room: "room@muc.example.com".to_string(),
             identity: "bob@example.com/web".to_string(),
-            permission: ParticipantPermission::from_capabilities(MediaCapabilities::from_muc_role(
-                waddle_xmpp_core::types::Role::Visitor,
-            )),
+            permission: ParticipantPermission::from_capabilities(
+                MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted),
+            ),
         };
         let json = serde_json::to_value(&body).expect("serializes");
         assert_eq!(

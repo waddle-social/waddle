@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
@@ -35,6 +36,15 @@ pub(crate) const MAX_ISSUED_PER_PARTICIPANT: usize = 16;
 /// a burst of session-terminates would otherwise spawn arbitrarily
 /// many reqwest tasks. The semaphore is a fixed-size FIFO valve.
 const ADMIN_CONCURRENCY: usize = 32;
+
+/// Attempts allowed for a grant *downgrade* push. Losing voice must
+/// actually reach LiveKit — a single dropped request would leave a
+/// de-voiced occupant publishing — so a transient failure is retried a
+/// few times before the warn-and-give-up path.
+const GRANT_DOWNGRADE_ATTEMPTS: u32 = 3;
+
+/// Linear backoff base between grant-downgrade attempts.
+const GRANT_RETRY_BACKOFF: StdDuration = StdDuration::from_millis(250);
 
 /// Grace window after registration before a participant becomes
 /// eligible for ghost reconciliation. The registry is populated at
@@ -116,6 +126,12 @@ pub struct LiveKitSfu {
     /// validation hook) or a shared revocation store (Redis) once
     /// Waddle scales past a single SFU instance.
     revoked: DashMap<Jti, DateTime<Utc>>,
+    /// Monotonic ticket per `(call, identity)` for grant pushes, so a
+    /// slow `UpdateParticipant` cannot overwrite a newer one's grants
+    /// (see [`Self::schedule_permission_update`]). Shared with the
+    /// spawned tasks; entries are dropped in `clear_local_state`
+    /// alongside the rest of the participant's state.
+    grant_generation: Arc<DashMap<(CallId, Identity), u64>>,
     /// LiveKit admin REST client. Used to evict participants and
     /// delete empty rooms when a teardown signal arrives over XMPP —
     /// without this, LiveKit only notices a hangup when the underlying
@@ -177,6 +193,7 @@ impl LiveKitSfu {
             registered_at: DashMap::new(),
             absent_streak: DashMap::new(),
             revoked: DashMap::new(),
+            grant_generation: Arc::new(DashMap::new()),
             admin,
             runtime: Handle::try_current().ok(),
             admin_permits: Arc::new(Semaphore::new(ADMIN_CONCURRENCY)),
@@ -255,6 +272,8 @@ impl LiveKitSfu {
         self.registered_at
             .remove(&(call_id.clone(), identity.clone()));
         self.absent_streak
+            .remove(&(call_id.clone(), identity.clone()));
+        self.grant_generation
             .remove(&(call_id.clone(), identity.clone()));
         self.sweep_expired_revoked(Utc::now());
 
@@ -339,11 +358,16 @@ impl LiveKitSfu {
     }
 
     /// Move every outstanding JTI for `(call_id, identity)` into the
-    /// revocation map WITHOUT touching the participant registry.
-    /// Used on a mid-call grant downgrade: the participant stays in
-    /// the call (listen-only), but a not-yet-used token minted before
-    /// the demotion must not be replayable to rejoin with stale
-    /// publish rights.
+    /// revocation map WITHOUT touching the participant registry. Used
+    /// on a mid-call grant downgrade: the participant stays in the
+    /// call (listen-only), and their pre-downgrade tokens are marked
+    /// spent.
+    ///
+    /// This is local bookkeeping, NOT enforcement: LiveKit reads
+    /// permissions off the JWT at join and never asks us about the
+    /// jti (see the `revoked` field docs). Enforcement for a rejoin
+    /// with a stale token comes from re-asserting permissions on the
+    /// `participant_joined` webhook.
     fn revoke_issued_tokens(&self, call_id: &CallId, identity: &Identity) {
         if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
             for issued in issued {
@@ -358,31 +382,86 @@ impl LiveKitSfu {
     /// permit shape as [`Self::schedule_remote_teardown`]; when no
     /// runtime handle is attached (plain `#[test]` fixtures) the
     /// remote leg silently drops.
+    ///
+    /// Each push takes a monotonic ticket per `(call, identity)` under
+    /// the shard lock before spawning, and drops itself if a later
+    /// push has already been admitted. Without that, two grant
+    /// changes for the same participant (a batch that revokes then
+    /// grants voice, or two moderation IQs in quick succession) race
+    /// on independent tasks through a 32-permit semaphore and can
+    /// land on LiveKit out of order — leaving publish enabled after a
+    /// revoke, which is exactly the state this feature exists to
+    /// prevent.
     fn schedule_permission_update(
         &self,
         call_id: CallId,
         identity: Identity,
         capabilities: MediaCapabilities,
     ) {
+        let key = (call_id.clone(), identity.clone());
+        let ticket = {
+            let mut entry = self.grant_generation.entry(key.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
         let admin = Arc::clone(&self.admin);
         let permits = Arc::clone(&self.admin_permits);
+        let generation = Arc::clone(&self.grant_generation);
         runtime.spawn(async move {
             let Ok(_permit) = permits.acquire_owned().await else {
                 return;
             };
-            if let Err(err) = admin
-                .update_participant(&call_id, &identity, capabilities)
-                .await
-            {
-                tracing::warn!(
-                    call_id = %call_id,
-                    identity = %identity.as_livekit_identity(),
-                    error = %err,
-                    "LiveKit UpdateParticipant failed; live grants may lag the MUC role"
-                );
+            // A newer push was admitted while we waited for a permit;
+            // it carries the current grants, so ours is stale and
+            // applying it would move LiveKit backwards.
+            let superseded = || {
+                generation
+                    .get(&key)
+                    .is_some_and(|current| *current > ticket)
+            };
+            if superseded() {
+                return;
+            }
+            // A downgrade is a security-relevant convergence, so a
+            // transient transport/5xx failure gets bounded retries
+            // rather than a single best effort. Widening grants is not
+            // retried: failing to restore publish rights is a
+            // functional annoyance the next role change or rejoin
+            // fixes, and retrying it could race a fresh downgrade.
+            let attempts = if capabilities.is_listen_only() {
+                GRANT_DOWNGRADE_ATTEMPTS
+            } else {
+                1
+            };
+            for attempt in 1..=attempts {
+                match admin
+                    .update_participant(&call_id, &identity, capabilities)
+                    .await
+                {
+                    Ok(()) => return,
+                    Err(err) => {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            identity = %identity.as_livekit_identity(),
+                            attempt,
+                            attempts,
+                            error = %err,
+                            // This crate sits below the telemetry crate
+                            // (`waddle-xmpp` depends on it, not the
+                            // reverse), so this WARN is the alert
+                            // signal for a participant whose live
+                            // grants no longer match their MUC voice.
+                            "LiveKit UpdateParticipant failed; live media grants lag the MUC voice"
+                        );
+                    }
+                }
+                if attempt == attempts || superseded() {
+                    return;
+                }
+                tokio::time::sleep(GRANT_RETRY_BACKOFF * attempt).await;
             }
         });
     }
@@ -641,12 +720,13 @@ impl SfuService for LiveKitSfu {
         identity: &Identity,
         capabilities: MediaCapabilities,
     ) {
-        // Only registered call participants get the admin round-trip:
-        // a role change for an occupant who never joined the call (or
-        // already left) has no SFU-side state to converge.
-        if !self.has_call_participant(call_id, identity) {
-            return;
-        }
+        // Deliberately NOT gated on local registration — see the
+        // trait doc. LiveKit may hold a participant our per-process
+        // registry lost (reconnect after `participant_left`, actor
+        // migration, reconcile sweep); skipping the push for them
+        // would let a de-voiced occupant keep publishing. A
+        // participant LiveKit doesn't know resolves to Twirp
+        // `not_found`, which the admin client maps to success.
         if capabilities.is_listen_only() {
             self.revoke_issued_tokens(call_id, identity);
         }
@@ -1022,7 +1102,7 @@ mod tests {
         let alice = fixture_identity("alice");
         sfu.register_call_participant(&call, &alice);
 
-        let caps = MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor);
+        let caps = MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted);
         sfu.update_participant_capabilities(&call, &alice, caps);
         drain_admin_tasks().await;
 
@@ -1044,24 +1124,39 @@ mod tests {
         );
     }
 
+    /// A downgrade must NOT be gated on local registration. Our
+    /// per-process registry can legitimately have lost a participant
+    /// LiveKit still holds (reconnect after `participant_left`, room
+    /// actor migrated between cluster nodes, reconcile sweep), and
+    /// skipping the push for them would let a de-voiced occupant keep
+    /// publishing — a fail-open in the one direction that must never
+    /// fail open. Mirrors `unregister_call_participant`'s
+    /// always-run `RemoveParticipant`.
     #[tokio::test]
-    async fn update_capabilities_noops_for_unregistered_participant() {
+    async fn downgrade_pushes_even_when_the_local_registry_lost_the_participant() {
         let admin = Arc::new(RecordingAdmin::default());
         let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
         let call = CallId::new("r-grants-ghost").unwrap();
         let alice = fixture_identity("alice");
+        assert!(
+            !sfu.has_call_participant(&call, &alice),
+            "fixture models a participant absent from the local registry"
+        );
 
         sfu.update_participant_capabilities(
             &call,
             &alice,
-            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
+            MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted),
         );
         drain_admin_tasks().await;
 
-        assert!(
-            admin.update_snapshot().is_empty(),
-            "an occupant who never joined the call has no SFU state to converge"
+        let updates = admin.update_snapshot();
+        assert_eq!(
+            updates.len(),
+            1,
+            "the downgrade must still reach LiveKit: {updates:?}"
         );
+        assert!(updates[0].2.is_listen_only());
     }
 
     #[tokio::test]
@@ -1078,7 +1173,7 @@ mod tests {
         sfu.update_participant_capabilities(
             &call,
             &alice,
-            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
+            MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted),
         );
         drain_admin_tasks().await;
 
@@ -1104,7 +1199,7 @@ mod tests {
             .issue_join_token(
                 &call,
                 &alice,
-                MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
+                MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted),
             )
             .expect("token");
         sfu.register_call_participant(&call, &alice);
@@ -1112,7 +1207,7 @@ mod tests {
         sfu.update_participant_capabilities(
             &call,
             &alice,
-            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Participant),
+            MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Voiced),
         );
         drain_admin_tasks().await;
 
@@ -1122,6 +1217,42 @@ mod tests {
         );
         assert_eq!(admin.update_snapshot().len(), 1);
         assert!(admin.update_snapshot()[0].2.can_publish);
+    }
+
+    /// A slow push must never overwrite a newer one's grants. Two
+    /// updates admitted back-to-back (a batch that revokes then
+    /// re-grants voice, or two moderation IQs in a row) run on
+    /// independent tasks; only the latest may reach LiveKit.
+    #[tokio::test]
+    async fn a_superseded_grant_push_is_dropped_before_reaching_livekit() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-order").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+
+        let voiced = MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Voiced);
+        let muted = MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted);
+        // Stale promotion first, then the demotion that supersedes it.
+        // Both are queued before either task gets to run.
+        sfu.update_participant_capabilities(&call, &alice, voiced);
+        sfu.update_participant_capabilities(&call, &alice, muted);
+        drain_admin_tasks().await;
+
+        let updates = admin.update_snapshot();
+        assert!(
+            !updates.is_empty(),
+            "at least the newest push must reach LiveKit"
+        );
+        assert!(
+            updates.iter().all(|(_, _, caps)| caps.is_listen_only()),
+            "no superseded (publish-enabling) push may land after the demotion: {updates:?}"
+        );
+        assert_eq!(
+            updates.last().expect("non-empty").2,
+            muted,
+            "the last write must be the newest grants"
+        );
     }
 
     #[tokio::test]

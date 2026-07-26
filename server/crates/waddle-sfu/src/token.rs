@@ -288,7 +288,7 @@ mod tests {
 
         let mut inputs = fixture_inputs(&api_key, &secret, &ws_url, &call_id, &identity);
         inputs.capabilities =
-            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor);
+            MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted);
         let token = mint_join_token(inputs).expect("mint should succeed");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);

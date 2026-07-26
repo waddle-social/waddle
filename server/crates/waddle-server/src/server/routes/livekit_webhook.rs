@@ -222,10 +222,27 @@ async fn livekit_webhook_handler(
                 );
             }
         }
-        LiveKitWebhookEvent::ParticipantJoined(_) | LiveKitWebhookEvent::Other => {
-            // Informational; the join path already flows through
-            // Jingle session-initiate → `register_call_participant`.
+        LiveKitWebhookEvent::ParticipantJoined(env) => {
+            // Registry-wise this is informational (the join already
+            // flowed through Jingle session-initiate →
+            // `register_call_participant`), but it is the ONLY moment
+            // we learn that a specific token was actually redeemed —
+            // and therefore the only place a stale token can be
+            // caught.
+            //
+            // Self-hosted LiveKit derives permissions from the JWT at
+            // join and does not invalidate previously-minted tokens
+            // when permissions change (that is a LiveKit Cloud
+            // feature), and our own JTI revocation is local
+            // bookkeeping LiveKit never consults. So an occupant who
+            // was de-voiced between mint and connect — or who
+            // reconnects with a cached pre-demotion token — would
+            // otherwise publish for the remainder of the token's TTL.
+            // Re-deriving their current voice here and pushing it
+            // converges them within one webhook round-trip.
+            reassert_voice_grants_on_join(&state, &env.room.name, &env.participant.identity).await;
         }
+        LiveKitWebhookEvent::Other => {}
     }
 
     StatusCode::OK
@@ -348,6 +365,54 @@ async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvel
 /// `RoomFinished` survivor sweep. Takes the raw identity string so
 /// the survivor sweep (which iterates `Identity` values out of the
 /// SFU registry) can call it with the same shape.
+/// Re-derive a just-joined participant's XEP-0045 voice and push it to
+/// the SFU, so the permissions LiveKit granted from their token match
+/// the room's current authorization state.
+///
+/// This is the enforcement point for stale tokens: LiveKit reads
+/// grants off the JWT at join and self-hosted deployments never
+/// invalidate an already-minted token when permissions change, so
+/// without this a token minted before a demotion still admits its
+/// holder with publish rights until it expires.
+///
+/// Only MUC (Muji) rooms participate — a 1:1 call's room name is a
+/// scoped call id, not a room JID, and 1:1 peers have no role model.
+/// A participant who is no longer an occupant at all is left to the
+/// leave/eviction paths rather than being downgraded here.
+async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, identity: &str) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    let Ok(full_jid) = identity.parse::<FullJid>() else {
+        return;
+    };
+    let Ok(room_jid) = room_name.parse::<BareJid>() else {
+        // 1:1 scoped call id — no MUC roles apply.
+        return;
+    };
+    let Ok(Some(actor)) =
+        crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await
+    else {
+        return;
+    };
+    let Ok(Some(voice)) = actor
+        .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
+            jid: full_jid.clone(),
+        })
+        .await
+    else {
+        return;
+    };
+    debug!(
+        room = %room_jid,
+        user = %full_jid.to_bare(),
+        "re-asserting SFU media grants from current MUC voice on participant join",
+    );
+    crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
+        sfu, &room_jid, &full_jid, voice,
+    );
+}
+
 async fn process_participant_left_for_identity(
     state: &WebSocketState,
     room_name: &str,

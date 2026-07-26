@@ -6,7 +6,7 @@
 //! representations live in [`crate::token`] and [`crate::livekit`].
 
 use jid::FullJid;
-use waddle_xmpp_core::types::Role;
+use waddle_xmpp_core::types::Voice;
 
 use crate::error::SfuError;
 
@@ -98,20 +98,32 @@ impl MediaCapabilities {
     }
 
     /// Grants for a MUC (XEP-0272 Muji) call occupant, derived from
-    /// the occupant's XEP-0045 role. "Voice" is precisely role ≥
-    /// participant: a visitor is by definition an occupant without
-    /// voice, so visitors receive listen-only grants. Affiliation is
-    /// not consulted here — it is an input to role assignment, which
-    /// the room actor already resolves.
+    /// the occupant's XEP-0045 voice. An occupant without voice may
+    /// listen but not publish, exactly mirroring the text-broadcast
+    /// rule (§7.5) — the two authorization models share
+    /// [`waddle_xmpp_core::types::Role::voice`] as their single
+    /// predicate, so media and text can never disagree.
     ///
-    /// `Role::None` cannot belong to a current occupant; it maps to
-    /// listen-only as the fail-closed floor.
-    pub fn from_muc_role(role: Role) -> Self {
-        let has_voice = role >= Role::Participant;
+    /// Affiliation is not consulted here: it is an input to role
+    /// assignment, which the room actor already resolves.
+    pub fn from_muc_voice(voice: Voice) -> Self {
+        match voice {
+            Voice::Voiced => Self {
+                can_publish: true,
+                can_subscribe: true,
+                can_publish_data: true,
+            },
+            Voice::Muted => Self::listen_only(),
+        }
+    }
+
+    /// Subscribe-only grants. The fail-closed floor for any MUC mint
+    /// that cannot establish the caller's voice.
+    pub fn listen_only() -> Self {
         Self {
-            can_publish: has_voice,
+            can_publish: false,
             can_subscribe: true,
-            can_publish_data: has_voice,
+            can_publish_data: false,
         }
     }
 
@@ -125,24 +137,22 @@ impl MediaCapabilities {
 mod tests {
     use super::*;
 
-    /// XEP-0045 voice semantics: "voice" is precisely role ≥
-    /// participant. Pin the full role → grant table.
+    /// Voice → grant mapping. An occupant with voice may publish; one
+    /// without may only listen. (The role+moderation → voice policy
+    /// itself is pinned in `waddle-xmpp-core`'s `Role::voice` tests —
+    /// it is deliberately not duplicated here.)
     #[test]
-    fn muc_role_grant_table() {
-        for role in [Role::Moderator, Role::Participant] {
-            let caps = MediaCapabilities::from_muc_role(role);
-            assert!(caps.can_publish, "{role:?} has voice");
-            assert!(caps.can_publish_data, "{role:?} has voice");
-            assert!(caps.can_subscribe);
-            assert!(!caps.is_listen_only());
-        }
-        for role in [Role::Visitor, Role::None] {
-            let caps = MediaCapabilities::from_muc_role(role);
-            assert!(!caps.can_publish, "{role:?} has no voice");
-            assert!(!caps.can_publish_data, "{role:?} has no voice");
-            assert!(caps.can_subscribe, "a visitor is a listener");
-            assert!(caps.is_listen_only());
-        }
+    fn voice_grant_table() {
+        let voiced = MediaCapabilities::from_muc_voice(Voice::Voiced);
+        assert!(voiced.can_publish && voiced.can_publish_data && voiced.can_subscribe);
+        assert!(!voiced.is_listen_only());
+
+        let muted = MediaCapabilities::from_muc_voice(Voice::Muted);
+        assert!(!muted.can_publish);
+        assert!(!muted.can_publish_data);
+        assert!(muted.can_subscribe, "an occupant without voice may listen");
+        assert!(muted.is_listen_only());
+        assert_eq!(muted, MediaCapabilities::listen_only());
     }
 
     #[test]

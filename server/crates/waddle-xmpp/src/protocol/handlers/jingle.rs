@@ -638,9 +638,9 @@ impl JingleHandler {
         // dispatch route without the gate — fail closed to
         // listen-only rather than minting publish rights nobody
         // authorized.
-        let capabilities = ctx.media_capabilities.unwrap_or_else(|| {
-            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor)
-        });
+        let capabilities = ctx
+            .media_capabilities
+            .unwrap_or_else(MediaCapabilities::listen_only);
         if let Err(reason) = rewrite_contents_transport(
             &mut jingle.contents,
             &call_id,
@@ -1321,8 +1321,8 @@ mod tests {
         StanzaContext {
             domain: "waddle.test",
             full_jid: jid,
-            media_capabilities: Some(MediaCapabilities::from_muc_role(
-                waddle_xmpp_core::types::Role::Participant,
+            media_capabilities: Some(MediaCapabilities::from_muc_voice(
+                waddle_xmpp_core::types::Voice::Voiced,
             )),
         }
     }

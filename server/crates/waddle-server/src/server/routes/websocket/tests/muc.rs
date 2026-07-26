@@ -6209,6 +6209,30 @@ fn build_admin_set_iq_xml(room_jid: &BareJid, id: &str, item: Element) -> String
     )
 }
 
+/// Flip an existing room to XEP-0045 moderated. Required for any
+/// devoice test: the visitor/voice distinction only withholds voice in
+/// a moderated room, so in the default (unmoderated) fixture a visitor
+/// still has voice and there is nothing to converge.
+async fn make_room_moderated(state: &WebSocketState, room_jid: &BareJid) {
+    let actor = crate::server::routes::websocket::get_room_actor_result(state, room_jid)
+        .await
+        .expect("room lookup")
+        .expect("room actor exists");
+    let config = actor
+        .ask(waddle_xmpp::muc::room_actor::GetConfig)
+        .await
+        .expect("read room config");
+    actor
+        .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            config: waddle_xmpp::muc::RoomConfig {
+                moderated: true,
+                ..config
+            },
+        })
+        .await
+        .expect("set room moderated");
+}
+
 async fn join_alice_owner_and_bob(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -6393,6 +6417,7 @@ async fn muc_admin_voice_revocation_downgrades_live_sfu_grants() {
         .expect("room jid");
     let (alice_session, alice_jid, _bob_jid) =
         join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    make_room_moderated(state.as_ref(), &room_jid).await;
     let ready = ready_phase(&alice_jid);
 
     let demote_iq = build_admin_set_iq_xml(
@@ -6424,8 +6449,8 @@ async fn muc_admin_voice_revocation_downgrades_live_sfu_grants() {
     assert_eq!(updates[0].1.as_livekit_identity(), "bob@example.com/web");
     assert_eq!(
         updates[0].2,
-        waddle_sfu::MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
-        "a visitor's live grants are listen-only"
+        waddle_sfu::MediaCapabilities::listen_only(),
+        "a devoiced occupant's live grants are listen-only"
     );
     assert!(updates[0].2.is_listen_only());
     assert!(
@@ -6445,6 +6470,7 @@ async fn muc_admin_voice_grant_upgrades_live_sfu_grants() {
         .expect("room jid");
     let (alice_session, alice_jid, _bob_jid) =
         join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    make_room_moderated(state.as_ref(), &room_jid).await;
     let ready = ready_phase(&alice_jid);
 
     for (id, role) in [("revoke-bob", "visitor"), ("grant-bob", "participant")] {
@@ -6473,7 +6499,7 @@ async fn muc_admin_voice_grant_upgrades_live_sfu_grants() {
     assert!(updates[0].2.is_listen_only(), "revocation first");
     assert_eq!(
         updates[1].2,
-        waddle_sfu::MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Participant),
+        waddle_sfu::MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Voiced),
         "restored voice restores publish grants"
     );
     assert!(updates[1].2.can_publish);

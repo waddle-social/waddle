@@ -110,19 +110,32 @@ pub trait SfuService: Send + Sync + 'static {
     /// round-trip plus a race window against quick rejoins.
     fn note_participant_left(&self, call_id: &CallId, identity: &Identity);
 
-    /// Push replacement media grants to a *live* participant after an
-    /// XEP-0045 role change, without disconnecting them: a visitor
-    /// demotion becomes listen-only immediately (the SFU
-    /// force-unpublishes their tracks), a voice grant lets them
-    /// publish without renegotiating. No-op when `identity` is not
-    /// currently registered in `call_id`.
-    ///
-    /// On a downgrade (new grants are listen-only) implementations
-    /// also revoke every outstanding JWT minted for the
-    /// `(call_id, identity)` pair, so an unused token from before the
-    /// demotion cannot be replayed to rejoin with stale publish
-    /// rights. The remote leg is fire-and-forget like
+    /// Push replacement media grants to a live participant after an
+    /// XEP-0045 voice change, without disconnecting them: losing voice
+    /// becomes listen-only immediately (the SFU force-unpublishes
+    /// their tracks), regaining it lets them publish without
+    /// renegotiating. The remote leg is fire-and-forget like
     /// [`Self::unregister_call_participant`]'s.
+    ///
+    /// This runs unconditionally, exactly like
+    /// `unregister_call_participant`'s `RemoveParticipant`: the SFU may
+    /// know about a participant our per-process registry has lost
+    /// track of (a reconnect after `participant_left`, a room actor
+    /// that migrated between cluster nodes, reconciliation sweeps).
+    /// Gating on local registration would make the *downgrade* fail
+    /// open, which is the one direction that must never be skipped.
+    ///
+    /// A downgrade also revokes every outstanding JWT minted for the
+    /// `(call_id, identity)` pair. NOTE: that revocation is local
+    /// bookkeeping only — LiveKit derives permissions from the JWT at
+    /// join time and never consults [`Self::is_revoked`], so a token
+    /// minted before the downgrade still admits its holder with the
+    /// old grants until `exp`. The mechanism that actually closes
+    /// that window is re-asserting permissions when LiveKit reports
+    /// the participant joined (`participant_joined` webhook); the
+    /// revocation entry exists for the future
+    /// LiveKit-cooperative-validation path and for local replay
+    /// checks.
     fn update_participant_capabilities(
         &self,
         call_id: &CallId,

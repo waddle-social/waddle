@@ -63,7 +63,7 @@ pub use pubsub::{
     NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
 };
 pub use stanza::Stanza;
-pub use types::{Affiliation, ConnectionState, Role, StanzaType, Transport};
+pub use types::{Affiliation, ConnectionState, Moderation, Role, StanzaType, Transport, Voice};
 pub use xep0201::{
     build_thread_element, install_thread_element, parse_thread_info, set_thread_id,
     thread_id_from_message, thread_id_from_message_in_stanza_ns, thread_info_from_message,

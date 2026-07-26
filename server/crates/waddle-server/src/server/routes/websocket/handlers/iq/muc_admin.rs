@@ -657,14 +657,15 @@ pub(super) async fn handle_muc_admin_iq(
             state, &room_jid, removed,
         );
     }
-    // Role-derived media grants: a non-removal role change (voice
-    // grant/revoke, moderator grant/revoke) must converge the
-    // target's live SFU permission with the role the room actor just
-    // applied — otherwise a voice-revoked visitor keeps publishing
-    // until they renegotiate. Fire-and-forget like the eviction above.
-    for (session, new_role) in &applied.role_changes {
-        super::super::super::muc_call_sfu::apply_role_grants_for_room(
-            state, &room_jid, session, *new_role,
+    // Voice-derived media grants: any non-removal change that alters
+    // an occupant's XEP-0045 voice — an explicit `<item role='…'/>`
+    // or an affiliation change that re-derives their role — must
+    // converge their live SFU permission, otherwise a de-voiced
+    // occupant keeps publishing until they renegotiate.
+    // Fire-and-forget like the eviction above.
+    for (session, new_voice) in &applied.voice_changes {
+        super::super::super::muc_call_sfu::apply_voice_grants_for_room(
+            state, &room_jid, session, *new_voice,
         );
     }
     for (recipient, presence) in remaining_broadcasts {

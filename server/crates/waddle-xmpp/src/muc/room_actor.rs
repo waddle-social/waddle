@@ -14,7 +14,7 @@ use thiserror::Error;
 use super::affiliation::AffiliationEntry;
 use super::pin::{PinStateChange, PinnedEntry};
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
-use crate::types::{Affiliation, Role};
+use crate::types::{Affiliation, Role, Voice};
 
 /// A join-path ownership proof is fail-closed, but it must not monopolize the
 /// room actor forever when the durable backend stops responding.
@@ -1389,6 +1389,33 @@ impl kameo::message::Message<GetOccupantByJid> for RoomActor {
         self.room
             .find_occupant_by_real_jid(&msg.jid)
             .map(OccupantInfo::from_occupant)
+    }
+}
+
+/// Resolve the SFU media-grant inputs for `jid` in one round-trip:
+/// whether they are a current occupant, and if so their XEP-0045
+/// voice (which needs both the role and the room's moderation).
+///
+/// The Muji gate uses this instead of [`GetOccupantByJid`] +
+/// [`GetConfig`] so authorization reads a single consistent snapshot
+/// of the room — two asks could straddle a role change or a config
+/// change and mint grants matching neither.
+pub struct GetOccupantVoice {
+    pub jid: FullJid,
+}
+
+impl kameo::message::Message<GetOccupantVoice> for RoomActor {
+    type Reply = Option<Voice>;
+
+    async fn handle(
+        &mut self,
+        msg: GetOccupantVoice,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let moderation = self.room.moderation();
+        self.room
+            .find_occupant_by_real_jid(&msg.jid)
+            .map(|occupant| occupant.role.voice(moderation))
     }
 }
 

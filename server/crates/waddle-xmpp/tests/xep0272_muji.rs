@@ -333,8 +333,8 @@ fn ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
     StanzaContext {
         domain: TEST_DOMAIN,
         full_jid: jid,
-        media_capabilities: Some(waddle_sfu::MediaCapabilities::from_muc_role(
-            waddle_xmpp_core::types::Role::Participant,
+        media_capabilities: Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+            waddle_xmpp_core::types::Voice::Voiced,
         )),
     }
 }
@@ -899,8 +899,8 @@ fn muji_initiate_with_participant_grants_mints_publishing_token() {
         &iq,
         &ctx_with_caps(
             &jid,
-            Some(waddle_sfu::MediaCapabilities::from_muc_role(
-                waddle_xmpp_core::types::Role::Participant,
+            Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+                waddle_xmpp_core::types::Voice::Voiced,
             )),
         ),
     );
@@ -925,8 +925,8 @@ fn muji_initiate_with_visitor_grants_mints_listen_only_token() {
         &iq,
         &ctx_with_caps(
             &jid,
-            Some(waddle_sfu::MediaCapabilities::from_muc_role(
-                waddle_xmpp_core::types::Role::Visitor,
+            Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+                waddle_xmpp_core::types::Voice::Muted,
             )),
         ),
     );
