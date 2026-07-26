@@ -386,6 +386,7 @@ export class OfflineSendQueue {
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
+  private depthHeartbeat: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly deps: OfflineSendQueueDeps) {}
 
@@ -420,6 +421,23 @@ export class OfflineSendQueue {
         this.inflightQueuedIds.add(id);
         this.resumeReplayQueuedIds.add(id);
       }
+    }
+    // A queue restored from localStorage may never see another mutation
+    // (a flush that cannot proceed raises no events), so report it —
+    // and arm the stuck-queue heartbeat — as soon as the current task
+    // completes. A microtask, not a direct call: on the construction
+    // path the instrumentation subscribes right after the constructor
+    // returns, and a synchronous emit would fire into zero listeners.
+    queueMicrotask(() => this.emitQueueDepth());
+  }
+
+  /** Stop the stuck-queue heartbeat; called from the client's
+   *  destroying `disconnect()` so a logged-out client neither beacons
+   *  a signed-out account's queue nor pins the object graph. */
+  dispose(): void {
+    if (this.depthHeartbeat !== null) {
+      clearInterval(this.depthHeartbeat);
+      this.depthHeartbeat = null;
     }
   }
 
@@ -626,6 +644,16 @@ export class OfflineSendQueue {
         persisted: kindEntries.length,
         inflight: kindEntries.filter((entry) => this.inflightQueuedIds.has(entry.id)).length,
       });
+    }
+    // A stuck, otherwise-idle queue raises no further mutation events,
+    // so a non-empty queue keeps a heartbeat that re-reports it (the
+    // telemetry layer dedupes unchanged readings inside its re-emit
+    // window, #1443). Self-clears once the queue drains.
+    if (entries.length > 0) {
+      this.depthHeartbeat ??= setInterval(() => this.emitQueueDepth(), 65_000);
+    } else if (this.depthHeartbeat !== null) {
+      clearInterval(this.depthHeartbeat);
+      this.depthHeartbeat = null;
     }
   }
 

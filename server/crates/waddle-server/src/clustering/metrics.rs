@@ -35,7 +35,7 @@ pub fn record_connected_peers(count: i64) {
         meter()
             .i64_gauge("waddle.clustering.connected_peers")
             .with_description("Current number of connected clustering swarm peers")
-            .with_unit("peer")
+            .with_unit("{peer}")
             .build()
     })
     .record(count, &[]);
@@ -48,7 +48,7 @@ pub fn record_routing_table_size(count: i64) {
         meter()
             .i64_gauge("waddle.clustering.routing_table_size")
             .with_description("Observed kademlia routing-table peer count")
-            .with_unit("peer")
+            .with_unit("{peer}")
             .build()
     })
     .record(count, &[]);
@@ -62,7 +62,7 @@ pub fn record_bootstrap_dial() {
         meter()
             .u64_counter("waddle.clustering.bootstrap_dials")
             .with_description("Total bootstrap dial attempts to headless-DNS peers")
-            .with_unit("dial")
+            .with_unit("{dial}")
             .build()
     })
     .add(1, &[]);
@@ -75,7 +75,7 @@ pub fn record_allowlist_size(count: i64) {
         meter()
             .i64_gauge("waddle.clustering.allowlist_size")
             .with_description("Currently enrolled clustering peer-allowlist entries")
-            .with_unit("peer")
+            .with_unit("{peer}")
             .build()
     })
     .record(count, &[]);
@@ -91,7 +91,7 @@ pub fn record_remote_codec_drop(reason: &'static str) {
         meter()
             .u64_counter("waddle.clustering.remote_codec_drops")
             .with_description("Remote payloads rejected by the XML codec (NACKed, never silent)")
-            .with_unit("payload")
+            .with_unit("{payload}")
             .build()
     })
     .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
@@ -105,7 +105,7 @@ pub fn record_relay_respawn() {
         meter()
             .u64_counter("waddle.clustering.relay_respawns")
             .with_description("Supervised relay-actor respawns with same-name re-registration")
-            .with_unit("respawn")
+            .with_unit("{respawn}")
             .build()
     })
     .add(1, &[]);
@@ -118,7 +118,7 @@ pub fn record_ordered_relay_ack() {
         meter()
             .u64_counter("waddle.clustering.ordered_relay_acks")
             .with_description("Internal ordered-relay ACK replies")
-            .with_unit("reply")
+            .with_unit("{reply}")
             .build()
     })
     .add(1, &[]);
@@ -132,7 +132,7 @@ pub fn record_ordered_relay_nack(reason: &'static str) {
         meter()
             .u64_counter("waddle.clustering.ordered_relay_nacks")
             .with_description("Internal ordered-relay NACK replies")
-            .with_unit("reply")
+            .with_unit("{reply}")
             .build()
     })
     .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
@@ -147,7 +147,7 @@ pub fn record_node_heartbeat_age_ms(age_ms: f64) {
     static G: OnceLock<Gauge<f64>> = OnceLock::new();
     G.get_or_init(|| {
         meter()
-            .f64_gauge("waddle.clustering.node_heartbeat_age_ms")
+            .f64_gauge("waddle.clustering.node_heartbeat_age")
             .with_description("Milliseconds since this node's last successful node-lease heartbeat")
             .with_unit("ms")
             .build()
@@ -163,7 +163,7 @@ pub fn record_node_heartbeat_write_latency_ms(latency_ms: f64) {
     static H: OnceLock<Histogram<f64>> = OnceLock::new();
     H.get_or_init(|| {
         meter()
-            .f64_histogram("waddle.clustering.node_heartbeat_write_latency_ms")
+            .f64_histogram("waddle.clustering.node_heartbeat_write_latency")
             .with_description("Node-lease heartbeat CAS statement latency (pool wait + execution)")
             .with_unit("ms")
             .build()
@@ -178,7 +178,7 @@ pub fn record_peers_revoked(count: u64) {
         meter()
             .u64_counter("waddle.clustering.peers_revoked")
             .with_description("Peers revoked by allowlist refresh (live connections closed)")
-            .with_unit("peer")
+            .with_unit("{peer}")
             .build()
     })
     .add(count, &[]);
@@ -196,7 +196,7 @@ pub fn record_drain_duration_ms(duration_ms: f64) {
     static H: OnceLock<Histogram<f64>> = OnceLock::new();
     H.get_or_init(|| {
         meter()
-            .f64_histogram("waddle.clustering.drain_duration_ms")
+            .f64_histogram("waddle.clustering.drain_duration")
             .with_description(
                 "Wall-clock duration of a graceful per-entity claim drain, from mark_draining \
                  to the batched release_many call (or abandonment) completing",
@@ -217,7 +217,7 @@ pub fn record_claims_released_on_drain(count: u64) {
         meter()
             .u64_counter("waddle.clustering.claims_released_on_drain")
             .with_description("Claims successfully released as part of a graceful drain")
-            .with_unit("claim")
+            .with_unit("{claim}")
             .build()
     })
     .add(count, &[]);
@@ -245,7 +245,7 @@ pub fn record_claims_abandoned_on_drain(count: u64) {
                 "Claims left held (not released) when a graceful drain's budget overran or a \
                  per-entity seal/release failed — alert on any nonzero value",
             )
-            .with_unit("claim")
+            .with_unit("{claim}")
             .build()
     })
     .add(count, &[]);
@@ -262,7 +262,7 @@ pub fn record_room_orphan_reconciliation(outcome: &'static str, count: u64) {
         meter()
             .u64_counter("waddle.clustering.room_orphan_reconciliations")
             .with_description("Proactive RoomActor orphan-claim reconciliation outcomes")
-            .with_unit("claim")
+            .with_unit("{claim}")
             .build()
     })
     .add(count, &[opentelemetry::KeyValue::new("outcome", outcome)]);
@@ -275,14 +275,14 @@ pub fn record_room_orphan_pending_backlog(depth: usize, oldest_age_ms: u64) {
             meter()
                 .u64_gauge("waddle.clustering.room_orphan_pending_depth")
                 .with_description("Reclaimed room epochs awaiting adoption or release")
-                .with_unit("claim")
+                .with_unit("{claim}")
                 .build()
         })
         .record(depth as u64, &[]);
     static AGE: OnceLock<Gauge<u64>> = OnceLock::new();
     AGE.get_or_init(|| {
         meter()
-            .u64_gauge("waddle.clustering.room_orphan_pending_oldest_age_ms")
+            .u64_gauge("waddle.clustering.room_orphan_pending_oldest_age")
             .with_description("Age of the oldest pending reclaimed room epoch")
             .with_unit("ms")
             .build()
@@ -298,7 +298,7 @@ pub fn record_orphan_work_queue_depth(queue: &'static str, depth: usize) {
         meter()
             .u64_gauge("waddle.clustering.orphan_work_queue_depth")
             .with_description("Current deduplicated orphan-reaper work queue depth")
-            .with_unit("item")
+            .with_unit("{item}")
             .build()
     })
     .record(
@@ -318,7 +318,7 @@ pub fn record_orphan_work_queue_backpressure(queue: &'static str) {
         meter()
             .u64_counter("waddle.clustering.orphan_work_queue_backpressure")
             .with_description("Orphan-reaper work rejected because its bounded queue was full")
-            .with_unit("item")
+            .with_unit("{item}")
             .build()
     })
     .add(1, &[opentelemetry::KeyValue::new("queue", queue)]);
@@ -330,7 +330,7 @@ pub fn record_orphan_worker_failure(worker: &'static str, reason: &'static str) 
         meter()
             .u64_counter("waddle.clustering.orphan_worker_failures")
             .with_description("Orphan-reaper worker tasks that exited unexpectedly")
-            .with_unit("failure")
+            .with_unit("{failure}")
             .build()
     })
     .add(
@@ -353,7 +353,7 @@ pub fn record_orphan_terminal_cleanup_failure(lane: &'static str, reason: &'stat
         meter()
             .u64_counter("waddle.clustering.orphan_terminal_cleanup_failures")
             .with_description("Terminal orphan claim cleanup attempts that did not complete")
-            .with_unit("failure")
+            .with_unit("{failure}")
             .build()
     })
     .add(
@@ -373,7 +373,7 @@ pub fn record_sm_orphan_candidate_page(candidates: usize, has_more: bool, quaran
         meter()
             .u64_histogram("waddle.clustering.sm_orphan_candidate_page_size")
             .with_description("Bounded SM orphan candidates returned per cursor page")
-            .with_unit("claim")
+            .with_unit("{claim}")
             .build()
     })
     .record(
@@ -386,9 +386,131 @@ pub fn record_sm_orphan_candidate_page(candidates: usize, has_more: bool, quaran
             meter()
                 .u64_counter("waddle.clustering.sm_orphan_malformed_quarantined")
                 .with_description("Malformed stale SM claim rows quarantined by the bounded scan")
-                .with_unit("claim")
+                .with_unit("{claim}")
                 .build()
         })
         .add(quarantined as u64, &[]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use waddle_xmpp::telemetry::test_support;
+
+    /// Exported (name, unit) pairs for every clustering instrument.
+    ///
+    /// Pinned because Grafana Cloud's OTLP→Prometheus normalization
+    /// appends the unit to the series name: a bare-noun unit such as
+    /// `peer` produces `waddle_clustering_connected_peers_peer`, and a
+    /// name that also embeds its unit produces a double suffix like
+    /// `..._heartbeat_age_ms_milliseconds`. Counts therefore use UCUM
+    /// curly-brace annotations (dropped by the translator) and
+    /// duration instruments carry the unit only on the instrument,
+    /// never in the name.
+    const EXPECTED: &[(&str, &str)] = &[
+        ("waddle.clustering.connected_peers", "{peer}"),
+        ("waddle.clustering.routing_table_size", "{peer}"),
+        ("waddle.clustering.bootstrap_dials", "{dial}"),
+        ("waddle.clustering.allowlist_size", "{peer}"),
+        ("waddle.clustering.remote_codec_drops", "{payload}"),
+        ("waddle.clustering.relay_respawns", "{respawn}"),
+        ("waddle.clustering.ordered_relay_acks", "{reply}"),
+        ("waddle.clustering.ordered_relay_nacks", "{reply}"),
+        ("waddle.clustering.node_heartbeat_age", "ms"),
+        ("waddle.clustering.node_heartbeat_write_latency", "ms"),
+        ("waddle.clustering.peers_revoked", "{peer}"),
+        ("waddle.clustering.drain_duration", "ms"),
+        ("waddle.clustering.claims_released_on_drain", "{claim}"),
+        ("waddle.clustering.claims_abandoned_on_drain", "{claim}"),
+        ("waddle.clustering.room_orphan_reconciliations", "{claim}"),
+        ("waddle.clustering.room_orphan_pending_depth", "{claim}"),
+        ("waddle.clustering.room_orphan_pending_oldest_age", "ms"),
+        ("waddle.clustering.orphan_work_queue_depth", "{item}"),
+        ("waddle.clustering.orphan_work_queue_backpressure", "{item}"),
+        ("waddle.clustering.orphan_worker_failures", "{failure}"),
+        (
+            "waddle.clustering.orphan_terminal_cleanup_failures",
+            "{failure}",
+        ),
+        ("waddle.clustering.sm_orphan_candidate_page_size", "{claim}"),
+        (
+            "waddle.clustering.sm_orphan_malformed_quarantined",
+            "{claim}",
+        ),
+    ];
+
+    fn record_every_instrument() {
+        super::record_connected_peers(1);
+        super::record_routing_table_size(1);
+        super::record_bootstrap_dial();
+        super::record_allowlist_size(1);
+        super::record_remote_codec_drop("malformed");
+        super::record_relay_respawn();
+        super::record_ordered_relay_ack();
+        super::record_ordered_relay_nack("malformed");
+        super::record_node_heartbeat_age_ms(1.0);
+        super::record_node_heartbeat_write_latency_ms(1.0);
+        super::record_peers_revoked(1);
+        super::record_drain_duration_ms(1.0);
+        super::record_claims_released_on_drain(1);
+        super::record_claims_abandoned_on_drain(1);
+        super::record_room_orphan_reconciliation("released", 1);
+        super::record_room_orphan_pending_backlog(1, 1);
+        super::record_orphan_work_queue_depth("room_release", 1);
+        super::record_orphan_work_queue_backpressure("room_release");
+        super::record_orphan_worker_failure("room_release", "error");
+        super::record_orphan_terminal_cleanup_failure("room_release", "error");
+        super::record_sm_orphan_candidate_page(1, false, 1);
+    }
+
+    #[tokio::test]
+    async fn clustering_instrument_names_and_units_are_pinned() {
+        let guard = test_support::acquire().await;
+        record_every_instrument();
+
+        for (name, unit) in EXPECTED {
+            assert_eq!(
+                guard.metric_unit(name).as_deref(),
+                Some(*unit),
+                "instrument {name} must export UCUM unit {unit}"
+            );
+        }
+
+        let mut exported: Vec<String> = guard
+            .metric_names()
+            .into_iter()
+            .filter(|name| name.starts_with("waddle.clustering."))
+            .collect();
+        exported.sort();
+        exported.dedup();
+        let mut expected: Vec<String> = EXPECTED
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            exported, expected,
+            "every clustering instrument must be pinned in EXPECTED"
+        );
+    }
+
+    #[tokio::test]
+    async fn clustering_instrument_names_never_embed_their_unit() {
+        let guard = test_support::acquire().await;
+        record_every_instrument();
+
+        for name in guard
+            .metric_names()
+            .into_iter()
+            .filter(|name| name.starts_with("waddle.clustering."))
+        {
+            for suffix in ["_ms", "_seconds", "_bytes", "_millis"] {
+                assert!(
+                    !name.ends_with(suffix),
+                    "{name} embeds unit suffix {suffix}; carry the unit on the \
+                     instrument instead so OTLP→Prometheus does not double it"
+                );
+            }
+        }
     }
 }

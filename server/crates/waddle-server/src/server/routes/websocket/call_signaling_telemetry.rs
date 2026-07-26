@@ -1,5 +1,8 @@
 use jid::BareJid;
-use waddle_xmpp::telemetry::attributes::{CallSignalEvent, MetricAttribute, SfuDenialReason};
+use waddle_sfu::CallCorrelationId;
+use waddle_xmpp::telemetry::attributes::{
+    CallSetupFailureReason, CallSignalEvent, MetricAttribute, SfuDenialReason,
+};
 
 pub(crate) enum CallSignalTarget<'a> {
     Peer(&'a BareJid),
@@ -39,14 +42,37 @@ pub(crate) fn record_call_signal(
     );
 }
 
+/// Project a token-gate denial into the closed call-setup failure
+/// taxonomy (#1452). The Muji gate runs *before* IQ dispatch, so a
+/// denial here means the sans-I/O Jingle handler never opened its own
+/// attempt — the caller records the attempted/failed pair together.
+fn setup_failure_reason(reason: SfuDenialReason) -> CallSetupFailureReason {
+    match reason {
+        SfuDenialReason::MembershipDenied => CallSetupFailureReason::MembershipDenied,
+        SfuDenialReason::RoomNotFound => CallSetupFailureReason::RoomNotFound,
+        SfuDenialReason::NotAuthorized => CallSetupFailureReason::NotAuthorized,
+        // The gate's internal errors are room-registry/actor faults hit
+        // during the membership check — the SFU was never contacted, so
+        // labelling them `token_mint_failed` would point on-call at
+        // LiveKit credentials during a MUC-registry incident.
+        SfuDenialReason::InternalError => CallSetupFailureReason::MembershipCheckFailed,
+    }
+}
+
 pub(crate) fn record_sfu_token_denial(room: &BareJid, user: &BareJid, reason: SfuDenialReason) {
+    // For a Muji call the MUC room JID *is* the LiveKit room name, so
+    // the same correlation key the client and the webhook derive is
+    // available here without any new wire field.
+    let correlation = CallCorrelationId::for_room_name(&room.to_string());
     tracing::warn!(
         room = %room,
+        call.id = %correlation,
         user = %user,
         reason = reason.value(),
         "SFU token request denied"
     );
     waddle_xmpp::telemetry::call::increment_sfu_token_denied(reason);
+    waddle_xmpp::telemetry::call::record_call_setup_rejected(setup_failure_reason(reason));
 }
 
 #[cfg(test)]

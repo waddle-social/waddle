@@ -246,6 +246,12 @@ pub enum PushRetryReason {
     Unknown,
 }
 
+impl PushRetryReason {
+    /// Every allowed value. Startup zero-registration (#1436) iterates
+    /// this so every label value exists before the first real retry.
+    pub const ALL: [Self; 1] = [Self::Unknown];
+}
+
 impl sealed::Sealed for PushRetryReason {}
 impl MetricAttribute for PushRetryReason {
     fn key(&self) -> &'static str {
@@ -496,6 +502,116 @@ impl MetricAttribute for SfuDenialReason {
     }
 }
 
+/// `reason` — why a Jingle call setup failed (#1452).
+///
+/// Counted on `waddle.call.setup.failed`, whose denominator is
+/// `waddle.call.setup.attempted`. Every terminal failure of a
+/// `session-initiate` maps into exactly one of these buckets, so the
+/// success rate is `ok / attempted` and the failure taxonomy is
+/// closed. Distinct from [`SfuDenialReason`], which counts only the
+/// token-mint gate: a setup can fail for reasons that never reach the
+/// SFU (rate limit, bad wire shape, unsupported transport).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSetupFailureReason {
+    /// The Muji room has no live room actor — nobody has joined it.
+    RoomNotFound,
+    /// The requester is not an occupant of the requested Muji room.
+    MembershipDenied,
+    /// The `initiator`/`responder` attribute did not match the
+    /// authenticated session (XEP-0166 §7.1 spoofing defense).
+    NotAuthorized,
+    /// The per-JID `session-initiate` rate limit rejected the attempt.
+    RateLimited,
+    /// The stanza was malformed or addressed somewhere it may not be
+    /// (missing `to`, wrong mixer JID, foreign Muji room, unusable sid).
+    BadRequest,
+    /// The offered Jingle transport is not the Waddle LiveKit
+    /// placeholder, or the client tried to supply its own credentials.
+    UnsupportedTransport,
+    /// Cross-domain Jingle: federation is not implemented.
+    FederationUnsupported,
+    /// The SFU refused or failed to mint the join token.
+    TokenMintFailed,
+    /// The server-side membership check itself failed (room-registry
+    /// lookup or room-actor ask error) before the SFU was ever
+    /// contacted.
+    MembershipCheckFailed,
+}
+
+impl CallSetupFailureReason {
+    /// Every allowed value. Startup zero-registration (#1436) iterates
+    /// this so every failure series exists before the first real call.
+    pub const ALL: [Self; 9] = [
+        Self::RoomNotFound,
+        Self::MembershipDenied,
+        Self::NotAuthorized,
+        Self::RateLimited,
+        Self::BadRequest,
+        Self::UnsupportedTransport,
+        Self::FederationUnsupported,
+        Self::TokenMintFailed,
+        Self::MembershipCheckFailed,
+    ];
+}
+
+impl sealed::Sealed for CallSetupFailureReason {}
+impl MetricAttribute for CallSetupFailureReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::RoomNotFound => "room_not_found",
+            Self::MembershipDenied => "membership_denied",
+            Self::NotAuthorized => "not_authorized",
+            Self::RateLimited => "rate_limited",
+            Self::BadRequest => "bad_request",
+            Self::UnsupportedTransport => "unsupported_transport",
+            Self::FederationUnsupported => "federation_unsupported",
+            Self::TokenMintFailed => "token_mint_failed",
+            Self::MembershipCheckFailed => "membership_check_failed",
+        }
+    }
+}
+
+/// `event` — which LiveKit webhook payload kind a delivery carried
+/// (#1452). Closed set: everything LiveKit sends that Waddle does not
+/// model collapses into [`Self::Other`], and a delivery that failed
+/// verification before the body could be typed is [`Self::Unknown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookEventType {
+    /// `participant_joined`.
+    ParticipantJoined,
+    /// `participant_left`.
+    ParticipantLeft,
+    /// `participant_connection_aborted`.
+    ParticipantConnectionAborted,
+    /// `room_finished`.
+    RoomFinished,
+    /// A signature-valid delivery Waddle does not model.
+    Other,
+    /// The delivery never decoded into a typed event (signature or
+    /// JSON failure), so its kind is not knowable.
+    Unknown,
+}
+
+impl sealed::Sealed for WebhookEventType {}
+impl MetricAttribute for WebhookEventType {
+    fn key(&self) -> &'static str {
+        "event"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::ParticipantJoined => "participant_joined",
+            Self::ParticipantLeft => "participant_left",
+            Self::ParticipantConnectionAborted => "participant_connection_aborted",
+            Self::RoomFinished => "room_finished",
+            Self::Other => "other",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// `outcome` — LiveKit webhook ingestion outcome (#1319).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebhookOutcome {
@@ -637,6 +753,97 @@ impl MetricAttribute for SessionInitFailureReason {
         match self {
             Self::BlocklistLoad => "blocklist_load",
             Self::AuthoritativeRegistration => "authoritative_registration",
+        }
+    }
+}
+
+/// `deny_reason` — why a MUC join was refused (#1440). The stanza
+/// error condition alone collapses several very different operational
+/// faults into `resource-constraint`/`internal-server-error`, so every
+/// denial also carries the concrete refusal site. One variant per
+/// join-denial return site in the WebSocket presence handler; the set
+/// is closed by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucJoinDenyReason {
+    /// The managed-channel lookup for the room failed.
+    ManagedChannelLookup,
+    /// The room-registry lookup performed before the join failed.
+    RoomLookup,
+    /// Snapshotting the existing room actor before the join failed.
+    RoomSnapshot,
+    /// A managed channel was joined without an authenticated session.
+    SessionMissing,
+    /// The authenticated session carried an unparsable identity.
+    SessionIdentityMalformed,
+    /// The permission graph reports the joiner as a channel outcast.
+    ChannelBan,
+    /// The managed channel is members-only and the joiner has no
+    /// membership.
+    MembershipRequired,
+    /// The managed-channel affiliation resolver itself failed.
+    AffiliationResolver,
+    /// Another cluster node currently holds this room's claim and the
+    /// ordered relay could not proxy the join.
+    OwnershipHeldByAnotherNode,
+    /// This room's ownership claim is mid-reconciliation.
+    OwnershipReconciling,
+    /// The room actor could not resolve its ownership at all.
+    OwnershipUnavailable,
+    /// The room's durable state had not finished restoring.
+    DurableRestorePending,
+    /// Getting or creating the room actor failed.
+    RoomCreate,
+    /// The room actor was evicted underneath the join, twice.
+    RoomEvicted,
+    /// The admission revision kept changing under the join.
+    StaleAdmissionRevision,
+    /// The room actor reports the joiner as banned from the room.
+    RoomBan,
+    /// The room actor is members-only and the joiner is unaffiliated.
+    RoomMembersOnly,
+    /// The room has reached its configured occupant limit.
+    RoomFull,
+    /// The room actor refused the join with an otherwise unclassified
+    /// error (typed fail-safe).
+    RoomActorError,
+    /// The room does not exist and the joiner may not create rooms.
+    RoomCreationNotPermitted,
+    /// The requested nickname is already in use by another occupant.
+    NickConflict,
+    /// The session is already in the room under a different nickname
+    /// (XEP-0045 §7.6, nicknames locked to identity).
+    NickLocked,
+}
+
+impl sealed::Sealed for MucJoinDenyReason {}
+impl MetricAttribute for MucJoinDenyReason {
+    fn key(&self) -> &'static str {
+        "deny_reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::ManagedChannelLookup => "managed_channel_lookup",
+            Self::RoomLookup => "room_lookup",
+            Self::RoomSnapshot => "room_snapshot",
+            Self::SessionMissing => "session_missing",
+            Self::SessionIdentityMalformed => "session_identity_malformed",
+            Self::ChannelBan => "channel_ban",
+            Self::MembershipRequired => "membership_required",
+            Self::AffiliationResolver => "affiliation_resolver",
+            Self::OwnershipHeldByAnotherNode => "ownership_held_by_another_node",
+            Self::OwnershipReconciling => "ownership_reconciling",
+            Self::OwnershipUnavailable => "ownership_unavailable",
+            Self::DurableRestorePending => "durable_restore_pending",
+            Self::RoomCreate => "room_create",
+            Self::RoomEvicted => "room_evicted",
+            Self::StaleAdmissionRevision => "stale_admission_revision",
+            Self::RoomBan => "room_ban",
+            Self::RoomMembersOnly => "room_members_only",
+            Self::RoomFull => "room_full",
+            Self::RoomActorError => "room_actor_error",
+            Self::RoomCreationNotPermitted => "room_creation_not_permitted",
+            Self::NickConflict => "nick_conflict",
+            Self::NickLocked => "nick_locked",
         }
     }
 }

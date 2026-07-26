@@ -37,8 +37,8 @@ fn captured_logs(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
 fn captured_admission_denial_log(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
     let logs = captured_logs(buffer);
     logs.lines()
-        .find(|line| line.contains("managed-channel admission denied"))
-        .unwrap_or_else(|| panic!("managed-channel admission denial log not found in:\n{logs}"))
+        .find(|line| line.contains("MUC join admission denied"))
+        .unwrap_or_else(|| panic!("MUC join admission denial log not found in:\n{logs}"))
         .to_string()
 }
 
@@ -507,6 +507,9 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
 /// occupancy is created.
 #[tokio::test]
 async fn muc_join_under_second_nick_returns_not_acceptable() {
+    // The denial increments waddle.muc.admission.denied, so the metrics
+    // test lock must be held for the export window.
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "no-second-nick@muc.example.com".parse().expect("room jid");
@@ -551,6 +554,18 @@ async fn muc_join_under_second_nick_returns_not_acceptable() {
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
     assert_eq!(room.occupant_count(), 1, "no ghost occupancy");
     assert_eq!(room.find_nick_by_real_jid(&sender_jid), Some("alice"));
+
+    // #1440: the locked-nick refusal is a counted join denial.
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[
+                ("condition", "not-acceptable"),
+                ("deny_reason", "nick_locked")
+            ]
+        ),
+        Some(1)
+    );
 }
 
 /// #1111 / XEP-0045 §7.2.9: joining a room that has reached its maximum
@@ -933,6 +948,11 @@ async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
 
 #[tokio::test]
 async fn managed_members_only_join_requires_explicit_channel_member_affiliation() {
+    // #1440: every join denial now increments
+    // `waddle.muc.admission.denied`, so tests that produce one must hold
+    // the metrics test lock; otherwise their samples leak into a
+    // concurrently asserting test's export window.
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
     let room_jid: BareJid = "private-space@muc.example.com".parse().expect("room jid");
@@ -1136,7 +1156,10 @@ async fn managed_registration_required_denial_increments_admission_counter() {
     assert_eq!(
         metrics.counter_sum(
             "waddle.muc.admission.denied",
-            &[("condition", "registration-required")]
+            &[
+                ("condition", "registration-required"),
+                ("deny_reason", "membership_required"),
+            ]
         ),
         Some(1),
         "the registration-required admission denial must increment the counter exactly once"
@@ -1219,7 +1242,10 @@ async fn managed_not_authorized_denial_emits_admission_telemetry() {
     assert_eq!(
         metrics.counter_sum(
             "waddle.muc.admission.denied",
-            &[("condition", "not-authorized")]
+            &[
+                ("condition", "not-authorized"),
+                ("deny_reason", "session_missing"),
+            ]
         ),
         Some(1),
         "the not-authorized admission denial must increment the counter exactly once"
@@ -1309,7 +1335,10 @@ async fn managed_internal_server_error_denial_emits_admission_telemetry() {
     assert_eq!(
         metrics.counter_sum(
             "waddle.muc.admission.denied",
-            &[("condition", "internal-server-error")]
+            &[
+                ("condition", "internal-server-error"),
+                ("deny_reason", "session_identity_malformed"),
+            ]
         ),
         Some(1),
         "the internal-server-error admission denial must increment the counter exactly once"
@@ -1395,8 +1424,11 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
     ));
 }
 
+/// #1440: a managed-channel lookup failure bounces the join with a
+/// wait-type error, so it must be visible like any other join denial —
+/// counted under its condition AND its refusal site, and logged once.
 #[tokio::test(flavor = "current_thread")]
-async fn managed_channel_lookup_failure_is_logged_but_not_counted_as_a_denial() {
+async fn managed_channel_lookup_failure_counts_as_a_wait_denial() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let buffer = Arc::new(Mutex::new(Vec::new()));
     let _subscriber = tracing::subscriber::set_default(
@@ -1427,16 +1459,28 @@ async fn managed_channel_lookup_failure_is_logged_but_not_counted_as_a_denial() 
     assert_eq!(denied.len(), 1);
     assert!(denied[0].contains("internal-server-error"), "{denied:?}");
     assert_eq!(
-        metrics
-            .counter_sum("waddle.muc.admission.denied", &[])
-            .unwrap_or(0),
-        0,
-        "an unresolved managed status must not count as a managed-channel denial"
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[
+                ("condition", "internal-server-error"),
+                ("deny_reason", "managed_channel_lookup"),
+            ]
+        ),
+        Some(1),
+        "a wait-type lookup-failure denial must be counted under its refusal site"
     );
 
     let denial_log = captured_admission_denial_log(&buffer);
     assert!(
         denial_log.contains("\"resolver_outcome\":\"managed-channel-lookup-error\""),
+        "{denial_log}"
+    );
+    assert!(
+        denial_log.contains("\"deny_reason\":\"managed_channel_lookup\""),
+        "{denial_log}"
+    );
+    assert!(
+        denial_log.contains("\"managed_channel\":false"),
         "{denial_log}"
     );
 }
@@ -1502,7 +1546,10 @@ async fn managed_forbidden_ban_denial_increments_admission_counter() {
         "a channel-banned managed joiner must be forbidden: {denied:?}"
     );
     assert_eq!(
-        metrics.counter_sum("waddle.muc.admission.denied", &[("condition", "forbidden")]),
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[("condition", "forbidden"), ("deny_reason", "channel_ban")]
+        ),
         Some(1),
         "the forbidden (ban) admission denial must increment the counter exactly once"
     );
@@ -1581,6 +1628,11 @@ async fn managed_public_channel_allows_deployment_member_without_channel_tuple()
 
 #[tokio::test]
 async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row() {
+    // #1440: every join denial now increments
+    // `waddle.muc.admission.denied`, so tests that produce one must hold
+    // the metrics test lock; otherwise their samples leak into a
+    // concurrently asserting test's export window.
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "bob").await;
     let room_jid: BareJid = "chat@muc.example.com".parse().expect("room jid");
@@ -1659,6 +1711,11 @@ async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row
 /// `Affiliation::None` into the existing actor.
 #[tokio::test]
 async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_actor() {
+    // #1440: every join denial now increments
+    // `waddle.muc.admission.denied`, so tests that produce one must hold
+    // the metrics test lock; otherwise their samples leak into a
+    // concurrently asserting test's export window.
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "bob").await;
     let room_jid: BareJid = "revoked@muc.example.com".parse().expect("room jid");
@@ -4442,11 +4499,57 @@ async fn muc_join_broadcast_includes_real_occupant_jid() {
     );
 }
 
+/// #1440: refusing to create a room for an unprivileged joiner was the
+/// one join denial with zero server-side telemetry — pin that it now
+/// counts and keeps its XEP-0045 `<not-allowed/>` cancel frame.
+#[tokio::test]
+async fn muc_room_creation_denial_emits_admission_telemetry() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "no-create-rights@muc.example.com".parse().expect("room");
+    let sender: FullJid = "mallory@example.com/web".parse().expect("sender");
+
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender,
+        "mallory",
+        None,
+        &None,
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "one error presence: {responses:?}");
+    let el = Element::from_str(&responses[0]).expect("valid XML");
+    assert_eq!(el.attr("type"), Some("error"));
+    let err = el
+        .get_child("error", waddle_xmpp::ns::JABBER_CLIENT)
+        .expect("error element");
+    assert_eq!(err.attr("type"), Some("cancel"));
+    assert!(err
+        .get_child("not-allowed", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[
+                ("condition", "not-allowed"),
+                ("deny_reason", "room_creation_not_permitted")
+            ]
+        ),
+        Some(1)
+    );
+}
+
 #[tokio::test]
 async fn muc_nick_collision_returns_conflict_presence() {
     // Two different users try to hold the same nick — second gets a
     // <presence type='error'/> with <conflict/>, and room state for
-    // the incumbent is untouched.
+    // the incumbent is untouched. The denial counts, so the metrics
+    // test lock must be held for the export window.
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "conflict-channel@muc.example.com".parse().expect("room");
@@ -4493,6 +4596,16 @@ async fn muc_nick_collision_returns_conflict_presence() {
     assert_eq!(room.find_nick_by_real_jid(&alice), Some("dino"));
     assert!(room.find_nick_by_real_jid(&bob).is_none());
     assert_eq!(room.occupant_count(), 1);
+
+    // #1440: the nick-collision refusal is a counted join denial even
+    // though its conflict frame is built outside the choke point.
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[("condition", "conflict"), ("deny_reason", "nick_conflict")]
+        ),
+        Some(1)
+    );
 }
 
 #[tokio::test]

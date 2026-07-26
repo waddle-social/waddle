@@ -22,7 +22,7 @@ import {
   finishCallAttempt,
   markCallAttemptAccepted,
 } from "../src/lib/calls/call-lifecycle-telemetry";
-import { __setFaroForTesting } from "../src/lib/telemetry";
+import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
 
 const audioVideo: CallMedia = { audio: true, video: true };
 const join: LiveKitJoin = {
@@ -189,7 +189,7 @@ describe("call-store reducer", () => {
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
-  test("sibling proceed finalizes the pending browser attempt exactly once", () => {
+  test("sibling proceed finalizes the pending browser attempt exactly once", async () => {
     clearCallState();
     __resetCallLifecycleTelemetryForTesting();
     const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
@@ -214,6 +214,7 @@ describe("call-store reducer", () => {
     });
     clearCallState();
 
+    await callLifecycleEmissionSettled();
     expect($callState.get()).toEqual({ phase: "idle" });
     expect(events).toEqual([{
       name: "chat.call.lifecycle",
@@ -226,7 +227,7 @@ describe("call-store reducer", () => {
 
   });
 
-  test("local accept proceed does not finalize the attempt (session-initiate follows)", () => {
+  test("local accept proceed does not finalize the attempt (session-initiate follows)", async () => {
     clearCallState();
     __resetCallLifecycleTelemetryForTesting();
     const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
@@ -260,6 +261,7 @@ describe("call-store reducer", () => {
     // lifecycle beacon (accepted via the media path in the real flow).
     markCallAttemptAccepted("local-accept");
     finishCallAttempt("local-accept", { endReason: "hangup" });
+    await callLifecycleEmissionSettled();
     expect(events).toEqual([{
       name: "chat.call.lifecycle",
       attributes: expect.objectContaining({

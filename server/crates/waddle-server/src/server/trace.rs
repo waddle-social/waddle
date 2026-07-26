@@ -138,6 +138,7 @@ pub(crate) fn observe_http_response<B>(response: &Response<B>, latency: Duration
             "http.server.request.duration",
             "s",
             "HTTP server request duration.",
+            buckets: waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS,
             latency.as_secs_f64(),
             *route,
             HttpStatusClass::from_status(status),
@@ -235,16 +236,29 @@ fn is_lower_hex(value: &str, expected_len: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// The `uri` span field, with every credential-bearing part removed
+/// (#1439).
+///
+/// Query strings are dropped for **all** routes, not allowlisted ones:
+/// observed production spans carried `/api/auth/session?session_id=<live
+/// session credential>` and `/ws?traceparent=…`, and any new endpoint
+/// would leak by default under a per-route redaction list. `http.route`
+/// already carries the bounded template, so the query adds no queryable
+/// signal.
+///
+/// Path segments that are themselves credentials still need naming: the
+/// calendar feed token sits in the path, so it collapses to the route
+/// template shape.
 fn redacted_request_uri(uri: &Uri) -> String {
     let path = uri.path();
     let Some(token_and_suffix) = path.strip_prefix("/api/calendar/community/") else {
-        return uri.to_string();
+        return path.to_string();
     };
     let Some(token) = token_and_suffix.strip_suffix("/events.ics") else {
-        return uri.to_string();
+        return path.to_string();
     };
     if token.is_empty() || token.contains('/') {
-        return uri.to_string();
+        return path.to_string();
     }
     "/api/calendar/community/:token/events.ics".to_string()
 }
@@ -376,6 +390,63 @@ mod tests {
         );
     }
 
+    /// #1452: the inbound LiveKit webhook must be a *templated,
+    /// allowlisted* route. Per #1438 an unmatched path gets
+    /// `Span::none()`, and a matched-but-unlisted one gets a span with
+    /// an empty `http.route` — either way the webhook's ingestion
+    /// traces would be unqueryable by route. Pins both the allowlist
+    /// entry and the resulting span fields.
+    #[tokio::test(flavor = "current_thread")]
+    async fn livekit_webhook_route_is_templated_and_carries_route_and_status() {
+        const WEBHOOK_ROUTE: &str = "/api/v1/livekit/webhook";
+        assert!(
+            HTTP_ROUTE_TEMPLATES.contains(&WEBHOOK_ROUTE),
+            "the LiveKit webhook route must stay in the route-template allowlist",
+        );
+        assert!(
+            !PROBE_ROUTE_TEMPLATES.contains(&WEBHOOK_ROUTE),
+            "the LiveKit webhook is not probe noise; it must keep its span",
+        );
+
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let capture = HttpSpanCapture::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let app = Router::new()
+            .route(
+                WEBHOOK_ROUTE,
+                axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+            )
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri(WEBHOOK_ROUTE)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let fields = capture.fields.lock().expect("HTTP span capture lock");
+        assert_eq!(
+            fields.get("http.route").map(String::as_str),
+            Some(WEBHOOK_ROUTE),
+        );
+        assert_eq!(
+            fields.get("http.status_code").map(String::as_str),
+            Some("401"),
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn probe_routes_get_no_request_span_but_keep_the_duration_histogram() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -418,6 +489,41 @@ mod tests {
                 "suppressing the {probe} span must not suppress the duration histogram",
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_duration_histogram_uses_second_scale_buckets() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let app = Router::new()
+            .route("/api/auth/session", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        // The instrument records seconds, so its buckets must be
+        // second-scale: the SDK's millisecond-scale defaults put every
+        // sub-second request in the first bucket and pin p99 at ~4.95s
+        // (#1453).
+        assert_eq!(
+            metrics.histogram_bounds("http.server.request.duration"),
+            Some(vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -600,14 +706,68 @@ mod tests {
     }
 
     #[test]
-    fn non_calendar_feed_uri_is_not_redacted() {
-        let uri: Uri = "/api/auth/session?session_id=still-owned-by-telemetry-redactor"
-            .parse()
-            .unwrap();
+    fn query_strings_are_stripped_from_every_route() {
+        for (raw, expected) in [
+            (
+                "/api/auth/session?session_id=live-session-credential",
+                "/api/auth/session",
+            ),
+            (
+                "/ws?traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                "/ws",
+            ),
+            (
+                "/api/auth/callback?code=secret&state=secret",
+                "/api/auth/callback",
+            ),
+            ("/api/auth/session", "/api/auth/session"),
+            (
+                "/api/calendar/community/v1.payload.signature/events.ics?x=y",
+                "/api/calendar/community/:token/events.ics",
+            ),
+        ] {
+            let uri: Uri = raw.parse().expect("uri");
+            assert_eq!(redacted_request_uri(&uri), expected, "for {raw}");
+        }
+    }
 
+    /// The full pipeline: a request whose query carries a live session
+    /// credential must export a `uri` span field with no query string.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_credentials_never_reach_the_request_span() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let capture = HttpSpanCapture::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let app = Router::new()
+            .route("/api/auth/session", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+        let credential = "live-session-credential";
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/auth/session?session_id={credential}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let fields = capture.fields.lock().expect("HTTP span capture lock");
         assert_eq!(
-            redacted_request_uri(&uri),
-            "/api/auth/session?session_id=still-owned-by-telemetry-redactor",
+            fields.get("uri").map(String::as_str),
+            Some("/api/auth/session"),
+        );
+        assert!(
+            fields.values().all(|value| !value.contains(credential)),
+            "request span must not expose the session credential: {fields:?}",
         );
     }
 }

@@ -19,6 +19,7 @@ import {
   initTelemetry,
   markSensitiveUrlForTelemetry,
   reportCallAudioProcessing,
+  reportCallIce,
   reportCallMediaPath,
   reportCatchup,
   reportError,
@@ -34,6 +35,10 @@ import {
   setXmppResourceForTelemetry,
   websocketUrlWithTraceparent,
 } from "../src/lib/telemetry";
+import {
+  adoptCallCorrelationId,
+  clearCallCorrelationId,
+} from "../src/lib/calls/call-correlation";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
@@ -195,6 +200,7 @@ describe("reportCallAudioProcessing", () => {
           auto_gain_control: "unknown",
           ai_noise_filter: "rnnoise",
           call_kind: "muc",
+          call_id: "unknown",
         },
       },
     ]);
@@ -226,6 +232,40 @@ describe("call beacon kind tagging", () => {
         ice_transport: "udp",
         video_resolution_band: "720p",
         call_kind: "dm",
+        call_id: "unknown",
+      },
+    });
+  });
+
+  test("adds call_kind and the shared correlation id to ICE events", async () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    await adoptCallCorrelationId("general@muc.example.com");
+
+    reportCallIce(
+      {
+        pathClass: "relay",
+        candidateType: "relay",
+        transport: "tcp",
+        turnReachability: "gathered",
+        restartBucket: "once",
+      },
+      "muc",
+    );
+    clearCallCorrelationId();
+
+    expect(stub.events[0]).toEqual({
+      name: "chat.call.ice",
+      attributes: {
+        ice_path: "relay",
+        ice_candidate_type: "relay",
+        ice_transport: "tcp",
+        turn_reachability: "gathered",
+        ice_restarts: "once",
+        call_kind: "muc",
+        // The #1452 join key — the same digest the server's call-setup
+        // logs and the LiveKit webhook logs carry for this room.
+        call_id: "ba2798ebd1a58db8",
       },
     });
   });
@@ -341,6 +381,69 @@ describe("telemetry module no-op behaviour", () => {
     const resumeDrain = stub.measurements[5];
     expect(resumeDrain.values).toEqual({ buffered: 5, duration_ms: 12, hidden_ms: 0 });
     expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+  });
+
+  test("queue-depth measurements are deduped per kind until the reading changes (#1443)", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    // Every queue mutation reports both kinds; only the kind that actually
+    // moved may reach Faro, otherwise each send ships two 2-4KB beacons.
+    reportQueueDepthChange({ kind: "dm", persisted: 1, inflight: 0 });
+    reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+    reportQueueDepthChange({ kind: "dm", persisted: 1, inflight: 0 });
+    reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+    reportQueueDepthChange({ kind: "dm", persisted: 1, inflight: 1 });
+    reportQueueDepthChange({ kind: "dm", persisted: 0, inflight: 0 });
+
+    expect(stub.measurements.map((m) => ({ ...m.values, ...m.context }))).toEqual([
+      { persisted: 1, inflight: 0, kind: "dm" },
+      { persisted: 0, inflight: 0, kind: "room" },
+      { persisted: 1, inflight: 1, kind: "dm" },
+      { persisted: 0, inflight: 0, kind: "dm" },
+    ]);
+  });
+
+  test("a stuck non-zero reading re-emits once its minute is up (#1443)", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    const realNow = Date.now;
+    try {
+      let now = 1_000_000;
+      Date.now = () => now;
+
+      reportQueueDepthChange({ kind: "room", persisted: 3, inflight: 0 });
+      // Unchanged, inside the window: deduped.
+      now += 30_000;
+      reportQueueDepthChange({ kind: "room", persisted: 3, inflight: 0 });
+      expect(stub.measurements).toHaveLength(1);
+
+      // Unchanged but stale: the heartbeat-driven event re-emits so the
+      // dashboard's max_over_time window keeps seeing the stuck queue.
+      now += 31_000;
+      reportQueueDepthChange({ kind: "room", persisted: 3, inflight: 0 });
+      expect(stub.measurements).toHaveLength(2);
+
+      // A stale-but-zero reading stays deduped: nothing is stuck.
+      reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+      now += 61_000;
+      reportQueueDepthChange({ kind: "room", persisted: 0, inflight: 0 });
+      expect(stub.measurements).toHaveLength(3);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test("queue-depth dedupe state resets with the Faro instance (#1443)", () => {
+    const first = createFaroStub();
+    __setFaroForTesting(first as never);
+    reportQueueDepthChange({ kind: "dm", persisted: 3, inflight: 2 });
+
+    const second = createFaroStub();
+    __setFaroForTesting(second as never);
+    reportQueueDepthChange({ kind: "dm", persisted: 3, inflight: 2 });
+
+    expect(second.measurements).toHaveLength(1);
   });
 
   test("maps displayed-marker failures to low-cardinality latency bands", () => {
@@ -1560,9 +1663,12 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0].kind).toBe("dm");
-    expect(depths).toHaveLength(2);
-    expect(depths.find((depth) => depth.kind === "dm")?.persisted).toBe(1);
-    expect(depths.find((depth) => depth.kind === "room")?.persisted).toBe(0);
+    // Four readings: the construction-time baseline (both kinds, via
+    // the seed microtask that ran while awaiting the send) plus the
+    // enqueue's report (both kinds).
+    expect(depths).toHaveLength(4);
+    expect(depths.filter((depth) => depth.kind === "dm").at(-1)?.persisted).toBe(1);
+    expect(depths.filter((depth) => depth.kind === "room").at(-1)?.persisted).toBe(0);
   });
 
   test("hook exceptions are swallowed and do not break chat", () => {

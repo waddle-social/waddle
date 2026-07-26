@@ -256,7 +256,7 @@ const SELECT_COLS: &str =
 
 #[async_trait]
 impl SpacesMetadataStore for DatabaseSpacesMetadataStore {
-    #[instrument(skip(self), fields(space = %space_jid))]
+    #[instrument(skip(self, space_jid), fields(space = %space_jid))]
     async fn get(&self, space_jid: &BareJid) -> Result<Option<SpaceMetadata>, SpacesMetadataError> {
         let sql = format!("SELECT {SELECT_COLS} FROM spaces_metadata WHERE space_jid = ?");
         let mut rows = self
@@ -320,7 +320,7 @@ impl SpacesMetadataStore for DatabaseSpacesMetadataStore {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(space = %space_jid))]
+    #[instrument(skip(self, space_jid), fields(space = %space_jid))]
     async fn delete(&self, space_jid: &BareJid) -> Result<bool, SpacesMetadataError> {
         let affected = self
             .execute(

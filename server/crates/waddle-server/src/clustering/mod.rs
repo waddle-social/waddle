@@ -101,6 +101,11 @@ pub mod self_fence;
 /// the harness process joins the swarm as a real node).
 #[cfg(feature = "clustering")]
 pub mod swarm;
+/// W3C trace context carried on relay messages so a cross-node delivery
+/// forms one trace (#1485). Telemetry only — never read for relay
+/// semantics.
+#[cfg(feature = "clustering")]
+pub mod trace_context;
 
 /// A node's per-process clustering identity: freshly generated on every
 /// start, never reused across restarts. Names the node's keypair-slot lease

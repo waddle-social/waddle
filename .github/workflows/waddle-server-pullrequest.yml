@@ -37,6 +37,8 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server/**
+    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
+    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
     - server/**/env.cue
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**

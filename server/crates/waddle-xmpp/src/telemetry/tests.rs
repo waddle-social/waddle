@@ -162,6 +162,24 @@ async fn histogram_records_samples_with_attributes() {
 }
 
 #[tokio::test]
+async fn histogram_buckets_form_pins_explicit_boundaries() {
+    let guard = test_support::acquire().await;
+
+    crate::histogram_record!(
+        "waddle.telemetry.selftest.seconds",
+        "s",
+        "Telemetry self-test histogram: second-scale buckets.",
+        buckets: super::SECOND_SCALE_BUCKETS,
+        0.42,
+    );
+
+    assert_eq!(
+        guard.histogram_bounds("waddle.telemetry.selftest.seconds"),
+        Some(super::SECOND_SCALE_BUCKETS.to_vec()),
+    );
+}
+
+#[tokio::test]
 async fn consecutive_guards_observe_only_their_own_increments() {
     {
         let _first = test_support::acquire().await;

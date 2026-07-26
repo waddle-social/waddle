@@ -38,6 +38,8 @@ import {
   createCallMediaPathBeacon,
   type CallMediaPathSnapshot,
 } from "./call-media-path-telemetry";
+import { createCallIceBeacon, iceStatsEntries } from "./call-ice-telemetry";
+import { adoptCallCorrelationId, clearCallCorrelationId } from "./call-correlation";
 import {
   audioBitrateBand,
   summarizeAudioStats,
@@ -46,11 +48,12 @@ import {
   type CallStatDirection,
   type CallStatSample,
 } from "./call-stats";
-import { reportCallAudioProcessing, reportCallMediaPath } from "../telemetry";
+import { reportCallAudioProcessing, reportCallIce, reportCallMediaPath } from "../telemetry";
 import {
   resetCallConnectionQuality,
   setCallConnectionPhase,
   setCallConnectionQuality,
+  type CallConnectionPhase,
 } from "./connection-quality";
 import { resetCallActiveSince, setCallActiveSince } from "./call-duration";
 import {
@@ -198,6 +201,21 @@ const callMediaPathBeacon = createCallMediaPathBeacon((snapshot) => {
   if (callKind) reportCallMediaPath(snapshot, callKind);
 });
 
+/**
+ * Fleet-measurement beacon for the call's ICE/TURN connectivity (#1452):
+ * relay-vs-direct media path, whether a TURN relay candidate was gathered at
+ * all, and how many times ICE restarted. Fed by the same read-only stats poll
+ * as the media-path beacon, plus the engine's `transportReconnecting`
+ * event (a full media-transport reconnect is an ICE restart; signaling
+ * WebSocket recovery is deliberately excluded). De-dupes to at most
+ * one event per distinct ICE state per call; reset on disconnect.
+ */
+
+const callIceBeacon = createCallIceBeacon((snapshot) => {
+  const callKind = currentCallKind();
+  if (callKind) reportCallIce(snapshot, callKind);
+});
+
 /** Cadence of the observational media-path poll. Codec/ICE settle within the
  * first seconds and then rarely change, and the beacon de-dupes, so a slow 5 s
  * poll captures the path and any mid-call re-route at negligible cost. */
@@ -315,6 +333,26 @@ async function sampleAudioTrackMediaPath(
   }
 }
 
+/**
+ * Read the call's ICE state once and beacon it. Any published or subscribed
+ * track's stats report carries the transport / candidate-pair / local-candidate
+ * entries for the peer connection, so the first available track is enough — the
+ * ICE path is a property of the connection, not of a track.
+ * `getRTCStatsReport()` rejects mid-teardown, so a failure drops this pass.
+ */
+async function sampleIcePath(): Promise<unknown[] | null> {
+  const track = localTracks.value[0] ?? remoteTracks.value[0];
+  if (!track) return null;
+  try {
+    const report = await track.track.getRTCStatsReport();
+    if (!report) return null;
+    return iceStatsEntries(report);
+  } catch {
+    // Telemetry must never be the reason a call misbehaves.
+    return null;
+  }
+}
+
 /** Sample every published/subscribed video track once and beacon the distinct
  * media paths. Skips re-entrant ticks so a slow pass cannot stack, and discards
  * its results if the call ended (or restarted) while `getStats()` was awaited. */
@@ -322,7 +360,8 @@ async function sampleMediaPaths(generation: number): Promise<void> {
   if (mediaPathSampling) return;
   mediaPathSampling = true;
   try {
-    const [videoSnapshots, audioResults] = await Promise.all([
+    const [iceEntries, videoSnapshots, audioResults] = await Promise.all([
+      sampleIcePath(),
       Promise.all([
         ...localTracks.value
           .filter((track) => track.kind === "video")
@@ -346,6 +385,9 @@ async function sampleMediaPaths(generation: number): Promise<void> {
     // to a torn-down call and must not observe into the (reset) beacon or seed
     // the next call's bitrate samples.
     if (generation !== mediaPathGeneration) return;
+    // Observed only after the generation check: a pass that outlived the
+    // call must not poison the (reset) ICE beacon for the next call.
+    if (iceEntries) callIceBeacon.observe(iceEntries);
     for (const result of videoSnapshots) {
       if (!result) continue;
       observeCallStats({ rttMs: result.rttMs, packetLossPct: result.packetLossPct });
@@ -409,6 +451,14 @@ export function useCallEngine(): {
         (existing) => existing.publicationSid !== track.publicationSid,
       );
       if (track.source === "screen_share") syncScreenShareEnabled(false);
+    });
+    singletonEngine.on("connected", ({ roomName }) => {
+      // Adopt the #1452 correlation id before any call-scoped beacon can
+      // fire, so every event of this call joins with the server's
+      // call-setup logs and the LiveKit webhook logs. Fire-and-forget:
+      // the digest is a microtask, and an event that races it simply
+      // carries `unknown` rather than blocking the connect path.
+      void adoptCallCorrelationId(roomName);
     });
     singletonEngine.on("connected", ({ localIdentity, remoteIdentities }) => {
       // Seed the LK-truth projection for the active MUC room with
@@ -491,6 +541,13 @@ export function useCallEngine(): {
       setCallConnectionPhase(phase);
       observeCallConnectionPhase(phase);
     });
+    singletonEngine.on("transportReconnecting", () => {
+      // A full media-transport reconnect is the client-observable ICE
+      // restart (#1452). The engine deliberately does not fire this for
+      // SignalReconnecting (signaling WebSocket recovery, media intact),
+      // so signaling blips never inflate the ICE-restart SLI.
+      callIceBeacon.noteIceRestart();
+    });
     singletonEngine.on("activeSpeakersChanged", (identities) => {
       // LiveKit re-derived who is speaking. Feed it through the brief hold so
       // the Gallery highlight does not flicker on transient sounds.
@@ -540,6 +597,12 @@ export function useCallEngine(): {
       // Stop the media-path poll and re-arm its beacon for the next call.
       stopMediaPathPolling();
       callMediaPathBeacon.reset();
+      // Same for the ICE beacon: drop this call's seen-set and restart
+      // count so the next call measures its own connectivity.
+      callIceBeacon.reset();
+      // Drop the correlation id so a stray post-call event cannot be
+      // attributed to the call that just ended.
+      clearCallCorrelationId();
       // Drop the connection-quality chip so a stale `poor`/`reconnecting`
       // from the call that just ended can't bleed into the next call.
       resetCallConnectionQuality();

@@ -80,20 +80,31 @@ pub(super) async fn verify_muji_jingle_request(
     let Some(muji_elem) = find_muji(payload) else {
         return GateOutcome::Allow;
     };
+    // A wire-shape rejection of a `session-initiate` is still a complete
+    // call-setup attempt for the #1452 SLI: the gate short-circuits IQ
+    // dispatch, so the Jingle handler's own attempt tracker never opens.
+    // The action attribute is read directly because these branches fire
+    // before (or because) the full `<jingle/>` parse is possible.
+    let is_session_initiate = payload.attr("action") == Some("session-initiate");
+    let reject_wire_shape = |description: &'static str| {
+        if is_session_initiate {
+            waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                waddle_xmpp::telemetry::attributes::CallSetupFailureReason::BadRequest,
+            );
+        }
+        GateOutcome::Deny(Box::new(bad_request_iq_error(description)))
+    };
+
     // Parse the Muji shape so we can read the room JID. Failure
     // here is a wire-shape error returned as `<bad-request/>`.
     let muji = match Muji::try_from(muji_elem) {
         Ok(m) => m,
         Err(_) => {
-            return GateOutcome::Deny(Box::new(bad_request_iq_error(
-                "Muji <muji/> child inside <jingle/> failed to parse",
-            )));
+            return reject_wire_shape("Muji <muji/> child inside <jingle/> failed to parse");
         }
     };
     let Some(room_jid) = muji.room else {
-        return GateOutcome::Deny(Box::new(bad_request_iq_error(
-            "Muji <muji/> inside <jingle/> requires the 'room' attribute",
-        )));
+        return reject_wire_shape("Muji <muji/> inside <jingle/> requires the 'room' attribute");
     };
 
     // Parse the surrounding Jingle to extract the action — we only
@@ -101,7 +112,7 @@ pub(super) async fn verify_muji_jingle_request(
     let jingle = match Jingle::try_from(payload.clone()) {
         Ok(j) => j,
         Err(_) => {
-            return GateOutcome::Deny(Box::new(bad_request_iq_error("malformed <jingle/> stanza")));
+            return reject_wire_shape("malformed <jingle/> stanza");
         }
     };
     let user = full_jid.to_bare();
@@ -406,6 +417,135 @@ mod tests {
         assert!(logs.contains("SFU token request denied"), "{logs}");
         assert!(!logs.contains("mallory@example.com/laptop"), "{logs}");
     }
+
+    /// #1452: a gate denial is a *complete* call-setup attempt — the
+    /// sans-I/O Jingle handler never runs, so the gate must count the
+    /// attempted/failed pair itself or `room_not_found` would show up
+    /// as failures with no denominator.
+    #[tokio::test(flavor = "current_thread")]
+    async fn room_not_found_denial_records_a_call_setup_failure() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let alice = full("alice@example.com/web");
+        let iq = ghost_room_session_initiate_iq();
+
+        let outcome = verify_muji_jingle_request(&state, &alice, &iq).await;
+
+        assert!(matches!(outcome, GateOutcome::Deny(_)));
+        assert_eq!(
+            metrics.counter_sum("waddle.call.setup.attempted", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.setup.failed", &[("reason", "room_not_found")]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.metric_unit("waddle.call.setup.failed"),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.ok", &[])
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn membership_denial_records_a_call_setup_failure() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice = full("alice@example.com/web");
+        let mallory = full("mallory@example.com/laptop");
+        create_room_and_join(&state, &room, "alice", &alice).await;
+
+        let outcome = verify_muji_jingle_request(
+            &state,
+            &mallory,
+            &build_jingle_muji_iq(Action::SessionInitiate, "general@muc.example.com"),
+        )
+        .await;
+
+        assert!(matches!(outcome, GateOutcome::Deny(_)));
+        assert_eq!(
+            metrics.counter_sum("waddle.call.setup.attempted", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.setup.failed",
+                &[("reason", "membership_denied")]
+            ),
+            Some(1)
+        );
+    }
+
+    /// The denial log line must carry the bounded, non-PII correlation
+    /// id derived from the room name — the join key the client Faro
+    /// events and the LiveKit webhook logs also carry (#1452).
+    #[tokio::test(flavor = "current_thread")]
+    async fn denial_log_carries_the_call_correlation_id_and_not_the_room_hash_preimage() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(CaptureWriter(buffer.clone()))
+                .finish(),
+        );
+        let state = create_test_websocket_state().await;
+        let alice = full("alice@example.com/web");
+
+        verify_muji_jingle_request(&state, &alice, &ghost_room_session_initiate_iq()).await;
+
+        let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+            .expect("captured logs are UTF-8");
+        let expected = waddle_sfu::CallCorrelationId::for_room_name(GHOST_ROOM).to_string();
+        assert_eq!(expected.len(), waddle_sfu::CORRELATION_ID_HEX_LEN);
+        assert!(logs.contains(&expected), "{logs}");
+    }
+
+    /// A Muji `session-initiate` whose single `<muji room='…'/>` names
+    /// a room no actor has ever created, so the gate takes the
+    /// `RoomNotFound` branch. Built from scratch rather than restamped
+    /// on top of [`build_jingle_muji_iq`], which would leave two
+    /// `<muji/>` children and have `find_muji` read the first one.
+    fn ghost_room_session_initiate_iq() -> Iq {
+        let mut content = Content::new(JingleCreator::Initiator, ContentId("audio".into()));
+        content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+            waddle_xmpp::xep::xep0167::opus_audio_description(),
+        ));
+        content.transport = Some(xmpp_parsers::jingle::Transport::Unknown(
+            waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::Request
+                .to_element(),
+        ));
+        let mut jingle = Jingle::new(
+            Action::SessionInitiate,
+            SessionId("ghost-room-initiate".into()),
+        );
+        jingle.initiator = Some("alice@example.com".parse().expect("valid bare jid"));
+        jingle.contents.push(content);
+        let mut elem: xmpp_parsers::minidom::Element = jingle.into();
+        elem.append_child(
+            Muji {
+                room: Some(GHOST_ROOM.parse().expect("valid bare jid")),
+                preparing: false,
+                contents: muji_audio().contents,
+            }
+            .to_element(),
+        );
+        Iq::Set {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some("calls.example.com".parse().expect("valid mixer jid")),
+            id: "ghost-1".into(),
+            payload: elem,
+        }
+    }
+
+    /// A MUC room JID that no test ever creates a room actor for.
+    const GHOST_ROOM: &str = "ghost-room@muc.example.com";
 
     #[tokio::test]
     async fn deny_when_room_actor_does_not_exist() {

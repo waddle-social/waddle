@@ -52,7 +52,7 @@ impl DatabaseRosterStorage {
     ///
     /// Returns [`RosterStorageError::ItemNotFound`] if a `Remove` targets a
     /// non-existent item.
-    #[instrument(skip(self, change), fields(user = %user_jid))]
+    #[instrument(skip(self, change, user_jid), fields(user = %user_jid))]
     pub async fn apply_roster_change(
         &self,
         user_jid: &BareJid,
@@ -187,7 +187,7 @@ impl DatabaseRosterStorage {
     /// to flip subscription/ask without disturbing name/groups. The row write
     /// and version bump run inside a single database transaction under the
     /// per-user lock.
-    #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
+    #[instrument(skip(self, user_jid, contact_jid), fields(user = %user_jid, contact = %contact_jid))]
     pub async fn apply_subscription_update(
         &self,
         user_jid: &BareJid,

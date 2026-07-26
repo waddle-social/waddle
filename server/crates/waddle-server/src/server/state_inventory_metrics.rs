@@ -39,7 +39,7 @@ macro_rules! gauge {
             meter()
                 .i64_gauge($name)
                 .with_description($description)
-                .with_unit("entry")
+                .with_unit("{entry}")
                 .build()
         })
     }};
@@ -50,7 +50,7 @@ fn rss_gauge() -> &'static Gauge<i64> {
     static G: OnceLock<Gauge<i64>> = OnceLock::new();
     G.get_or_init(|| {
         meter()
-            .i64_gauge("waddle.process.resident_memory_bytes")
+            .i64_gauge("waddle.process.resident_memory")
             .with_description(
                 "Server process resident set size, sampled from /proc/self/statm \
                  on each state-inventory publisher tick. Plot against \
@@ -260,7 +260,7 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
             // silently leaving the RSS panel empty.
             warn!(
                 target_os = std::env::consts::OS,
-                "state-inventory publisher: RSS sample unavailable; skipping waddle.process.resident_memory_bytes"
+                "state-inventory publisher: RSS sample unavailable; skipping waddle.process.resident_memory"
             );
         }
     }
@@ -305,6 +305,95 @@ mod tests {
         // explicit that the helper returns None there rather than
         // panicking.
         assert!(super::read_process_rss_bytes().is_none());
+    }
+
+    /// Exported (name, unit) pairs for the state-inventory gauges.
+    ///
+    /// Pinned because Grafana Cloud's OTLP→Prometheus normalization
+    /// appends the unit to the series name: the bare noun `entry`
+    /// produced `waddle_state_rooms_total_entry`. UCUM curly-brace
+    /// annotations are dropped by the translator instead.
+    const EXPECTED: &[(&str, &str)] = &[
+        ("waddle.state.auth.pending_auth", "{entry}"),
+        ("waddle.state.auth.device_auth", "{entry}"),
+        ("waddle.state.auth.xmpp_auth_codes", "{entry}"),
+        ("waddle.state.auth.dynamic_oidc_clients", "{entry}"),
+        ("waddle.state.auth.dynamic_oidc_client_locks", "{entry}"),
+        ("waddle.state.profile.avatar_source_locks", "{entry}"),
+        ("waddle.state.profile.publish_tracker_in_flight", "{entry}"),
+        (
+            "waddle.state.profile.provider_dispatch_in_flight",
+            "{entry}",
+        ),
+        ("waddle.state.sessions.sm_live_sessions", "{entry}"),
+        ("waddle.state.sessions.resumable_sessions", "{entry}"),
+        ("waddle.state.caps.caps_cache", "{entry}"),
+        ("waddle.state.caps.pending_resolutions", "{entry}"),
+        ("waddle.state.connections.full_jid_connections", "{entry}"),
+        (
+            "waddle.state.connections.pending_subscription_stanzas",
+            "{entry}",
+        ),
+        ("waddle.state.connections.presence_states", "{entry}"),
+        ("waddle.state.connections.last_activity", "{entry}"),
+        ("waddle.state.rooms.total", "{entry}"),
+        ("waddle.state.rooms.dormant", "{entry}"),
+    ];
+
+    #[tokio::test]
+    async fn state_inventory_names_and_units_are_pinned() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        publish_once(&state).await;
+
+        for (name, unit) in EXPECTED {
+            assert_eq!(
+                metrics.metric_unit(name).as_deref(),
+                Some(*unit),
+                "gauge {name} must export UCUM unit {unit}"
+            );
+        }
+
+        let mut exported: Vec<String> = metrics
+            .metric_names()
+            .into_iter()
+            .filter(|name| name.starts_with("waddle.state."))
+            .collect();
+        exported.sort();
+        exported.dedup();
+        let mut expected: Vec<String> = EXPECTED
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            exported, expected,
+            "every state-inventory gauge must be pinned in EXPECTED"
+        );
+    }
+
+    /// The RSS gauge publishes only where /proc is available, so it is
+    /// pinned by direct record rather than through `publish_once`: the
+    /// name must not embed its unit (#1437) and the unit must be UCUM
+    /// `By` — the OTLP-normalized series is
+    /// `waddle_process_resident_memory_bytes`.
+    #[tokio::test]
+    async fn process_rss_gauge_name_and_unit_are_pinned() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        rss_gauge().record(0, &[]);
+        assert_eq!(
+            metrics
+                .metric_unit("waddle.process.resident_memory")
+                .as_deref(),
+            Some("By")
+        );
+        assert!(
+            !metrics
+                .metric_names()
+                .iter()
+                .any(|name| name == "waddle.process.resident_memory_bytes"),
+            "the RSS gauge name must not embed its unit"
+        );
     }
 
     #[test]

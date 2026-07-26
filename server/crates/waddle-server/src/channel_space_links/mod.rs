@@ -279,7 +279,7 @@ impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(channel = %channel_jid))]
+    #[instrument(skip(self, channel_jid), fields(channel = %channel_jid))]
     async fn clear(&self, channel_jid: &BareJid) -> Result<bool, ChannelSpaceLinkError> {
         let affected = self
             .execute(
@@ -290,7 +290,7 @@ impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
         Ok(affected > 0)
     }
 
-    #[instrument(skip(self), fields(channel = %channel_jid))]
+    #[instrument(skip(self, channel_jid), fields(channel = %channel_jid))]
     async fn get(
         &self,
         channel_jid: &BareJid,
@@ -309,7 +309,7 @@ impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
         Ok(Some(decode_row(&row)?))
     }
 
-    #[instrument(skip(self), fields(space = %space_jid))]
+    #[instrument(skip(self, space_jid), fields(space = %space_jid))]
     async fn list_channels_in_space(
         &self,
         space_jid: &BareJid,

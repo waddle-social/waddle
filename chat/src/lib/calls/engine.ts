@@ -208,7 +208,17 @@ export type CallEngineEvents = {
    * `$mucCallParticipants` without missing peers that connected
    * before our event listener attached.
    */
-  connected: (snapshot: { localIdentity: string; remoteIdentities: string[] }) => void;
+  connected: (snapshot: {
+    localIdentity: string;
+    remoteIdentities: string[];
+    /**
+     * The LiveKit room name this call joined. Carried so telemetry can
+     * derive the #1452 call correlation id from the one identifier the
+     * client, the server call-setup path, and the inbound LiveKit
+     * webhook all already share — no new wire field.
+     */
+    roomName: string;
+  }) => void;
   disconnected: (reason: "local" | "transport") => void;
   /**
    * Fires when LiveKit reports whether remote audio can currently
@@ -287,6 +297,13 @@ export type CallEngineEvents = {
    */
   connectionPhaseChanged: (phase: CallConnectionPhase) => void;
   /**
+   * Fires on a full media-transport reconnect (`ConnectionState.Reconnecting`),
+   * i.e. an actual ICE restart — deliberately NOT for
+   * `SignalReconnecting`, which is only the signaling WebSocket
+   * recovering while media keeps flowing (#1452 ICE-restart SLI).
+   */
+  transportReconnecting: () => void;
+  /**
    * Fires when LiveKit re-derives which participants are actively speaking
    * (from audio levels). Carries the full speaking set — including the local
    * participant — as identities, so the UI can highlight the active speaker's
@@ -345,6 +362,7 @@ export class CallEngine {
     verifiedMicProcessingChanged: new Set(),
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
+    transportReconnecting: new Set(),
     activeSpeakersChanged: new Set(),
   };
 
@@ -529,6 +547,7 @@ export class CallEngine {
     this.emit("connected", {
       localIdentity: room.localParticipant.identity,
       remoteIdentities: Array.from(room.remoteParticipants.values()).map((p) => p.identity),
+      roomName: room.name || join.room,
     });
     // Publishing is BEST-EFFORT and decoupled from joining. `room.connect`
     // above already succeeded, so the user is a fully working receive-only
@@ -1191,6 +1210,9 @@ export class CallEngine {
   };
 
   private handleConnectionStateChanged = (state: ConnectionState) => {
+    if (state === ConnectionState.Reconnecting) {
+      this.emit("transportReconnecting");
+    }
     this.emit("connectionPhaseChanged", mapLiveKitConnectionState(state));
   };
 

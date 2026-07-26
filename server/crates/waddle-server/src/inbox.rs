@@ -258,7 +258,7 @@ fn decode_groupchat_notification_recovery(
 
 #[async_trait]
 impl InboxStorage for DatabaseInboxStorage {
-    #[instrument(skip(self), fields(user = %user))]
+    #[instrument(skip(self, user), fields(user = %user))]
     async fn list(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
         let sql = format!(
             "SELECT {SELECT_COLS} FROM inbox_entries WHERE user_jid = ? AND thread_id = '' ORDER BY last_updated DESC, partner_jid ASC"
@@ -278,7 +278,7 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(entries)
     }
 
-    #[instrument(skip(self), fields(user = %user, room = %room))]
+    #[instrument(skip(self, user, room), fields(user = %user, room = %room))]
     async fn list_threads(
         &self,
         user: &BareJid,
@@ -302,7 +302,7 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(entries)
     }
 
-    #[instrument(skip(self), fields(user = %user))]
+    #[instrument(skip(self, user), fields(user = %user))]
     async fn list_all_threads(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
         let sql = format!(
             "SELECT {SELECT_COLS} FROM inbox_entries \
@@ -323,7 +323,7 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(entries)
     }
 
-    #[instrument(skip(self, entry), fields(user = %user, partner = %entry.partner))]
+    #[instrument(skip(self, entry, user), fields(user = %user, partner = %entry.partner))]
     async fn upsert(
         &self,
         user: &BareJid,
@@ -347,7 +347,7 @@ impl InboxStorage for DatabaseInboxStorage {
         decode_row(&row)
     }
 
-    #[instrument(skip(self, entry, recovery), fields(user = %user, partner = %entry.partner))]
+    #[instrument(skip(self, entry, recovery, user), fields(user = %user, partner = %entry.partner))]
     async fn upsert_with_groupchat_notification_recovery(
         &self,
         user: &BareJid,
@@ -474,7 +474,7 @@ impl InboxStorage for DatabaseInboxStorage {
         .await
     }
 
-    #[instrument(skip(self), fields(user = %user, partner = %partner))]
+    #[instrument(skip(self, user, partner), fields(user = %user, partner = %partner))]
     async fn mark_read(
         &self,
         user: &BareJid,
@@ -503,7 +503,7 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(Some(decode_row(&row)?))
     }
 
-    #[instrument(skip(self), fields(user = %user))]
+    #[instrument(skip(self, user), fields(user = %user))]
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError> {
         let mut rows = self
             .query(
@@ -524,7 +524,7 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(total.max(0) as u64)
     }
 
-    #[instrument(skip(self), fields(room = %room, thread_id))]
+    #[instrument(skip(self, room), fields(room = %room, thread_id))]
     async fn mark_call_thread_ended(
         &self,
         room: &BareJid,
@@ -555,7 +555,7 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(user = %user, partner = %partner, thread_id))]
+    #[instrument(skip(self, user, partner), fields(user = %user, partner = %partner, thread_id))]
     async fn mark_direct_call_thread_ended(
         &self,
         user: &BareJid,

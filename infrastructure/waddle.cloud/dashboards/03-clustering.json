@@ -22,7 +22,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "max by (service_instance_id) (waddle_clustering_node_heartbeat_age_ms_milliseconds)",
+          "expr": "max by (service_instance_id) (waddle_clustering_node_heartbeat_age_milliseconds)",
           "legendFormat": "{{service_instance_id}}",
           "refId": "A"
         }
@@ -36,7 +36,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "max by (service_instance_id) (waddle_clustering_connected_peers_peer)",
+          "expr": "max by (service_instance_id) (waddle_clustering_connected_peers)",
           "legendFormat": "{{service_instance_id}}",
           "refId": "A"
         }
@@ -51,12 +51,12 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase(waddle_clustering_claims_released_on_drain_claim_total[5m]))",
+          "expr": "sum(increase(waddle_clustering_claims_released_on_drain_total[5m]))",
           "legendFormat": "released",
           "refId": "A"
         },
         {
-          "expr": "sum(increase(waddle_clustering_claims_abandoned_on_drain_claim_total[5m]))",
+          "expr": "sum(increase(waddle_clustering_claims_abandoned_on_drain_total[5m]))",
           "legendFormat": "abandoned",
           "refId": "B"
         }
@@ -70,12 +70,12 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase(waddle_clustering_ordered_relay_acks_reply_total[5m]))",
+          "expr": "sum(increase(waddle_clustering_ordered_relay_acks_total[5m]))",
           "legendFormat": "acks",
           "refId": "A"
         },
         {
-          "expr": "sum by (reason) (increase(waddle_clustering_ordered_relay_nacks_reply_total[5m]))",
+          "expr": "sum by (reason) (increase(waddle_clustering_ordered_relay_nacks_total[5m]))",
           "legendFormat": "nack: {{reason}}",
           "refId": "B"
         }

@@ -11,151 +11,298 @@
 
 use super::attributes::{Janitor, PushRetryReason, PushSuppressReason, SweepOutcome};
 
-macro_rules! reliability_increment {
-    ($helper:ident, $name:literal, $unit:literal, $description:literal) => {
+/// One table entry: a private `mod <helper> { fn add(count) }` holding
+/// the single `counter_add!` call site (and therefore the single
+/// `OnceLock` instrument) plus the public helper of the requested
+/// shape. Startup registration and the emitting helper both go through
+/// that one call site, so the zero-registration and the real increment
+/// are guaranteed to be the same instrument.
+macro_rules! reliability_counter {
+    (increment $helper:ident, $name:literal, $unit:literal, $description:literal) => {
         #[doc = concat!("Increment the OTel reliability counter `", $name, "`.")]
         pub fn $helper() {
-            crate::counter_add!($name, $unit, $description, 1);
+            $helper::add(1);
         }
     };
-}
-
-macro_rules! reliability_add {
-    ($helper:ident, $name:literal, $unit:literal, $description:literal) => {
+    (add $helper:ident, $name:literal, $unit:literal, $description:literal) => {
         #[doc = concat!("Add to the OTel reliability counter `", $name, "`.")]
         pub fn $helper(count: u64) {
-            crate::counter_add!($name, $unit, $description, count);
+            $helper::add(count);
         }
     };
 }
 
-reliability_increment!(
-    increment_sm_unacked_evicted,
-    "xmpp.sm.unacked_evicted",
-    "{stanza}",
-    "XEP-0198 unacked stanzas evicted from an attached session replay window."
-);
-reliability_add!(
-    add_sm_promotion_storage_failed,
-    "xmpp.sm.promotion_storage_failed",
-    "{stanza}",
-    "Unacked stanzas whose XEP-0160 promotion storage write failed."
-);
-reliability_increment!(
-    increment_sm_promotion_not_promotable,
-    "xmpp.sm.promotion_not_promotable",
-    "{stanza}",
-    "Unacked stanzas that were not XEP-0160 promotion candidates."
-);
-reliability_increment!(
-    increment_sm_promotion_blocklist_failed,
-    "xmpp.sm.promotion_blocklist_failed",
-    "{session}",
-    "XEP-0198 promotion sessions skipped because blocklist loading failed."
-);
-reliability_increment!(
-    increment_sm_promotion_dead_lettered,
-    "xmpp.sm.promotion_dead_lettered",
-    "{session}",
-    "XEP-0198 promotion sessions dead-lettered after exhausting retries."
-);
-reliability_increment!(
-    increment_sm_drain_timeout,
-    "xmpp.sm.drain_timeout",
-    "{event}",
-    "Graceful-shutdown XEP-0198 drains that exceeded their deadline."
-);
-reliability_increment!(
-    increment_sm_resume_window_clamped,
-    "xmpp.sm.resume_window_clamped",
-    "{session}",
-    "XEP-0198 sessions whose requested resume window was clamped."
-);
-reliability_increment!(
-    increment_sm_send_window_pause,
-    "xmpp.sm.send_window_pauses",
-    "{event}",
-    "XEP-0198 wire-write pauses engaged at the send-window high watermark."
-);
-reliability_increment!(
-    increment_sm_send_window_pause_timeout,
-    "xmpp.sm.send_window_pause_timeouts",
-    "{event}",
-    "XEP-0198 send-window pauses that exceeded their acknowledgement deadline."
-);
-reliability_increment!(
-    increment_sm_detached_unacked_evicted,
-    "xmpp.sm.detached_unacked_evicted",
-    "{stanza}",
-    "Unacked stanzas evicted from a detached XEP-0198 session replay window."
-);
+/// The attribute-free reliability counters.
+///
+/// Adding a row here creates the emitting helper *and* enrolls the
+/// counter in [`register_reliability_counters`] — there is no way to
+/// add one of the two without the other, which is the point (#1436).
+macro_rules! reliability_counters {
+    ($(
+        $shape:ident $helper:ident, $name:literal, $unit:literal, $description:literal;
+    )*) => {
+        $(
+            // Modules live in the type namespace and the helpers in the
+            // value namespace, so the emitting call site can share the
+            // helper's name.
+            mod $helper {
+                pub fn add(count: u64) {
+                    crate::counter_add!($name, $unit, $description, count);
+                }
+            }
+            reliability_counter!($shape $helper, $name, $unit, $description);
+        )*
 
-/// Record a durable push candidate in the reliability and typed pipeline families.
-pub fn increment_push_candidate_created() {
+        /// `add(0)` every table counter through its own call site.
+        fn register_table_counters() {
+            $( $helper::add(0); )*
+        }
+
+        /// Every table counter's metric name, for the registration test.
+        #[cfg(test)]
+        const TABLE_COUNTER_NAMES: &[&str] = &[$($name),*];
+    };
+}
+
+reliability_counters! {
+    increment increment_sm_unacked_evicted,
+        "xmpp.sm.unacked_evicted",
+        "{stanza}",
+        "XEP-0198 unacked stanzas evicted from an attached session replay window.";
+    add add_sm_promotion_storage_failed,
+        "xmpp.sm.promotion_storage_failed",
+        "{stanza}",
+        "Unacked stanzas whose XEP-0160 promotion storage write failed.";
+    increment increment_sm_promotion_not_promotable,
+        "xmpp.sm.promotion_not_promotable",
+        "{stanza}",
+        "Unacked stanzas that were not XEP-0160 promotion candidates.";
+    increment increment_sm_promotion_blocklist_failed,
+        "xmpp.sm.promotion_blocklist_failed",
+        "{session}",
+        "XEP-0198 promotion sessions skipped because blocklist loading failed.";
+    increment increment_sm_promotion_dead_lettered,
+        "xmpp.sm.promotion_dead_lettered",
+        "{session}",
+        "XEP-0198 promotion sessions dead-lettered after exhausting retries.";
+    increment increment_sm_drain_timeout,
+        "xmpp.sm.drain_timeout",
+        "{event}",
+        "Graceful-shutdown XEP-0198 drains that exceeded their deadline.";
+    increment increment_sm_resume_window_clamped,
+        "xmpp.sm.resume_window_clamped",
+        "{session}",
+        "XEP-0198 sessions whose requested resume window was clamped.";
+    increment increment_sm_send_window_pause,
+        "xmpp.sm.send_window_pauses",
+        "{event}",
+        "XEP-0198 wire-write pauses engaged at the send-window high watermark.";
+    increment increment_sm_send_window_pause_timeout,
+        "xmpp.sm.send_window_pause_timeouts",
+        "{event}",
+        "XEP-0198 send-window pauses that exceeded their acknowledgement deadline.";
+    increment increment_sm_detached_unacked_evicted,
+        "xmpp.sm.detached_unacked_evicted",
+        "{stanza}",
+        "Unacked stanzas evicted from a detached XEP-0198 session replay window.";
+    increment increment_pending_delivery_quota_exceeded,
+        "xmpp.pending_delivery.quota_exceeded",
+        "{message}",
+        "Offline messages rejected because the recipient pending-delivery quota was full.";
+    add add_pending_delivery_orphan_claims_released,
+        "xmpp.pending_delivery.orphan_claims_released",
+        "{claim}",
+        "Orphaned pending-delivery claims released by the claim janitor.";
+    add add_pending_delivery_aged_out,
+        "xmpp.pending_delivery.aged_out",
+        "{row}",
+        "Pending-delivery rows removed after exceeding the configured maximum age.";
+    increment increment_pending_delivery_unresolved_poison_pill,
+        "xmpp.pending_delivery.unresolved_poison_pill",
+        "{row}",
+        "Pending-delivery rows dropped because their archived payload could not be resolved.";
+    increment increment_pending_delivery_archive_lookup_transient_failure,
+        "xmpp.pending_delivery.archive_lookup_transient_failure",
+        "{event}",
+        "Pending-delivery flushes aborted by a transient archive lookup failure.";
+    add add_pending_flush_batches,
+        "xmpp.pending.flush_batches",
+        "{event}",
+        "Pending-delivery batches drained by offline-message flushes.";
+    add add_pending_flush_rows_pushed,
+        "xmpp.pending.flush_rows_pushed",
+        "{row}",
+        "Pending-delivery rows pushed to recovering resources.";
+    increment increment_broadcast_delivered,
+        "xmpp.broadcast.delivered",
+        "{stanza}",
+        "Non-blocking broadcast attempts enqueued to a recipient.";
+    increment increment_broadcast_not_connected,
+        "xmpp.broadcast.not_connected",
+        "{stanza}",
+        "Non-blocking broadcast attempts with no connected recipient.";
+    increment increment_broadcast_dropped_full,
+        "xmpp.broadcast.dropped_full",
+        "{stanza}",
+        "Non-blocking broadcast attempts dropped because the recipient channel was full.";
+    increment increment_broadcast_dropped_closed,
+        "xmpp.broadcast.dropped_closed",
+        "{stanza}",
+        "Non-blocking broadcast attempts dropped because the recipient channel was closed.";
+    increment increment_delivery_terminal_error_drop,
+        "xmpp.delivery.terminal_error_drop",
+        "{stanza}",
+        "Actor-path deliveries dropped after an enqueue-uncertain terminal error.";
+    increment increment_delivery_retry_exhausted_drop,
+        "xmpp.delivery.retry_exhausted_drop",
+        "{stanza}",
+        "Deliveries dropped after bounded full-channel retries were exhausted.";
+    increment increment_resolver_affiliation_sync_capacity_drop,
+        "xmpp.resolver.affiliation_sync_capacity_drop",
+        "{event}",
+        "Resolver-affiliation synchronization jobs dropped at scheduler capacity.";
+    increment increment_user_actor_reaped,
+        "xmpp.user_actor.reaped",
+        "{session}",
+        "Empty user actors removed by the periodic reaper.";
+    increment increment_dnd_projection_read_errored,
+        "xmpp.dnd.projection_read_errored",
+        "{event}",
+        "DND projection reads that failed open to inactive.";
+}
+
+/// `add(0)` every reliability counter — and every value of its closed
+/// attribute enums — so a fresh, healthy pod exports the whole family
+/// at zero on its first OTLP push.
+///
+/// Call once from `waddle-server::telemetry::init`, immediately after
+/// the meter provider is installed globally. Every zero goes through
+/// the same call site (and therefore the same cached instrument) the
+/// emitting helper uses, so registration cannot create a second,
+/// divergent stream.
+///
+/// Deliberately **not** registered here: `waddle.janitor.sweeps`. Its
+/// alert is `min by (janitor) (increase(...[30m])) == 0`, so a
+/// pre-registered `outcome="failed"` series that stays flat at zero
+/// would hold that alert permanently firing. Zero-registration is for
+/// counters whose alert asks `> N`; a no-data-is-fine "did this ever
+/// tick" alert must keep its absent series.
+pub fn register_reliability_counters() {
+    register_table_counters();
+    add_push_candidate_created(0);
+    add_push_candidate_coalesced(0);
+    add_push_outbox_published(0);
+    add_push_outbox_dead_lettered(0);
+    for reason in PushRetryReason::ALL {
+        add_push_outbox_retry_scheduled(0, reason);
+    }
+    for reason in PushSuppressReason::ALL {
+        add_push_suppressed(0, reason);
+    }
+    super::push_pipeline::register_pipeline_stages();
+    super::call::register_call_setup_counters();
+}
+
+// The push helpers below are hand-written rather than table rows
+// because each one drives two families (the `xmpp.push.*` reliability
+// counter plus the typed `waddle.push.pipeline` stage) or carries a
+// `reason` label the alias recording rules preserve. Each keeps its
+// counter's single `counter_add!` call site in a private `add_*(count,
+// ..)` function so `register_reliability_counters` can zero it through
+// the same instrument.
+
+fn add_push_candidate_created(count: u64) {
     crate::counter_add!(
         "xmpp.push.candidate_created",
         "{notification}",
         "XEP-0357 notification candidates inserted into the durable pipeline.",
-        1,
+        count,
     );
+}
+
+/// Record a durable push candidate in the reliability and typed pipeline families.
+pub fn increment_push_candidate_created() {
+    add_push_candidate_created(1);
     super::push_pipeline::increment_candidate_created();
 }
 
-/// Record duplicate candidate coalescing in the reliability and typed pipeline families.
-pub fn increment_push_candidate_coalesced() {
+fn add_push_candidate_coalesced(count: u64) {
     crate::counter_add!(
         "xmpp.push.candidate_coalesced",
         "{notification}",
         "Duplicate XEP-0357 notification candidates coalesced at insertion.",
-        1,
+        count,
     );
+}
+
+/// Record duplicate candidate coalescing in the reliability and typed pipeline families.
+pub fn increment_push_candidate_coalesced() {
+    add_push_candidate_coalesced(1);
     super::push_pipeline::increment_coalesced();
 }
 
-/// Record Push Service acceptance in the reliability and typed pipeline families.
-pub fn increment_push_outbox_published() {
+fn add_push_outbox_published(count: u64) {
     crate::counter_add!(
         "xmpp.push.outbox_published",
         "{notification}",
         "XEP-0357 notification outbox jobs accepted by the Push Service.",
-        1,
+        count,
     );
+}
+
+/// Record Push Service acceptance in the reliability and typed pipeline families.
+pub fn increment_push_outbox_published() {
+    add_push_outbox_published(1);
     super::push_pipeline::increment_published();
 }
-/// Hand-written (not `reliability_increment!`) because the counter
-/// carries the `reason` label the alias recording rule preserves
-/// (`waddle_push_outbox_retry_scheduled_total{reason=...}`).
-pub fn increment_push_outbox_retry_scheduled(reason: PushRetryReason) {
+
+fn add_push_outbox_retry_scheduled(count: u64, reason: PushRetryReason) {
     crate::counter_add!(
         "xmpp.push.outbox_retry_scheduled",
         "{notification}",
         "XEP-0357 notification outbox jobs scheduled for retry.",
-        1,
+        count,
         reason,
     );
+}
+
+/// Record an outbox retry in the reliability and typed pipeline families.
+///
+/// Carries the `reason` label the alias recording rule preserves
+/// (`waddle_push_outbox_retry_scheduled_total{reason=...}`).
+pub fn increment_push_outbox_retry_scheduled(reason: PushRetryReason) {
+    add_push_outbox_retry_scheduled(1, reason);
     super::push_pipeline::increment_retry_scheduled();
 }
 
-/// Record terminal outbox dead-lettering in the reliability and typed pipeline families.
-pub fn increment_push_outbox_dead_lettered() {
+fn add_push_outbox_dead_lettered(count: u64) {
     crate::counter_add!(
         "xmpp.push.outbox_dead_lettered",
         "{notification}",
         "XEP-0357 notification outbox jobs terminally dead-lettered.",
-        1,
+        count,
     );
+}
+
+/// Record terminal outbox dead-lettering in the reliability and typed pipeline families.
+pub fn increment_push_outbox_dead_lettered() {
+    add_push_outbox_dead_lettered(1);
     super::push_pipeline::increment_dead_lettered();
 }
 
-/// Record one typed push suppression in the reliability and typed pipeline families.
-pub fn increment_push_suppressed(reason: PushSuppressReason) {
+fn add_push_suppressed(count: u64, reason: PushSuppressReason) {
     crate::counter_add!(
         "xmpp.push.suppressed",
         "{notification}",
         "XEP-0357 notification candidates suppressed by a bounded policy reason.",
-        1,
+        count,
         reason,
     );
+}
+
+/// Record one typed push suppression in the reliability and typed pipeline families.
+pub fn increment_push_suppressed(reason: PushSuppressReason) {
+    add_push_suppressed(1, reason);
     super::push_pipeline::increment_suppressed();
 }
 
@@ -164,107 +311,9 @@ pub fn increment_push_suppressed(reason: PushSuppressReason) {
 // reason a compile error, so it was structurally unreachable and
 // permanently 0. It is retired without an alias (rules README).
 
-reliability_increment!(
-    increment_pending_delivery_quota_exceeded,
-    "xmpp.pending_delivery.quota_exceeded",
-    "{message}",
-    "Offline messages rejected because the recipient pending-delivery quota was full."
-);
-reliability_add!(
-    add_pending_delivery_orphan_claims_released,
-    "xmpp.pending_delivery.orphan_claims_released",
-    "{claim}",
-    "Orphaned pending-delivery claims released by the claim janitor."
-);
-reliability_add!(
-    add_pending_delivery_aged_out,
-    "xmpp.pending_delivery.aged_out",
-    "{row}",
-    "Pending-delivery rows removed after exceeding the configured maximum age."
-);
-reliability_increment!(
-    increment_pending_delivery_unresolved_poison_pill,
-    "xmpp.pending_delivery.unresolved_poison_pill",
-    "{row}",
-    "Pending-delivery rows dropped because their archived payload could not be resolved."
-);
-reliability_increment!(
-    increment_pending_delivery_archive_lookup_transient_failure,
-    "xmpp.pending_delivery.archive_lookup_transient_failure",
-    "{event}",
-    "Pending-delivery flushes aborted by a transient archive lookup failure."
-);
-reliability_add!(
-    add_pending_flush_batches,
-    "xmpp.pending.flush_batches",
-    "{event}",
-    "Pending-delivery batches drained by offline-message flushes."
-);
-reliability_add!(
-    add_pending_flush_rows_pushed,
-    "xmpp.pending.flush_rows_pushed",
-    "{row}",
-    "Pending-delivery rows pushed to recovering resources."
-);
-
-reliability_increment!(
-    increment_broadcast_delivered,
-    "xmpp.broadcast.delivered",
-    "{stanza}",
-    "Non-blocking broadcast attempts enqueued to a recipient."
-);
-reliability_increment!(
-    increment_broadcast_not_connected,
-    "xmpp.broadcast.not_connected",
-    "{stanza}",
-    "Non-blocking broadcast attempts with no connected recipient."
-);
-reliability_increment!(
-    increment_broadcast_dropped_full,
-    "xmpp.broadcast.dropped_full",
-    "{stanza}",
-    "Non-blocking broadcast attempts dropped because the recipient channel was full."
-);
-reliability_increment!(
-    increment_broadcast_dropped_closed,
-    "xmpp.broadcast.dropped_closed",
-    "{stanza}",
-    "Non-blocking broadcast attempts dropped because the recipient channel was closed."
-);
-
-reliability_increment!(
-    increment_delivery_terminal_error_drop,
-    "xmpp.delivery.terminal_error_drop",
-    "{stanza}",
-    "Actor-path deliveries dropped after an enqueue-uncertain terminal error."
-);
-reliability_increment!(
-    increment_delivery_retry_exhausted_drop,
-    "xmpp.delivery.retry_exhausted_drop",
-    "{stanza}",
-    "Deliveries dropped after bounded full-channel retries were exhausted."
-);
-reliability_increment!(
-    increment_resolver_affiliation_sync_capacity_drop,
-    "xmpp.resolver.affiliation_sync_capacity_drop",
-    "{event}",
-    "Resolver-affiliation synchronization jobs dropped at scheduler capacity."
-);
-reliability_increment!(
-    increment_user_actor_reaped,
-    "xmpp.user_actor.reaped",
-    "{session}",
-    "Empty user actors removed by the periodic reaper."
-);
-
-reliability_increment!(
-    increment_dnd_projection_read_errored,
-    "xmpp.dnd.projection_read_errored",
-    "{event}",
-    "DND projection reads that failed open to inactive."
-);
-
 /// Record one periodic janitor sweep outcome.
+///
+/// Not zero-registered — see [`register_reliability_counters`].
 pub fn record_janitor_sweep(janitor: Janitor, outcome: SweepOutcome) {
     crate::counter_add!(
         "waddle.janitor.sweeps",
@@ -279,6 +328,7 @@ pub fn record_janitor_sweep(janitor: Janitor, outcome: SweepOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::attributes::MetricAttribute;
 
     async fn setup() -> crate::telemetry::test_support::MetricsTestGuard {
         crate::telemetry::test_support::acquire().await
@@ -372,6 +422,188 @@ mod tests {
             ),
             Some(1)
         );
+    }
+
+    /// The counters `register_reliability_counters` zeroes that carry
+    /// no attributes, beyond the macro table.
+    const REGISTERED_PUSH_COUNTERS: &[&str] = &[
+        "xmpp.push.candidate_created",
+        "xmpp.push.candidate_coalesced",
+        "xmpp.push.outbox_published",
+        "xmpp.push.outbox_dead_lettered",
+    ];
+
+    /// Every metric name startup registration is expected to export.
+    fn registered_counter_names() -> Vec<&'static str> {
+        TABLE_COUNTER_NAMES
+            .iter()
+            .copied()
+            .chain(REGISTERED_PUSH_COUNTERS.iter().copied())
+            .chain(["xmpp.push.outbox_retry_scheduled", "xmpp.push.suppressed"])
+            .chain([
+                "waddle.call.setup.attempted",
+                "waddle.call.setup.ok",
+                "waddle.call.setup.failed",
+            ])
+            .collect()
+    }
+
+    /// #1436 acceptance: after startup registration a pod that has done
+    /// nothing wrong still exports every alert-worthy counter at 0, so
+    /// `increase(...[1h]) > 0` reads 0 rather than no-data.
+    #[tokio::test]
+    async fn registration_exports_every_reliability_counter_at_zero() {
+        let guard = setup().await;
+        register_reliability_counters();
+
+        for name in registered_counter_names() {
+            assert_eq!(
+                guard.counter_sum(name, &[]),
+                Some(0),
+                "{name} missing from startup zero-registration"
+            );
+        }
+    }
+
+    /// The label dimensions are enumerated from the closed enums, so
+    /// every expected series exists — not just the label-free one.
+    #[tokio::test]
+    async fn registration_covers_every_closed_attribute_value() {
+        let guard = setup().await;
+        register_reliability_counters();
+
+        for reason in PushRetryReason::ALL {
+            assert_eq!(
+                guard.counter_sum(
+                    "xmpp.push.outbox_retry_scheduled",
+                    &[("reason", reason.value())]
+                ),
+                Some(0),
+                "retry reason {} not registered",
+                reason.value()
+            );
+        }
+        for reason in PushSuppressReason::ALL {
+            assert_eq!(
+                guard.counter_sum("xmpp.push.suppressed", &[("reason", reason.as_str())]),
+                Some(0),
+                "suppress reason {} not registered",
+                reason.as_str()
+            );
+        }
+        for stage in [
+            "candidate_created",
+            "suppressed",
+            "coalesced",
+            "published",
+            "retry_scheduled",
+            "dead_lettered",
+        ] {
+            assert_eq!(
+                guard.counter_sum("waddle.push.pipeline", &[("stage", stage)]),
+                Some(0),
+                "pipeline stage {stage} not registered"
+            );
+        }
+        for reason in crate::telemetry::attributes::CallSetupFailureReason::ALL {
+            assert_eq!(
+                guard.counter_sum(
+                    "waddle.call.setup.failed",
+                    &[(
+                        "reason",
+                        crate::telemetry::attributes::MetricAttribute::value(&reason)
+                    )]
+                ),
+                Some(0),
+                "call setup failure reason not registered"
+            );
+        }
+    }
+
+    /// Registration must reuse the emitting call site's instrument: a
+    /// second stream under the same name would double-count on the
+    /// Prometheus side.
+    #[tokio::test]
+    async fn registration_then_increment_reads_one() {
+        let guard = setup().await;
+        register_reliability_counters();
+        increment_sm_drain_timeout();
+        increment_pending_delivery_unresolved_poison_pill();
+        increment_push_outbox_dead_lettered();
+        increment_delivery_terminal_error_drop();
+
+        for name in [
+            "xmpp.sm.drain_timeout",
+            "xmpp.pending_delivery.unresolved_poison_pill",
+            "xmpp.push.outbox_dead_lettered",
+            "xmpp.delivery.terminal_error_drop",
+        ] {
+            assert_eq!(
+                guard.counter_sum(name, &[]),
+                Some(1),
+                "{name} double-counted"
+            );
+        }
+        let (monotonic, _) = guard
+            .counter_shape("xmpp.sm.drain_timeout")
+            .expect("registered counter must export as a u64 sum");
+        assert!(monotonic);
+    }
+
+    /// The janitor heartbeat is a `== 0` alert: a pre-registered
+    /// `outcome="failed"` series flat at zero would hold
+    /// `JanitorHeartbeatStale` permanently firing. Registration must
+    /// leave it absent.
+    #[tokio::test]
+    async fn registration_leaves_the_janitor_heartbeat_absent() {
+        let guard = setup().await;
+        register_reliability_counters();
+        assert_eq!(guard.counter_sum("waddle.janitor.sweeps", &[]), None);
+    }
+
+    /// Every `xmpp_*` counter the Mimir reliability rules read must be
+    /// zero-registered, or the alias recording rule it feeds goes
+    /// no-data on a fresh pod. Guards the rules file and the
+    /// registration list against drifting apart.
+    #[test]
+    fn every_xmpp_counter_in_the_mimir_rules_is_registered() {
+        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        // Full checkouts have the file, and the nix test derivations
+        // copy it into the build tree (flake.nix testArgs postUnpack),
+        // so a missing file is a broken copy path, not an expected
+        // environment — fail loudly rather than silently skipping the
+        // guard (#1436).
+        let rules = std::fs::read_to_string(&rules_path).unwrap_or_else(|error| {
+            panic!(
+                "read {}: {error} — if this is a filtered build tree, the flake.nix                  testArgs postUnpack copy is broken",
+                rules_path.display()
+            )
+        });
+
+        let registered: Vec<String> = registered_counter_names()
+            .into_iter()
+            .map(|name| format!("{}_total", name.replace('.', "_")))
+            .collect();
+
+        for word in rules.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if !(word.starts_with("xmpp_") || word.starts_with("waddle_call_"))
+                || !word.ends_with("_total")
+            {
+                continue;
+            }
+            // Registered from waddle-server (its emitting helper lives in
+            // the webhook route), with its own zero-registration test
+            // there — this crate cannot reach it.
+            if word == "waddle_call_webhook_events_total" {
+                continue;
+            }
+            assert!(
+                registered.iter().any(|name| name == word),
+                "{word} is read by the Mimir reliability rules but is not \
+                 zero-registered by register_reliability_counters()"
+            );
+        }
     }
 
     /// One emit contract case: drive `emit`, then expect the exported

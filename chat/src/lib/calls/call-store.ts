@@ -33,6 +33,7 @@ import {
   publishDmCallStartedAnchor,
 } from "./dm-call-anchor";
 import { barePeerJid } from "../xmpp/jid";
+import { dmCallRoomName } from "./call-correlation";
 import type { IncomingCallAlertController } from "@/shell/audio-alerts";
 import { reportError as reportTelemetryError } from "../telemetry";
 
@@ -352,7 +353,11 @@ export function applyCallEvent(
     next.phase === "incoming"
     && (before.phase !== "incoming" || before.sid !== next.sid)
   ) {
-    beginCallAttempt(next.sid, "dm");
+    beginCallAttempt(
+      next.sid,
+      "dm",
+      dmCallRoomName(barePeerJid(event.from) || event.from, next.sid),
+    );
   }
   if (next.phase === "active" && (before.phase !== "active" || before.sid !== next.sid)) {
     markCallAttemptAccepted(next.sid);
@@ -547,7 +552,11 @@ export function acceptIncomingTieBreakPropose(
     sid: event.sid,
     media: event.media,
   });
-  beginCallAttempt(event.sid, "dm");
+  beginCallAttempt(
+    event.sid,
+    "dm",
+    dmCallRoomName(barePeerJid(event.from) || event.from, event.sid),
+  );
   incomingCallAlerts?.start({
     peerJid: barePeerJid(event.from) || event.from,
     sid: event.sid,
@@ -574,7 +583,11 @@ export function beginOutgoingCall(
       ? { phase: "outgoing", to, sid, media, initiator }
       : { phase: "outgoing", to, sid, media },
   );
-  beginCallAttempt(sid, "dm");
+  beginCallAttempt(
+    sid,
+    "dm",
+    initiator ? dmCallRoomName(barePeerJid(initiator) || initiator, sid) : null,
+  );
   applyDmCallEvent({
     event: {
       kind: "propose",
@@ -1169,7 +1182,7 @@ export async function beginMucCall(
     selfFullJid,
     attemptId,
   });
-  beginCallAttempt(attemptId, "muc");
+  beginCallAttempt(attemptId, "muc", normalizedRoomJid);
   $lastCallError.set(null);
 
   // Step 1 — preparing presence (XEP-0272 §Joining two-phase flow).

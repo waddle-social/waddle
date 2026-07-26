@@ -17,6 +17,35 @@
 //!   [`attributes`]. JIDs, room JIDs, stream ids, and message ids are
 //!   never metric attributes — they belong on spans and logs.
 //!
+//! # Zero-registration of alert-worthy counters (#1436)
+//!
+//! Create-at-increment means an alert-worthy counter does not exist
+//! until it first fires. With several deploys a day,
+//! `increase(waddle_sm_drain_timeout_total[1h]) > 0` then evaluates to
+//! *no data* on a healthy pod instead of `0`. The fix is **not** a
+//! standalone registration API — that would reintroduce
+//! registered-but-never-wired metrics. Instead:
+//!
+//! - Each alert-worthy counter keeps exactly **one** `counter_add!`
+//!   call site, wrapped in a private `add(count: u64)` function. The
+//!   emitting helper calls it with `1`; startup calls it with `0`.
+//!   Same call site, same `OnceLock`, one stream.
+//! - [`reliability::register_reliability_counters`] is the single
+//!   entry point, called from `waddle-server::telemetry::init`
+//!   immediately after the meter provider is installed. Attribute
+//!   dimensions are enumerated from the closed enums in [`attributes`]
+//!   (`PushSuppressReason::ALL`, …), so every expected series exists at
+//!   zero, not just the attribute-free one.
+//! - The table macro in [`reliability`] generates the helper and the
+//!   registration entry from the same row, so a new counter cannot be
+//!   added to that family without being registered.
+//!
+//! Zero-registration is for counters an alert reads as `> N` on a
+//! healthy pod. A counter whose alert asks "did this ever tick"
+//! (`min by (janitor) (increase(waddle_janitor_sweeps_total[30m])) == 0`)
+//! must stay unregistered — a flat-zero series would hold that alert
+//! permanently firing. New counter, new alert: decide which kind it is.
+//!
 //! # Cardinality budget
 //!
 //! Every attribute is a closed enum defined in [`attributes`]; adding
@@ -65,6 +94,18 @@ pub mod __export {
     pub use opentelemetry::KeyValue;
     pub use std::sync::OnceLock;
 }
+
+/// Explicit bucket boundaries for histograms whose unit is seconds
+/// (`"s"`), spanning 5ms to 10s — the seconds-scaled form of the
+/// OpenTelemetry default advice.
+///
+/// Pass these with the `buckets:` form of [`histogram_record!`]: the
+/// SDK default boundaries are millisecond-scale, so a seconds-unit
+/// instrument left on them reports every sub-second observation in the
+/// lowest bucket and a constant fake p99 (#1453).
+pub const SECOND_SCALE_BUCKETS: [f64; 11] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
 /// The meter every macro-created instrument attaches to. Resolved
 /// from the global meter provider at instrument-creation time, so
@@ -231,8 +272,37 @@ macro_rules! counter_add {
 
 /// Record into an `f64` histogram, creating the instrument on first
 /// use. Same naming/unit/attribute rules as [`counter_add!`].
+///
+/// The SDK's default buckets are millisecond-scale
+/// (`[0, 5, 10, …, 10000]`); an instrument recording another scale
+/// must pass its own boundaries with the `buckets:` form, e.g.
+/// `histogram_record!(name, "s", desc, buckets: SECOND_SCALE_BUCKETS, value, attr)`
+/// (see [`SECOND_SCALE_BUCKETS`]). Otherwise every real sample lands
+/// in the lowest bucket and quantiles are constant (#1453).
 #[macro_export]
 macro_rules! histogram_record {
+    (
+        $name:literal, $unit:literal, $desc:literal,
+        buckets: $buckets:expr, $value:expr $(, $attr:expr)* $(,)?
+    ) => {{
+        const _VALIDATED: &str = $crate::telemetry::validate_metric_name($name);
+        static INSTRUMENT: $crate::telemetry::__export::OnceLock<
+            $crate::telemetry::__export::Histogram<f64>,
+        > = $crate::telemetry::__export::OnceLock::new();
+        let attributes: &[$crate::telemetry::__export::KeyValue] = &[
+            $($crate::telemetry::attributes::MetricAttribute::key_value(&$attr)),*
+        ];
+        INSTRUMENT
+            .get_or_init(|| {
+                $crate::telemetry::meter()
+                    .f64_histogram($name)
+                    .with_unit($unit)
+                    .with_description($desc)
+                    .with_boundaries($buckets.to_vec())
+                    .build()
+            })
+            .record($value, attributes);
+    }};
     ($name:literal, $unit:literal, $desc:literal, $value:expr $(, $attr:expr)* $(,)?) => {{
         const _VALIDATED: &str = $crate::telemetry::validate_metric_name($name);
         static INSTRUMENT: $crate::telemetry::__export::OnceLock<

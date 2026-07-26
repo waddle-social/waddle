@@ -1144,6 +1144,7 @@ export class BrowserXmppClient {
 
   async disconnect() {
     this.destroying = true;
+    this.outboundQueue.dispose();
     this.roomDiscoveryGeneration += 1;
     this.currentRoomCatalogFingerprintEvidence.clear();
     this.disarmOnlineRecovery();

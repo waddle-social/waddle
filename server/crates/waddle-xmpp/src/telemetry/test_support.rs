@@ -333,6 +333,25 @@ impl MetricsTestGuard {
         total
     }
 
+    /// Explicit bucket boundaries the named `f64` histogram exported.
+    /// `None` when the instrument never exported as an f64 histogram.
+    ///
+    /// Pins the unit/bucket contract: a seconds-unit instrument left on
+    /// the SDK's millisecond-scale defaults buries every real sample in
+    /// the lowest bucket (#1453).
+    pub fn histogram_bounds(&self, name: &str) -> Option<Vec<f64>> {
+        let mut bounds = None;
+        self.each_metric(name, |metric| {
+            let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+                return;
+            };
+            if let Some(point) = histogram.data_points().next() {
+                bounds.get_or_insert_with(|| point.bounds().collect());
+            }
+        });
+        bounds
+    }
+
     /// Shape of the named `u64` counter: whether every exported batch is
     /// monotonic, and the attribute count of each exported data point.
     /// `None` when the instrument never exported as a u64 sum.

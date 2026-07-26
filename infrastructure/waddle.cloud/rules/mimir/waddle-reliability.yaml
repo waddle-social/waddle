@@ -14,16 +14,16 @@ groups:
     - name: waddle-clustering
       rules:
         - alert: ClusterHeartbeatStale
-          expr: max(waddle_clustering_node_heartbeat_age_ms_milliseconds or waddle_clustering_node_heartbeat_age_ms_ms or waddle_clustering_node_heartbeat_age_ms) > 60000
+          expr: max(waddle_clustering_node_heartbeat_age_milliseconds or waddle_clustering_node_heartbeat_age) > 60000
           for: 5m
           labels:
             severity: critical
             team: waddle
           annotations:
-            runbook: Identify the stale node via the per-pod series, check its pod and Postgres lease writes. Node-death scenarios (claim leaks, orphaned sessions) follow if this persists. The instrument is `waddle.clustering.node_heartbeat_age_ms` (unit ms); the expression ORs the plausible OTLP-exported spellings — after verifying the live series name in Grafana, prune to the real one. Caveat - the gauge is self-reported, so a fully dead node goes stale rather than large; ScrapeAbsent is the backstop for that case.
+            runbook: Identify the stale node via the per-pod series, check its pod and Postgres lease writes. Node-death scenarios (claim leaks, orphaned sessions) follow if this persists. The instrument is `waddle.clustering.node_heartbeat_age` (unit ms, no unit in the name — #1437); the expression ORs the two plausible OTLP-exported spellings (with and without the translated `_milliseconds` suffix) — after verifying the live series name in Grafana, prune to the real one. Caveat - the gauge is self-reported, so a fully dead node goes stale rather than large; ScrapeAbsent is the backstop for that case.
             summary: A cluster node heartbeat is older than 60s (healthy steady-state is ~10s) — node death or lease-write stall.
         - alert: ClusterHeartbeatMissing
-          expr: absent(waddle_clustering_node_heartbeat_age_ms_milliseconds) and absent(waddle_clustering_node_heartbeat_age_ms_ms) and absent(waddle_clustering_node_heartbeat_age_ms)
+          expr: absent(waddle_clustering_node_heartbeat_age_milliseconds) and absent(waddle_clustering_node_heartbeat_age)
           for: 15m
           labels:
             severity: warning
@@ -104,6 +104,44 @@ groups:
           annotations:
             runbook: Every janitor loop records a sweep heartbeat on every tick (intervals 30s-300s), so at least 6 sweeps are expected per 30m per janitor. Zero increase over 30m sustained for 30m means the named loop is wedged, not idle. The series only exists once the dual-emit release (PR 1418) is deployed - before that this rule has nothing to evaluate.
             summary: A janitor loop stopped emitting sweep heartbeats - the loop is wedged, not idle.
+    - name: waddle-calls
+      rules:
+        - alert: CallSetupFailureRate
+          expr: (sum(increase(waddle_call_setup_failed_total[30m])) / clamp_min(sum(increase(waddle_call_setup_attempted_total[30m])), 1)) > 0.1 and sum(increase(waddle_call_setup_attempted_total[30m])) >= 10
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 'Every Jingle session-initiate increments `waddle.call.setup.attempted` exactly once and terminates in one `.ok` or `.failed`, so this ratio is the real call success rate. Break it down by the `reason` label on the failed counter first - `room_not_found`/`membership_denied` point at the MUC gate (client joining the call before the room), `token_mint_failed` at the SFU/LiveKit credentials, `unsupported_transport` at a client regression. The `>= 10` arm suppresses tiny-denominator noise on a quiet cluster. `membership_check_failed` means the gate itself errored (room registry or actor ask) before the SFU was contacted. Both counters are zero-registered at startup (#1436), so this rule evaluates from the first scrape of a fresh pod - a genuine no-data state means the OTLP export path is broken, not that no calls happened. https://github.com/waddle-social/waddle/issues/1452'
+            summary: More than 10% of Jingle call setups are failing - users cannot start calls.
+        - alert: CallSetupRoomNotFound
+          expr: sum(increase(waddle_call_setup_failed_total{reason="room_not_found"}[1h])) > 20
+          for: 30m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 'The Muji membership gate found no room actor for the requested MUC room, so no LiveKit token was minted. A steady stream means clients are sending the Muji session-initiate before their XEP-0045 join has landed, or room actors are being evicted under an active call. Correlate with the gate WARN line ("SFU token request denied") and its `call.id` on the same call. https://github.com/waddle-social/waddle/issues/1452'
+            summary: Muji call setups are being refused because the MUC room has no live room actor.
+        - alert: LiveKitWebhookRejections
+          expr: sum(increase(waddle_call_webhook_events_total{outcome=~"signature_failed|decode_failed"}[30m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: '0 in healthy history - LiveKit signs every delivery with the shared API secret. Sustained `signature_failed` means the `livekit-sfu-api-keys` Secret drifted between the SFU and waddle-server (or something unauthenticated is posting at the endpoint); `decode_failed` means LiveKit changed a payload shape we parse. Rejected deliveries are dropped, so participant-left cleanup stops and ghost Muji occupants accumulate until the 60s reconciler sweeps them.'
+            summary: Inbound LiveKit webhooks are being rejected - SFU participant cleanup is not being applied.
+        - alert: LiveKitWebhookSilent
+          expr: (sum(increase(waddle_call_webhook_events_total{outcome="received"}[6h])) or vector(0)) == 0 and sum(increase(waddle_call_setup_ok_total[6h])) > 0
+          for: 1h
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 'Calls are being set up but no LiveKit webhook has been accepted in 6h - the ingestion path is dark, not idle (the `setup.ok` arm is what distinguishes the two). Check the SFU webhook configuration points at /api/v1/livekit/webhook, that the route still returns 200 (its request span carries http.route), and that the SFU is not returning SERVICE_UNAVAILABLE because no SFU is configured on this pod. Every accepted delivery also logs one "LiveKit webhook accepted" line with its `call.id`. The webhook family is zero-registered at startup (#1436), so the `received` series exists from the first scrape; the `or vector(0)` stays as belt-and-braces for a pod whose OTLP export is itself broken (an empty vector would otherwise stop the rule evaluating - exactly the outage it exists to catch).'
+            summary: No LiveKit webhook has been accepted in 6h despite active calls - participant cleanup is dark.
     # ── Legacy-name aliases (#1330 contract phase) ──────────────────
     # Each record keeps a retired waddle_* text-family name answering
     # from its OTel successor's translated series (dots→underscores,

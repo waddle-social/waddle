@@ -16,15 +16,11 @@ impl ConnectionRegistry {
     /// `register` installed a fresh sender on the same JID between our lookup and
     /// a failed send, the stanza is retried on the replacement rather than lost.
     #[instrument(
-        skip(self, stanza),
-        fields(
-            to = %jid,
-            message_id = %crate::telemetry::messages::fanout_span_message_id(
-                stanza_message_id(&stanza)
-            )
-        )
+        skip(self, stanza, jid),
+        fields(to = %jid, message_id = tracing::field::Empty)
     )]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
+        crate::telemetry::messages::record_span_message_id(stanza_message_id(&stanza));
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
             None => {
@@ -73,7 +69,7 @@ impl ConnectionRegistry {
     /// was superseded the replacement's own once-per-session flush will deliver
     /// them — rerouting them to the replacement here (as `send_to` would) would
     /// double-deliver (Qodo review on PR #1234).
-    #[instrument(skip(self, stanza), fields(to = %jid))]
+    #[instrument(skip(self, stanza, jid), fields(to = %jid))]
     pub async fn send_to_if_owner(
         &self,
         jid: &FullJid,
@@ -103,7 +99,7 @@ impl ConnectionRegistry {
     /// the queued [`OutboundStanza`] carries the source row id so the
     /// destination's main loop can bind the stanza's assigned XEP-0198
     /// outbound counter back to the row (locked Q7b SM-ack lifecycle).
-    #[instrument(skip(self, stanza), fields(to = %jid, row = %row_id))]
+    #[instrument(skip(self, stanza, jid), fields(to = %jid, row = %row_id))]
     pub async fn send_pending_flush(
         &self,
         jid: &FullJid,
@@ -143,7 +139,7 @@ impl ConnectionRegistry {
     /// claim-expiry janitor releases them, with a duplicate-delivery risk.
     /// Gating the send binds the flush to the session it was planned for; on
     /// a mismatch the caller releases the row for the replacement's own flush.
-    #[instrument(skip(self, stanza), fields(to = %jid, row = %row_id))]
+    #[instrument(skip(self, stanza, jid), fields(to = %jid, row = %row_id))]
     pub async fn send_pending_flush_if_owner(
         &self,
         jid: &FullJid,

@@ -47,6 +47,11 @@ import {
   callMediaPathEventAttributes,
   type CallMediaPathSnapshot,
 } from "./calls/call-media-path-telemetry";
+import {
+  callIceEventAttributes,
+  type CallIceSnapshot,
+} from "./calls/call-ice-telemetry";
+import { callCorrelationId, deriveCallCorrelationId } from "./calls/call-correlation";
 import type {
   CallKind,
   CallLifecyclePayload,
@@ -855,6 +860,7 @@ export function __clearSensitiveUrlsForTesting(): void {
 /** For tests only — inject a stub or clear state between test cases. */
 export function __setFaroForTesting(instance: Faro | null): void {
   faro = instance;
+  lastQueueDepth.clear();
   if (!instance) {
     configuredTrustedSpanOrigins = new Set();
     lastGlobalErrorKey = "";
@@ -1182,12 +1188,32 @@ export function reportSendEnqueued(payload: {
   });
 }
 
+/**
+ * Last reported depth per kind. Queue mutations report *both* kinds on every
+ * change, so without this the untouched kind (usually a 0/0 reading) ships a
+ * multi-kilobyte Faro beacon per send (#1443).
+ *
+ * Unchanged *non-zero* readings still re-emit once per minute: the
+ * client-experience dashboard reads the series through a short
+ * `max_over_time` window, and a permanently stuck queue must stay visible
+ * there rather than fading to no-data after its last transition.
+ */
+const lastQueueDepth = new Map<MessageKind, { reading: string; at: number }>();
+
+const QUEUE_DEPTH_REEMIT_MS = 60_000;
+
 export function reportQueueDepthChange(payload: {
   kind: MessageKind;
   persisted: number;
   inflight: number;
 }): void {
   if (!faro) return;
+  const reading = `${payload.persisted}/${payload.inflight}`;
+  const prior = lastQueueDepth.get(payload.kind);
+  const stuckNonZero =
+    reading !== "0/0" && prior !== undefined && Date.now() - prior.at >= QUEUE_DEPTH_REEMIT_MS;
+  if (prior?.reading === reading && !stuckNonZero) return;
+  lastQueueDepth.set(payload.kind, { reading, at: Date.now() });
   faro.api.pushMeasurement({
     type: "chat.xmpp.queue.depth",
     values: {
@@ -1220,6 +1246,7 @@ export function reportCallAudioProcessing(
   faro?.api.pushEvent("chat.call.audio_processing", {
     ...callAudioProcessingEventAttributes(state),
     call_kind: callKind,
+    call_id: callCorrelationId(),
   });
 }
 
@@ -1237,20 +1264,75 @@ export function reportCallMediaPath(snapshot: CallMediaPathSnapshot, callKind: C
   faro?.api.pushEvent("chat.call.media_path", {
     ...callMediaPathEventAttributes(snapshot),
     call_kind: callKind,
+    call_id: callCorrelationId(),
   });
 }
 
-export function reportCallLifecycle(payload: CallLifecyclePayload): void {
-  faro?.api.pushEvent("chat.call.lifecycle", {
-    setup_outcome: payload.setupOutcome,
-    end_reason: payload.endReason,
-    duration_bucket: payload.durationBucket,
-    call_kind: payload.callKind,
-    rtt_band: payload.rttBand,
-    packet_loss_band: payload.packetLossBand,
-    connection_quality: payload.connectionQuality,
-    reconnect_count: payload.reconnectCount,
+/**
+ * Beacon the call's ICE/TURN connectivity (#1452): relay-vs-direct media
+ * path, whether a TURN relay candidate was gathered at all, and how many
+ * times ICE had to restart. Complements {@link reportCallMediaPath}, which
+ * is per-track and blind to both "no relay candidate exists" and restart
+ * churn. The payload is the PII-free attribute set from
+ * {@link callIceEventAttributes} — candidate types and buckets, never an IP
+ * address, port, or TURN hostname. Pure observability — no XMPP/Jingle wire
+ * effect. De-dup (at most once per call per distinct state) is the caller's
+ * job via `createCallIceBeacon`.
+ */
+export function reportCallIce(snapshot: CallIceSnapshot, callKind: CallKind): void {
+  faro?.api.pushEvent("chat.call.ice", {
+    ...callIceEventAttributes(snapshot),
+    call_kind: callKind,
+    call_id: callCorrelationId(),
   });
+}
+
+/**
+ * Settles when the most recent `reportCallLifecycle` emission has been
+ * pushed. Room-name-carrying emissions derive their `call_id` digest
+ * asynchronously; tests await this instead of guessing at microtask
+ * timing.
+ */
+export function callLifecycleEmissionSettled(): Promise<unknown> {
+  return lastCallLifecyclePush;
+}
+
+let lastCallLifecyclePush: Promise<unknown> = Promise.resolve();
+
+export function reportCallLifecycle(
+  payload: CallLifecyclePayload,
+  roomName?: string | null,
+): void {
+  // Captured now, compared at (possibly async) push time: an emission
+  // still deriving its digest when the Faro instance is swapped (new
+  // page session, or a test installing a fresh stub) must be dropped,
+  // not delivered to the new instance.
+  const faroAtEmit = faro;
+  const push = (callId: string) => {
+    if (faro !== faroAtEmit) return;
+    faroAtEmit?.api.pushEvent("chat.call.lifecycle", {
+      setup_outcome: payload.setupOutcome,
+      end_reason: payload.endReason,
+      duration_bucket: payload.durationBucket,
+      call_kind: payload.callKind,
+      rtt_band: payload.rttBand,
+      packet_loss_band: payload.packetLossBand,
+      connection_quality: payload.connectionQuality,
+      reconnect_count: payload.reconnectCount,
+      // The #1452 join key: the same bounded, non-PII value the server's
+      // call-setup logs and the LiveKit webhook logs carry, derived from
+      // the LiveKit room name all three already know.
+      call_id: callId,
+    });
+  };
+  // A per-attempt room name beats the module-global id: declined and
+  // failed attempts never connect, so the global is still "unknown"
+  // when their lifecycle event fires.
+  if (roomName) {
+    lastCallLifecyclePush = deriveCallCorrelationId(roomName).then(push);
+    return;
+  }
+  push(callCorrelationId());
 }
 
 export function reportCallMediaError(

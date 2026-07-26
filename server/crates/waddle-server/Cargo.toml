@@ -133,6 +133,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 waddle-ws-test-support = { path = "../waddle-ws-test-support" }
 tokio-test = "0.4"
 wiremock = "0.6"
+# The exact codec kameo 0.20 uses for remote messages
+# (`rmp_serde::to_vec_named` / `from_slice`). Tests encode and decode relay
+# messages through it directly to pin mixed-version rolling-deploy behavior
+# for the additive trace-context field (#1485).
+rmp-serde = "1.3"
 # `image` is already a regular dependency; integration tests reach
 # it via the same crate without a separate dev-dep declaration.
 http-body-util = "0.1"
