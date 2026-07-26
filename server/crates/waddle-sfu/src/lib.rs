@@ -199,7 +199,9 @@ pub trait SfuReconciler: Send + Sync + 'static {
     fn reconcile_active_calls(&self, grace: chrono::Duration) -> ReconcileFuture<'_>;
 
     /// The identities the SFU itself reports as currently connected to
-    /// `call_id`, or an empty vec when the SFU does not know the room.
+    /// `call_id`. `Some(vec![])` means the SFU confirmed nobody is
+    /// connected; `None` means the SFU could not be reached, so absence
+    /// is UNCONFIRMED.
     ///
     /// Authoritative and cluster-wide, unlike
     /// [`SfuService::participants_for_call`], which only sees the
@@ -209,8 +211,13 @@ pub trait SfuReconciler: Send + Sync + 'static {
     /// necessarily the node that registered the participant — MUST use
     /// this rather than the local registry, or it silently skips
     /// participants and fails open.
+    ///
+    /// Callers MUST NOT treat `None` as "nobody is connected": doing so
+    /// lets a LiveKit outage silently disable the convergence that
+    /// depends on this, which is a security-relevant backstop.
     fn live_participants<'a>(&'a self, call_id: &'a CallId) -> LiveParticipantsFuture<'a>;
 }
 
 /// Future returned by [`SfuReconciler::live_participants`].
-pub type LiveParticipantsFuture<'a> = Pin<Box<dyn Future<Output = Vec<Identity>> + Send + 'a>>;
+pub type LiveParticipantsFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<Vec<Identity>>> + Send + 'a>>;

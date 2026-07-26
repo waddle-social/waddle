@@ -148,6 +148,9 @@ pub(crate) async fn converge_room_voice_after_moderation_flip(
     };
     let voices = match actor
         .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
+        // Bounded: a wedged room actor must not park the config-change
+        // handler that is waiting on this convergence.
+        .reply_timeout(waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT)
         .await
     {
         Ok(voices) => voices,

@@ -23,12 +23,14 @@ const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
-const NS_JABBER_CLIENT: &str = "jabber:client";
-const NS_JINGLE: &str = "urn:xmpp:jingle:1";
-const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
-const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
-const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
-const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+// Namespaces for the stanzas these tests build come from the shared
+// definitions, never re-spelled here — a local copy would silently drift
+// from the wire shape the server actually implements.
+use waddle_xmpp::muc::{NS_MUC_ADMIN, NS_MUC_OWNER};
+use waddle_xmpp::ns::JABBER_CLIENT as NS_JABBER_CLIENT;
+use waddle_xmpp::xep::xep0166::NS_JINGLE;
+use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
+use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
 const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 const NS_SID: &str = "urn:xmpp:sid:0";

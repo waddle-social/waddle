@@ -461,17 +461,24 @@ impl LiveKitSfu {
         let locks = Arc::clone(&self.grant_locks);
         runtime.spawn(async move {
             let serialized = lock.lock().await;
-            // Take the latest intent. Absent => a task that ran before
-            // us already applied it (or the participant was cleared),
-            // so there is nothing left to converge.
-            let Some((_, capabilities)) = desired.remove(&key) else {
+            // Acquire the admin slot BEFORE claiming the intent. Waiting
+            // on an exhausted semaphore can take arbitrarily long, and a
+            // value claimed beforehand would go stale in our hand: a
+            // pending downgrade would be recorded behind our lock while
+            // we still held (and would then send) the older
+            // publish-enabling grant, briefly restoring publishing for
+            // an occupant who has already been devoiced.
+            let Ok(mut permit) = Arc::clone(&permits).acquire_owned().await else {
+                // Only reachable if `admin_permits` is closed, which
+                // nothing does today; reap anyway so no path leaks.
                 drop(serialized);
                 reap_grant_lock(&locks, &key);
                 return;
             };
-            let Ok(mut permit) = Arc::clone(&permits).acquire_owned().await else {
-                // Only reachable if `admin_permits` is closed, which
-                // nothing does today; reap anyway so no path leaks.
+            // Claim the latest intent. Absent => a task that ran before
+            // us already applied it (or the participant was cleared),
+            // so there is nothing left to converge.
+            let Some((_, mut capabilities)) = desired.remove(&key) else {
                 drop(serialized);
                 reap_grant_lock(&locks, &key);
                 return;
@@ -512,22 +519,20 @@ impl LiveKitSfu {
                 if attempt == attempts {
                     break;
                 }
-                // A fresher intent arrived; it owns convergence from
-                // here and will run as soon as we release the lock.
-                if desired.contains_key(&key) {
-                    break;
+                // A fresher intent arrived; adopt it rather than
+                // retrying a value we already know is stale.
+                if let Some((_, fresher)) = desired.remove(&key) {
+                    capabilities = fresher;
                 }
                 // Release the admin slot across the backoff so a
                 // retrying downgrade doesn't hold one of the 32 slots
                 // idle during a LiveKit incident.
                 drop(permit);
                 tokio::time::sleep(GRANT_RETRY_BACKOFF * attempt).await;
-                // Re-check AFTER the sleep too: an intent that arrived
-                // during the backoff window owns convergence, and
-                // burning another retry would hold the per-participant
-                // lock and delay it.
-                if desired.contains_key(&key) {
-                    break;
+                // And again after the sleep: the backoff window is the
+                // longest gap in which an intent can overtake us.
+                if let Some((_, fresher)) = desired.remove(&key) {
+                    capabilities = fresher;
                 }
                 let Ok(next) = Arc::clone(&permits).acquire_owned().await else {
                     drop(serialized);
@@ -672,17 +677,21 @@ impl crate::SfuReconciler for LiveKitSfu {
     fn live_participants<'a>(&'a self, call_id: &'a CallId) -> crate::LiveParticipantsFuture<'a> {
         Box::pin(async move {
             match self.admin.list_participant_identities(call_id).await {
-                Ok(identities) => identities,
+                Ok(identities) => Some(identities),
                 Err(error) => {
-                    // Absence cannot be confirmed, so report nobody and
-                    // let the next pass retry rather than acting on a
-                    // guess.
-                    tracing::debug!(
+                    // `None`, never an empty vec: an outage must not be
+                    // mistaken for "nobody is connected", which would
+                    // silently disable the caller's convergence. WARN
+                    // because that convergence is the stale-token
+                    // backstop — this crate sits below the telemetry
+                    // crate, so the log is the alert signal.
+                    tracing::warn!(
                         call_id = %call_id,
                         error = %error,
-                        "LiveKit ListParticipants failed while resolving live participants"
+                        "LiveKit ListParticipants failed; cannot confirm live participants, \
+                         so voice-grant convergence is skipped for this call this pass"
                     );
-                    Vec::new()
+                    None
                 }
             }
         })
@@ -1443,7 +1452,9 @@ mod tests {
             "fixture models an empty local registry"
         );
 
-        let live = crate::SfuReconciler::live_participants(&sfu, &call).await;
+        let live = crate::SfuReconciler::live_participants(&sfu, &call)
+            .await
+            .expect("LiveKit reachable");
         assert_eq!(
             live.iter()
                 .map(|identity| identity.as_livekit_identity())
@@ -1453,19 +1464,22 @@ mod tests {
         );
     }
 
-    /// A `ListParticipants` failure must not be read as "nobody is
-    /// connected": absence is unconfirmed, so the pass reports empty and
-    /// retries next tick rather than acting on a guess.
+    /// A `ListParticipants` failure must report `None`, not an empty
+    /// vec: an outage must never be indistinguishable from "nobody is
+    /// connected", or it silently disables the caller's convergence.
     #[tokio::test]
-    async fn live_participants_reports_empty_when_livekit_cannot_be_reached() {
+    async fn live_participants_reports_unknown_when_livekit_cannot_be_reached() {
         let admin = Arc::new(RecordingAdmin::default());
         admin.fail_list();
         let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
         let call = CallId::new("r-list-fails").unwrap();
 
-        assert!(crate::SfuReconciler::live_participants(&sfu, &call)
-            .await
-            .is_empty());
+        assert!(
+            crate::SfuReconciler::live_participants(&sfu, &call)
+                .await
+                .is_none(),
+            "an unreachable SFU must be reported as unknown, not as empty"
+        );
     }
 
     #[tokio::test]
