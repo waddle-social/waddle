@@ -3780,6 +3780,10 @@ async fn run_set_affiliation(
     // participation ends with it. Fire-and-forget inside the SFU
     // layer; the moderation result is never blocked on LiveKit.
     evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+    // A demotion that keeps the occupant in the room can still cost
+    // them voice (e.g. `admin -> none` in a moderated room), which
+    // must revoke their SFU publish rights.
+    converge_moderation_voice_changes(sfu, &args.channel_jid, &applied.voice_changes);
     Ok(ChannelsSetAffiliationResult {
         member_jid: args.member_jid.clone(),
         affiliation: args.affiliation,
@@ -3998,6 +4002,7 @@ async fn run_kick(
     // occupant's room membership, so their live SFU call
     // participation ends with it.
     evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+    converge_moderation_voice_changes(sfu, &args.channel_jid, &applied.voice_changes);
 
     if revoke_members_only_member {
         sync_private_kick_affiliation_revocation(
@@ -4015,6 +4020,26 @@ async fn run_kick(
     Ok(ChannelsKickResult {
         occupant_jid: args.occupant_jid.clone(),
     })
+}
+
+/// Converge the live SFU media grants of every session whose XEP-0045
+/// voice changed without leaving the room — an affiliation change can
+/// re-derive an occupant's role and silently take voice away, and the
+/// admin V2 surface must enforce that on the SFU exactly like the
+/// XMPP moderation IQ path does.
+fn converge_moderation_voice_changes(
+    sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
+    room_jid: &BareJid,
+    voice_changes: &[(FullJid, waddle_xmpp_core::types::Voice)],
+) {
+    let Some(sfu) = sfu else {
+        return;
+    };
+    for (jid, voice) in voice_changes {
+        crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
+            sfu, room_jid, jid, *voice,
+        );
+    }
 }
 
 /// Evict every session involuntarily removed by moderation (kick 307
