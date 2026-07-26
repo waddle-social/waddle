@@ -16,7 +16,8 @@ import {
   reportFailedCallAttempt,
   rttBand,
 } from "../src/lib/calls/call-lifecycle-telemetry";
-import { __setFaroForTesting } from "../src/lib/telemetry";
+import { dmCallRoomName } from "../src/lib/calls/call-correlation";
+import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
 
 function createFaroStub() {
   const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
@@ -53,6 +54,28 @@ describe("call lifecycle mappings", () => {
     expect(reconnectCountBucket(0)).toBe("none");
     expect(reconnectCountBucket(1)).toBe("once");
     expect(reconnectCountBucket(2)).toBe("multiple");
+  });
+
+  test("a declined attempt that never connected still carries the shared call_id", async () => {
+    // The correlation id is normally adopted around the LiveKit connect
+    // attempt; declined/failed attempts never get there, so the lifecycle
+    // event derives it from the room name instead of shipping
+    // call_id="unknown" (#1452 review).
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportDeclinedCallAttempt(
+      "c1",
+      "dm",
+      dmCallRoomName("alice@waddle.test", "c1"),
+    );
+    await callLifecycleEmissionSettled();
+
+    expect(stub.events).toHaveLength(1);
+    // The digest of "alice@waddle.test::c1" — the same value pinned on
+    // the server side (dm_room_name_format_digest_is_pinned).
+    expect(stub.events[0].attributes?.call_id).toBe("585e23a731089821");
+    expect(stub.events[0].attributes?.setup_outcome).toBe("declined");
   });
 
   test("emits one declined DM setup outcome for an unaccepted attempt", () => {

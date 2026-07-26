@@ -942,6 +942,13 @@ fn resolve_muji_initiator(
     }
 }
 
+/// The 1:1 LiveKit room name: `{initiator_bare}::{sid}`.
+///
+/// The chat client re-derives this format (`dmCallRoomName` in
+/// `chat/src/lib/calls/call-correlation.ts`) so lifecycle events for
+/// calls that never connected still carry the shared correlation id —
+/// changing this format requires changing the client twin, and the
+/// cross-pinned digest tests on both sides fail until they agree.
 fn scoped_call_id(initiator_bare: &BareJid, sid: &str) -> Result<CallId, SfuError> {
     CallId::new(format!("{}::{}", initiator_bare, sid))
 }
@@ -1244,6 +1251,24 @@ fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<Outboun
 mod tests {
     use super::*;
     use crate::xep::xep0166;
+
+    /// Pins the 1:1 room-name format through the correlation digest.
+    /// The chat twin (`dmCallRoomName` pin in
+    /// `chat/tests/call-correlation.test.ts`) asserts the same hex for
+    /// the same (initiator, sid), so renaming the format breaks CI on
+    /// both sides instead of silently un-joining declined/failed call
+    /// lifecycle events from server telemetry (#1452).
+    #[test]
+    fn dm_room_name_format_digest_is_pinned() {
+        let initiator: BareJid = "alice@waddle.test".parse().expect("valid bare jid");
+        let call_id = scoped_call_id(&initiator, "c1").expect("valid call id");
+        assert_eq!(call_id.as_str(), "alice@waddle.test::c1");
+        assert_eq!(
+            CallCorrelationId::for_call(&call_id).as_str(),
+            "585e23a731089821",
+        );
+    }
+
     use crate::xep::xep0167::opus_audio_description;
     use chrono::Duration;
     use jid::FullJid;

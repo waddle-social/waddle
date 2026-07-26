@@ -63,7 +63,7 @@ export async function startMucCallAction({
   const lifecycleAttemptId = crypto.randomUUID();
   const sender = getSender();
   if (!sender) {
-    reportFailedCallAttempt(lifecycleAttemptId, "muc");
+    reportFailedCallAttempt(lifecycleAttemptId, "muc", roomJid);
     return false;
   }
   setStarting(true);
@@ -89,7 +89,7 @@ export async function startMucCallAction({
     );
     return true;
   } catch (err) {
-    reportFailedCallAttempt(lifecycleAttemptId, "muc");
+    reportFailedCallAttempt(lifecycleAttemptId, "muc", roomJid);
     reportCallError(err);
     return false;
   } finally {
@@ -263,7 +263,7 @@ export async function resumeMucCallActivity({
     selfNick,
     selfFullJid,
   });
-  resumeCallAttempt(session.sid, "muc");
+  resumeCallAttempt(session.sid, "muc", session.roomJid);
   markCallAttemptAccepted(session.sid);
 
   // Best-effort republish of Muji active presence under the current

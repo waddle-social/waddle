@@ -51,7 +51,7 @@ import {
   callIceEventAttributes,
   type CallIceSnapshot,
 } from "./calls/call-ice-telemetry";
-import { callCorrelationId } from "./calls/call-correlation";
+import { callCorrelationId, deriveCallCorrelationId } from "./calls/call-correlation";
 import type {
   CallKind,
   CallLifecyclePayload,
@@ -1287,21 +1287,52 @@ export function reportCallIce(snapshot: CallIceSnapshot, callKind: CallKind): vo
   });
 }
 
-export function reportCallLifecycle(payload: CallLifecyclePayload): void {
-  faro?.api.pushEvent("chat.call.lifecycle", {
-    setup_outcome: payload.setupOutcome,
-    end_reason: payload.endReason,
-    duration_bucket: payload.durationBucket,
-    call_kind: payload.callKind,
-    rtt_band: payload.rttBand,
-    packet_loss_band: payload.packetLossBand,
-    connection_quality: payload.connectionQuality,
-    reconnect_count: payload.reconnectCount,
-    // The #1452 join key: the same bounded, non-PII value the server's
-    // call-setup logs and the LiveKit webhook logs carry, derived from the
-    // LiveKit room name all three already know.
-    call_id: callCorrelationId(),
-  });
+/**
+ * Settles when the most recent `reportCallLifecycle` emission has been
+ * pushed. Room-name-carrying emissions derive their `call_id` digest
+ * asynchronously; tests await this instead of guessing at microtask
+ * timing.
+ */
+export function callLifecycleEmissionSettled(): Promise<unknown> {
+  return lastCallLifecyclePush;
+}
+
+let lastCallLifecyclePush: Promise<unknown> = Promise.resolve();
+
+export function reportCallLifecycle(
+  payload: CallLifecyclePayload,
+  roomName?: string | null,
+): void {
+  // Captured now, compared at (possibly async) push time: an emission
+  // still deriving its digest when the Faro instance is swapped (new
+  // page session, or a test installing a fresh stub) must be dropped,
+  // not delivered to the new instance.
+  const faroAtEmit = faro;
+  const push = (callId: string) => {
+    if (faro !== faroAtEmit) return;
+    faroAtEmit?.api.pushEvent("chat.call.lifecycle", {
+      setup_outcome: payload.setupOutcome,
+      end_reason: payload.endReason,
+      duration_bucket: payload.durationBucket,
+      call_kind: payload.callKind,
+      rtt_band: payload.rttBand,
+      packet_loss_band: payload.packetLossBand,
+      connection_quality: payload.connectionQuality,
+      reconnect_count: payload.reconnectCount,
+      // The #1452 join key: the same bounded, non-PII value the server's
+      // call-setup logs and the LiveKit webhook logs carry, derived from
+      // the LiveKit room name all three already know.
+      call_id: callId,
+    });
+  };
+  // A per-attempt room name beats the module-global id: declined and
+  // failed attempts never connect, so the global is still "unknown"
+  // when their lifecycle event fires.
+  if (roomName) {
+    lastCallLifecyclePush = deriveCallCorrelationId(roomName).then(push);
+    return;
+  }
+  push(callCorrelationId());
 }
 
 export function reportCallMediaError(

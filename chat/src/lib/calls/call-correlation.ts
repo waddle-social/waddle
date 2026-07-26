@@ -25,6 +25,22 @@ export const CALL_CORRELATION_ID_HEX_LEN = 16;
 /** The attribute value used when no call is in scope. */
 export const UNKNOWN_CALL_CORRELATION_ID = "unknown";
 
+/**
+ * The LiveKit room name of a 1:1 call, derived the way the server
+ * derives it (`scoped_call_id` in
+ * `server/crates/waddle-xmpp/src/protocol/handlers/jingle.rs`:
+ * `{initiator_bare}::{sid}`). This lets lifecycle events for calls that
+ * never connected — declined and failed attempts have no join token —
+ * still carry the same correlation id the server and webhook logs use.
+ * The format is cross-pinned by digest test vectors on both sides, so a
+ * server-side rename breaks CI instead of silently un-joining telemetry.
+ * The result feeds ONLY the SHA-256 correlation digest; the raw name
+ * carries the initiator JID and is never exported.
+ */
+export function dmCallRoomName(initiatorBareJid: string, sid: string): string {
+  return `${initiatorBareJid}::${sid}`;
+}
+
 function toHexPrefix(digest: ArrayBuffer): string {
   return Array.from(new Uint8Array(digest).slice(0, CALL_CORRELATION_ID_HEX_LEN / 2))
     .map((byte) => byte.toString(16).padStart(2, "0"))

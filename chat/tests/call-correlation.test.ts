@@ -6,6 +6,7 @@ import {
   callCorrelationId,
   clearCallCorrelationId,
   deriveCallCorrelationId,
+  dmCallRoomName,
 } from "../src/lib/calls/call-correlation";
 
 afterEach(() => {
@@ -46,6 +47,21 @@ describe("deriveCallCorrelationId", () => {
 
   test("an empty room name resolves to the unknown sentinel, never throws", async () => {
     await expect(deriveCallCorrelationId("")).resolves.toBe(UNKNOWN_CALL_CORRELATION_ID);
+  });
+});
+
+describe("dmCallRoomName", () => {
+  test("matches the server's scoped_call_id format via the pinned digest", async () => {
+    // The Rust twin (`dm_room_name_format_digest_is_pinned` in
+    // server/crates/waddle-sfu/src/correlation.rs) pins the SAME hex for
+    // CallCorrelationId over scoped_call_id("alice@waddle.test", "c1"),
+    // so a server-side rename of the 1:1 room-name format breaks CI on
+    // both sides instead of silently un-joining declined/failed
+    // lifecycle events from server telemetry (#1452).
+    expect(dmCallRoomName("alice@waddle.test", "c1")).toBe("alice@waddle.test::c1");
+    expect(await deriveCallCorrelationId(dmCallRoomName("alice@waddle.test", "c1"))).toBe(
+      "585e23a731089821",
+    );
   });
 });
 
