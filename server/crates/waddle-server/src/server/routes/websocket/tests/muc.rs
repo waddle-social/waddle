@@ -4733,6 +4733,13 @@ fn empty_muji() -> waddle_xmpp::xep::xep0272::Muji {
 struct RecordingSfu {
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
     note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    update_calls: std::sync::Mutex<
+        Vec<(
+            waddle_sfu::CallId,
+            waddle_sfu::Identity,
+            waddle_sfu::MediaCapabilities,
+        )>,
+    >,
 }
 
 impl RecordingSfu {
@@ -4774,6 +4781,19 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .expect("recording lock")
             .push((call_id.clone(), identity.clone()));
         waddle_sfu::CallState::Ended
+    }
+
+    fn update_participant_capabilities(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        capabilities: waddle_sfu::MediaCapabilities,
+    ) {
+        self.update_calls.lock().expect("recording lock").push((
+            call_id.clone(),
+            identity.clone(),
+            capabilities,
+        ));
     }
 
     fn note_participant_left(&self, call_id: &waddle_sfu::CallId, identity: &waddle_sfu::Identity) {
@@ -6359,6 +6379,104 @@ async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
         recorder.snapshot().is_empty(),
         "a role change that keeps the occupant must not end their call session"
     );
+}
+
+/// Role-derived media grants: revoking voice (role → visitor) must
+/// converge the target's live SFU permission to listen-only, without
+/// ending their call session.
+#[tokio::test]
+async fn muc_admin_voice_revocation_downgrades_live_sfu_grants() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid: BareJid = "voice-revoke-grants@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    let ready = ready_phase(&alice_jid);
+
+    let demote_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "revoke-bob-voice",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "bob")
+            .attr(minidom::rxml::xml_ncname!("role").to_owned(), "visitor")
+            .build(),
+    );
+    let responses = handle_iq(
+        &demote_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert!(responses[0].contains("type='result'"), "{responses:?}");
+
+    let updates = recorder.update_snapshot();
+    assert_eq!(
+        updates.len(),
+        1,
+        "exactly the demoted occupant's session gets a grant update: {updates:?}"
+    );
+    assert_eq!(updates[0].0.as_str(), "voice-revoke-grants@muc.example.com");
+    assert_eq!(updates[0].1.as_livekit_identity(), "bob@example.com/web");
+    assert_eq!(
+        updates[0].2,
+        waddle_sfu::MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
+        "a visitor's live grants are listen-only"
+    );
+    assert!(updates[0].2.is_listen_only());
+    assert!(
+        recorder.snapshot().is_empty(),
+        "a grant downgrade must not end the call session"
+    );
+}
+
+/// Role-derived media grants: granting voice (visitor → participant)
+/// must converge the target's live SFU permission back to publishable.
+#[tokio::test]
+async fn muc_admin_voice_grant_upgrades_live_sfu_grants() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid: BareJid = "voice-grant-grants@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    let ready = ready_phase(&alice_jid);
+
+    for (id, role) in [("revoke-bob", "visitor"), ("grant-bob", "participant")] {
+        let iq = build_admin_set_iq_xml(
+            &room_jid,
+            id,
+            Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "bob")
+                .attr(minidom::rxml::xml_ncname!("role").to_owned(), role)
+                .build(),
+        );
+        let responses = handle_iq(
+            &iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(alice_session.clone()),
+            &ready,
+        )
+        .await;
+        assert!(responses[0].contains("type='result'"), "{responses:?}");
+    }
+
+    let updates = recorder.update_snapshot();
+    assert_eq!(updates.len(), 2, "one update per role change: {updates:?}");
+    assert!(updates[0].2.is_listen_only(), "revocation first");
+    assert_eq!(
+        updates[1].2,
+        waddle_sfu::MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Participant),
+        "restored voice restores publish grants"
+    );
+    assert!(updates[1].2.can_publish);
 }
 
 /// Round-3 concurrency review: MUC occupancy is keyed by FULL JID, so

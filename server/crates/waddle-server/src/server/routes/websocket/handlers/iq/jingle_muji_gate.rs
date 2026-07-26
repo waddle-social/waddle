@@ -26,6 +26,7 @@
 //! `urn:waddle:muc-call:0` `<request-join>` IQ surface).
 
 use jid::{BareJid, FullJid};
+use waddle_sfu::MediaCapabilities;
 use waddle_xmpp::muc::room_actor::GetOccupantByJid;
 use waddle_xmpp::telemetry::attributes::{CallSignalEvent, SfuDenialReason};
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
@@ -46,9 +47,26 @@ use super::errors::{bad_request_iq_error, forbidden_iq_error, internal_server_er
 /// `Allow` means the IQ should continue to the sans-I/O dispatcher;
 /// `Deny` carries a typed `StanzaError` the caller must serialize
 /// into the IQ-error reply frame.
+///
+/// Authorization *produces* the grant: when the membership check ran,
+/// `Allow` carries the [`MediaCapabilities`] derived from the
+/// occupant's XEP-0045 role at authorization time, and the caller
+/// threads them into the sans-I/O dispatch so the Jingle handler
+/// mints the SFU token with exactly those grants. `None` means no
+/// membership check applied (non-Jingle, 1:1 Jingle, non-initiate
+/// actions) — the Muji mint path treats that as listen-only.
 pub(super) enum GateOutcome {
-    Allow,
+    Allow {
+        media_capabilities: Option<MediaCapabilities>,
+    },
     Deny(Box<StanzaError>),
+}
+
+/// `Allow` for stanzas the Muji membership gate does not apply to.
+fn allow_ungated() -> GateOutcome {
+    GateOutcome::Allow {
+        media_capabilities: None,
+    }
 }
 
 /// Run the membership pre-check for a Muji-bearing Jingle IQ.
@@ -69,16 +87,16 @@ pub(super) async fn verify_muji_jingle_request(
     iq: &Iq,
 ) -> GateOutcome {
     let Iq::Set { payload, .. } = iq else {
-        return GateOutcome::Allow;
+        return allow_ungated();
     };
     // Only Jingle IQs are interesting; let everything else through.
     if payload.ns() != NS_JINGLE || payload.name() != "jingle" {
-        return GateOutcome::Allow;
+        return allow_ungated();
     }
     // Without a `<muji/>` child this is a 1:1 Jingle — not our
     // gate.
     let Some(muji_elem) = find_muji(payload) else {
-        return GateOutcome::Allow;
+        return allow_ungated();
     };
     // A wire-shape rejection of a `session-initiate` is still a complete
     // call-setup attempt for the #1452 SLI: the gate short-circuits IQ
@@ -130,7 +148,7 @@ pub(super) async fn verify_muji_jingle_request(
         _ => {}
     }
     if !matches!(jingle.action, Action::SessionInitiate) {
-        return GateOutcome::Allow;
+        return allow_ungated();
     }
 
     verify_room_membership(state, full_jid, &room_jid).await
@@ -197,7 +215,13 @@ async fn verify_room_membership(
         })
         .await
     {
-        Ok(Some(_occupant)) => GateOutcome::Allow,
+        // Authorization produces the grant: the occupant's current
+        // XEP-0045 role decides the SFU media capabilities minted
+        // into the LiveKit token. Voice (role ≥ participant) maps to
+        // publish rights; a visitor gets listen-only.
+        Ok(Some(occupant)) => GateOutcome::Allow {
+            media_capabilities: Some(MediaCapabilities::from_muc_role(occupant.role)),
+        },
         Ok(None) => {
             record_sfu_token_denial(
                 room_jid,
@@ -315,6 +339,16 @@ mod tests {
         nick: &str,
         jid: &FullJid,
     ) {
+        create_room_and_join_with_role(state, room, nick, jid, Role::Participant).await;
+    }
+
+    async fn create_room_and_join_with_role(
+        state: &WebSocketState,
+        room: &BareJid,
+        nick: &str,
+        jid: &FullJid,
+        role: Role,
+    ) {
         let actor = state
             .deps
             .protocol
@@ -329,7 +363,7 @@ mod tests {
             .ask(Join {
                 nick: nick.to_string(),
                 real_jid: jid.clone(),
-                role: Role::Participant,
+                role,
                 affiliation: Affiliation::Member,
             })
             .await
@@ -349,7 +383,60 @@ mod tests {
             &build_jingle_muji_iq(Action::SessionInitiate, "general@muc.example.com"),
         )
         .await;
-        assert!(matches!(outcome, GateOutcome::Allow));
+        // Authorization produces the grant: a voiced occupant (role ≥
+        // participant) is authorized WITH publish capabilities.
+        let GateOutcome::Allow { media_capabilities } = outcome else {
+            panic!("expected Allow");
+        };
+        let caps = media_capabilities.expect("membership check ran, so capabilities are derived");
+        assert!(caps.can_publish && caps.can_subscribe && caps.can_publish_data);
+    }
+
+    /// XEP-0045 voice semantics on the SFU boundary: a visitor is an
+    /// occupant without voice, so the gate authorizes them with
+    /// listen-only media capabilities — occupancy alone must never
+    /// mint publish rights.
+    #[tokio::test]
+    async fn visitor_occupant_is_allowed_with_listen_only_capabilities() {
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice = full("alice@example.com/web");
+        create_room_and_join_with_role(&state, &room, "alice", &alice, Role::Visitor).await;
+
+        let outcome = verify_muji_jingle_request(
+            &state,
+            &alice,
+            &build_jingle_muji_iq(Action::SessionInitiate, "general@muc.example.com"),
+        )
+        .await;
+        let GateOutcome::Allow { media_capabilities } = outcome else {
+            panic!("expected Allow");
+        };
+        let caps = media_capabilities.expect("membership check ran, so capabilities are derived");
+        assert!(caps.is_listen_only(), "visitor grants are listen-only");
+        assert!(caps.can_subscribe, "a visitor may still watch/listen");
+    }
+
+    /// A moderator passes the gate with publish capabilities — same
+    /// grants as a participant; SFU-side moderation powers are
+    /// deliberately out of scope (XMPP is the moderation plane).
+    #[tokio::test]
+    async fn moderator_occupant_is_allowed_with_publish_capabilities() {
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice = full("alice@example.com/web");
+        create_room_and_join_with_role(&state, &room, "alice", &alice, Role::Moderator).await;
+
+        let outcome = verify_muji_jingle_request(
+            &state,
+            &alice,
+            &build_jingle_muji_iq(Action::SessionInitiate, "general@muc.example.com"),
+        )
+        .await;
+        let GateOutcome::Allow { media_capabilities } = outcome else {
+            panic!("expected Allow");
+        };
+        assert!(media_capabilities.expect("derived").can_publish);
     }
 
     #[tokio::test]
@@ -587,7 +674,7 @@ mod tests {
             &build_jingle_muji_iq(Action::SessionTerminate, "general@muc.example.com"),
         )
         .await;
-        assert!(matches!(outcome, GateOutcome::Allow));
+        assert!(matches!(outcome, GateOutcome::Allow { .. }));
     }
 
     #[tokio::test]
@@ -610,7 +697,7 @@ mod tests {
             payload,
         };
         let outcome = verify_muji_jingle_request(&state, &alice, &iq).await;
-        assert!(matches!(outcome, GateOutcome::Allow));
+        assert!(matches!(outcome, GateOutcome::Allow { .. }));
     }
 
     #[tokio::test]
@@ -639,7 +726,7 @@ mod tests {
             payload,
         };
         let outcome = verify_muji_jingle_request(&state, &alice, &iq).await;
-        assert!(matches!(outcome, GateOutcome::Allow));
+        assert!(matches!(outcome, GateOutcome::Allow { .. }));
     }
 
     #[test]

@@ -338,6 +338,55 @@ impl LiveKitSfu {
         });
     }
 
+    /// Move every outstanding JTI for `(call_id, identity)` into the
+    /// revocation map WITHOUT touching the participant registry.
+    /// Used on a mid-call grant downgrade: the participant stays in
+    /// the call (listen-only), but a not-yet-used token minted before
+    /// the demotion must not be replayable to rejoin with stale
+    /// publish rights.
+    fn revoke_issued_tokens(&self, call_id: &CallId, identity: &Identity) {
+        if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
+            for issued in issued {
+                self.revoked.insert(issued.jti, issued.exp);
+            }
+        }
+        self.sweep_expired_revoked(Utc::now());
+    }
+
+    /// Fire-and-forget the LiveKit admin `UpdateParticipant` call that
+    /// pushes replacement grants to a live participant. Same spawn +
+    /// permit shape as [`Self::schedule_remote_teardown`]; when no
+    /// runtime handle is attached (plain `#[test]` fixtures) the
+    /// remote leg silently drops.
+    fn schedule_permission_update(
+        &self,
+        call_id: CallId,
+        identity: Identity,
+        capabilities: MediaCapabilities,
+    ) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let admin = Arc::clone(&self.admin);
+        let permits = Arc::clone(&self.admin_permits);
+        runtime.spawn(async move {
+            let Ok(_permit) = permits.acquire_owned().await else {
+                return;
+            };
+            if let Err(err) = admin
+                .update_participant(&call_id, &identity, capabilities)
+                .await
+            {
+                tracing::warn!(
+                    call_id = %call_id,
+                    identity = %identity.as_livekit_identity(),
+                    error = %err,
+                    "LiveKit UpdateParticipant failed; live grants may lag the MUC role"
+                );
+            }
+        });
+    }
+
     /// One reconciliation pass against LiveKit's ground truth.
     ///
     /// For every call in the local registry, ask LiveKit who is
@@ -586,6 +635,24 @@ impl SfuService for LiveKitSfu {
         let _ = self.clear_local_state(call_id, identity);
     }
 
+    fn update_participant_capabilities(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        capabilities: MediaCapabilities,
+    ) {
+        // Only registered call participants get the admin round-trip:
+        // a role change for an occupant who never joined the call (or
+        // already left) has no SFU-side state to converge.
+        if !self.has_call_participant(call_id, identity) {
+            return;
+        }
+        if capabilities.is_listen_only() {
+            self.revoke_issued_tokens(call_id, identity);
+        }
+        self.schedule_permission_update(call_id.clone(), identity.clone(), capabilities);
+    }
+
     fn is_revoked(&self, jti: &Jti) -> bool {
         // Lazy sweep on the read path: an entry past its `exp` is
         // by definition unusable and so reads as not-revoked. Drop
@@ -684,7 +751,7 @@ mod tests {
         let identity = fixture_identity("alice");
 
         let token = sfu
-            .issue_join_token(&call, &identity, MediaCapabilities::full_participant())
+            .issue_join_token(&call, &identity, MediaCapabilities::direct_call_peer())
             .expect("token issued");
         assert_eq!(token.room, call);
         assert!(!token.jwt.as_str().is_empty());
@@ -709,10 +776,10 @@ mod tests {
         let alice = fixture_identity("alice");
 
         let t1 = sfu
-            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
+            .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
             .unwrap();
         let t2 = sfu
-            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
+            .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
             .unwrap();
         assert!(!sfu.is_revoked(&t1.jti));
         assert!(!sfu.is_revoked(&t2.jti));
@@ -734,10 +801,10 @@ mod tests {
         let bob = fixture_identity("bob");
 
         let alice_token = sfu
-            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
+            .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
             .unwrap();
         let bob_token = sfu
-            .issue_join_token(&call, &bob, MediaCapabilities::full_participant())
+            .issue_join_token(&call, &bob, MediaCapabilities::direct_call_peer())
             .unwrap();
 
         sfu.register_call_participant(&call, &alice);
@@ -758,7 +825,7 @@ mod tests {
         // Mint well past the cap; every fresh token should slot in,
         // but the per-participant vec must never exceed it.
         for _ in 0..(MAX_ISSUED_PER_PARTICIPANT * 3) {
-            sfu.issue_join_token(&call, &alice, MediaCapabilities::full_participant())
+            sfu.issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
                 .expect("token issued");
             assert!(
                 sfu.issued_count(&call, &alice) <= MAX_ISSUED_PER_PARTICIPANT,
@@ -831,6 +898,7 @@ mod tests {
     struct RecordingAdmin {
         remove_calls: Mutex<Vec<(CallId, Identity)>>,
         delete_calls: Mutex<Vec<CallId>>,
+        update_calls: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
         /// What LiveKit "reports" as connected per call. A call absent
         /// from the map lists as empty (room not found). Drives the
         /// reconciliation tests.
@@ -848,6 +916,10 @@ mod tests {
 
         fn delete_snapshot(&self) -> Vec<CallId> {
             self.delete_calls.lock().expect("recording lock").clone()
+        }
+
+        fn update_snapshot(&self) -> Vec<(CallId, Identity, MediaCapabilities)> {
+            self.update_calls.lock().expect("recording lock").clone()
         }
 
         fn set_live(&self, call: &CallId, identities: Vec<Identity>) {
@@ -894,6 +966,24 @@ mod tests {
             })
         }
 
+        fn update_participant<'a>(
+            &'a self,
+            room: &'a CallId,
+            identity: &'a Identity,
+            capabilities: MediaCapabilities,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
+            let room = room.clone();
+            let identity = identity.clone();
+            Box::pin(async move {
+                self.update_calls.lock().expect("recording lock").push((
+                    room,
+                    identity,
+                    capabilities,
+                ));
+                Ok(())
+            })
+        }
+
         fn list_participant_identities<'a>(
             &'a self,
             room: &'a CallId,
@@ -922,6 +1012,116 @@ mod tests {
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
+    }
+
+    #[tokio::test]
+    async fn update_capabilities_pushes_permission_for_registered_participant() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-grants").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+
+        let caps = MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor);
+        sfu.update_participant_capabilities(&call, &alice, caps);
+        drain_admin_tasks().await;
+
+        let updates = admin.update_snapshot();
+        assert_eq!(updates.len(), 1, "UpdateParticipant fires exactly once");
+        assert_eq!(&updates[0].0, &call);
+        assert_eq!(
+            updates[0].1.as_livekit_identity(),
+            alice.as_livekit_identity()
+        );
+        assert_eq!(updates[0].2, caps);
+        assert!(
+            sfu.has_call_participant(&call, &alice),
+            "a grant update must not unregister the participant"
+        );
+        assert!(
+            admin.remove_snapshot().is_empty(),
+            "a grant update must not evict"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_capabilities_noops_for_unregistered_participant() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-grants-ghost").unwrap();
+        let alice = fixture_identity("alice");
+
+        sfu.update_participant_capabilities(
+            &call,
+            &alice,
+            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
+        );
+        drain_admin_tasks().await;
+
+        assert!(
+            admin.update_snapshot().is_empty(),
+            "an occupant who never joined the call has no SFU state to converge"
+        );
+    }
+
+    #[tokio::test]
+    async fn downgrade_to_listen_only_revokes_outstanding_tokens_but_keeps_participant() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-demote").unwrap();
+        let alice = fixture_identity("alice");
+        let token = sfu
+            .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+            .expect("token");
+        sfu.register_call_participant(&call, &alice);
+
+        sfu.update_participant_capabilities(
+            &call,
+            &alice,
+            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
+        );
+        drain_admin_tasks().await;
+
+        assert!(
+            sfu.is_revoked(&token.jti),
+            "a not-yet-used pre-demotion token must not be replayable with stale publish rights"
+        );
+        assert_eq!(sfu.issued_count(&call, &alice), 0);
+        assert!(
+            sfu.has_call_participant(&call, &alice),
+            "the demoted participant stays in the call as a listener"
+        );
+        assert_eq!(admin.update_snapshot().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upgrade_to_voice_does_not_revoke_tokens() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-promote").unwrap();
+        let alice = fixture_identity("alice");
+        let token = sfu
+            .issue_join_token(
+                &call,
+                &alice,
+                MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor),
+            )
+            .expect("token");
+        sfu.register_call_participant(&call, &alice);
+
+        sfu.update_participant_capabilities(
+            &call,
+            &alice,
+            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Participant),
+        );
+        drain_admin_tasks().await;
+
+        assert!(
+            !sfu.is_revoked(&token.jti),
+            "a promotion widens grants; existing tokens stay valid"
+        );
+        assert_eq!(admin.update_snapshot().len(), 1);
+        assert!(admin.update_snapshot()[0].2.can_publish);
     }
 
     #[tokio::test]

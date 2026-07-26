@@ -25,6 +25,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 zeroize = { workspace = true }
 
 [dev-dependencies]

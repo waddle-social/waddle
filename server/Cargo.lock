@@ -7755,6 +7755,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "waddle-xmpp-core",
  "zeroize",
 ]
 

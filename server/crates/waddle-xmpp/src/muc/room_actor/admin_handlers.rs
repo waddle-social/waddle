@@ -138,6 +138,7 @@ pub(super) fn apply_affiliation_change(
         return Ok(AdminItemsApplied {
             presence_updates: updates,
             removed_by_moderation,
+            role_changes: Vec::new(),
         });
     }
 
@@ -161,6 +162,7 @@ pub(super) fn apply_affiliation_change(
         return Ok(AdminItemsApplied {
             presence_updates: updates,
             removed_by_moderation: Vec::new(),
+            role_changes: Vec::new(),
         });
     }
 
@@ -193,6 +195,7 @@ pub(super) fn apply_affiliation_change(
     Ok(AdminItemsApplied {
         presence_updates: updates,
         removed_by_moderation: Vec::new(),
+        role_changes: Vec::new(),
     })
 }
 
@@ -343,6 +346,14 @@ pub struct ApplyAdminItems {
 pub struct AdminItemsApplied {
     pub presence_updates: Vec<(FullJid, Presence)>,
     pub removed_by_moderation: Vec<FullJid>,
+    /// Every session whose XEP-0045 role changed *without* leaving the
+    /// room (voice grant/revoke, moderator grant/revoke), with the role
+    /// now in effect. Callers owning an SFU handle must converge these
+    /// sessions' live media grants — a visitor demotion revokes
+    /// publish rights on the SFU, a voice grant restores them.
+    /// Removals (kick/ban) never appear here; they are terminal and
+    /// carried by `removed_by_moderation` instead.
+    pub role_changes: Vec<(FullJid, Role)>,
 }
 
 impl kameo::message::Message<ApplyAdminItems> for RoomActor {
@@ -369,6 +380,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         }
         let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
         let mut removed_by_moderation: Vec<FullJid> = Vec::new();
+        let mut role_changes: Vec<(FullJid, Role)> = Vec::new();
         // FIX 2: a persist failure partway through this batch must not
         // abort the loop early — earlier items in the same batch have
         // already mutated `self.room` (bans/kicks remove occupants), so
@@ -455,6 +467,11 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     if let Some(occ) = self.room.occupants.get_mut(&target_nick) {
                         occ.role = new_role;
                     }
+                    role_changes.extend(
+                        target_sessions
+                            .iter()
+                            .map(|session| (session.clone(), new_role)),
+                    );
                     for recipient in all_room_sessions(&self.room) {
                         let target_identity = OccupantIdentity {
                             bare_jid: &target_bare,
@@ -630,6 +647,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         Ok(AdminItemsApplied {
             presence_updates,
             removed_by_moderation,
+            role_changes,
         })
     }
 }

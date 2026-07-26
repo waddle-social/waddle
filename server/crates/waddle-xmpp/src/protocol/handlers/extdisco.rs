@@ -228,6 +228,7 @@ mod tests {
         StanzaContext {
             domain: "waddle.test",
             full_jid: jid,
+            media_capabilities: None,
         }
     }
 

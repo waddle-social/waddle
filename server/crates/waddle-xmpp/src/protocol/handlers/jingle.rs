@@ -429,11 +429,14 @@ impl JingleHandler {
         };
 
         // One join token per stanza, shared across contents (#1142).
+        // 1:1 peers are symmetric, mutually-consenting participants:
+        // full grants by construction, no role model applies.
         if let Err(reason) = rewrite_contents_transport(
             &mut jingle.contents,
             &call_id,
             &correlation,
             &peer_identity,
+            MediaCapabilities::direct_call_peer(),
             &*self.sfu,
         ) {
             if let Some(invite) = claimed_invite.clone() {
@@ -629,11 +632,21 @@ impl JingleHandler {
         // we emit per XEP-0166 §10.2 — the conference focus is the
         // source of the rejection, not the requester.
         let mixer_jid: Jid = calls_mixer_jid(ctx.domain).into();
+        // Grants come from the websocket layer's Muji gate, which
+        // derived them from the sender's current XEP-0045 role at
+        // authorization time. A missing value on this path means a
+        // dispatch route without the gate — fail closed to
+        // listen-only rather than minting publish rights nobody
+        // authorized.
+        let capabilities = ctx.media_capabilities.unwrap_or_else(|| {
+            MediaCapabilities::from_muc_role(waddle_xmpp_core::types::Role::Visitor)
+        });
         if let Err(reason) = rewrite_contents_transport(
             &mut jingle.contents,
             &call_id,
             &correlation,
             &identity,
+            capabilities,
             &*self.sfu,
         ) {
             attempt.failed(reason.setup_failure_reason());
@@ -1088,6 +1101,7 @@ fn rewrite_contents_transport(
     call_id: &CallId,
     correlation: &CallCorrelationId,
     peer_identity: &Identity,
+    capabilities: MediaCapabilities,
     sfu: &dyn SfuService,
 ) -> Result<(), RewriteError> {
     for content in contents.iter() {
@@ -1096,11 +1110,7 @@ fn rewrite_contents_transport(
     if contents.is_empty() {
         return Ok(());
     }
-    let token = match sfu.issue_join_token(
-        call_id,
-        peer_identity,
-        MediaCapabilities::full_participant(),
-    ) {
+    let token = match sfu.issue_join_token(call_id, peer_identity, capabilities) {
         Ok(token) => {
             record_sfu_token_minted(call_id, correlation, peer_identity);
             token
@@ -1305,9 +1315,15 @@ mod tests {
     }
 
     fn ctx<'a>(jid: &'a FullJid) -> StanzaContext<'a> {
+        // Mirrors what the websocket layer's Muji gate supplies for a
+        // voiced occupant; tests for the fail-closed path override
+        // `media_capabilities` explicitly.
         StanzaContext {
             domain: "waddle.test",
             full_jid: jid,
+            media_capabilities: Some(MediaCapabilities::from_muc_role(
+                waddle_xmpp_core::types::Role::Participant,
+            )),
         }
     }
 

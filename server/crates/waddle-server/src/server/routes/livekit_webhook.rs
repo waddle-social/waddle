@@ -814,7 +814,7 @@ mod tests {
             .issue_join_token(
                 &call_id,
                 &bob_identity,
-                MediaCapabilities::full_participant(),
+                MediaCapabilities::direct_call_peer(),
             )
             .expect("bob token");
         sfu.register_call_participant(&call_id, &alice_identity);

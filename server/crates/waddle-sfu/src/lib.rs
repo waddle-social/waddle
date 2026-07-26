@@ -110,6 +110,26 @@ pub trait SfuService: Send + Sync + 'static {
     /// round-trip plus a race window against quick rejoins.
     fn note_participant_left(&self, call_id: &CallId, identity: &Identity);
 
+    /// Push replacement media grants to a *live* participant after an
+    /// XEP-0045 role change, without disconnecting them: a visitor
+    /// demotion becomes listen-only immediately (the SFU
+    /// force-unpublishes their tracks), a voice grant lets them
+    /// publish without renegotiating. No-op when `identity` is not
+    /// currently registered in `call_id`.
+    ///
+    /// On a downgrade (new grants are listen-only) implementations
+    /// also revoke every outstanding JWT minted for the
+    /// `(call_id, identity)` pair, so an unused token from before the
+    /// demotion cannot be replayed to rejoin with stale publish
+    /// rights. The remote leg is fire-and-forget like
+    /// [`Self::unregister_call_participant`]'s.
+    fn update_participant_capabilities(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        capabilities: MediaCapabilities,
+    );
+
     /// Returns `true` if the SFU has marked `jti` as revoked. Useful
     /// for tests + future LiveKit-cooperative validation: when
     /// LiveKit gains the ability to delegate token verification back

@@ -6,6 +6,7 @@
 //! representations live in [`crate::token`] and [`crate::livekit`].
 
 use jid::FullJid;
+use waddle_xmpp_core::types::Role;
 
 use crate::error::SfuError;
 
@@ -77,7 +78,7 @@ impl Identity {
 
 /// Per-participant grants. Translated 1:1 into the LiveKit `video`
 /// grant in the issued JWT.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaCapabilities {
     pub can_publish: bool,
     pub can_subscribe: bool,
@@ -85,14 +86,70 @@ pub struct MediaCapabilities {
 }
 
 impl MediaCapabilities {
-    /// Default for an interactive call participant: full publish +
-    /// subscribe rights, no data-channel role.
-    pub fn full_participant() -> Self {
+    /// Grants for a 1:1 call peer. Both sides of a direct call are
+    /// symmetric, mutually-consenting participants, so each receives
+    /// full publish + subscribe rights.
+    pub fn direct_call_peer() -> Self {
         Self {
             can_publish: true,
             can_subscribe: true,
             can_publish_data: true,
         }
+    }
+
+    /// Grants for a MUC (XEP-0272 Muji) call occupant, derived from
+    /// the occupant's XEP-0045 role. "Voice" is precisely role ≥
+    /// participant: a visitor is by definition an occupant without
+    /// voice, so visitors receive listen-only grants. Affiliation is
+    /// not consulted here — it is an input to role assignment, which
+    /// the room actor already resolves.
+    ///
+    /// `Role::None` cannot belong to a current occupant; it maps to
+    /// listen-only as the fail-closed floor.
+    pub fn from_muc_role(role: Role) -> Self {
+        let has_voice = role >= Role::Participant;
+        Self {
+            can_publish: has_voice,
+            can_subscribe: true,
+            can_publish_data: has_voice,
+        }
+    }
+
+    /// True when these grants allow no publishing of any kind.
+    pub fn is_listen_only(&self) -> bool {
+        !self.can_publish && !self.can_publish_data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// XEP-0045 voice semantics: "voice" is precisely role ≥
+    /// participant. Pin the full role → grant table.
+    #[test]
+    fn muc_role_grant_table() {
+        for role in [Role::Moderator, Role::Participant] {
+            let caps = MediaCapabilities::from_muc_role(role);
+            assert!(caps.can_publish, "{role:?} has voice");
+            assert!(caps.can_publish_data, "{role:?} has voice");
+            assert!(caps.can_subscribe);
+            assert!(!caps.is_listen_only());
+        }
+        for role in [Role::Visitor, Role::None] {
+            let caps = MediaCapabilities::from_muc_role(role);
+            assert!(!caps.can_publish, "{role:?} has no voice");
+            assert!(!caps.can_publish_data, "{role:?} has no voice");
+            assert!(caps.can_subscribe, "a visitor is a listener");
+            assert!(caps.is_listen_only());
+        }
+    }
+
+    #[test]
+    fn direct_call_peers_get_full_grants() {
+        let caps = MediaCapabilities::direct_call_peer();
+        assert!(caps.can_publish && caps.can_subscribe && caps.can_publish_data);
+        assert!(!caps.is_listen_only());
     }
 }
 

@@ -64,6 +64,7 @@ mod tests {
         let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
+            media_capabilities: None,
         };
         let events = CarbonsHandler.handle(&iq, &ctx);
         assert_eq!(events.len(), 1);

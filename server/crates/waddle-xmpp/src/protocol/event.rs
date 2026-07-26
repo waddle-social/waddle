@@ -19,6 +19,7 @@ use super::frame::InboundFrame;
 use crate::xep::{CallThreadKind, CallThreadMedia};
 use crate::Stanza;
 use jid::{FullJid, Jid};
+use waddle_sfu::MediaCapabilities;
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::message::Message;
 
@@ -244,4 +245,12 @@ pub struct StanzaContext<'a> {
     pub domain: &'a str,
     /// The currently authenticated full JID of the connection owner.
     pub full_jid: &'a FullJid,
+    /// Media grants derived by the websocket layer's Muji gate from
+    /// the sender's current XEP-0045 role, at the moment the gate
+    /// authorized this stanza. `Some` only for Muji Jingle IQs that
+    /// passed the occupancy check; `None` everywhere else (non-call
+    /// stanzas, 1:1 Jingle, and dispatch paths with no gate). The
+    /// Jingle handler's Muji mint consumes this — absence on that
+    /// path fails closed to listen-only grants.
+    pub media_capabilities: Option<MediaCapabilities>,
 }

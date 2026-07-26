@@ -18,7 +18,8 @@
 //! session in is a benign no-op.
 
 use jid::{BareJid, FullJid};
-use waddle_sfu::{CallId, Identity};
+use waddle_sfu::{CallId, Identity, MediaCapabilities};
+use waddle_xmpp_core::types::Role;
 
 use super::state::WebSocketState;
 
@@ -60,6 +61,36 @@ pub(crate) fn unregister_participant_via_sfu(
     };
     let identity = Identity::from_jid(jid.clone());
     let _ = sfu.unregister_call_participant(&call_id, &identity);
+}
+
+/// Converge `jid`'s live SFU media grants with their new XEP-0045
+/// role after a non-removal role change (voice grant/revoke,
+/// moderator grant/revoke). The SFU layer no-ops when `jid` is not a
+/// current call participant, revokes outstanding join tokens on a
+/// downgrade to listen-only, and pushes the new permission to the
+/// live participant fire-and-forget — moderation IQ handling is
+/// never blocked on LiveKit.
+///
+/// Same no-op conditions as [`unregister_participant_from_room`]
+/// (no SFU configured, room JID not a valid call-id).
+pub(crate) fn apply_role_grants_for_room(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    jid: &FullJid,
+    role: Role,
+) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+        return;
+    };
+    let identity = Identity::from_jid(jid.clone());
+    sfu.update_participant_capabilities(
+        &call_id,
+        &identity,
+        MediaCapabilities::from_muc_role(role),
+    );
 }
 
 /// Local-only teardown variant for the LiveKit webhook bridge. The

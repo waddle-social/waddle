@@ -657,6 +657,16 @@ pub(super) async fn handle_muc_admin_iq(
             state, &room_jid, removed,
         );
     }
+    // Role-derived media grants: a non-removal role change (voice
+    // grant/revoke, moderator grant/revoke) must converge the
+    // target's live SFU permission with the role the room actor just
+    // applied — otherwise a voice-revoked visitor keeps publishing
+    // until they renegotiate. Fire-and-forget like the eviction above.
+    for (session, new_role) in &applied.role_changes {
+        super::super::super::muc_call_sfu::apply_role_grants_for_room(
+            state, &room_jid, session, *new_role,
+        );
+    }
     for (recipient, presence) in remaining_broadcasts {
         let _ = state
             .deps
