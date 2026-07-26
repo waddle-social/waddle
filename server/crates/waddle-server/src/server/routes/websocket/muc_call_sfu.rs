@@ -104,6 +104,88 @@ pub(crate) fn apply_voice_grants_via_sfu(
     );
 }
 
+/// Converge the live SFU media grants of every session whose XEP-0045
+/// voice changed without leaving the room. An affiliation change can
+/// re-derive an occupant's role and silently take voice away, so every
+/// moderation surface must push these — not just the XMPP IQ path.
+pub(crate) fn converge_voice_changes_via_sfu(
+    sfu: Option<&std::sync::Arc<dyn waddle_sfu::SfuService>>,
+    room_jid: &BareJid,
+    voice_changes: &[(FullJid, Voice)],
+) {
+    let Some(sfu) = sfu else {
+        return;
+    };
+    for (session, voice) in voice_changes {
+        apply_voice_grants_via_sfu(sfu, room_jid, session, *voice);
+    }
+}
+
+/// Push every occupant's current XEP-0045 voice to the SFU after a
+/// room-configuration change flipped `moderated`.
+///
+/// Flipping moderation re-decides voice for every seated visitor
+/// without changing any role, and nothing else in the config path
+/// touches an occupant, so without this the SFU keeps the pre-flip
+/// grants: a visitor who just lost text voice would keep publishing.
+///
+/// Deliberately NOT filtered by the process-local participant registry.
+/// Filtering would skip a visitor LiveKit still holds but this node has
+/// lost track of (a reconnect after `participant_left`, reconciliation,
+/// actor migration, or registration by another node), leaving them
+/// publishing — the same fail-open that
+/// [`waddle_sfu::SfuService::update_participant_capabilities`] is
+/// documented to avoid. LiveKit maps an unknown participant to
+/// `not_found`, which the admin client treats as success, so
+/// over-pushing costs only a few no-op requests.
+pub(crate) async fn converge_room_voice_after_moderation_flip(
+    sfu: Option<&std::sync::Arc<dyn waddle_sfu::SfuService>>,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+) {
+    let Some(sfu) = sfu else {
+        return;
+    };
+    let voices = match actor
+        .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
+        .await
+    {
+        Ok(voices) => voices,
+        Err(error) => {
+            // Security-relevant convergence: a silent skip leaves
+            // occupants publishing against the new moderation policy.
+            tracing::warn!(
+                room = %room_jid,
+                error = ?error,
+                "could not read occupant voices after a moderation flip; \
+                 live media grants now lag the room configuration",
+            );
+            return;
+        }
+    };
+    for (session, voice) in voices {
+        apply_voice_grants_via_sfu(sfu, room_jid, &session, voice);
+    }
+}
+
+/// Mirror a members-only enforcement sweep (XEP-0045 status 322) onto
+/// the SFU: an ejection ends room membership, so it must end call
+/// participation, and a surviving occupant who lost voice must lose
+/// publish rights.
+pub(crate) fn converge_members_only_sweep_via_sfu(
+    sfu: Option<&std::sync::Arc<dyn waddle_sfu::SfuService>>,
+    room_jid: &BareJid,
+    applied: &waddle_xmpp::muc::room_actor::AdminItemsApplied,
+) {
+    let Some(sfu) = sfu else {
+        return;
+    };
+    for removed in &applied.removed_by_moderation {
+        unregister_participant_via_sfu(sfu, room_jid, removed);
+    }
+    converge_voice_changes_via_sfu(Some(sfu), room_jid, &applied.voice_changes);
+}
+
 /// Local-only teardown variant for the LiveKit webhook bridge. The
 /// SFU's `participant_left` event is the acknowledgement that
 /// LiveKit already removed the participant on its side — invoking

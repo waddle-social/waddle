@@ -23,6 +23,12 @@ const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
+const NS_JABBER_CLIENT: &str = "jabber:client";
+const NS_JINGLE: &str = "urn:xmpp:jingle:1";
+const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
+const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
+const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 const NS_SID: &str = "urn:xmpp:sid:0";
@@ -1406,23 +1412,105 @@ fn decode_issued_grant(frame: &str) -> E2eVideoGrant {
         .video
 }
 
+/// `muc#owner` config-submit IQ carrying the given form fields.
+fn owner_config_iq(room: &str, id: &str, fields: &[(&str, &str)]) -> Element {
+    let mut form = Element::builder("x", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    for (var, value) in fields {
+        form = form.append(
+            Element::builder("field", NS_DATA)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), *var)
+                .append(
+                    Element::builder("value", NS_DATA)
+                        .append(minidom::Node::Text((*value).to_string()))
+                        .build(),
+                )
+                .build(),
+        );
+    }
+    Element::builder("iq", NS_JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room)
+        .append(
+            Element::builder("query", NS_MUC_OWNER)
+                .append(form.build())
+                .build(),
+        )
+        .build()
+}
+
+/// `muc#admin` role-change IQ (XEP-0045 §8.4 voice grant/revoke).
+fn muc_admin_role_iq(room: &str, id: &str, nick: &str, role: &str) -> Element {
+    Element::builder("iq", NS_JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room)
+        .append(
+            Element::builder("query", NS_MUC_ADMIN)
+                .append(
+                    Element::builder("item", NS_MUC_ADMIN)
+                        .attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick)
+                        .attr(minidom::rxml::xml_ncname!("role").to_owned(), role)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
 /// Send a Muji `session-initiate` for `room` and return the focus's
 /// `session-accept` frame carrying the issued transport.
 async fn muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str) -> String {
+    // Built with `minidom` builders, not string formatting, per the
+    // repo's XML-generation rule: interpolating `room`/`sid` into raw
+    // XML is exactly the shape that rule forbids.
+    let payload_type = Element::builder("payload-type", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+        .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+        .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+        .build();
+    let description = Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+        .append(payload_type)
+        .build();
+    let content = Element::builder("content", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("creator").to_owned(),
+            "initiator",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+        .append(description)
+        .append(Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build())
+        .build();
+    let jingle = Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-initiate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .append(content)
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .attr(minidom::rxml::xml_ncname!("room").to_owned(), room)
+                .build(),
+        )
+        .build();
+    let iq = Element::builder("iq", NS_JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            format!("mji-{sid}"),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "calls.localhost",
+        )
+        .append(jingle)
+        .build();
     client
-        .send(&format!(
-            r#"<iq xmlns="jabber:client" type="set" id="mji-{sid}" to="calls.localhost">
-                 <jingle xmlns="urn:xmpp:jingle:1" action="session-initiate" sid="{sid}">
-                   <content creator="initiator" name="audio">
-                     <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio">
-                       <payload-type id="111" name="opus" clockrate="48000" channels="2"/>
-                     </description>
-                     <transport xmlns="urn:waddle:transports:livekit:0"/>
-                   </content>
-                   <muji xmlns="{NS_MUJI}" room="{room}"/>
-                 </jingle>
-               </iq>"#
-        ))
+        .send(&String::from(&iq))
         .await
         .expect("muji session-initiate");
     client
@@ -1494,16 +1582,14 @@ async fn muji_join_by_devoiced_visitor_mints_listen_only_token_end_to_end() {
     // Make the room moderated so the visitor role actually withholds
     // voice (XEP-0045 §Terminology), then devoice bob.
     alice
-        .send(&format!(
-            r#"<iq xmlns="jabber:client" type="set" id="cfg-moderated" to="{room}">
-                 <query xmlns="http://jabber.org/protocol/muc#owner">
-                   <x xmlns="{NS_DATA}" type="submit">
-                     <field var="FORM_TYPE"><value>http://jabber.org/protocol/muc#roomconfig</value></field>
-                     <field var="muc#roomconfig_moderatedroom"><value>1</value></field>
-                   </x>
-                 </query>
-               </iq>"#
-        ))
+        .send(&String::from(&owner_config_iq(
+            &room,
+            "cfg-moderated",
+            &[
+                ("FORM_TYPE", "http://jabber.org/protocol/muc#roomconfig"),
+                ("muc#roomconfig_moderatedroom", "1"),
+            ],
+        )))
         .await
         .expect("owner config submit");
     let _ = alice
@@ -1512,13 +1598,12 @@ async fn muji_join_by_devoiced_visitor_mints_listen_only_token_end_to_end() {
         .expect("room config result");
 
     alice
-        .send(&format!(
-            r#"<iq xmlns="jabber:client" type="set" id="devoice-bob" to="{room}">
-                 <query xmlns="http://jabber.org/protocol/muc#admin">
-                   <item nick="bob" role="visitor"/>
-                 </query>
-               </iq>"#
-        ))
+        .send(&String::from(&muc_admin_role_iq(
+            &room,
+            "devoice-bob",
+            "bob",
+            "visitor",
+        )))
         .await
         .expect("devoice bob");
     let _ = alice

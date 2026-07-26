@@ -81,6 +81,23 @@ impl SeenEventIds {
         }
         true
     }
+
+    /// Un-record `id`, so a LiveKit retry of the same delivery is
+    /// processed instead of dropped as a duplicate.
+    ///
+    /// Needed when handling could not complete for a transient reason:
+    /// the dedupe LRU is recorded up-front, so without this a delivery
+    /// we failed to act on would be permanently unrepairable — LiveKit's
+    /// retries would all be discarded as duplicates.
+    pub fn forget(&self, id: Option<&str>) {
+        let Some(id) = id else {
+            return;
+        };
+        let mut guard = self.inner.lock().expect("SeenEventIds mutex poisoned");
+        if guard.set.remove(id) {
+            guard.order.retain(|seen| seen != id);
+        }
+    }
 }
 
 /// Axum router for the LiveKit webhook endpoint. Mounted under
@@ -240,7 +257,25 @@ async fn livekit_webhook_handler(
             // otherwise publish for the remainder of the token's TTL.
             // Re-deriving their current voice here and pushing it
             // converges them within one webhook round-trip.
-            reassert_voice_grants_on_join(&state, &env.room.name, &env.participant.identity).await;
+            if reassert_voice_grants_on_join(&state, &env.room.name, &env.participant.identity)
+                .await
+                == ReassertOutcome::RetryableFailure
+            {
+                // A transient failure must not be acknowledged: the
+                // dedupe LRU is recorded up-front, so a 200 here would
+                // make LiveKit's retries land as duplicates and leave a
+                // possibly stale token unenforced forever. Drop the
+                // dedupe entry and answer 5xx so the retry is processed.
+                // The structural case (room owned by another replica) is
+                // deliberately NOT retried — see `ReassertOutcome`.
+                seen.forget(event.event_id());
+                warn!(
+                    room = %env.room.name,
+                    call.id = %call_id_field,
+                    "asking LiveKit to retry participant_joined after a transient failure",
+                );
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
         }
         LiveKitWebhookEvent::Other => {}
     }
@@ -337,22 +372,77 @@ async fn reconcile_once(
     grace: chrono::Duration,
 ) {
     let swept = reconciler.reconcile_active_calls(grace).await;
-    if swept.is_empty() {
-        return;
-    }
-    info!(
-        count = swept.len(),
-        "SFU reconciliation swept ghost participants; clearing MUC Muji presence"
-    );
-    for (call_id, identity) in swept {
-        if is_muc_call(call_id.as_str()) {
-            process_participant_left_for_identity(
-                state,
-                call_id.as_str(),
-                identity.as_jid().to_string().as_str(),
-            )
-            .await;
+    if !swept.is_empty() {
+        info!(
+            count = swept.len(),
+            "SFU reconciliation swept ghost participants; clearing MUC Muji presence"
+        );
+        for (call_id, identity) in swept {
+            if is_muc_call(call_id.as_str()) {
+                process_participant_left_for_identity(
+                    state,
+                    call_id.as_str(),
+                    identity.as_jid().to_string().as_str(),
+                )
+                .await;
+            }
         }
+    }
+    reconcile_voice_grants(state).await;
+}
+
+/// Re-derive and push the current XEP-0045 voice of every occupant of
+/// every MUC room whose actor lives on THIS node.
+///
+/// This is the backstop that makes stale-token enforcement independent
+/// of which replica received a `participant_joined` webhook. The webhook
+/// path is the fast path, and it asks LiveKit to retry when it lands on
+/// a node that cannot resolve the room — but retries are finite and all
+/// of them could miss the owner. Because a room actor is claimed by
+/// exactly one node, iterating locally-claimed rooms covers every room
+/// exactly once across the cluster, with no cross-node request and no
+/// new relay protocol.
+///
+/// Pushes are idempotent: `UpdateParticipant` for a participant whose
+/// grants already match is a no-op on LiveKit's side, and an unknown
+/// participant resolves to `not_found`, which the admin client treats as
+/// success.
+async fn reconcile_voice_grants(state: &WebSocketState) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    let rooms = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::LocalRoomJids)
+        .await;
+    let rooms = match rooms {
+        Ok(rooms) => rooms,
+        Err(error) => {
+            warn!(error = ?error, "could not list locally-claimed rooms for voice reconciliation");
+            return;
+        }
+    };
+    for room_jid in rooms {
+        // Only rooms with an active call have anything to converge.
+        let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+            continue;
+        };
+        if sfu.participants_for_call(&call_id).is_empty() {
+            continue;
+        }
+        let Ok(Some(actor)) =
+            crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await
+        else {
+            continue;
+        };
+        crate::server::routes::websocket::muc_call_sfu::converge_room_voice_after_moderation_flip(
+            Some(sfu),
+            &actor,
+            &room_jid,
+        )
+        .await;
     }
 }
 
@@ -365,6 +455,26 @@ async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvel
 /// `RoomFinished` survivor sweep. Takes the raw identity string so
 /// the survivor sweep (which iterates `Identity` values out of the
 /// SFU registry) can call it with the same shape.
+/// Whether a `participant_joined` delivery was fully handled, or could
+/// not be enforced and should be retried by LiveKit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReassertOutcome {
+    /// Grants were converged, or no MUC authorization applies to this
+    /// participant. Nothing a retry would improve.
+    Handled,
+    /// This node structurally cannot resolve the room — its actor is
+    /// claimed by another replica. Retrying would 5xx roughly half of
+    /// all joins in a two-replica cluster for a condition that is not a
+    /// failure, so the delivery is acknowledged and convergence is left
+    /// to [`reconcile_voice_grants`] on the owning node.
+    UnenforceableHere,
+    /// A transient failure (the local actor flaked) left grants
+    /// possibly stale. The delivery is NOT acknowledged so LiveKit's
+    /// retry can repair it — without this the up-front dedupe record
+    /// would make the failure permanent.
+    RetryableFailure,
+}
+
 /// Re-derive a just-joined participant's XEP-0045 voice and push it to
 /// the SFU, so the permissions LiveKit granted from their token match
 /// the room's current authorization state.
@@ -390,25 +500,30 @@ async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvel
 /// silent skip would be indistinguishable from success. Notably the
 /// room actor may be claimed by another cluster node, in which case
 /// this node cannot resolve the role at all.
-async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, identity: &str) {
+async fn reassert_voice_grants_on_join(
+    state: &WebSocketState,
+    room_name: &str,
+    identity: &str,
+) -> ReassertOutcome {
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return;
+        return ReassertOutcome::Handled;
     };
     let Ok(full_jid) = identity.parse::<FullJid>() else {
+        // Permanent: retrying cannot make this parse.
         warn!(
             room = %room_name,
             "LiveKit participant identity is not a valid full JID; cannot re-assert media grants",
         );
-        return;
+        return ReassertOutcome::Handled;
     };
     // Use the shared classifier: a domain-only id like `c-abc123`
     // parses as a valid `BareJid` without being a room.
     if !is_muc_call(room_name) {
         // 1:1 scoped call id — no MUC roles apply.
-        return;
+        return ReassertOutcome::Handled;
     }
     let Ok(room_jid) = room_name.parse::<BareJid>() else {
-        return;
+        return ReassertOutcome::Handled;
     };
     let actor =
         match crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await {
@@ -426,10 +541,10 @@ async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, 
                 warn!(
                     room = %room_jid,
                     user = %full_jid.to_bare(),
-                    "no local room actor on this node; \
-                     live media grants are unenforced for this join",
+                    "no local room actor on this node; media grants for this join \
+                     will converge on the owning node's reconciliation pass",
                 );
-                return;
+                return ReassertOutcome::UnenforceableHere;
             }
             Err(error) => {
                 // The room lives elsewhere or the lookup failed, so this
@@ -443,9 +558,9 @@ async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, 
                     user = %full_jid.to_bare(),
                     error = %error,
                     "could not resolve MUC voice on participant join; \
-                     live media grants are unenforced for this join",
+                     asking LiveKit to retry",
                 );
-                return;
+                return ReassertOutcome::RetryableFailure;
             }
         };
     match actor
@@ -463,6 +578,7 @@ async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, 
             crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
                 sfu, &room_jid, &full_jid, voice,
             );
+            ReassertOutcome::Handled
         }
         Ok(None) => {
             // A LOCAL room actor answered, so it owns this room and its
@@ -479,6 +595,7 @@ async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, 
             crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
                 sfu, &room_jid, &full_jid,
             );
+            ReassertOutcome::Handled
         }
         Err(error) => {
             warn!(
@@ -486,8 +603,9 @@ async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, 
                 user = %full_jid.to_bare(),
                 error = %error,
                 "MUC voice lookup failed on participant join; \
-                 live media grants are unenforced for this join",
+                 asking LiveKit to retry",
             );
+            ReassertOutcome::RetryableFailure
         }
     }
 }

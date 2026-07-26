@@ -102,6 +102,43 @@ async fn test_room_count_starts_at_zero() {
     assert_eq!(count, 0);
 }
 
+/// The SFU voice-reconciliation backstop iterates locally-claimed rooms
+/// on every node, relying on a room actor being claimed by exactly one
+/// node so each room is covered once cluster-wide.
+#[tokio::test]
+async fn local_room_jids_lists_rooms_this_node_holds() {
+    let registry = spawn_registry().await;
+    assert!(
+        registry.ask(LocalRoomJids).await.expect("ask").is_empty(),
+        "a fresh registry holds no rooms"
+    );
+
+    for name in ["general", "random"] {
+        registry
+            .ask(CreateInstantRoom {
+                room_jid: test_room_jid(name),
+            })
+            .await
+            .expect("create instant room");
+    }
+
+    let mut listed: Vec<String> = registry
+        .ask(LocalRoomJids)
+        .await
+        .expect("ask")
+        .into_iter()
+        .map(|jid| jid.to_string())
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        vec![
+            "general@muc.example.com".to_string(),
+            "random@muc.example.com".to_string()
+        ]
+    );
+}
+
 #[tokio::test]
 async fn test_create_room() {
     let registry = spawn_registry().await;

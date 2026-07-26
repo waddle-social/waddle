@@ -522,6 +522,13 @@ impl LiveKitSfu {
                 // idle during a LiveKit incident.
                 drop(permit);
                 tokio::time::sleep(GRANT_RETRY_BACKOFF * attempt).await;
+                // Re-check AFTER the sleep too: an intent that arrived
+                // during the backoff window owns convergence, and
+                // burning another retry would hold the per-participant
+                // lock and delay it.
+                if desired.contains_key(&key) {
+                    break;
+                }
                 let Ok(next) = Arc::clone(&permits).acquire_owned().await else {
                     drop(serialized);
                     reap_grant_lock(&locks, &key);

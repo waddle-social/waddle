@@ -634,13 +634,21 @@ impl JingleHandler {
         let mixer_jid: Jid = calls_mixer_jid(ctx.domain).into();
         // Grants come from the websocket layer's Muji gate, which
         // derived them from the sender's current XEP-0045 role at
-        // authorization time. A missing value on this path means a
-        // dispatch route without the gate — fail closed to
-        // listen-only rather than minting publish rights nobody
-        // authorized.
-        let capabilities = ctx
-            .media_capabilities
-            .unwrap_or_else(MediaCapabilities::listen_only);
+        // authorization time. Absence means this Muji IQ reached the
+        // mint through a dispatch route that never ran the gate, so no
+        // authorization decision exists for it. Refuse outright rather
+        // than minting a listen-only token: a subscribe-capable JWT
+        // still admits the holder to the room's media and would let an
+        // unverified caller listen in.
+        let Some(capabilities) = ctx.media_capabilities else {
+            record_sfu_token_authorization_denial(&room_jid, &ctx.full_jid.to_bare());
+            attempt.failed(CallSetupFailureReason::NotAuthorized);
+            return error_reply(
+                iq,
+                DefinedCondition::Forbidden,
+                "Muji join was not authorized: no MUC membership decision accompanied this request",
+            );
+        };
         if let Err(reason) = rewrite_contents_transport(
             &mut jingle.contents,
             &call_id,

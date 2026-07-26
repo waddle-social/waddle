@@ -938,10 +938,11 @@ fn muji_initiate_with_visitor_grants_mints_listen_only_token() {
 }
 
 /// Fail closed: a Muji mint reached without gate-derived capabilities
-/// (a dispatch route that skipped the membership gate) must never
-/// mint publish rights nobody authorized.
+/// must issue NO token at all. A subscribe-only JWT is still a usable
+/// credential for the room's media, so an unverified caller must not
+/// receive one — the request is refused instead.
 #[test]
-fn muji_initiate_without_gate_capabilities_fails_closed_to_listen_only() {
+fn muji_initiate_without_gate_capabilities_is_refused() {
     let iq = muji_session_initiate_iq(
         TEST_INITIATOR,
         &calls_mixer_jid(TEST_DOMAIN).to_string(),
@@ -952,11 +953,13 @@ fn muji_initiate_without_gate_capabilities_fails_closed_to_listen_only() {
     let handler = JingleHandler::new(fixture_sfu());
     let events = handler.handle(&iq, &ctx_with_caps(&jid, None));
 
-    let grant = accepted_video_grant(&events);
-    assert!(grant.can_subscribe);
-    assert!(
-        !grant.can_publish,
-        "fail closed: no publish without a gate-derived grant"
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::Forbidden),
+        "an ungated Muji join must be forbidden, not granted a listener token: {events:?}",
     );
-    assert!(!grant.can_publish_data);
+    assert!(
+        session_accept_payload_to(&events, TEST_INITIATOR).is_none(),
+        "no session-accept (and therefore no token) may be issued: {events:?}",
+    );
 }

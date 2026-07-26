@@ -216,7 +216,11 @@ pub(super) async fn apply_muc_owner_config(
                 .ask(EnforceMembersOnly)
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
-            converge_members_only_sfu_state(state, room_jid, &applied);
+            super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
+                state.deps.protocol.sfu.as_ref(),
+                room_jid,
+                &applied,
+            );
             for (recipient, presence) in applied.presence_updates {
                 let _ = state
                     .deps
@@ -225,8 +229,7 @@ pub(super) async fn apply_muc_owner_config(
                     .try_send_to(&recipient, Stanza::Presence(presence));
             }
         }
-        converge_voice_on_moderation_flip(state, room_jid, &room_actor, &previous_config, &config)
-            .await;
+        converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
         let post_update_snapshot = room_actor
             .ask(GetSnapshot)
             .await
@@ -304,7 +307,11 @@ pub(super) async fn apply_muc_owner_config(
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
         };
-        converge_members_only_sfu_state(state, room_jid, &applied);
+        super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
+            state.deps.protocol.sfu.as_ref(),
+            room_jid,
+            &applied,
+        );
         for (recipient, presence) in applied.presence_updates {
             let _ = state
                 .deps
@@ -314,8 +321,7 @@ pub(super) async fn apply_muc_owner_config(
         }
     }
 
-    converge_voice_on_moderation_flip(state, room_jid, &room_actor, &previous_config, &config)
-        .await;
+    converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
 
     let post_update_snapshot = room_actor
         .ask(GetSnapshot)
@@ -357,21 +363,9 @@ fn broadcast_muc_config_change(
     }
 }
 
-/// Converge live SFU media grants when a config change flips
-/// `moderated`.
-///
-/// Flipping moderation silently re-decides XEP-0045 voice for every
-/// seated visitor without changing anyone's role: turning it ON takes
-/// their voice, turning it OFF restores it (§5.1.2 footnote). Nothing
-/// else in the config path touches an occupant, so without this the SFU
-/// keeps the pre-flip grants and a visitor who just lost text voice
-/// would keep publishing media.
-///
-/// Only occupants the SFU registry actually holds are pushed: a
-/// moderation toggle on a large room would otherwise fan out one
-/// `UpdateParticipant` per occupant, nearly all resolving to
-/// `not_found`.
-pub(super) async fn converge_voice_on_moderation_flip(
+/// Thin adapter: run the shared moderation-flip convergence only when
+/// this config change actually flipped `moderated`.
+async fn converge_flip(
     state: &WebSocketState,
     room_jid: &BareJid,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -381,58 +375,12 @@ pub(super) async fn converge_voice_on_moderation_flip(
     if previous.moderated == updated.moderated {
         return;
     }
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return;
-    };
-    let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) else {
-        return;
-    };
-    let voices = match room_actor
-        .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
-        .await
-    {
-        Ok(voices) => voices,
-        Err(error) => {
-            // Security-relevant convergence: a silent skip leaves
-            // occupants publishing against the new moderation policy.
-            warn!(
-                room = %room_jid,
-                error = ?error,
-                "could not read occupant voices after a moderation flip; \
-                 live media grants now lag the room configuration",
-            );
-            return;
-        }
-    };
-    let in_call = sfu.participants_for_call(&call_id);
-    for (session, voice) in voices {
-        if in_call.iter().any(|identity| identity.as_jid() == &session) {
-            super::super::super::muc_call_sfu::apply_voice_grants_for_room(
-                state, room_jid, &session, voice,
-            );
-        }
-    }
-}
-
-/// Mirror a members-only enforcement sweep onto the SFU: a status-322
-/// ejection ends room membership, so it must end call participation
-/// too, and an occupant who merely lost voice in the sweep must lose
-/// publish rights.
-fn converge_members_only_sfu_state(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-    applied: &waddle_xmpp::muc::room_actor::AdminItemsApplied,
-) {
-    for removed in &applied.removed_by_moderation {
-        super::super::super::muc_call_sfu::unregister_participant_from_room(
-            state, room_jid, removed,
-        );
-    }
-    for (session, voice) in &applied.voice_changes {
-        super::super::super::muc_call_sfu::apply_voice_grants_for_room(
-            state, room_jid, session, *voice,
-        );
-    }
+    super::super::super::muc_call_sfu::converge_room_voice_after_moderation_flip(
+        state.deps.protocol.sfu.as_ref(),
+        room_actor,
+        room_jid,
+    )
+    .await;
 }
 
 #[cfg(test)]

@@ -4054,6 +4054,26 @@ impl kameo::message::Message<ListRoomsOwnedBy> for RoomRegistryActor {
     }
 }
 
+/// Bare JIDs of every room this node currently holds an actor for.
+///
+/// A room actor is claimed by exactly one node, so iterating this on
+/// every node covers each room exactly once cluster-wide — which is what
+/// lets the SFU voice-reconciliation backstop run without any cross-node
+/// request.
+pub struct LocalRoomJids;
+
+impl kameo::message::Message<LocalRoomJids> for RoomRegistryActor {
+    type Reply = Vec<BareJid>;
+
+    async fn handle(
+        &mut self,
+        _msg: LocalRoomJids,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.rooms.keys().cloned().collect()
+    }
+}
+
 /// Return the number of active rooms.
 pub struct RoomCount;
 
