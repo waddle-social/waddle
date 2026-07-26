@@ -184,8 +184,12 @@ export function summarizeIceStats(
   // succeeded. A succeeded pair whose local-candidate fields were
   // unmeasurable (pathClass "unknown") is a working call, not a missing
   // TURN fallback.
+  // A selected pair with a MISSING state still counts as established
+  // (Firefox omits fields), but an explicitly failed one never does —
+  // a failed selected pair with no relay is the real "no path, no TURN".
   const pathEstablished =
-    pair?.state === "succeeded" || (selectedPairId !== undefined && pair !== undefined);
+    pair?.state === "succeeded" ||
+    (selectedPairId !== undefined && pair !== undefined && pair.state !== "failed");
   return {
     pathClass,
     candidateType,

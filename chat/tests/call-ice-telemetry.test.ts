@@ -98,6 +98,20 @@ describe("summarizeIceStats", () => {
     });
   });
 
+  test("an explicitly failed selected pair with no relay reads not-gathered", () => {
+    // transport.selectedCandidatePairId pointing at a FAILED pair is a
+    // genuine no-path failure, not an established call (Qodo review,
+    // PR #1487).
+    const selectedButFailed = [
+      { id: "T1", type: "transport", selectedCandidatePairId: "P1" },
+      { id: "P1", type: "candidate-pair", state: "failed", localCandidateId: "L1" },
+      { id: "L1", type: "local-candidate", candidateType: "host", protocol: "udp" },
+    ];
+    expect(summarizeIceStats(selectedButFailed, 0)).toMatchObject({
+      turnReachability: "not-gathered",
+    });
+  });
+
   test("flags a client whose gathering produced candidates but no relay and no path", () => {
     const failedNoRelay = [
       { id: "P1", type: "candidate-pair", state: "failed", localCandidateId: "L1" },

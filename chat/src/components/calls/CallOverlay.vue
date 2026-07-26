@@ -84,8 +84,10 @@ watch(
       if (current.phase !== "active" || current.sid !== sid) return;
       // Adopt the call correlation id BEFORE the connect attempt, not on
       // the connected event alone: a failed join must still stamp its
-      // lifecycle/failure events with the call's id (#1452).
-      void adoptCallCorrelationId(current.join.room);
+      // lifecycle/failure events with the call's id (#1452). The promise
+      // is kept so the failure path can await the adoption — a fast
+      // connect failure must not emit its telemetry before the id lands.
+      const correlationAdopted = adoptCallCorrelationId(current.join.room);
       await engine.connect(current.join, { ...current.media, iceServers });
       // Capture is best-effort inside connect(): a missing device or a
       // denied mic/cam permission no longer throws — the user joins as a
@@ -101,6 +103,9 @@ watch(
       // fatal — it surfaces as the non-blocking media notice instead and
       // never reaches this catch. Run the full hangup path so
       // SFU/session/Muji presence state rolls back before the slot goes.
+      // Await the in-flight adoption first: clearing (below) bumps the
+      // epoch, and the failure telemetry emitted here must carry the id.
+      await correlationAdopted;
       await tearDownActiveCall(getSender(), "gone");
       await engine.disconnect();
       reportCallError(err);

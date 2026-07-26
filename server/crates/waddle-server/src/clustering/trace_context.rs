@@ -112,6 +112,13 @@ fn deserialize_tracestate<'de, D: serde::Deserializer<'de>>(
 /// (Greptile/Qodo review, PR #1487). Non-string shapes are drained
 /// (sequences/maps element by element) so the decoder stays positioned
 /// for the fields that follow.
+///
+/// Nesting depth is not this visitor's problem: rmp-serde enforces a
+/// 1024-frame recursion limit (`Error::DepthLimitExceeded`) before any
+/// stack risk, and a peer shipping a >1024-deep container fails the
+/// message decode the same way it would for any other field — that
+/// residual is inherent to sharing one MessagePack map, not a
+/// telemetry-specific delivery cost.
 struct LenientBoundedHeaderVisitor {
     what: &'static str,
     max_len: usize,
