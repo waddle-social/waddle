@@ -101,12 +101,139 @@ pub(super) async fn reconcile_voice_grants(state: &WebSocketState, reconciler: &
         if live.is_empty() {
             continue;
         }
-        for (session, voice) in voices {
-            if live.iter().any(|identity| identity.as_jid() == &session) {
-                crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
-                    sfu, &room_jid, &session, voice,
-                );
-            }
+        let RoomVoiceReconciliation { converge, evict } = plan_room_reconciliation(&voices, &live);
+        for (session, voice) in converge {
+            crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
+                sfu, &room_jid, &session, voice,
+            );
         }
+        for session in evict {
+            // Occupancy is the precondition for call participation, and
+            // this node owns the room, so its occupant set is
+            // authoritative: a participant LiveKit reports as connected
+            // who is no longer an occupant holds a token for a room they
+            // left. The webhook path evicts these when it happens to
+            // reach the owning node; without this the backstop would
+            // converge grants but leave a former occupant publishing —
+            // and listening — indefinitely.
+            warn!(
+                room = %room_jid,
+                user = %session.to_bare(),
+                "LiveKit participant is no longer a MUC occupant; evicting from the call",
+            );
+            crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
+                sfu, &room_jid, &session,
+            );
+        }
+    }
+}
+
+/// What one room's reconciliation pass should do to the SFU.
+#[derive(Debug, Default, PartialEq)]
+struct RoomVoiceReconciliation {
+    /// Connected occupants whose grants should be re-asserted.
+    converge: Vec<(jid::FullJid, waddle_xmpp_core::types::Voice)>,
+    /// Connected participants who are no longer occupants at all.
+    evict: Vec<jid::FullJid>,
+}
+
+/// Decide a room's reconciliation from the authoritative occupant set
+/// and the SFU's authoritative participant set.
+///
+/// Pure so the decision is testable without actors or HTTP. NOTE the
+/// caller only reaches this with a NON-EMPTY occupant set: a room actor
+/// freshly claimed by this node has no occupants until clients rejoin,
+/// and treating that as "everyone is a former occupant" would evict a
+/// whole live call. The empty-occupant guard at the call site is
+/// therefore load-bearing, not an optimisation.
+fn plan_room_reconciliation(
+    voices: &[(jid::FullJid, waddle_xmpp_core::types::Voice)],
+    live: &[waddle_sfu::Identity],
+) -> RoomVoiceReconciliation {
+    let mut plan = RoomVoiceReconciliation::default();
+    for identity in live {
+        let session = identity.as_jid();
+        match voices.iter().find(|(occupant, _)| occupant == session) {
+            Some((_, voice)) => plan.converge.push((session.clone(), *voice)),
+            None => plan.evict.push(session.clone()),
+        }
+    }
+    plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waddle_sfu::Identity;
+    use waddle_xmpp_core::types::Voice;
+
+    fn jid(value: &str) -> jid::FullJid {
+        value.parse().expect("full jid")
+    }
+
+    /// Only participants the SFU actually reports are touched, each with
+    /// the voice the room says they have.
+    #[test]
+    fn connected_occupants_are_converged_with_their_current_voice() {
+        let voices = vec![
+            (jid("alice@example.com/web"), Voice::Muted),
+            (jid("bob@example.com/web"), Voice::Voiced),
+            // Not connected to the SFU: nothing to converge.
+            (jid("carol@example.com/web"), Voice::Voiced),
+        ];
+        let live = vec![
+            Identity::from_jid(jid("alice@example.com/web")),
+            Identity::from_jid(jid("bob@example.com/web")),
+        ];
+
+        let plan = plan_room_reconciliation(&voices, &live);
+
+        assert_eq!(
+            plan.converge,
+            vec![
+                (jid("alice@example.com/web"), Voice::Muted),
+                (jid("bob@example.com/web"), Voice::Voiced),
+            ]
+        );
+        assert!(plan.evict.is_empty());
+    }
+
+    /// A participant the SFU reports who is no longer an occupant holds a
+    /// token for a room they left; occupancy is the precondition for call
+    /// participation, so they are evicted rather than left publishing.
+    #[test]
+    fn connected_non_occupants_are_evicted() {
+        let voices = vec![(jid("alice@example.com/web"), Voice::Voiced)];
+        let live = vec![
+            Identity::from_jid(jid("alice@example.com/web")),
+            Identity::from_jid(jid("mallory@example.com/web")),
+        ];
+
+        let plan = plan_room_reconciliation(&voices, &live);
+
+        assert_eq!(
+            plan.converge,
+            vec![(jid("alice@example.com/web"), Voice::Voiced)]
+        );
+        assert_eq!(plan.evict, vec![jid("mallory@example.com/web")]);
+    }
+
+    /// Multi-resource: each session is decided independently, so one
+    /// resource leaving does not disturb another that is still joined.
+    #[test]
+    fn sessions_of_one_user_are_decided_independently() {
+        let voices = vec![(jid("alice@example.com/web"), Voice::Muted)];
+        let live = vec![
+            Identity::from_jid(jid("alice@example.com/web")),
+            Identity::from_jid(jid("alice@example.com/phone")),
+        ];
+
+        let plan = plan_room_reconciliation(&voices, &live);
+
+        assert_eq!(
+            plan.converge,
+            vec![(jid("alice@example.com/web"), Voice::Muted)]
+        );
+        assert_eq!(plan.evict, vec![jid("alice@example.com/phone")]);
     }
 }
