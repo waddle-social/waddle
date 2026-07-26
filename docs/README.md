@@ -2,7 +2,7 @@
 
 Welcome to Waddle's technical and product documentation. This directory contains Architecture Decision Records (ADRs), Request for Comments (RFCs), and Product Requirements Documents (PRDs) that define Waddle's design and roadmap.
 
-- [FlakeHub Cache in CI](./ci-flakehub-cache.md)
+- [Hestia Nix cache in CI](./ci-hestia-cache.md)
 
 ## What is Waddle?
 

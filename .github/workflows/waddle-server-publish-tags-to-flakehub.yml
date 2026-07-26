@@ -27,21 +27,21 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
-      with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
     - name: Checkout tag
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       with:
         persist-credentials: false
         ref: ${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        extra_nix_config: accept-flake-config = true
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+      with:
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Push to FlakeHub
       uses: DeterminateSystems/flakehub-push@a225170f3ab20a9d93dbb4424090ef0523ca7425
       with:
@@ -57,7 +57,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

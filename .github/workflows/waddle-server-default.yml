@@ -7,6 +7,8 @@ on:
     branches:
     - main
     paths:
+    - .github/workflows/hestia-cache-gc.yml
+    - .github/workflows/hestia-cache-gc.yml/**
     - .github/workflows/waddle-server-*.yml
     - .github/workflows/waddle-server-default.yml
     - .gitignore
@@ -16,7 +18,11 @@ on:
     - apps/apple/**/Tests/**
     - apps/apple/Waddle/RustClient/Generated/**
     - chat/tests/**
+    - ci/contributors/nix.cue
+    - ci/contributors/nix.cue/**
     - cue.mod/**
+    - cue.mod/module.cue
+    - cue.mod/module.cue/**
     - cuenv.lock
     - cuenv.lock/**
     - docs/evidence/**
@@ -92,16 +98,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -110,7 +116,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -150,16 +156,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -168,7 +174,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -196,16 +202,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -214,7 +220,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -242,16 +248,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -260,7 +266,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -288,16 +294,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -306,7 +312,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -334,16 +340,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -352,7 +358,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -380,16 +386,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -398,7 +404,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -426,16 +432,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -444,7 +450,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -479,16 +485,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -497,7 +503,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -537,16 +543,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -555,7 +561,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -583,16 +589,16 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Cache /nix on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
       with:
-        cache: nix
-    - name: Hand /nix to the runner user
-      run: sudo chown -R runner /nix
-    - name: Install Nix
-      uses: cachix/install-nix-action@v31
+        extra-conf: accept-flake-config = true
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
-        extra_nix_config: accept-flake-config = true
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -601,7 +607,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.54.0"
+        cuenv_version="0.55.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
