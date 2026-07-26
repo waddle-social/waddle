@@ -3,40 +3,8 @@ package cuenv
 import (
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
+	wc "github.com/waddle-social/waddle/ci/contributors"
 )
-
-let _NamespaceNix = schema.#Contributor & {
-	id: "namespaceNix"
-	when: runtimeType: ["nix"]
-	tasks: [
-		{
-			id:       "nix.cache"
-			label:    "Cache /nix on Namespace volume"
-			priority: 0
-			provider: github: {
-				uses: "namespacelabs/nscloud-cache-action@v1"
-				with: cache: "nix"
-			}
-		},
-		{
-			id:       "nix.chown"
-			label:    "Hand /nix to the runner user"
-			priority: 1
-			dependsOn: ["nix.cache"]
-			script: "sudo chown -R runner /nix"
-		},
-		{
-			id:       "nix.install"
-			label:    "Install Nix"
-			priority: 2
-			dependsOn: ["nix.chown"]
-			provider: github: {
-				uses: "cachix/install-nix-action@v31"
-				with: extra_nix_config: "accept-flake-config = true"
-			}
-		},
-	]
-}
 
 schema.#Project & {
 	name: "waddle-colony"
@@ -48,7 +16,8 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		_NamespaceNix,
+		wc.#Nix,
+		wc.#Hestia,
 		c.#CuenvRelease,
 		c.#OnePassword,
 		c.#BunWorkspace,
