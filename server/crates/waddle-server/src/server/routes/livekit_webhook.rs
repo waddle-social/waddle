@@ -377,40 +377,107 @@ async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvel
 ///
 /// Only MUC (Muji) rooms participate — a 1:1 call's room name is a
 /// scoped call id, not a room JID, and 1:1 peers have no role model.
-/// A participant who is no longer an occupant at all is left to the
-/// leave/eviction paths rather than being downgraded here.
+///
+/// A participant LiveKit reports as joined who is NOT a current
+/// occupant is evicted rather than downgraded: they hold a token for a
+/// room they no longer belong to (a voluntary leave followed by a
+/// LiveKit reconnect reaches no other teardown path, because the
+/// registry-based sweeps only chase participants LiveKit has already
+/// dropped).
+///
+/// Every branch that cannot establish the caller's voice logs at WARN:
+/// this is the only enforcement point against stale tokens, so a
+/// silent skip would be indistinguishable from success. Notably the
+/// room actor may be claimed by another cluster node, in which case
+/// this node cannot resolve the role at all.
 async fn reassert_voice_grants_on_join(state: &WebSocketState, room_name: &str, identity: &str) {
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         return;
     };
     let Ok(full_jid) = identity.parse::<FullJid>() else {
+        warn!(
+            room = %room_name,
+            "LiveKit participant identity is not a valid full JID; cannot re-assert media grants",
+        );
         return;
     };
     let Ok(room_jid) = room_name.parse::<BareJid>() else {
         // 1:1 scoped call id — no MUC roles apply.
         return;
     };
-    let Ok(Some(actor)) =
-        crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await
-    else {
-        return;
-    };
-    let Ok(Some(voice)) = actor
+    let actor =
+        match crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await {
+            Ok(Some(actor)) => actor,
+            Ok(None) => {
+                // No room actor anywhere in this process's view: nobody is
+                // joined, so a LiveKit participant here holds a token for a
+                // room they are not in.
+                warn!(
+                    room = %room_jid,
+                    user = %full_jid.to_bare(),
+                    "LiveKit reports a participant in a room with no actor; evicting",
+                );
+                crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
+                    sfu, &room_jid, &full_jid,
+                );
+                return;
+            }
+            Err(error) => {
+                // Typically `ClaimHeldByAnotherNode`: the room lives on
+                // another cluster node, so this node cannot resolve the
+                // occupant's role. Deliberately NOT an eviction — the
+                // participant is probably legitimate and we simply can't
+                // see the room — but it does mean a stale token is
+                // unenforced on this path, so it must be visible.
+                warn!(
+                    room = %room_jid,
+                    user = %full_jid.to_bare(),
+                    error = %error,
+                    "could not resolve MUC voice on participant join; \
+                     live media grants are unenforced for this join",
+                );
+                return;
+            }
+        };
+    match actor
         .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
             jid: full_jid.clone(),
         })
         .await
-    else {
-        return;
-    };
-    debug!(
-        room = %room_jid,
-        user = %full_jid.to_bare(),
-        "re-asserting SFU media grants from current MUC voice on participant join",
-    );
-    crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
-        sfu, &room_jid, &full_jid, voice,
-    );
+    {
+        Ok(Some(voice)) => {
+            debug!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "re-asserting SFU media grants from current MUC voice on participant join",
+            );
+            crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
+                sfu, &room_jid, &full_jid, voice,
+            );
+        }
+        Ok(None) => {
+            // Joined the SFU room while not an occupant of the MUC —
+            // occupancy is the precondition for call participation, so
+            // this is a stale-token join and must end.
+            warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "LiveKit participant is not a MUC occupant; evicting from the call",
+            );
+            crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
+                sfu, &room_jid, &full_jid,
+            );
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                error = %error,
+                "MUC voice lookup failed on participant join; \
+                 live media grants are unenforced for this join",
+            );
+        }
+    }
 }
 
 async fn process_participant_left_for_identity(

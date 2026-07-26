@@ -502,7 +502,19 @@ async fn members_only_enforcement_ejects_current_non_members_with_status_322() {
         .await
         .expect("config update");
 
-    let updates = actor.ask(EnforceMembersOnly).await.expect("enforce");
+    let applied = actor.ask(EnforceMembersOnly).await.expect("enforce");
+    // A status-322 ejection ends room membership, so it must also end
+    // the ejected occupant's SFU call participation.
+    assert_eq!(
+        applied
+            .removed_by_moderation
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![alice.to_string()],
+        "the ejected occupant must be marked for SFU eviction"
+    );
+    let updates = applied.presence_updates;
     assert_eq!(updates.len(), 1, "only Alice should receive her removal");
     assert_eq!(updates[0].0, alice);
     assert_eq!(updates[0].1.type_, PresenceType::Unavailable);
@@ -1236,7 +1248,8 @@ async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
             affiliations: vec![(alice.to_bare(), Affiliation::None)],
         })
         .await
-        .expect("managed enforcement succeeds");
+        .expect("managed enforcement succeeds")
+        .presence_updates;
 
     assert!(updates.iter().any(|(recipient, presence)| {
         recipient == &alice && presence_has_status(presence, "322")
@@ -1273,7 +1286,8 @@ async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none(
             affiliations: Vec::new(),
         })
         .await
-        .expect("managed enforcement succeeds");
+        .expect("managed enforcement succeeds")
+        .presence_updates;
 
     assert!(updates.iter().any(|(recipient, presence)| {
         recipient == &alice && presence_has_status(presence, "322")

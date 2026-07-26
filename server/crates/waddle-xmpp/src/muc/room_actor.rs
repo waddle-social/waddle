@@ -1419,6 +1419,38 @@ impl kameo::message::Message<GetOccupantVoice> for RoomActor {
     }
 }
 
+/// Current XEP-0045 voice of every active occupant session.
+///
+/// Used after a room-configuration change that alters `moderated`:
+/// flipping moderation silently re-decides voice for every seated
+/// visitor without touching any occupant's role, so callers owning an
+/// SFU handle must converge live media grants or a visitor who just
+/// lost text voice keeps publishing.
+pub struct OccupantVoices;
+
+impl kameo::message::Message<OccupantVoices> for RoomActor {
+    type Reply = Vec<(FullJid, Voice)>;
+
+    async fn handle(
+        &mut self,
+        _msg: OccupantVoices,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let moderation = self.room.moderation();
+        self.room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                let voice = occupant.role.voice(moderation);
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(move |session| (session, voice))
+            })
+            .collect()
+    }
+}
+
 /// Look up an occupant by their nickname.
 pub struct GetOccupantByNick {
     pub nick: String,

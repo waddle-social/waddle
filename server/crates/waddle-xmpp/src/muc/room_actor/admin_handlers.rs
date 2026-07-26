@@ -252,12 +252,21 @@ fn changed_session_voices(
         .collect()
 }
 
+/// Eject occupants who lack the member affiliation after a room became
+/// members-only (XEP-0045 status 322).
+///
+/// Returns removals as well as presences: a status-322 ejection ends
+/// room membership, and occupancy is the precondition for call
+/// participation, so the ejected occupant's SFU session must end too.
+/// Leaving them connected would let a non-occupant keep publishing into
+/// — and listening in on — a room they can no longer enter. Same
+/// reasoning as the 307/301/321 paths.
 fn enforce_members_only(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
-) -> Vec<(FullJid, Presence)> {
+) -> AdminItemsApplied {
     if !room.config.members_only {
-        return Vec::new();
+        return AdminItemsApplied::default();
     }
     let removed_occupants: Vec<Occupant> = room
         .occupants
@@ -266,6 +275,7 @@ fn enforce_members_only(
         .cloned()
         .collect();
     let mut presence_updates = Vec::new();
+    let mut removed_by_moderation = Vec::new();
     for occupant in &removed_occupants {
         presence_updates.extend(removal_presence_updates(
             room,
@@ -274,11 +284,16 @@ fn enforce_members_only(
             STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
             None,
         ));
+        removed_by_moderation.extend(room.get_occupant_sessions(&occupant.nick));
     }
     for occupant in removed_occupants {
         room.remove_occupant(&occupant.nick);
     }
-    presence_updates
+    AdminItemsApplied {
+        presence_updates,
+        removed_by_moderation,
+        voice_changes: Vec::new(),
+    }
 }
 
 /// XEP-0045 role-change authorization: target protection first, actor
@@ -762,14 +777,17 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
 pub struct EnforceMembersOnly;
 
 impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
-    type Reply = Vec<(FullJid, Presence)>;
+    type Reply = Result<AdminItemsApplied, Infallible>;
 
     async fn handle(
         &mut self,
         _msg: EnforceMembersOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        enforce_members_only(&mut self.room, &self.occupant_id_secret)
+        Ok(enforce_members_only(
+            &mut self.room,
+            &self.occupant_id_secret,
+        ))
     }
 }
 
@@ -778,7 +796,7 @@ pub struct EnforceMembersOnlyAffiliations {
 }
 
 impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
-    type Reply = Result<Vec<(FullJid, Presence)>, super::AffiliationMutationError>;
+    type Reply = Result<AdminItemsApplied, super::AffiliationMutationError>;
 
     async fn handle(
         &mut self,
@@ -807,6 +825,14 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         // `self.room`), collect the first failure and surface it typed
         // only after the full batch has run.
         let mut persist_failure: Option<super::DurablePersistError> = None;
+        // These `set_affiliation` calls re-derive occupant roles, so an
+        // occupant who is NOT ejected below can still silently lose
+        // voice. Snapshot before the loop so the caller can converge
+        // their live SFU grants.
+        let voices_before: Vec<(FullJid, Voice)> = occupied_jids
+            .iter()
+            .flat_map(|jid| session_voices(&self.room, jid))
+            .collect();
         for jid in occupied_jids {
             let affiliation = affiliations.get(&jid).copied().unwrap_or(Affiliation::None);
             self.invalidate_invite_grant(&jid);
@@ -829,10 +855,21 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         if let Some(error) = persist_failure {
             return Err(error.into());
         }
-        Ok(enforce_members_only(
-            &mut self.room,
-            &self.occupant_id_secret,
-        ))
+        let mut applied = enforce_members_only(&mut self.room, &self.occupant_id_secret);
+        // Report voice losses for occupants who survived the
+        // members-only sweep; ejected sessions are carried by
+        // `removed_by_moderation` and must not be double-reported.
+        let voices_after: Vec<(FullJid, Voice)> = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|occupant| session_voices(&self.room, &occupant.real_jid.to_bare()))
+            .collect();
+        applied.voice_changes = changed_session_voices(&voices_before, &voices_after)
+            .into_iter()
+            .filter(|(session, _)| !applied.removed_by_moderation.contains(session))
+            .collect();
+        Ok(applied)
     }
 }
 

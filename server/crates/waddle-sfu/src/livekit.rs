@@ -72,6 +72,15 @@ pub(crate) const RECONCILE_ABSENT_PASSES: u32 = 2;
 /// re-creates the call between local-clear and the remote evict.
 type CallRegistry = Arc<DashMap<CallId, HashSet<Identity>>>;
 
+/// Key identifying one participant within one call across the
+/// per-participant side tables.
+type ParticipantKey = (CallId, Identity);
+
+/// Per-participant serialization for grant pushes. Shared with the
+/// spawned admin tasks so only one `UpdateParticipant` per participant
+/// is ever in flight.
+type GrantLocks = Arc<DashMap<ParticipantKey, Arc<tokio::sync::Mutex<()>>>>;
+
 /// Result of [`LiveKitSfu::clear_local_state`].
 #[derive(Debug, Clone, Copy)]
 struct ClearOutcome {
@@ -126,12 +135,18 @@ pub struct LiveKitSfu {
     /// validation hook) or a shared revocation store (Redis) once
     /// Waddle scales past a single SFU instance.
     revoked: DashMap<Jti, DateTime<Utc>>,
-    /// Monotonic ticket per `(call, identity)` for grant pushes, so a
-    /// slow `UpdateParticipant` cannot overwrite a newer one's grants
-    /// (see [`Self::schedule_permission_update`]). Shared with the
-    /// spawned tasks; entries are dropped in `clear_local_state`
-    /// alongside the rest of the participant's state.
-    grant_generation: Arc<DashMap<(CallId, Identity), u64>>,
+    /// Latest media grants that SHOULD be in effect per
+    /// `(call, identity)`, written before a push task is spawned and
+    /// consumed by whichever task wins that key's lock. Last writer
+    /// wins, so a superseded push never reaches LiveKit.
+    desired_grants: Arc<DashMap<ParticipantKey, MediaCapabilities>>,
+    /// Per-`(call, identity)` lock serializing grant pushes, so two
+    /// concurrent `UpdateParticipant` requests for one participant
+    /// cannot race on HTTP timing (see
+    /// [`Self::schedule_permission_update`]). Entries are dropped once
+    /// no task holds them, and in `clear_local_state` with the rest of
+    /// the participant's state.
+    grant_locks: GrantLocks,
     /// LiveKit admin REST client. Used to evict participants and
     /// delete empty rooms when a teardown signal arrives over XMPP —
     /// without this, LiveKit only notices a hangup when the underlying
@@ -193,7 +208,8 @@ impl LiveKitSfu {
             registered_at: DashMap::new(),
             absent_streak: DashMap::new(),
             revoked: DashMap::new(),
-            grant_generation: Arc::new(DashMap::new()),
+            desired_grants: Arc::new(DashMap::new()),
+            grant_locks: Arc::new(DashMap::new()),
             admin,
             runtime: Handle::try_current().ok(),
             admin_permits: Arc::new(Semaphore::new(ADMIN_CONCURRENCY)),
@@ -273,7 +289,9 @@ impl LiveKitSfu {
             .remove(&(call_id.clone(), identity.clone()));
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
-        self.grant_generation
+        self.desired_grants
+            .remove(&(call_id.clone(), identity.clone()));
+        self.grant_locks
             .remove(&(call_id.clone(), identity.clone()));
         self.sweep_expired_revoked(Utc::now());
 
@@ -383,15 +401,21 @@ impl LiveKitSfu {
     /// runtime handle is attached (plain `#[test]` fixtures) the
     /// remote leg silently drops.
     ///
-    /// Each push takes a monotonic ticket per `(call, identity)` under
-    /// the shard lock before spawning, and drops itself if a later
-    /// push has already been admitted. Without that, two grant
-    /// changes for the same participant (a batch that revokes then
-    /// grants voice, or two moderation IQs in quick succession) race
-    /// on independent tasks through a 32-permit semaphore and can
-    /// land on LiveKit out of order — leaving publish enabled after a
-    /// revoke, which is exactly the state this feature exists to
-    /// prevent.
+    /// Pushes for the same `(call, identity)` are strictly serialized
+    /// through a per-key lock, and each task pushes whatever the
+    /// *latest* desired grants are when it acquires that lock rather
+    /// than the value it was spawned with. Two grant changes for the
+    /// same participant (a batch that revokes then grants voice, two
+    /// moderation IQs in a row, a role change racing a config flip)
+    /// therefore cannot land on LiveKit out of order and leave publish
+    /// enabled after a revoke — the exact state this feature exists to
+    /// prevent. A superseded task finds the desired entry already
+    /// consumed and exits without a round-trip.
+    ///
+    /// Serializing on a dedicated per-key lock rather than a
+    /// generation counter is deliberate: a counter can only decide
+    /// whether to *start* a request, so two in-flight requests still
+    /// race on HTTP timing.
     fn schedule_permission_update(
         &self,
         call_id: CallId,
@@ -399,37 +423,43 @@ impl LiveKitSfu {
         capabilities: MediaCapabilities,
     ) {
         let key = (call_id.clone(), identity.clone());
-        let ticket = {
-            let mut entry = self.grant_generation.entry(key.clone()).or_insert(0);
-            *entry += 1;
-            *entry
-        };
+        // Publish the intent before spawning so a task that wins the
+        // lock always observes the newest value, even one written after
+        // it was spawned.
+        self.desired_grants.insert(key.clone(), capabilities);
+        let lock = self
+            .grant_locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
         let Some(runtime) = self.runtime.as_ref() else {
+            // No runtime (plain `#[test]` fixtures): the remote leg
+            // drops, so don't leak the intent.
+            self.desired_grants.remove(&key);
+            self.grant_locks.remove(&key);
             return;
         };
         let admin = Arc::clone(&self.admin);
         let permits = Arc::clone(&self.admin_permits);
-        let generation = Arc::clone(&self.grant_generation);
+        let desired = Arc::clone(&self.desired_grants);
+        let locks = Arc::clone(&self.grant_locks);
         runtime.spawn(async move {
-            let Ok(_permit) = permits.acquire_owned().await else {
+            let _serialized = lock.lock().await;
+            // Take the latest intent. Absent => a task that ran before
+            // us already applied it (or the participant was cleared),
+            // so there is nothing left to converge.
+            let Some((_, capabilities)) = desired.remove(&key) else {
+                locks.remove_if(&key, |_, held| Arc::strong_count(held) == 1);
                 return;
             };
-            // A newer push was admitted while we waited for a permit;
-            // it carries the current grants, so ours is stale and
-            // applying it would move LiveKit backwards.
-            let superseded = || {
-                generation
-                    .get(&key)
-                    .is_some_and(|current| *current > ticket)
-            };
-            if superseded() {
+            let Ok(mut permit) = Arc::clone(&permits).acquire_owned().await else {
                 return;
-            }
+            };
             // A downgrade is a security-relevant convergence, so a
             // transient transport/5xx failure gets bounded retries
             // rather than a single best effort. Widening grants is not
             // retried: failing to restore publish rights is a
-            // functional annoyance the next role change or rejoin
+            // functional annoyance the next voice change or rejoin
             // fixes, and retrying it could race a fresh downgrade.
             let attempts = if capabilities.is_listen_only() {
                 GRANT_DOWNGRADE_ATTEMPTS
@@ -441,7 +471,7 @@ impl LiveKitSfu {
                     .update_participant(&call_id, &identity, capabilities)
                     .await
                 {
-                    Ok(()) => return,
+                    Ok(()) => break,
                     Err(err) => {
                         tracing::warn!(
                             call_id = %call_id,
@@ -458,11 +488,25 @@ impl LiveKitSfu {
                         );
                     }
                 }
-                if attempt == attempts || superseded() {
-                    return;
+                if attempt == attempts {
+                    break;
                 }
+                // A fresher intent arrived; it owns convergence from
+                // here and will run as soon as we release the lock.
+                if desired.contains_key(&key) {
+                    break;
+                }
+                // Release the admin slot across the backoff so a
+                // retrying downgrade doesn't hold one of the 32 slots
+                // idle during a LiveKit incident.
+                drop(permit);
                 tokio::time::sleep(GRANT_RETRY_BACKOFF * attempt).await;
+                let Ok(next) = Arc::clone(&permits).acquire_owned().await else {
+                    return;
+                };
+                permit = next;
             }
+            locks.remove_if(&key, |_, held| Arc::strong_count(held) == 1);
         });
     }
 
@@ -979,6 +1023,9 @@ mod tests {
         remove_calls: Mutex<Vec<(CallId, Identity)>>,
         delete_calls: Mutex<Vec<CallId>>,
         update_calls: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
+        /// Artificial latency for `update_participant`, so ordering
+        /// tests can force two pushes to genuinely overlap.
+        update_delay: Mutex<Option<StdDuration>>,
         /// What LiveKit "reports" as connected per call. A call absent
         /// from the map lists as empty (room not found). Drives the
         /// reconciliation tests.
@@ -1000,6 +1047,10 @@ mod tests {
 
         fn update_snapshot(&self) -> Vec<(CallId, Identity, MediaCapabilities)> {
             self.update_calls.lock().expect("recording lock").clone()
+        }
+
+        fn set_update_delay(&self, delay: StdDuration) {
+            *self.update_delay.lock().expect("recording lock") = Some(delay);
         }
 
         fn set_live(&self, call: &CallId, identities: Vec<Identity>) {
@@ -1219,13 +1270,17 @@ mod tests {
         assert!(admin.update_snapshot()[0].2.can_publish);
     }
 
-    /// A slow push must never overwrite a newer one's grants. Two
-    /// updates admitted back-to-back (a batch that revokes then
-    /// re-grants voice, or two moderation IQs in a row) run on
-    /// independent tasks; only the latest may reach LiveKit.
+    /// A slow push must never overwrite a newer one's grants. The
+    /// first update is delayed inside the admin client so, without
+    /// per-key serialization, its (publish-enabling) request would be
+    /// in flight when the newer demotion is issued and could land
+    /// last. Only the newest grants may ever be the final state.
     #[tokio::test]
-    async fn a_superseded_grant_push_is_dropped_before_reaching_livekit() {
+    async fn a_superseded_grant_push_never_lands_after_a_newer_one() {
         let admin = Arc::new(RecordingAdmin::default());
+        // Make every UpdateParticipant take a real await point so the
+        // two pushes genuinely overlap in time.
+        admin.set_update_delay(StdDuration::from_millis(50));
         let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
         let call = CallId::new("r-order").unwrap();
         let alice = fixture_identity("alice");
@@ -1233,26 +1288,65 @@ mod tests {
 
         let voiced = MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Voiced);
         let muted = MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted);
-        // Stale promotion first, then the demotion that supersedes it.
-        // Both are queued before either task gets to run.
+
+        // Stale promotion, then — after it is already spawned and
+        // (thanks to the delay) plausibly in flight — the demotion
+        // that supersedes it.
         sfu.update_participant_capabilities(&call, &alice, voiced);
+        tokio::task::yield_now().await;
         sfu.update_participant_capabilities(&call, &alice, muted);
-        drain_admin_tasks().await;
+
+        tokio::time::sleep(StdDuration::from_millis(400)).await;
 
         let updates = admin.update_snapshot();
         assert!(
             !updates.is_empty(),
-            "at least the newest push must reach LiveKit"
-        );
-        assert!(
-            updates.iter().all(|(_, _, caps)| caps.is_listen_only()),
-            "no superseded (publish-enabling) push may land after the demotion: {updates:?}"
+            "the newest grants must reach LiveKit at least once"
         );
         assert_eq!(
             updates.last().expect("non-empty").2,
             muted,
-            "the last write must be the newest grants"
+            "the FINAL state on LiveKit must be the newest grants: {updates:?}"
         );
+        // The safety property: once a revoke has been applied, no
+        // publish-enabling push may land afterwards. A promotion
+        // already in flight before the revoke existed is fine; one
+        // arriving after it is the failure mode.
+        let first_revoke = updates
+            .iter()
+            .position(|(_, _, caps)| caps.is_listen_only())
+            .expect("the revoke reached LiveKit");
+        assert!(
+            updates[first_revoke..]
+                .iter()
+                .all(|(_, _, caps)| caps.is_listen_only()),
+            "no publish-enabling push may land after a revoke: {updates:?}"
+        );
+    }
+
+    /// The per-key lock must not wedge later pushes for the same
+    /// participant: a second, independent change after the first has
+    /// settled still converges.
+    #[tokio::test]
+    async fn sequential_grant_pushes_each_reach_livekit() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-sequential").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+
+        let muted = MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted);
+        let voiced = MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Voiced);
+
+        sfu.update_participant_capabilities(&call, &alice, muted);
+        drain_admin_tasks().await;
+        sfu.update_participant_capabilities(&call, &alice, voiced);
+        drain_admin_tasks().await;
+
+        let updates = admin.update_snapshot();
+        assert_eq!(updates.len(), 2, "both settled changes push: {updates:?}");
+        assert_eq!(updates[0].2, muted);
+        assert_eq!(updates[1].2, voiced);
     }
 
     #[tokio::test]

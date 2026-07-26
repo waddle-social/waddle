@@ -212,11 +212,12 @@ pub(super) async fn apply_muc_owner_config(
 
     let Some(channel_id) = channel_id else {
         if !previous_members_only && config.members_only {
-            let updates = room_actor
+            let applied = room_actor
                 .ask(EnforceMembersOnly)
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
-            for (recipient, presence) in updates {
+            converge_members_only_sfu_state(state, room_jid, &applied);
+            for (recipient, presence) in applied.presence_updates {
                 let _ = state
                     .deps
                     .protocol
@@ -290,7 +291,7 @@ pub(super) async fn apply_muc_owner_config(
     }
 
     if !previous_members_only && config.members_only {
-        let updates = if let Some(affiliations) = managed_enforcement_affiliations {
+        let applied = if let Some(affiliations) = managed_enforcement_affiliations {
             room_actor
                 .ask(EnforceMembersOnlyAffiliations { affiliations })
                 .await
@@ -301,12 +302,31 @@ pub(super) async fn apply_muc_owner_config(
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
         };
-        for (recipient, presence) in updates {
+        converge_members_only_sfu_state(state, room_jid, &applied);
+        for (recipient, presence) in applied.presence_updates {
             let _ = state
                 .deps
                 .protocol
                 .connection_registry
                 .try_send_to(&recipient, Stanza::Presence(presence));
+        }
+    }
+
+    // Flipping `moderated` silently re-decides XEP-0045 voice for every
+    // seated visitor without changing anyone's role: turning moderation
+    // ON takes their voice, turning it OFF restores it (§5.1.2
+    // footnote). Nothing else in the config path touches an occupant,
+    // so without this the SFU keeps the pre-flip grants and a visitor
+    // who just lost text voice would keep publishing media.
+    if previous_config.moderated != config.moderated {
+        let voices = room_actor
+            .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
+            .await
+            .unwrap_or_default();
+        for (session, voice) in voices {
+            super::super::super::muc_call_sfu::apply_voice_grants_for_room(
+                state, room_jid, &session, voice,
+            );
         }
     }
 
@@ -347,6 +367,27 @@ fn broadcast_muc_config_change(
                 .connection_registry
                 .try_send_to(&recipient_jid, Stanza::Message(message));
         }
+    }
+}
+
+/// Mirror a members-only enforcement sweep onto the SFU: a status-322
+/// ejection ends room membership, so it must end call participation
+/// too, and an occupant who merely lost voice in the sweep must lose
+/// publish rights.
+fn converge_members_only_sfu_state(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    applied: &waddle_xmpp::muc::room_actor::AdminItemsApplied,
+) {
+    for removed in &applied.removed_by_moderation {
+        super::super::super::muc_call_sfu::unregister_participant_from_room(
+            state, room_jid, removed,
+        );
+    }
+    for (session, voice) in &applied.voice_changes {
+        super::super::super::muc_call_sfu::apply_voice_grants_for_room(
+            state, room_jid, session, *voice,
+        );
     }
 }
 
