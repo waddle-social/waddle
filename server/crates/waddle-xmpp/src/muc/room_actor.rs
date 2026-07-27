@@ -14,7 +14,7 @@ use thiserror::Error;
 use super::affiliation::AffiliationEntry;
 use super::pin::{PinStateChange, PinnedEntry};
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
-use crate::types::{Affiliation, Role};
+use crate::types::{Affiliation, Role, Voice};
 
 /// A join-path ownership proof is fail-closed, but it must not monopolize the
 /// room actor forever when the durable backend stops responding.
@@ -1389,6 +1389,65 @@ impl kameo::message::Message<GetOccupantByJid> for RoomActor {
         self.room
             .find_occupant_by_real_jid(&msg.jid)
             .map(OccupantInfo::from_occupant)
+    }
+}
+
+/// Resolve the SFU media-grant inputs for `jid` in one round-trip:
+/// whether they are a current occupant, and if so their XEP-0045
+/// voice (which needs both the role and the room's moderation).
+///
+/// The Muji gate uses this instead of [`GetOccupantByJid`] +
+/// [`GetConfig`] so authorization reads a single consistent snapshot
+/// of the room — two asks could straddle a role change or a config
+/// change and mint grants matching neither.
+pub struct GetOccupantVoice {
+    pub jid: FullJid,
+}
+
+impl kameo::message::Message<GetOccupantVoice> for RoomActor {
+    type Reply = Option<Voice>;
+
+    async fn handle(
+        &mut self,
+        msg: GetOccupantVoice,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let moderation = self.room.moderation();
+        self.room
+            .find_occupant_by_real_jid(&msg.jid)
+            .map(|occupant| occupant.role.voice(moderation))
+    }
+}
+
+/// Current XEP-0045 voice of every active occupant session.
+///
+/// Used after a room-configuration change that alters `moderated`:
+/// flipping moderation silently re-decides voice for every seated
+/// visitor without touching any occupant's role, so callers owning an
+/// SFU handle must converge live media grants or a visitor who just
+/// lost text voice keeps publishing.
+pub struct OccupantVoices;
+
+impl kameo::message::Message<OccupantVoices> for RoomActor {
+    type Reply = Vec<(FullJid, Voice)>;
+
+    async fn handle(
+        &mut self,
+        _msg: OccupantVoices,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let moderation = self.room.moderation();
+        self.room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                let voice = occupant.role.voice(moderation);
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(move |session| (session, voice))
+            })
+            .collect()
     }
 }
 

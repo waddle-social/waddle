@@ -180,7 +180,14 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
             .ok_or_else(|| RoomActorError::SenderNotOccupant(msg.sender_jid.clone()))?;
         let sender_nick = sender_occupant.nick.clone();
 
-        if self.room.config.moderated && sender_occupant.role == Role::Visitor {
+        // Shares the single voice predicate with `broadcast_message`
+        // and the SFU grant derivation — no divergent copy of the
+        // XEP-0045 §7.5 rule may exist.
+        if !sender_occupant
+            .role
+            .voice(self.room.moderation())
+            .is_voiced()
+        {
             return Err(RoomActorError::VisitorMayNotSpeak(msg.sender_jid.clone()));
         }
 

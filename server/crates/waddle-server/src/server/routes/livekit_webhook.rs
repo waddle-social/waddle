@@ -81,6 +81,23 @@ impl SeenEventIds {
         }
         true
     }
+
+    /// Un-record `id`, so a LiveKit retry of the same delivery is
+    /// processed instead of dropped as a duplicate.
+    ///
+    /// Needed when handling could not complete for a transient reason:
+    /// the dedupe LRU is recorded up-front, so without this a delivery
+    /// we failed to act on would be permanently unrepairable — LiveKit's
+    /// retries would all be discarded as duplicates.
+    pub fn forget(&self, id: Option<&str>) {
+        let Some(id) = id else {
+            return;
+        };
+        let mut guard = self.inner.lock().expect("SeenEventIds mutex poisoned");
+        if guard.set.remove(id) {
+            guard.order.retain(|seen| seen != id);
+        }
+    }
 }
 
 /// Axum router for the LiveKit webhook endpoint. Mounted under
@@ -222,10 +239,45 @@ async fn livekit_webhook_handler(
                 );
             }
         }
-        LiveKitWebhookEvent::ParticipantJoined(_) | LiveKitWebhookEvent::Other => {
-            // Informational; the join path already flows through
-            // Jingle session-initiate → `register_call_participant`.
+        LiveKitWebhookEvent::ParticipantJoined(env) => {
+            // Registry-wise this is informational (the join already
+            // flowed through Jingle session-initiate →
+            // `register_call_participant`), but it is the ONLY moment
+            // we learn that a specific token was actually redeemed —
+            // and therefore the only place a stale token can be
+            // caught.
+            //
+            // Self-hosted LiveKit derives permissions from the JWT at
+            // join and does not invalidate previously-minted tokens
+            // when permissions change (that is a LiveKit Cloud
+            // feature), and our own JTI revocation is local
+            // bookkeeping LiveKit never consults. So an occupant who
+            // was de-voiced between mint and connect — or who
+            // reconnects with a cached pre-demotion token — would
+            // otherwise publish for the remainder of the token's TTL.
+            // Re-deriving their current voice here and pushing it
+            // converges them within one webhook round-trip.
+            if reassert_voice_grants_on_join(&state, &env.room.name, &env.participant.identity)
+                .await
+                == ReassertOutcome::RetryableFailure
+            {
+                // A transient failure must not be acknowledged: the
+                // dedupe LRU is recorded up-front, so a 200 here would
+                // make LiveKit's retries land as duplicates and leave a
+                // possibly stale token unenforced forever. Drop the
+                // dedupe entry and answer 5xx so the retry is processed.
+                // The structural case (room owned by another replica) is
+                // deliberately NOT retried — see `ReassertOutcome`.
+                seen.forget(event.event_id());
+                warn!(
+                    room = %env.room.name,
+                    call.id = %call_id_field,
+                    "asking LiveKit to retry participant_joined after a transient failure",
+                );
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
         }
+        LiveKitWebhookEvent::Other => {}
     }
 
     StatusCode::OK
@@ -300,13 +352,22 @@ fn is_muc_call(call_id: &str) -> bool {
 pub fn spawn_reconciliation_task(state: Arc<WebSocketState>, reconciler: Arc<dyn SfuReconciler>) {
     let grace = chrono::Duration::seconds(RECONCILE_GRACE_SECONDS);
     tokio::spawn(async move {
+        // Owned by the loop so the non-occupant confirmation streaks
+        // survive across ticks.
+        let mut non_occupant_streaks = super::sfu_voice_reconcile::NonOccupantStreaks::default();
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         // Drop the immediate first tick `interval` yields so we don't
         // reconcile at boot before any call exists.
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            reconcile_once(&state, reconciler.as_ref(), grace).await;
+            reconcile_once(
+                &state,
+                reconciler.as_ref(),
+                grace,
+                &mut non_occupant_streaks,
+            )
+            .await;
         }
     });
 }
@@ -318,25 +379,27 @@ async fn reconcile_once(
     state: &WebSocketState,
     reconciler: &dyn SfuReconciler,
     grace: chrono::Duration,
+    non_occupant_streaks: &mut super::sfu_voice_reconcile::NonOccupantStreaks,
 ) {
     let swept = reconciler.reconcile_active_calls(grace).await;
-    if swept.is_empty() {
-        return;
-    }
-    info!(
-        count = swept.len(),
-        "SFU reconciliation swept ghost participants; clearing MUC Muji presence"
-    );
-    for (call_id, identity) in swept {
-        if is_muc_call(call_id.as_str()) {
-            process_participant_left_for_identity(
-                state,
-                call_id.as_str(),
-                identity.as_jid().to_string().as_str(),
-            )
-            .await;
+    if !swept.is_empty() {
+        info!(
+            count = swept.len(),
+            "SFU reconciliation swept ghost participants; clearing MUC Muji presence"
+        );
+        for (call_id, identity) in swept {
+            if is_muc_call(call_id.as_str()) {
+                process_participant_left_for_identity(
+                    state,
+                    call_id.as_str(),
+                    identity.as_jid().to_string().as_str(),
+                )
+                .await;
+            }
         }
     }
+    super::sfu_voice_reconcile::reconcile_voice_grants(state, reconciler, non_occupant_streaks)
+        .await;
 }
 
 async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvelope) {
@@ -348,6 +411,161 @@ async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvel
 /// `RoomFinished` survivor sweep. Takes the raw identity string so
 /// the survivor sweep (which iterates `Identity` values out of the
 /// SFU registry) can call it with the same shape.
+/// Whether a `participant_joined` delivery was fully handled, or could
+/// not be enforced and should be retried by LiveKit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReassertOutcome {
+    /// Grants were converged, or no MUC authorization applies to this
+    /// participant. Nothing a retry would improve.
+    Handled,
+    /// This node structurally cannot resolve the room — its actor is
+    /// claimed by another replica. Retrying would 5xx roughly half of
+    /// all joins in a two-replica cluster for a condition that is not a
+    /// failure, so the delivery is acknowledged and convergence is left
+    /// to [`reconcile_voice_grants`] on the owning node.
+    UnenforceableHere,
+    /// A transient failure (the local actor flaked) left grants
+    /// possibly stale. The delivery is NOT acknowledged so LiveKit's
+    /// retry can repair it — without this the up-front dedupe record
+    /// would make the failure permanent.
+    RetryableFailure,
+}
+
+/// Re-derive a just-joined participant's XEP-0045 voice and push it to
+/// the SFU, so the permissions LiveKit granted from their token match
+/// the room's current authorization state.
+///
+/// This is the enforcement point for stale tokens: LiveKit reads
+/// grants off the JWT at join and self-hosted deployments never
+/// invalidate an already-minted token when permissions change, so
+/// without this a token minted before a demotion still admits its
+/// holder with publish rights until it expires.
+///
+/// Only MUC (Muji) rooms participate — a 1:1 call's room name is a
+/// scoped call id, not a room JID, and 1:1 peers have no role model.
+///
+/// A participant LiveKit reports as joined who is NOT a current
+/// occupant is evicted rather than downgraded: they hold a token for a
+/// room they no longer belong to (a voluntary leave followed by a
+/// LiveKit reconnect reaches no other teardown path, because the
+/// registry-based sweeps only chase participants LiveKit has already
+/// dropped).
+///
+/// Every branch that cannot establish the caller's voice logs at WARN:
+/// this is the only enforcement point against stale tokens, so a
+/// silent skip would be indistinguishable from success. Notably the
+/// room actor may be claimed by another cluster node, in which case
+/// this node cannot resolve the role at all.
+async fn reassert_voice_grants_on_join(
+    state: &WebSocketState,
+    room_name: &str,
+    identity: &str,
+) -> ReassertOutcome {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return ReassertOutcome::Handled;
+    };
+    let Ok(full_jid) = identity.parse::<FullJid>() else {
+        // Permanent: retrying cannot make this parse.
+        warn!(
+            room = %room_name,
+            "LiveKit participant identity is not a valid full JID; cannot re-assert media grants",
+        );
+        return ReassertOutcome::Handled;
+    };
+    // Use the shared classifier: a domain-only id like `c-abc123`
+    // parses as a valid `BareJid` without being a room.
+    if !is_muc_call(room_name) {
+        // 1:1 scoped call id — no MUC roles apply.
+        return ReassertOutcome::Handled;
+    }
+    let Ok(room_jid) = room_name.parse::<BareJid>() else {
+        return ReassertOutcome::Handled;
+    };
+    let actor =
+        match crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await {
+            Ok(Some(actor)) => actor,
+            Ok(None) => {
+                // `GetRoom` only consults THIS process's room map, so a
+                // room claimed by another cluster node also answers
+                // `Ok(None)`. Webhooks arrive through one load-balanced
+                // URL across replicas, so this is the common case, NOT
+                // evidence that the participant is unauthorized —
+                // evicting here would eject legitimate occupants from
+                // roughly every join that lands on a non-owning node.
+                // Absence of a local actor means "cannot determine",
+                // which is exactly the `Err` case below.
+                warn!(
+                    room = %room_jid,
+                    user = %full_jid.to_bare(),
+                    "no local room actor on this node; media grants for this join \
+                     will converge on the owning node's reconciliation pass",
+                );
+                return ReassertOutcome::UnenforceableHere;
+            }
+            Err(error) => {
+                // The room lives elsewhere or the lookup failed, so this
+                // node cannot resolve the occupant's role. Deliberately
+                // NOT an eviction — the participant is probably
+                // legitimate and we simply cannot see the room — but a
+                // stale token goes unenforced on this path, so it must
+                // be visible.
+                warn!(
+                    room = %room_jid,
+                    user = %full_jid.to_bare(),
+                    error = %error,
+                    "could not resolve MUC voice on participant join; \
+                     asking LiveKit to retry",
+                );
+                return ReassertOutcome::RetryableFailure;
+            }
+        };
+    match actor
+        .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
+            jid: full_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(voice)) => {
+            debug!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "re-asserting SFU media grants from current MUC voice on participant join",
+            );
+            crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
+                sfu, &room_jid, &full_jid, voice,
+            );
+            ReassertOutcome::Handled
+        }
+        Ok(None) => {
+            // A LOCAL room actor answered, so it owns this room and its
+            // occupant set is authoritative: this participant joined the
+            // SFU room while not being an occupant of the MUC.
+            // Occupancy is the precondition for call participation, so
+            // this is a stale-token join and must end. (Contrast the
+            // absent-actor case above, which proves nothing.)
+            warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "LiveKit participant is not a MUC occupant; evicting from the call",
+            );
+            crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
+                sfu, &room_jid, &full_jid,
+            );
+            ReassertOutcome::Handled
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                error = %error,
+                "MUC voice lookup failed on participant join; \
+                 asking LiveKit to retry",
+            );
+            ReassertOutcome::RetryableFailure
+        }
+    }
+}
+
 async fn process_participant_left_for_identity(
     state: &WebSocketState,
     room_name: &str,
@@ -814,7 +1032,7 @@ mod tests {
             .issue_join_token(
                 &call_id,
                 &bob_identity,
-                MediaCapabilities::full_participant(),
+                MediaCapabilities::direct_call_peer(),
             )
             .expect("bob token");
         sfu.register_call_participant(&call_id, &alice_identity);

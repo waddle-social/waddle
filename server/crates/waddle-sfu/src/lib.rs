@@ -110,6 +110,39 @@ pub trait SfuService: Send + Sync + 'static {
     /// round-trip plus a race window against quick rejoins.
     fn note_participant_left(&self, call_id: &CallId, identity: &Identity);
 
+    /// Push replacement media grants to a live participant after an
+    /// XEP-0045 voice change, without disconnecting them: losing voice
+    /// becomes listen-only immediately (the SFU force-unpublishes
+    /// their tracks), regaining it lets them publish without
+    /// renegotiating. The remote leg is fire-and-forget like
+    /// [`Self::unregister_call_participant`]'s.
+    ///
+    /// This runs unconditionally, exactly like
+    /// `unregister_call_participant`'s `RemoveParticipant`: the SFU may
+    /// know about a participant our per-process registry has lost
+    /// track of (a reconnect after `participant_left`, a room actor
+    /// that migrated between cluster nodes, reconciliation sweeps).
+    /// Gating on local registration would make the *downgrade* fail
+    /// open, which is the one direction that must never be skipped.
+    ///
+    /// A downgrade also revokes every outstanding JWT minted for the
+    /// `(call_id, identity)` pair. NOTE: that revocation is local
+    /// bookkeeping only — LiveKit derives permissions from the JWT at
+    /// join time and never consults [`Self::is_revoked`], so a token
+    /// minted before the downgrade still admits its holder with the
+    /// old grants until `exp`. The mechanism that actually closes
+    /// that window is re-asserting permissions when LiveKit reports
+    /// the participant joined (`participant_joined` webhook); the
+    /// revocation entry exists for the future
+    /// LiveKit-cooperative-validation path and for local replay
+    /// checks.
+    fn update_participant_capabilities(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        capabilities: MediaCapabilities,
+    );
+
     /// Returns `true` if the SFU has marked `jti` as revoked. Useful
     /// for tests + future LiveKit-cooperative validation: when
     /// LiveKit gains the ability to delegate token verification back
@@ -164,4 +197,27 @@ pub trait SfuReconciler: Send + Sync + 'static {
     /// `(call, identity)` pairs swept so the caller can clear the
     /// corresponding MUC Muji presence idempotently.
     fn reconcile_active_calls(&self, grace: chrono::Duration) -> ReconcileFuture<'_>;
+
+    /// The identities the SFU itself reports as currently connected to
+    /// `call_id`. `Some(vec![])` means the SFU confirmed nobody is
+    /// connected; `None` means the SFU could not be reached, so absence
+    /// is UNCONFIRMED.
+    ///
+    /// Authoritative and cluster-wide, unlike
+    /// [`SfuService::participants_for_call`], which only sees the
+    /// calling process's registry. Any convergence decision that must
+    /// hold across nodes — notably the voice-grant reconciliation
+    /// backstop, which runs on whichever node claims a room and not
+    /// necessarily the node that registered the participant — MUST use
+    /// this rather than the local registry, or it silently skips
+    /// participants and fails open.
+    ///
+    /// Callers MUST NOT treat `None` as "nobody is connected": doing so
+    /// lets a LiveKit outage silently disable the convergence that
+    /// depends on this, which is a security-relevant backstop.
+    fn live_participants<'a>(&'a self, call_id: &'a CallId) -> LiveParticipantsFuture<'a>;
 }
+
+/// Future returned by [`SfuReconciler::live_participants`].
+pub type LiveParticipantsFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<Vec<Identity>>> + Send + 'a>>;

@@ -8,6 +8,7 @@ pub mod extension_webhooks; // Extension webhook ingress
 pub mod interpret; // OutboundEvent effect interpreter for sans-I/O protocol
 pub mod livekit_webhook; // LiveKit SFU webhook → MUC Muji-presence bridge
 pub mod muc_muji_clear; // Shared Muji clear + broadcast for SFU/Jingle teardown
+mod sfu_voice_reconcile; // periodic XEP-0045 voice → LiveKit grant convergence
 pub mod uploads; // File upload endpoints (XEP-0363)
 pub mod websocket; // XMPP over WebSocket (RFC 7395)
 pub mod well_known; // /.well-known/ endpoints (host-meta, etc.)

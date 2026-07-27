@@ -1366,6 +1366,34 @@ async fn managed_internal_server_error_denial_emits_admission_telemetry() {
     );
 }
 
+use std::time::Duration as StdDuration;
+
+/// Poll until at least one span named `name` has been exported, or the
+/// deadline elapses; returns whatever was exported at that point.
+///
+/// Needed because a span exports on close, and the join paths under test
+/// leave background work holding the dispatch span open. On a
+/// `current_thread` runtime that work only advances while the test
+/// awaits, so a straight read after the call under test races it.
+async fn await_exported_spans(
+    spans: &waddle_xmpp::telemetry::test_support::SpanTestGuard,
+    name: &str,
+    within: StdDuration,
+) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let matching: Vec<_> = spans
+            .exported()
+            .into_iter()
+            .filter(|span| span.name == name)
+            .collect();
+        if !matching.is_empty() || tokio::time::Instant::now() >= deadline {
+            return matching;
+        }
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn managed_internal_admission_failure_exports_error_dispatch_span() {
     let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -1411,17 +1439,66 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
     .await;
 
     assert!(
-        denied[0].contains("internal-server-error"),
+        denied
+            .first()
+            .is_some_and(|frame| frame.contains("internal-server-error")),
         "malformed identity must fail closed: {denied:?}"
     );
+
+    // Wait for the dispatch span to actually close before reading it.
+    //
+    // This assertion failed intermittently in CI with an EMPTY exported
+    // set (`exported xmpp.stanza.dispatch spans: []`), never locally.
+    // The reason is structural, not timing luck: the join path leaves
+    // background work holding the span open, and on a `current_thread`
+    // runtime that work can only progress while the test awaits — and
+    // there is no await between the join returning and this read. On an
+    // idle machine the work happens to finish during the awaits inside
+    // the join; under CI contention it does not, so the span is still
+    // open and `tracing-opentelemetry` has nothing to export yet
+    // (a span exports on close, and `exported()` already force-flushes,
+    // so flushing harder cannot help).
+    //
+    // Polling yields the runtime so that work can finish, with a bounded
+    // deadline. This does not weaken the assertion: it still requires
+    // the attribute to be present, and on timeout it reports the empty
+    // set rather than passing.
+    let dispatch_spans =
+        await_exported_spans(&spans, "xmpp.stanza.dispatch", StdDuration::from_secs(5)).await;
+    let rendered = dispatch_spans
+        .iter()
+        .map(|span| {
+            let attributes: Vec<String> = span
+                .attributes
+                .iter()
+                .map(|attribute| format!("{}={}", attribute.key.as_str(), attribute.value))
+                .collect();
+            format!(
+                "{{status={:?} attrs=[{}]}}",
+                span.status,
+                attributes.join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let condition = dispatch_spans.iter().find_map(|span| {
+        span.attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == "condition")
+            .map(|attribute| attribute.value.to_string())
+    });
     assert_eq!(
-        spans.attribute_of("xmpp.stanza.dispatch", "condition"),
-        Some("internal-server-error".to_string())
+        condition,
+        Some("internal-server-error".to_string()),
+        "exported xmpp.stanza.dispatch spans: [{rendered}]",
     );
-    assert!(matches!(
-        spans.status_of("xmpp.stanza.dispatch"),
-        Some(opentelemetry::trace::Status::Error { .. })
-    ));
+    assert!(
+        dispatch_spans
+            .iter()
+            .any(|span| matches!(span.status, opentelemetry::trace::Status::Error { .. })),
+        "exported xmpp.stanza.dispatch spans: [{rendered}]",
+    );
 }
 
 /// #1440: a managed-channel lookup failure bounces the join with a
@@ -4733,6 +4810,13 @@ fn empty_muji() -> waddle_xmpp::xep::xep0272::Muji {
 struct RecordingSfu {
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
     note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    update_calls: std::sync::Mutex<
+        Vec<(
+            waddle_sfu::CallId,
+            waddle_sfu::Identity,
+            waddle_sfu::MediaCapabilities,
+        )>,
+    >,
 }
 
 impl RecordingSfu {
@@ -4774,6 +4858,19 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .expect("recording lock")
             .push((call_id.clone(), identity.clone()));
         waddle_sfu::CallState::Ended
+    }
+
+    fn update_participant_capabilities(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        capabilities: waddle_sfu::MediaCapabilities,
+    ) {
+        self.update_calls.lock().expect("recording lock").push((
+            call_id.clone(),
+            identity.clone(),
+            capabilities,
+        ));
     }
 
     fn note_participant_left(&self, call_id: &waddle_sfu::CallId, identity: &waddle_sfu::Identity) {
@@ -6189,6 +6286,30 @@ fn build_admin_set_iq_xml(room_jid: &BareJid, id: &str, item: Element) -> String
     )
 }
 
+/// Flip an existing room to XEP-0045 moderated. Required for any
+/// devoice test: the visitor/voice distinction only withholds voice in
+/// a moderated room, so in the default (unmoderated) fixture a visitor
+/// still has voice and there is nothing to converge.
+async fn make_room_moderated(state: &WebSocketState, room_jid: &BareJid) {
+    let actor = crate::server::routes::websocket::get_room_actor_result(state, room_jid)
+        .await
+        .expect("room lookup")
+        .expect("room actor exists");
+    let config = actor
+        .ask(waddle_xmpp::muc::room_actor::GetConfig)
+        .await
+        .expect("read room config");
+    actor
+        .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            config: waddle_xmpp::muc::RoomConfig {
+                moderated: true,
+                ..config
+            },
+        })
+        .await
+        .expect("set room moderated");
+}
+
 async fn join_alice_owner_and_bob(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -6359,6 +6480,106 @@ async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
         recorder.snapshot().is_empty(),
         "a role change that keeps the occupant must not end their call session"
     );
+}
+
+/// Role-derived media grants: revoking voice (role → visitor) must
+/// converge the target's live SFU permission to listen-only, without
+/// ending their call session.
+#[tokio::test]
+async fn muc_admin_voice_revocation_downgrades_live_sfu_grants() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid: BareJid = "voice-revoke-grants@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    make_room_moderated(state.as_ref(), &room_jid).await;
+    let ready = ready_phase(&alice_jid);
+
+    let demote_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "revoke-bob-voice",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "bob")
+            .attr(minidom::rxml::xml_ncname!("role").to_owned(), "visitor")
+            .build(),
+    );
+    let responses = handle_iq(
+        &demote_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert!(responses[0].contains("type='result'"), "{responses:?}");
+
+    let updates = recorder.update_snapshot();
+    assert_eq!(
+        updates.len(),
+        1,
+        "exactly the demoted occupant's session gets a grant update: {updates:?}"
+    );
+    assert_eq!(updates[0].0.as_str(), "voice-revoke-grants@muc.example.com");
+    assert_eq!(updates[0].1.as_livekit_identity(), "bob@example.com/web");
+    assert_eq!(
+        updates[0].2,
+        waddle_sfu::MediaCapabilities::listen_only(),
+        "a devoiced occupant's live grants are listen-only"
+    );
+    assert!(updates[0].2.is_listen_only());
+    assert!(
+        recorder.snapshot().is_empty(),
+        "a grant downgrade must not end the call session"
+    );
+}
+
+/// Role-derived media grants: granting voice (visitor → participant)
+/// must converge the target's live SFU permission back to publishable.
+#[tokio::test]
+async fn muc_admin_voice_grant_upgrades_live_sfu_grants() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid: BareJid = "voice-grant-grants@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    make_room_moderated(state.as_ref(), &room_jid).await;
+    let ready = ready_phase(&alice_jid);
+
+    for (id, role) in [("revoke-bob", "visitor"), ("grant-bob", "participant")] {
+        let iq = build_admin_set_iq_xml(
+            &room_jid,
+            id,
+            Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "bob")
+                .attr(minidom::rxml::xml_ncname!("role").to_owned(), role)
+                .build(),
+        );
+        let responses = handle_iq(
+            &iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(alice_session.clone()),
+            &ready,
+        )
+        .await;
+        assert!(responses[0].contains("type='result'"), "{responses:?}");
+    }
+
+    let updates = recorder.update_snapshot();
+    assert_eq!(updates.len(), 2, "one update per role change: {updates:?}");
+    assert!(updates[0].2.is_listen_only(), "revocation first");
+    assert_eq!(
+        updates[1].2,
+        waddle_sfu::MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Voiced),
+        "restored voice restores publish grants"
+    );
+    assert!(updates[1].2.can_publish);
 }
 
 /// Round-3 concurrency review: MUC occupancy is keyed by FULL JID, so

@@ -215,7 +215,7 @@ mod tests {
             ws_url,
             call_id,
             identity,
-            capabilities: MediaCapabilities::full_participant(),
+            capabilities: MediaCapabilities::direct_call_peer(),
             ttl: Duration::seconds(3600),
         }
     }
@@ -270,6 +270,37 @@ mod tests {
         assert!(claims.video.can_publish);
         assert!(claims.video.can_subscribe);
         assert!(claims.video.can_publish_data);
+    }
+
+    /// The role → grant mapping must survive all the way into the
+    /// signed JWT: a visitor's token carries `canPublish: false` /
+    /// `canPublishData: false` so the SFU itself enforces
+    /// listen-only, regardless of client behaviour.
+    #[test]
+    fn visitor_capabilities_mint_listen_only_video_grant() {
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
+        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
+            .expect("valid ws url");
+        let call_id = CallId::new("general@muc.waddle.social").expect("valid call id");
+        let identity = fixture_identity();
+
+        let mut inputs = fixture_inputs(&api_key, &secret, &ws_url, &call_id, &identity);
+        inputs.capabilities =
+            MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted);
+        let token = mint_join_token(inputs).expect("mint should succeed");
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_nbf = true;
+        let key = DecodingKey::from_secret(secret.as_bytes());
+        let decoded = decode::<DecodedClaims>(token.jwt.as_str(), &key, &validation)
+            .expect("token decodes with secret");
+
+        assert!(decoded.claims.video.room_join, "a visitor may join");
+        assert!(decoded.claims.video.can_subscribe, "a visitor may listen");
+        assert!(!decoded.claims.video.can_publish);
+        assert!(!decoded.claims.video.can_publish_data);
     }
 
     #[test]

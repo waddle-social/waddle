@@ -57,6 +57,7 @@ mod tests {
         let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
+            media_capabilities: None,
         };
 
         let events = SessionHandler.handle(&iq, &ctx);

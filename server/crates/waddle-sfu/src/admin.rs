@@ -27,7 +27,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::call::{CallId, Identity};
+use crate::call::{CallId, Identity, MediaCapabilities};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 use crate::token::JWT_CLOCK_SKEW;
@@ -59,6 +59,20 @@ pub trait LiveKitAdmin: Send + Sync + 'static {
     fn delete_room<'a>(
         &'a self,
         room: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>>;
+
+    /// Replace a live participant's publish/subscribe permission.
+    /// LiveKit applies the new permission immediately and
+    /// force-unpublishes any track the participant is no longer
+    /// allowed to publish, so a mid-call XEP-0045 voice revocation
+    /// takes effect without disconnecting the participant. A
+    /// `not_found` participant resolves to `Ok(())`: they already
+    /// left, so the desired post-condition ("not publishing") holds.
+    fn update_participant<'a>(
+        &'a self,
+        room: &'a CallId,
+        identity: &'a Identity,
+        capabilities: MediaCapabilities,
     ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>>;
 
     /// List the identities LiveKit currently reports as joined to
@@ -245,6 +259,23 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
         })
     }
 
+    fn update_participant<'a>(
+        &'a self,
+        room: &'a CallId,
+        identity: &'a Identity,
+        capabilities: MediaCapabilities,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
+        let body = UpdateParticipantRequest {
+            room: room.as_str().to_string(),
+            identity: identity.as_livekit_identity(),
+            permission: ParticipantPermission::from_capabilities(capabilities),
+        };
+        Box::pin(async move {
+            self.post(room, "twirp/livekit.RoomService/UpdateParticipant", &body)
+                .await
+        })
+    }
+
     fn list_participant_identities<'a>(
         &'a self,
         room: &'a CallId,
@@ -338,6 +369,39 @@ struct RemoveParticipantRequest {
 #[derive(Serialize)]
 struct DeleteRoomRequest {
     room: String,
+}
+
+/// Twirp body for `livekit.RoomService/UpdateParticipant`. Only the
+/// `permission` field is sent alongside the addressing pair; LiveKit
+/// treats absent `metadata`/`name` as "leave unchanged".
+#[derive(Serialize)]
+struct UpdateParticipantRequest {
+    room: String,
+    identity: String,
+    permission: ParticipantPermission,
+}
+
+/// LiveKit `ParticipantPermission` message. Field vocabulary matches
+/// the `VideoGrant` camelCase names in [`crate::token`] so the mint
+/// grant and the live-update grant stay in the same terms.
+#[derive(Serialize)]
+struct ParticipantPermission {
+    #[serde(rename = "canSubscribe")]
+    can_subscribe: bool,
+    #[serde(rename = "canPublish")]
+    can_publish: bool,
+    #[serde(rename = "canPublishData")]
+    can_publish_data: bool,
+}
+
+impl ParticipantPermission {
+    fn from_capabilities(capabilities: MediaCapabilities) -> Self {
+        Self {
+            can_subscribe: capabilities.can_subscribe,
+            can_publish: capabilities.can_publish,
+            can_publish_data: capabilities.can_publish_data,
+        }
+    }
 }
 
 /// Twirp body for `livekit.RoomService/ListParticipants`.
@@ -488,6 +552,33 @@ mod tests {
 
         let empty: ListParticipantsResponse = serde_json::from_str(r#"{}"#).expect("empty parses");
         assert!(empty.participants.is_empty());
+    }
+
+    #[test]
+    fn update_participant_request_serializes_livekit_wire_shape() {
+        // Pin the Twirp `UpdateParticipant` body: addressing pair plus
+        // a camelCase `permission` message, no other fields (absent
+        // `metadata`/`name` mean "leave unchanged" on LiveKit's side).
+        let body = UpdateParticipantRequest {
+            room: "room@muc.example.com".to_string(),
+            identity: "bob@example.com/web".to_string(),
+            permission: ParticipantPermission::from_capabilities(
+                MediaCapabilities::from_muc_voice(waddle_xmpp_core::types::Voice::Muted),
+            ),
+        };
+        let json = serde_json::to_value(&body).expect("serializes");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "room": "room@muc.example.com",
+                "identity": "bob@example.com/web",
+                "permission": {
+                    "canSubscribe": true,
+                    "canPublish": false,
+                    "canPublishData": false,
+                }
+            })
+        );
     }
 
     #[test]

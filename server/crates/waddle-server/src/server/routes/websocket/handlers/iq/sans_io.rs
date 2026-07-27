@@ -129,9 +129,18 @@ pub(super) async fn handle_sans_io_iq(
         // dispatch. The gate triggers on the Jingle namespace and
         // only when the embedded `<jingle/>` carries a `<muji/>`
         // child — 1:1 Jingle traffic passes through untouched.
+        let mut media_capabilities = None;
         if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
             match super::jingle_muji_gate::verify_muji_jingle_request(state, full_jid, iq).await {
-                super::jingle_muji_gate::GateOutcome::Allow => {}
+                super::jingle_muji_gate::GateOutcome::Allow {
+                    media_capabilities: gate_capabilities,
+                } => {
+                    // Authorization produced the grant: the Jingle
+                    // handler's Muji mint consumes exactly the
+                    // capabilities the gate derived from the sender's
+                    // current XEP-0045 role.
+                    media_capabilities = gate_capabilities;
+                }
                 super::jingle_muji_gate::GateOutcome::Deny(stanza_error) => {
                     return Some(vec![build_iq_error_xml_typed(
                         id,
@@ -142,7 +151,11 @@ pub(super) async fn handle_sans_io_iq(
                 }
             }
         }
-        let ctx = ProtocolStanzaContext { domain, full_jid };
+        let ctx = ProtocolStanzaContext {
+            domain,
+            full_jid,
+            media_capabilities,
+        };
         let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
         let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
         let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));

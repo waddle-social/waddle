@@ -212,11 +212,16 @@ pub(super) async fn apply_muc_owner_config(
 
     let Some(channel_id) = channel_id else {
         if !previous_members_only && config.members_only {
-            let updates = room_actor
+            let applied = room_actor
                 .ask(EnforceMembersOnly)
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
-            for (recipient, presence) in updates {
+            super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
+                state.deps.protocol.sfu.as_ref(),
+                room_jid,
+                &applied,
+            );
+            for (recipient, presence) in applied.presence_updates {
                 let _ = state
                     .deps
                     .protocol
@@ -224,6 +229,7 @@ pub(super) async fn apply_muc_owner_config(
                     .try_send_to(&recipient, Stanza::Presence(presence));
             }
         }
+        converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
         let post_update_snapshot = room_actor
             .ask(GetSnapshot)
             .await
@@ -290,7 +296,7 @@ pub(super) async fn apply_muc_owner_config(
     }
 
     if !previous_members_only && config.members_only {
-        let updates = if let Some(affiliations) = managed_enforcement_affiliations {
+        let applied = if let Some(affiliations) = managed_enforcement_affiliations {
             room_actor
                 .ask(EnforceMembersOnlyAffiliations { affiliations })
                 .await
@@ -301,7 +307,12 @@ pub(super) async fn apply_muc_owner_config(
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
         };
-        for (recipient, presence) in updates {
+        super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
+            state.deps.protocol.sfu.as_ref(),
+            room_jid,
+            &applied,
+        );
+        for (recipient, presence) in applied.presence_updates {
             let _ = state
                 .deps
                 .protocol
@@ -309,6 +320,8 @@ pub(super) async fn apply_muc_owner_config(
                 .try_send_to(&recipient, Stanza::Presence(presence));
         }
     }
+
+    converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
 
     let post_update_snapshot = room_actor
         .ask(GetSnapshot)
@@ -348,6 +361,26 @@ fn broadcast_muc_config_change(
                 .try_send_to(&recipient_jid, Stanza::Message(message));
         }
     }
+}
+
+/// Thin adapter: run the shared moderation-flip convergence only when
+/// this config change actually flipped `moderated`.
+async fn converge_flip(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    previous: &waddle_xmpp::muc::RoomConfig,
+    updated: &waddle_xmpp::muc::RoomConfig,
+) {
+    if previous.moderated == updated.moderated {
+        return;
+    }
+    super::super::super::muc_call_sfu::converge_room_voice_after_moderation_flip(
+        state.deps.protocol.sfu.as_ref(),
+        room_actor,
+        room_jid,
+    )
+    .await;
 }
 
 #[cfg(test)]

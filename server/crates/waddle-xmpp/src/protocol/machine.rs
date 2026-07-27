@@ -305,6 +305,7 @@ impl XmppStateMachine {
         let ctx = StanzaContext {
             domain: &self.domain,
             full_jid: &full_jid,
+            media_capabilities: None,
         };
 
         match stanza {

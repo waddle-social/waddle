@@ -381,11 +381,13 @@ pub async fn register(
     {
         let state = Arc::clone(&app_state);
         let connections = Arc::clone(&connection_registry);
+        let sfu = sfu.clone();
         registry
             .register(NODE_UPDATE, "Admin · Update channel", move |ctx| {
                 let state = Arc::clone(&state);
                 let connections = Arc::clone(&connections);
-                async move { handle_update(ctx, state, connections).await }
+                let sfu = sfu.clone();
+                async move { handle_update(ctx, state, connections, sfu).await }
             })
             .await;
     }
@@ -685,6 +687,7 @@ async fn handle_update(
     ctx: CommandContext,
     state: Arc<AppState>,
     connections: Arc<ConnectionRegistry>,
+    sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) -> CommandResult {
     if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
@@ -693,7 +696,7 @@ async fn handle_update(
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_update(&state, &connections, &args).await {
+    match run_update(&state, &connections, &args, sfu.as_ref()).await {
         Ok(channel) => CommandResult::Completed {
             session_id: None,
             form: Some(build_channel_form(&channel)),
@@ -3040,6 +3043,7 @@ async fn run_update(
     state: &AppState,
     connections: &ConnectionRegistry,
     args: &ChannelsUpdateArgs,
+    sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelRef, AdminErr> {
     let actor = state
         .room_registry
@@ -3178,13 +3182,36 @@ async fn run_update(
     }
 
     if let Some(explicit_affiliations) = members_only_enforcement_affiliations {
-        let updates = actor
+        let applied = actor
             .ask(EnforceMembersOnlyAffiliations {
                 affiliations: explicit_affiliations,
             })
             .await
             .map_err(send_err("room actor EnforceMembersOnlyAffiliations"))?;
-        broadcast_presence_updates(connections, updates).await;
+        // A status-322 ejection ends room membership, so it ends call
+        // participation; a surviving occupant who lost voice loses
+        // publish rights.
+        evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+        crate::server::routes::websocket::muc_call_sfu::converge_voice_changes_via_sfu(
+            sfu,
+            &args.channel_jid,
+            &applied.voice_changes,
+        );
+        broadcast_presence_updates(connections, applied.presence_updates).await;
+    }
+
+    // A channel-type change flips `moderated` in both directions
+    // (`apply_channel_type`), which silently re-decides XEP-0045 voice
+    // for every seated visitor without touching any role. Converge the
+    // live SFU grants or a Chat -> Announcement switch mid-call leaves
+    // every non-moderator publishing.
+    if existing.moderated != updated.moderated {
+        crate::server::routes::websocket::muc_call_sfu::converge_room_voice_after_moderation_flip(
+            sfu,
+            &actor,
+            &args.channel_jid,
+        )
+        .await;
     }
 
     // XEP-0045 §10.2.1 (#1265 item 15): a config change applied through
@@ -3780,6 +3807,14 @@ async fn run_set_affiliation(
     // participation ends with it. Fire-and-forget inside the SFU
     // layer; the moderation result is never blocked on LiveKit.
     evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+    // A demotion that keeps the occupant in the room can still cost
+    // them voice (e.g. `admin -> none` in a moderated room), which
+    // must revoke their SFU publish rights.
+    crate::server::routes::websocket::muc_call_sfu::converge_voice_changes_via_sfu(
+        sfu,
+        &args.channel_jid,
+        &applied.voice_changes,
+    );
     Ok(ChannelsSetAffiliationResult {
         member_jid: args.member_jid.clone(),
         affiliation: args.affiliation,
@@ -3998,6 +4033,11 @@ async fn run_kick(
     // occupant's room membership, so their live SFU call
     // participation ends with it.
     evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+    crate::server::routes::websocket::muc_call_sfu::converge_voice_changes_via_sfu(
+        sfu,
+        &args.channel_jid,
+        &applied.voice_changes,
+    );
 
     if revoke_members_only_member {
         sync_private_kick_affiliation_revocation(

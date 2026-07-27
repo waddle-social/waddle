@@ -109,6 +109,64 @@ pub enum Role {
     Moderator,
 }
 
+/// Whether a room enforces XEP-0045 moderation. The visitor/voice
+/// distinction is only meaningful in a moderated room (§Terminology
+/// defines both "in a moderated room"), so every voice decision needs
+/// this alongside the role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moderation {
+    Moderated,
+    Unmoderated,
+}
+
+impl Moderation {
+    /// Lift a [`crate::types::Moderation`] out of a room-config flag.
+    pub fn from_moderated_flag(moderated: bool) -> Self {
+        if moderated {
+            Self::Moderated
+        } else {
+            Self::Unmoderated
+        }
+    }
+}
+
+/// XEP-0045 "voice": the right to send to all occupants. The single
+/// authority for this predicate across the codebase — text broadcast
+/// (§7.5) and SFU media grants MUST agree, so both derive from
+/// [`Role::voice`] rather than testing roles ad hoc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voice {
+    Voiced,
+    Muted,
+}
+
+impl Voice {
+    pub fn is_voiced(self) -> bool {
+        matches!(self, Self::Voiced)
+    }
+}
+
+impl Role {
+    /// Resolve this role's voice in a room with the given moderation.
+    ///
+    /// Per XEP-0045 §Terminology a visitor is "an occupant who does
+    /// not have voice" *in a moderated room*; the §5.1.2 roles table
+    /// footnote adds that an implementation MAY grant voice to
+    /// visitors in unmoderated rooms — which Waddle does, so an
+    /// unmoderated room's visitor keeps voice. `Role::None` is not an
+    /// occupant at all and never has voice.
+    pub fn voice(self, moderation: Moderation) -> Voice {
+        match self {
+            Role::None => Voice::Muted,
+            Role::Visitor => match moderation {
+                Moderation::Moderated => Voice::Muted,
+                Moderation::Unmoderated => Voice::Voiced,
+            },
+            Role::Participant | Role::Moderator => Voice::Voiced,
+        }
+    }
+}
+
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -117,5 +175,48 @@ impl std::fmt::Display for Role {
             Role::Participant => write!(f, "participant"),
             Role::Moderator => write!(f, "moderator"),
         }
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::{Moderation, Role, Voice};
+
+    /// XEP-0045 §Terminology defines Visitor as "an occupant who does
+    /// not have voice" *in a moderated room*, and the §5.1.2 roles
+    /// table footnote lets an implementation grant voice to visitors
+    /// in unmoderated rooms. Pin both halves — the media-grant
+    /// derivation and the §7.5 text gate both read this table, so a
+    /// change here changes both.
+    #[test]
+    fn voice_depends_on_role_and_moderation() {
+        for moderation in [Moderation::Moderated, Moderation::Unmoderated] {
+            assert_eq!(Role::Moderator.voice(moderation), Voice::Voiced);
+            assert_eq!(Role::Participant.voice(moderation), Voice::Voiced);
+            assert_eq!(
+                Role::None.voice(moderation),
+                Voice::Muted,
+                "role=none is not an occupant and never has voice"
+            );
+        }
+        assert_eq!(
+            Role::Visitor.voice(Moderation::Moderated),
+            Voice::Muted,
+            "a visitor in a moderated room is precisely an occupant without voice"
+        );
+        assert_eq!(
+            Role::Visitor.voice(Moderation::Unmoderated),
+            Voice::Voiced,
+            "XEP-0045 §5.1.2 footnote: visitors MAY have voice in an unmoderated room"
+        );
+    }
+
+    #[test]
+    fn moderation_lifts_from_config_flag() {
+        assert_eq!(Moderation::from_moderated_flag(true), Moderation::Moderated);
+        assert_eq!(
+            Moderation::from_moderated_flag(false),
+            Moderation::Unmoderated
+        );
     }
 }

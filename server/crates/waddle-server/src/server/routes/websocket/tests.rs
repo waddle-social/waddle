@@ -203,6 +203,13 @@ pub(crate) async fn create_test_websocket_state_with_sfu(
 pub(crate) struct RecordingSfu {
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
     note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    update_calls: std::sync::Mutex<
+        Vec<(
+            waddle_sfu::CallId,
+            waddle_sfu::Identity,
+            waddle_sfu::MediaCapabilities,
+        )>,
+    >,
 }
 
 impl RecordingSfu {
@@ -212,6 +219,16 @@ impl RecordingSfu {
 
     pub(crate) fn note_snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
         self.note_calls.lock().expect("recording lock").clone()
+    }
+
+    pub(crate) fn update_snapshot(
+        &self,
+    ) -> Vec<(
+        waddle_sfu::CallId,
+        waddle_sfu::Identity,
+        waddle_sfu::MediaCapabilities,
+    )> {
+        self.update_calls.lock().expect("recording lock").clone()
     }
 }
 
@@ -259,6 +276,19 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .lock()
             .expect("recording lock")
             .push((call_id.clone(), identity.clone()));
+    }
+
+    fn update_participant_capabilities(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        capabilities: waddle_sfu::MediaCapabilities,
+    ) {
+        self.update_calls.lock().expect("recording lock").push((
+            call_id.clone(),
+            identity.clone(),
+            capabilities,
+        ));
     }
 
     fn is_revoked(&self, _: &waddle_sfu::Jti) -> bool {

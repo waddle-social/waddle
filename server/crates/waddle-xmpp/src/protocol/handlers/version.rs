@@ -148,6 +148,7 @@ mod tests {
         let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
+            media_capabilities: None,
         };
 
         let events = VersionHandler.handle(&iq, &ctx);
@@ -202,6 +203,7 @@ mod tests {
         let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
+            media_capabilities: None,
         };
 
         let events = VersionHandler.handle(&iq, &ctx);
@@ -239,6 +241,7 @@ mod tests {
         let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
+            media_capabilities: None,
         };
 
         let events = VersionHandler.handle(&iq, &ctx);
@@ -265,6 +268,7 @@ mod tests {
         let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
+            media_capabilities: None,
         };
 
         let events = VersionHandler.handle(&iq, &ctx);

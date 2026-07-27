@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
@@ -36,6 +37,15 @@ pub(crate) const MAX_ISSUED_PER_PARTICIPANT: usize = 16;
 /// many reqwest tasks. The semaphore is a fixed-size FIFO valve.
 const ADMIN_CONCURRENCY: usize = 32;
 
+/// Attempts allowed for a grant *downgrade* push. Losing voice must
+/// actually reach LiveKit — a single dropped request would leave a
+/// de-voiced occupant publishing — so a transient failure is retried a
+/// few times before the warn-and-give-up path.
+const GRANT_DOWNGRADE_ATTEMPTS: u32 = 3;
+
+/// Linear backoff base between grant-downgrade attempts.
+const GRANT_RETRY_BACKOFF: StdDuration = StdDuration::from_millis(250);
+
 /// Grace window after registration before a participant becomes
 /// eligible for ghost reconciliation. The registry is populated at
 /// Jingle `session-initiate` — *before* the client actually connects
@@ -61,6 +71,26 @@ pub(crate) const RECONCILE_ABSENT_PASSES: u32 = 2;
 /// firing `DeleteRoom`, closing the race where a fresh joiner
 /// re-creates the call between local-clear and the remote evict.
 type CallRegistry = Arc<DashMap<CallId, HashSet<Identity>>>;
+
+/// Key identifying one participant within one call across the
+/// per-participant side tables.
+type ParticipantKey = (CallId, Identity);
+
+/// Per-participant serialization for grant pushes. Shared with the
+/// spawned admin tasks so only one `UpdateParticipant` per participant
+/// is ever in flight.
+type GrantLocks = Arc<DashMap<ParticipantKey, Arc<tokio::sync::Mutex<()>>>>;
+
+/// Drop a `(call, identity)` grant lock once this task is the last
+/// holder, so the map cannot grow without bound.
+///
+/// The count to compare against is 2, not 1: the map holds one `Arc`
+/// and the calling task holds its own clone. Callers MUST have dropped
+/// their `MutexGuard` first — the guard borrows the `Arc`, so a live
+/// guard means a live reference.
+fn reap_grant_lock(locks: &GrantLocks, key: &ParticipantKey) {
+    locks.remove_if(key, |_, held| Arc::strong_count(held) == 2);
+}
 
 /// Result of [`LiveKitSfu::clear_local_state`].
 #[derive(Debug, Clone, Copy)]
@@ -116,6 +146,19 @@ pub struct LiveKitSfu {
     /// validation hook) or a shared revocation store (Redis) once
     /// Waddle scales past a single SFU instance.
     revoked: DashMap<Jti, DateTime<Utc>>,
+    /// Latest media grants that SHOULD be in effect per
+    /// `(call, identity)`, written before a push task is spawned and
+    /// consumed by whichever task wins that key's lock. Last writer
+    /// wins, so a superseded push never reaches LiveKit.
+    desired_grants: Arc<DashMap<ParticipantKey, MediaCapabilities>>,
+    /// Per-`(call, identity)` lock serializing grant pushes, so two
+    /// concurrent `UpdateParticipant` requests for one participant
+    /// cannot race on HTTP timing (see
+    /// [`Self::schedule_permission_update`]). Entries are reaped by the
+    /// last task to release them ([`reap_grant_lock`]) — deliberately
+    /// NOT in `clear_local_state`, so a key's serialization survives an
+    /// unregister/rejoin while a push is still in flight.
+    grant_locks: GrantLocks,
     /// LiveKit admin REST client. Used to evict participants and
     /// delete empty rooms when a teardown signal arrives over XMPP —
     /// without this, LiveKit only notices a hangup when the underlying
@@ -177,6 +220,8 @@ impl LiveKitSfu {
             registered_at: DashMap::new(),
             absent_streak: DashMap::new(),
             revoked: DashMap::new(),
+            desired_grants: Arc::new(DashMap::new()),
+            grant_locks: Arc::new(DashMap::new()),
             admin,
             runtime: Handle::try_current().ok(),
             admin_permits: Arc::new(Semaphore::new(ADMIN_CONCURRENCY)),
@@ -256,6 +301,30 @@ impl LiveKitSfu {
             .remove(&(call_id.clone(), identity.clone()));
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
+        // Dropping a queued grant intent here is correct, and load-bearing
+        // to reason about: every caller of `clear_local_state` means the
+        // participant is gone or is being removed, so a pending downgrade
+        // has nothing left to apply.
+        //   - `unregister_call_participant` also schedules
+        //     `RemoveParticipant`, which strictly supersedes any grant
+        //     change; and if that admin call fails, the participant is by
+        //     then no longer an occupant, so the voice-reconciliation
+        //     backstop evicts them.
+        //   - `note_participant_left` runs because LiveKit told us they
+        //     already left.
+        //   - the reconciliation sweep only clears participants LiveKit
+        //     has confirmed absent across consecutive passes.
+        // A new caller that does NOT imply departure must not reuse this
+        // path, or it would silently discard a downgrade for someone still
+        // publishing.
+        self.desired_grants
+            .remove(&(call_id.clone(), identity.clone()));
+        // `grant_locks` is deliberately NOT cleared here: a push task
+        // may still hold this key's mutex, and dropping the entry would
+        // let a post-rejoin push create a fresh mutex and run
+        // concurrently with it — the exact interleaving the per-key
+        // lock exists to prevent. The lock is reaped by the last task
+        // to release it (see `schedule_permission_update`).
         self.sweep_expired_revoked(Utc::now());
 
         // Atomic conditional removal: only drop the call entry if it
@@ -335,6 +404,161 @@ impl LiveKitSfu {
                     }
                 }
             }
+        });
+    }
+
+    /// Move every outstanding JTI for `(call_id, identity)` into the
+    /// revocation map WITHOUT touching the participant registry. Used
+    /// on a mid-call grant downgrade: the participant stays in the
+    /// call (listen-only), and their pre-downgrade tokens are marked
+    /// spent.
+    ///
+    /// This is local bookkeeping, NOT enforcement: LiveKit reads
+    /// permissions off the JWT at join and never asks us about the
+    /// jti (see the `revoked` field docs). Enforcement for a rejoin
+    /// with a stale token comes from re-asserting permissions on the
+    /// `participant_joined` webhook.
+    fn revoke_issued_tokens(&self, call_id: &CallId, identity: &Identity) {
+        if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
+            for issued in issued {
+                self.revoked.insert(issued.jti, issued.exp);
+            }
+        }
+        self.sweep_expired_revoked(Utc::now());
+    }
+
+    /// Fire-and-forget the LiveKit admin `UpdateParticipant` call that
+    /// pushes replacement grants to a live participant. Same spawn +
+    /// permit shape as [`Self::schedule_remote_teardown`]; when no
+    /// runtime handle is attached (plain `#[test]` fixtures) the
+    /// remote leg silently drops.
+    ///
+    /// Pushes for the same `(call, identity)` are strictly serialized
+    /// through a per-key lock, and each task pushes whatever the
+    /// *latest* desired grants are when it acquires that lock rather
+    /// than the value it was spawned with. Two grant changes for the
+    /// same participant (a batch that revokes then grants voice, two
+    /// moderation IQs in a row, a role change racing a config flip)
+    /// therefore cannot land on LiveKit out of order and leave publish
+    /// enabled after a revoke — the exact state this feature exists to
+    /// prevent. A superseded task finds the desired entry already
+    /// consumed and exits without a round-trip.
+    ///
+    /// Serializing on a dedicated per-key lock rather than a
+    /// generation counter is deliberate: a counter can only decide
+    /// whether to *start* a request, so two in-flight requests still
+    /// race on HTTP timing.
+    fn schedule_permission_update(
+        &self,
+        call_id: CallId,
+        identity: Identity,
+        capabilities: MediaCapabilities,
+    ) {
+        let key = (call_id.clone(), identity.clone());
+        // Publish the intent before spawning so a task that wins the
+        // lock always observes the newest value, even one written after
+        // it was spawned.
+        self.desired_grants.insert(key.clone(), capabilities);
+        let lock = self
+            .grant_locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let Some(runtime) = self.runtime.as_ref() else {
+            // No runtime (plain `#[test]` fixtures): the remote leg
+            // drops, so don't leak the intent.
+            self.desired_grants.remove(&key);
+            self.grant_locks.remove(&key);
+            return;
+        };
+        let admin = Arc::clone(&self.admin);
+        let permits = Arc::clone(&self.admin_permits);
+        let desired = Arc::clone(&self.desired_grants);
+        let locks = Arc::clone(&self.grant_locks);
+        runtime.spawn(async move {
+            let serialized = lock.lock().await;
+            // Acquire the admin slot BEFORE claiming the intent. Waiting
+            // on an exhausted semaphore can take arbitrarily long, and a
+            // value claimed beforehand would go stale in our hand: a
+            // pending downgrade would be recorded behind our lock while
+            // we still held (and would then send) the older
+            // publish-enabling grant, briefly restoring publishing for
+            // an occupant who has already been devoiced.
+            let Ok(mut permit) = Arc::clone(&permits).acquire_owned().await else {
+                // Only reachable if `admin_permits` is closed, which
+                // nothing does today; reap anyway so no path leaks.
+                drop(serialized);
+                reap_grant_lock(&locks, &key);
+                return;
+            };
+            // Claim the latest intent. Absent => a task that ran before
+            // us already applied it (or the participant was cleared),
+            // so there is nothing left to converge.
+            let Some((_, mut capabilities)) = desired.remove(&key) else {
+                drop(serialized);
+                reap_grant_lock(&locks, &key);
+                return;
+            };
+            // A downgrade is a security-relevant convergence, so a
+            // transient transport/5xx failure gets bounded retries
+            // rather than a single best effort. Widening grants is not
+            // retried: failing to restore publish rights is a
+            // functional annoyance the next voice change or rejoin
+            // fixes, and retrying it could race a fresh downgrade.
+            let attempts = if capabilities.is_listen_only() {
+                GRANT_DOWNGRADE_ATTEMPTS
+            } else {
+                1
+            };
+            for attempt in 1..=attempts {
+                match admin
+                    .update_participant(&call_id, &identity, capabilities)
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(err) => {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            identity = %identity.as_livekit_identity(),
+                            attempt,
+                            attempts,
+                            error = %err,
+                            // This crate sits below the telemetry crate
+                            // (`waddle-xmpp` depends on it, not the
+                            // reverse), so this WARN is the alert
+                            // signal for a participant whose live
+                            // grants no longer match their MUC voice.
+                            "LiveKit UpdateParticipant failed; live media grants lag the MUC voice"
+                        );
+                    }
+                }
+                if attempt == attempts {
+                    break;
+                }
+                // A fresher intent arrived; adopt it rather than
+                // retrying a value we already know is stale.
+                if let Some((_, fresher)) = desired.remove(&key) {
+                    capabilities = fresher;
+                }
+                // Release the admin slot across the backoff so a
+                // retrying downgrade doesn't hold one of the 32 slots
+                // idle during a LiveKit incident.
+                drop(permit);
+                tokio::time::sleep(GRANT_RETRY_BACKOFF * attempt).await;
+                // And again after the sleep: the backoff window is the
+                // longest gap in which an intent can overtake us.
+                if let Some((_, fresher)) = desired.remove(&key) {
+                    capabilities = fresher;
+                }
+                let Ok(next) = Arc::clone(&permits).acquire_owned().await else {
+                    drop(serialized);
+                    reap_grant_lock(&locks, &key);
+                    return;
+                };
+                permit = next;
+            }
+            drop(serialized);
+            reap_grant_lock(&locks, &key);
         });
     }
 
@@ -466,6 +690,29 @@ impl LiveKitSfu {
 }
 
 impl crate::SfuReconciler for LiveKitSfu {
+    fn live_participants<'a>(&'a self, call_id: &'a CallId) -> crate::LiveParticipantsFuture<'a> {
+        Box::pin(async move {
+            match self.admin.list_participant_identities(call_id).await {
+                Ok(identities) => Some(identities),
+                Err(error) => {
+                    // `None`, never an empty vec: an outage must not be
+                    // mistaken for "nobody is connected", which would
+                    // silently disable the caller's convergence. WARN
+                    // because that convergence is the stale-token
+                    // backstop — this crate sits below the telemetry
+                    // crate, so the log is the alert signal.
+                    tracing::warn!(
+                        call_id = %call_id,
+                        error = %error,
+                        "LiveKit ListParticipants failed; cannot confirm live participants, \
+                         so voice-grant convergence is skipped for this call this pass"
+                    );
+                    None
+                }
+            }
+        })
+    }
+
     fn reconcile_active_calls(&self, grace: ChronoDuration) -> crate::ReconcileFuture<'_> {
         Box::pin(self.reconcile_active_calls_inner(grace))
     }
@@ -586,6 +833,25 @@ impl SfuService for LiveKitSfu {
         let _ = self.clear_local_state(call_id, identity);
     }
 
+    fn update_participant_capabilities(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        capabilities: MediaCapabilities,
+    ) {
+        // Deliberately NOT gated on local registration — see the
+        // trait doc. LiveKit may hold a participant our per-process
+        // registry lost (reconnect after `participant_left`, actor
+        // migration, reconcile sweep); skipping the push for them
+        // would let a de-voiced occupant keep publishing. A
+        // participant LiveKit doesn't know resolves to Twirp
+        // `not_found`, which the admin client maps to success.
+        if capabilities.is_listen_only() {
+            self.revoke_issued_tokens(call_id, identity);
+        }
+        self.schedule_permission_update(call_id.clone(), identity.clone(), capabilities);
+    }
+
     fn is_revoked(&self, jti: &Jti) -> bool {
         // Lazy sweep on the read path: an entry past its `exp` is
         // by definition unusable and so reads as not-revoked. Drop
@@ -623,746 +889,4 @@ impl SfuService for LiveKitSfu {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{ApiKey, ApiSecret, TurnSharedSecret};
-    use chrono::Duration;
-    use jid::FullJid;
-    use url::Url;
-
-    fn fixture_config() -> SfuConfig {
-        SfuConfig {
-            api_key: ApiKey::new("APIxxxxxxxx"),
-            api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
-                .expect("test secret meets min length"),
-            webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
-                .expect("test secret meets min length"),
-            ws_url: WebsocketUrl::new(Url::parse("wss://livekit.waddle.social").unwrap()).unwrap(),
-            turn_host: TurnHost::new("turn.waddle.social"),
-            turn_tls_port: 443,
-            turn_udp_port: 3478,
-            turn_shared_secret: TurnSharedSecret::from_text("turn-shared-secret-value"),
-            token_ttl: Duration::seconds(3600),
-            turn_ttl: Duration::seconds(3600),
-        }
-    }
-
-    fn fixture_identity(name: &str) -> Identity {
-        let jid: FullJid = format!("{name}@waddle.social/desktop")
-            .parse()
-            .expect("jid");
-        Identity::from_jid(jid)
-    }
-
-    #[test]
-    fn registry_tracks_participants_per_call() {
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-        let call = CallId::new("r1").unwrap();
-        let a = fixture_identity("alice");
-        let b = fixture_identity("bob");
-
-        sfu.register_call_participant(&call, &a);
-        sfu.register_call_participant(&call, &b);
-        assert_eq!(sfu.participant_count(&call), 2);
-
-        match sfu.unregister_call_participant(&call, &a) {
-            CallState::Active { remaining } => assert_eq!(remaining, 1),
-            CallState::Ended => panic!("call should still be active"),
-        }
-
-        match sfu.unregister_call_participant(&call, &b) {
-            CallState::Ended => {}
-            CallState::Active { .. } => panic!("call should end with no participants"),
-        }
-        assert_eq!(sfu.participant_count(&call), 0);
-    }
-
-    #[test]
-    fn issue_join_token_returns_room_scoped_jwt() {
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-        let call = CallId::new("c1").unwrap();
-        let identity = fixture_identity("alice");
-
-        let token = sfu
-            .issue_join_token(&call, &identity, MediaCapabilities::full_participant())
-            .expect("token issued");
-        assert_eq!(token.room, call);
-        assert!(!token.jwt.as_str().is_empty());
-    }
-
-    #[test]
-    fn issue_turn_credentials_yields_time_limited_pair() {
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-        let identity = fixture_identity("alice");
-        let cred = sfu.issue_turn_credentials(&identity).expect("cred issued");
-        assert!(cred.expires_at > chrono::Utc::now());
-        assert!(cred
-            .username
-            .as_str()
-            .contains("alice@waddle.social/desktop"));
-    }
-
-    #[test]
-    fn unregister_revokes_every_jti_issued_to_the_participant() {
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-        let call = CallId::new("c-revoke").unwrap();
-        let alice = fixture_identity("alice");
-
-        let t1 = sfu
-            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
-            .unwrap();
-        let t2 = sfu
-            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
-            .unwrap();
-        assert!(!sfu.is_revoked(&t1.jti));
-        assert!(!sfu.is_revoked(&t2.jti));
-
-        // Register + unregister: every previously-issued jti must
-        // be revoked once the participant has left the call.
-        sfu.register_call_participant(&call, &alice);
-        sfu.unregister_call_participant(&call, &alice);
-
-        assert!(sfu.is_revoked(&t1.jti));
-        assert!(sfu.is_revoked(&t2.jti));
-    }
-
-    #[test]
-    fn revocation_is_scoped_per_participant() {
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-        let call = CallId::new("c-scope").unwrap();
-        let alice = fixture_identity("alice");
-        let bob = fixture_identity("bob");
-
-        let alice_token = sfu
-            .issue_join_token(&call, &alice, MediaCapabilities::full_participant())
-            .unwrap();
-        let bob_token = sfu
-            .issue_join_token(&call, &bob, MediaCapabilities::full_participant())
-            .unwrap();
-
-        sfu.register_call_participant(&call, &alice);
-        sfu.register_call_participant(&call, &bob);
-        sfu.unregister_call_participant(&call, &alice);
-
-        // Alice's hangup must not revoke bob's still-active token.
-        assert!(sfu.is_revoked(&alice_token.jti));
-        assert!(!sfu.is_revoked(&bob_token.jti));
-    }
-
-    #[test]
-    fn issued_jti_vec_is_capped_per_participant() {
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-        let call = CallId::new("c-cap").unwrap();
-        let alice = fixture_identity("alice");
-
-        // Mint well past the cap; every fresh token should slot in,
-        // but the per-participant vec must never exceed it.
-        for _ in 0..(MAX_ISSUED_PER_PARTICIPANT * 3) {
-            sfu.issue_join_token(&call, &alice, MediaCapabilities::full_participant())
-                .expect("token issued");
-            assert!(
-                sfu.issued_count(&call, &alice) <= MAX_ISSUED_PER_PARTICIPANT,
-                "issued vec must stay <= MAX_ISSUED_PER_PARTICIPANT"
-            );
-        }
-        assert_eq!(
-            sfu.issued_count(&call, &alice),
-            MAX_ISSUED_PER_PARTICIPANT,
-            "issued vec must saturate exactly at the cap"
-        );
-    }
-
-    #[test]
-    fn revoked_entries_are_swept_once_past_expiry() {
-        use chrono::Duration as ChronoDuration;
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-
-        // Seed the revoked map directly with a past-exp entry so
-        // the test does not depend on real-time tickdown of the
-        // token TTL.
-        let stale_jti = Jti::new();
-        let fresh_jti = Jti::new();
-        sfu.revoked
-            .insert(stale_jti.clone(), Utc::now() - ChronoDuration::seconds(60));
-        sfu.revoked
-            .insert(fresh_jti.clone(), Utc::now() + ChronoDuration::seconds(60));
-
-        // Reading the stale jti must return false (the token can
-        // no longer be replayed regardless) AND drop the entry.
-        assert!(!sfu.is_revoked(&stale_jti));
-        assert!(sfu.is_revoked(&fresh_jti));
-        assert_eq!(sfu.revoked_count(), 1);
-
-        // Running the unregister-path sweep clears any other stale
-        // entries that piled up since the last sweep.
-        sfu.revoked
-            .insert(Jti::new(), Utc::now() - ChronoDuration::seconds(1));
-        let alice = fixture_identity("alice");
-        let call = CallId::new("c-sweep").unwrap();
-        sfu.register_call_participant(&call, &alice);
-        sfu.unregister_call_participant(&call, &alice);
-        assert_eq!(
-            sfu.revoked_count(),
-            1,
-            "unregister sweep must clear past-exp entries; one fresh entry should remain"
-        );
-    }
-
-    #[test]
-    fn register_is_idempotent() {
-        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-        let call = CallId::new("c1").unwrap();
-        let identity = fixture_identity("alice");
-
-        sfu.register_call_participant(&call, &identity);
-        sfu.register_call_participant(&call, &identity);
-        assert_eq!(sfu.participant_count(&call), 1);
-    }
-
-    // -------- Admin-evict path (tokio runtime present) --------
-
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::Mutex;
-
-    use crate::admin::LiveKitAdmin;
-
-    #[derive(Default)]
-    struct RecordingAdmin {
-        remove_calls: Mutex<Vec<(CallId, Identity)>>,
-        delete_calls: Mutex<Vec<CallId>>,
-        /// What LiveKit "reports" as connected per call. A call absent
-        /// from the map lists as empty (room not found). Drives the
-        /// reconciliation tests.
-        live: Mutex<std::collections::HashMap<CallId, Vec<Identity>>>,
-        /// When set, `list_participant_identities` errors instead of
-        /// returning a set — used to assert reconcile skips a call it
-        /// can't confirm rather than sweeping it.
-        list_errors: Mutex<bool>,
-    }
-
-    impl RecordingAdmin {
-        fn remove_snapshot(&self) -> Vec<(CallId, Identity)> {
-            self.remove_calls.lock().expect("recording lock").clone()
-        }
-
-        fn delete_snapshot(&self) -> Vec<CallId> {
-            self.delete_calls.lock().expect("recording lock").clone()
-        }
-
-        fn set_live(&self, call: &CallId, identities: Vec<Identity>) {
-            self.live
-                .lock()
-                .expect("recording lock")
-                .insert(call.clone(), identities);
-        }
-
-        fn fail_list(&self) {
-            self.set_list_failing(true);
-        }
-
-        fn set_list_failing(&self, failing: bool) {
-            *self.list_errors.lock().expect("recording lock") = failing;
-        }
-    }
-
-    impl LiveKitAdmin for RecordingAdmin {
-        fn remove_participant<'a>(
-            &'a self,
-            room: &'a CallId,
-            identity: &'a Identity,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
-            let room = room.clone();
-            let identity = identity.clone();
-            Box::pin(async move {
-                self.remove_calls
-                    .lock()
-                    .expect("recording lock")
-                    .push((room, identity));
-                Ok(())
-            })
-        }
-
-        fn delete_room<'a>(
-            &'a self,
-            room: &'a CallId,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
-            let room = room.clone();
-            Box::pin(async move {
-                self.delete_calls.lock().expect("recording lock").push(room);
-                Ok(())
-            })
-        }
-
-        fn list_participant_identities<'a>(
-            &'a self,
-            room: &'a CallId,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Identity>, SfuError>> + Send + 'a>> {
-            let room = room.clone();
-            Box::pin(async move {
-                if *self.list_errors.lock().expect("recording lock") {
-                    return Err(SfuError::InvalidCallId("simulated list failure".into()));
-                }
-                Ok(self
-                    .live
-                    .lock()
-                    .expect("recording lock")
-                    .get(&room)
-                    .cloned()
-                    .unwrap_or_default())
-            })
-        }
-    }
-
-    /// Yield enough times for any spawned admin task on the current
-    /// runtime to make progress. The spawned future does a couple of
-    /// `Mutex` operations and returns, so two yields are more than
-    /// sufficient; tighten or loosen if `RecordingAdmin` grows steps.
-    async fn drain_admin_tasks() {
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn unregister_schedules_remove_participant_on_the_admin_client() {
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("r-evict").unwrap();
-        let alice = fixture_identity("alice");
-        let bob = fixture_identity("bob");
-
-        sfu.register_call_participant(&call, &alice);
-        sfu.register_call_participant(&call, &bob);
-
-        // Alice leaves: RemoveParticipant must fire; DeleteRoom must
-        // NOT fire because bob is still in the call.
-        let state = sfu.unregister_call_participant(&call, &alice);
-        assert!(matches!(state, CallState::Active { remaining: 1 }));
-        drain_admin_tasks().await;
-
-        let removes = admin.remove_snapshot();
-        assert_eq!(
-            removes.len(),
-            1,
-            "RemoveParticipant should fire exactly once"
-        );
-        assert_eq!(&removes[0].0, &call);
-        assert_eq!(
-            removes[0].1.as_livekit_identity(),
-            alice.as_livekit_identity()
-        );
-        assert!(
-            admin.delete_snapshot().is_empty(),
-            "DeleteRoom must not fire while the call still has participants"
-        );
-    }
-
-    #[tokio::test]
-    async fn unregister_last_participant_also_schedules_delete_room() {
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("r-empty").unwrap();
-        let alice = fixture_identity("alice");
-
-        sfu.register_call_participant(&call, &alice);
-        let state = sfu.unregister_call_participant(&call, &alice);
-        assert_eq!(state, CallState::Ended);
-        drain_admin_tasks().await;
-
-        let deletes = admin.delete_snapshot();
-        assert_eq!(deletes.len(), 1, "DeleteRoom must fire on last participant");
-        assert_eq!(&deletes[0], &call);
-
-        let removes = admin.remove_snapshot();
-        assert_eq!(
-            removes.len(),
-            1,
-            "RemoveParticipant still fires for the last leaver"
-        );
-        assert_eq!(&removes[0].0, &call);
-    }
-
-    #[tokio::test]
-    async fn unregister_of_unknown_identity_fires_remove_participant_but_not_delete_room() {
-        // Edge case: a session-terminate arrives without a matching
-        // register (e.g. server-side state was lost, a client races
-        // a re-init, a replayed terminate from a long-dead session).
-        // `RemoveParticipant` must still fire because LiveKit may
-        // hold the participant via a separate path. `DeleteRoom`
-        // MUST NOT fire — we don't know the call's true state, and
-        // tearing it down could evict participants we never tracked.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("r-ghost").unwrap();
-        let ghost = fixture_identity("mallory");
-
-        let state = sfu.unregister_call_participant(&call, &ghost);
-        assert!(
-            matches!(state, CallState::Active { remaining: 0 }),
-            "ghost unregister must NOT report CallState::Ended; got {state:?}",
-        );
-        drain_admin_tasks().await;
-
-        let removes = admin.remove_snapshot();
-        assert_eq!(removes.len(), 1);
-        assert_eq!(
-            removes[0].1.as_livekit_identity(),
-            ghost.as_livekit_identity()
-        );
-        assert!(
-            admin.delete_snapshot().is_empty(),
-            "DeleteRoom must not fire when we never tracked the participant",
-        );
-    }
-
-    #[tokio::test]
-    async fn note_participant_left_clears_local_state_without_admin_call() {
-        // The LiveKit webhook bridge calls this path when LiveKit's
-        // `participant_left` fires. Doing a back-channel admin
-        // RemoveParticipant here would amplify the wire traffic (LK
-        // would 404 our redundant call) and racily kick fresh
-        // rejoiners. The trait contract forbids it; assert the
-        // production impl honours it.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("r-webhook").unwrap();
-        let alice = fixture_identity("alice");
-        sfu.register_call_participant(&call, &alice);
-
-        sfu.note_participant_left(&call, &alice);
-        drain_admin_tasks().await;
-
-        assert_eq!(sfu.participant_count(&call), 0, "registry must be cleared");
-        assert!(
-            admin.remove_snapshot().is_empty(),
-            "note_participant_left must NOT spawn RemoveParticipant",
-        );
-        assert!(
-            admin.delete_snapshot().is_empty(),
-            "note_participant_left must NOT spawn DeleteRoom",
-        );
-    }
-
-    #[tokio::test]
-    async fn last_participant_delete_room_skipped_when_someone_rejoins() {
-        // Race: Alice hangs up (clearing local state + scheduling
-        // teardown), Bob joins the same MUC call before the spawn
-        // gets to its DeleteRoom step. The re-check inside the
-        // spawn must observe Bob's registration and suppress
-        // DeleteRoom so Bob's session is not evicted. We simulate
-        // the rejoin by registering Bob immediately after Alice's
-        // unregister returns, before yielding to the spawn.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("r-rejoin").unwrap();
-        let alice = fixture_identity("alice");
-        let bob = fixture_identity("bob");
-
-        sfu.register_call_participant(&call, &alice);
-        let state = sfu.unregister_call_participant(&call, &alice);
-        assert_eq!(state, CallState::Ended);
-
-        // Bob rejoins before the spawned future polls. With a single-
-        // threaded current-thread runtime this synchronous register
-        // is guaranteed to land before any `yield_now`-scheduled
-        // continuation observes the registry.
-        sfu.register_call_participant(&call, &bob);
-
-        drain_admin_tasks().await;
-
-        let removes = admin.remove_snapshot();
-        assert_eq!(
-            removes.len(),
-            1,
-            "RemoveParticipant for Alice must still fire"
-        );
-        assert!(
-            admin.delete_snapshot().is_empty(),
-            "DeleteRoom must be suppressed by the rejoin re-check; got {:?}",
-            admin.delete_snapshot(),
-        );
-    }
-
-    // -------- Reconciliation backstop --------
-
-    use crate::SfuReconciler;
-
-    #[tokio::test]
-    async fn reconcile_sweeps_ghost_absent_from_livekit() {
-        // Alice + Bob registered; LiveKit reports only Alice connected
-        // (Bob's participant_left webhook was lost). With a zero grace
-        // window Bob must be swept — after TWO consecutive absent
-        // passes (#1127) — and returned for presence cleanup; Alice
-        // must remain. No admin remove/delete is fired — the ghost is
-        // already gone from LiveKit.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("general@muc.waddle.social").unwrap();
-        let alice = fixture_identity("alice");
-        let bob = fixture_identity("bob");
-        sfu.register_call_participant(&call, &alice);
-        sfu.register_call_participant(&call, &bob);
-        admin.set_live(&call, vec![alice.clone()]);
-
-        let first_pass = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-        assert!(
-            first_pass.is_empty(),
-            "one absent observation must not sweep (#1127): {first_pass:?}"
-        );
-        assert!(
-            sfu.has_call_participant(&call, &bob),
-            "Bob must survive the first absent pass"
-        );
-
-        let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-
-        assert_eq!(swept, vec![(call.clone(), bob.clone())]);
-        assert!(sfu.has_call_participant(&call, &alice), "Alice must remain");
-        assert!(
-            !sfu.has_call_participant(&call, &bob),
-            "Bob must be swept from the registry"
-        );
-        assert_eq!(sfu.participant_count(&call), 1);
-        assert!(
-            admin.remove_snapshot().is_empty() && admin.delete_snapshot().is_empty(),
-            "reconcile must not fire admin RemoveParticipant/DeleteRoom for already-gone ghosts"
-        );
-    }
-
-    #[tokio::test]
-    async fn reconcile_respects_registration_grace_window() {
-        // A just-registered participant LiveKit hasn't seen yet (still
-        // ringing/connecting) must NOT be swept while inside the grace
-        // window — sweeping here would tear down a call coming up.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("room@muc.waddle.social").unwrap();
-        let alice = fixture_identity("alice");
-        sfu.register_call_participant(&call, &alice);
-        // LiveKit reports nobody (room not yet created / mid-connect).
-        admin.set_live(&call, vec![]);
-
-        let swept = sfu
-            .reconcile_active_calls(ChronoDuration::seconds(3600))
-            .await;
-
-        assert!(
-            swept.is_empty(),
-            "a participant inside the grace window must not be swept"
-        );
-        assert_eq!(sfu.participant_count(&call), 1);
-    }
-
-    #[tokio::test]
-    async fn reconcile_keeps_genuinely_connected_participants() {
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("room2@muc.waddle.social").unwrap();
-        let alice = fixture_identity("alice");
-        sfu.register_call_participant(&call, &alice);
-        admin.set_live(&call, vec![alice.clone()]);
-
-        let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-
-        assert!(swept.is_empty(), "connected participant must not be swept");
-        assert!(sfu.has_call_participant(&call, &alice));
-    }
-
-    #[tokio::test]
-    async fn reconcile_skips_calls_it_cannot_confirm() {
-        // If ListParticipants fails for a call, absence cannot be
-        // confirmed; nothing is swept and the next pass retries.
-        let admin = Arc::new(RecordingAdmin::default());
-        admin.fail_list();
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("room3@muc.waddle.social").unwrap();
-        let alice = fixture_identity("alice");
-        sfu.register_call_participant(&call, &alice);
-
-        let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-
-        assert!(
-            swept.is_empty(),
-            "a call whose participant list could not be fetched must not be swept"
-        );
-        assert_eq!(sfu.participant_count(&call), 1);
-    }
-
-    #[tokio::test]
-    async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
-        // #1127: a LiveKit pod restart makes one pass report every
-        // room as not-found (empty participant list). Clients silently
-        // rejoin before the next pass. Nothing may be swept.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call_a = CallId::new("standup@muc.waddle.social").unwrap();
-        let call_b = CallId::new("alice@waddle.social::dm-1").unwrap();
-        let alice = fixture_identity("alice");
-        let bob = fixture_identity("bob");
-        sfu.register_call_participant(&call_a, &alice);
-        sfu.register_call_participant(&call_b, &bob);
-
-        // Pass 1: restart — LiveKit knows no rooms (both list empty).
-        let pass1 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-        assert!(pass1.is_empty(), "restart pass must not sweep: {pass1:?}");
-        assert_eq!(sfu.participant_count(&call_a), 1);
-        assert_eq!(sfu.participant_count(&call_b), 1);
-
-        // Clients reconnected before pass 2.
-        admin.set_live(&call_a, vec![alice.clone()]);
-        admin.set_live(&call_b, vec![bob.clone()]);
-        let pass2 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-        assert!(pass2.is_empty(), "reconnected clients must not be swept");
-
-        // Pass 3: streaks were reset by the connected observation, so
-        // a later single absent blip still does not sweep.
-        admin.set_live(&call_a, vec![]);
-        let pass3 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-        assert!(
-            pass3.is_empty(),
-            "streak must have been reset by the connected pass: {pass3:?}"
-        );
-        assert!(sfu.has_call_participant(&call_a, &alice));
-    }
-
-    #[tokio::test]
-    async fn reconcile_failed_pass_resets_absence_streak() {
-        // #1127 AC: the absence tracker resets on a failed pass — two
-        // absent observations separated by a ListParticipants failure
-        // are not "consecutive".
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("room@muc.waddle.social").unwrap();
-        let alice = fixture_identity("alice");
-        sfu.register_call_participant(&call, &alice);
-        admin.set_live(&call, vec![]);
-
-        // Absent pass 1 → streak 1.
-        assert!(sfu
-            .reconcile_active_calls(ChronoDuration::zero())
-            .await
-            .is_empty());
-        // Failed pass → streak reset.
-        admin.set_list_failing(true);
-        assert!(sfu
-            .reconcile_active_calls(ChronoDuration::zero())
-            .await
-            .is_empty());
-        admin.set_list_failing(false);
-        // Absent pass again → streak restarts at 1, still no sweep.
-        let third = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-        assert!(
-            third.is_empty(),
-            "failed pass must reset the streak: {third:?}"
-        );
-        assert_eq!(sfu.participant_count(&call), 1);
-        // Second CONSECUTIVE absent pass → swept.
-        let fourth = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-        assert_eq!(fourth, vec![(call.clone(), alice)]);
-        assert_eq!(sfu.participant_count(&call), 0);
-    }
-
-    #[tokio::test]
-    async fn reconcile_streak_resets_on_reregistration() {
-        // A participant re-registering (fresh session-initiate /
-        // rejoin) invalidates absence observed against the previous
-        // attempt.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("room@muc.waddle.social").unwrap();
-        let alice = fixture_identity("alice");
-        sfu.register_call_participant(&call, &alice);
-        admin.set_live(&call, vec![]);
-
-        assert!(sfu
-            .reconcile_active_calls(ChronoDuration::zero())
-            .await
-            .is_empty());
-        // Rejoin between passes.
-        sfu.register_call_participant(&call, &alice);
-        // This absent pass is the FIRST of the new registration.
-        assert!(
-            sfu.reconcile_active_calls(ChronoDuration::zero())
-                .await
-                .is_empty(),
-            "re-registration must reset the absence streak"
-        );
-        assert_eq!(sfu.participant_count(&call), 1);
-    }
-
-    // -------- #1129 teardown/join race --------
-
-    #[test]
-    fn concurrent_join_during_teardown_is_never_clobbered() {
-        // #1129: `clear_local_state` used to compute `remaining == 0`
-        // under the entry guard, drop it, then unconditionally remove
-        // the call entry — deleting a joiner who registered in the
-        // window. The atomic `remove_if` closes that: after BOTH an
-        // unregister(alice) and a register(bob) have completed, bob
-        // must always be present in the registry, whatever the
-        // interleaving. Run many racing iterations to exercise the
-        // window.
-        let sfu = Arc::new(
-            LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test (no runtime)"),
-        );
-        let alice = fixture_identity("alice");
-        let bob = fixture_identity("bob");
-
-        for i in 0..200 {
-            let call = CallId::new(format!("race-{i}")).unwrap();
-            sfu.register_call_participant(&call, &alice);
-
-            let leaver = {
-                let sfu = Arc::clone(&sfu);
-                let call = call.clone();
-                let alice = alice.clone();
-                std::thread::spawn(move || {
-                    let _ = sfu.unregister_call_participant(&call, &alice);
-                })
-            };
-            sfu.register_call_participant(&call, &bob);
-            leaver.join().expect("leaver thread");
-
-            assert!(
-                sfu.has_call_participant(&call, &bob),
-                "iteration {i}: concurrent joiner was clobbered by teardown (#1129)"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
-        // #1129 second half: when the joiner wins the race, the
-        // unregister must report the call as still active (not Ended)
-        // so no DeleteRoom is scheduled against the fresh joiner.
-        let admin = Arc::new(RecordingAdmin::default());
-        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-        let call = CallId::new("r-joiner-race").unwrap();
-        let alice = fixture_identity("alice");
-        let bob = fixture_identity("bob");
-
-        sfu.register_call_participant(&call, &alice);
-        // Simulate the joiner landing inside alice's teardown window:
-        // remove alice from the set (step 1 of clear_local_state),
-        // register bob, then run the full unregister — the conditional
-        // removal must observe bob and keep the entry.
-        sfu.calls
-            .get_mut(&call)
-            .expect("entry exists")
-            .remove(&alice);
-        sfu.register_call_participant(&call, &bob);
-
-        let state = sfu.unregister_call_participant(&call, &alice);
-        assert!(
-            matches!(state, CallState::Active { remaining: 1 }),
-            "joiner present at conditional-remove time must keep the call active; got {state:?}"
-        );
-        drain_admin_tasks().await;
-        assert!(
-            admin.delete_snapshot().is_empty(),
-            "DeleteRoom must not fire while the fresh joiner is registered"
-        );
-        assert!(sfu.has_call_participant(&call, &bob));
-    }
-}
+mod tests;

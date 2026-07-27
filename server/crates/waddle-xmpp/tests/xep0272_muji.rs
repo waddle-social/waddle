@@ -328,9 +328,14 @@ fn test_full_jid() -> jid::FullJid {
 }
 
 fn ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
+    // Mirrors the grants the websocket layer's Muji gate derives for
+    // a voiced (role ≥ participant) occupant.
     StanzaContext {
         domain: TEST_DOMAIN,
         full_jid: jid,
+        media_capabilities: Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+            waddle_xmpp_core::types::Voice::Voiced,
+        )),
     }
 }
 
@@ -674,6 +679,19 @@ impl waddle_sfu::LiveKitAdmin for RecordingAdmin {
         })
     }
 
+    fn update_participant<'a>(
+        &'a self,
+        _room: &'a waddle_sfu::CallId,
+        _identity: &'a waddle_sfu::Identity,
+        _capabilities: waddle_sfu::MediaCapabilities,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), waddle_sfu::SfuError>> + Send + 'a>,
+    > {
+        // These Muji teardown tests don't exercise mid-call grant
+        // updates; accept and ignore.
+        Box::pin(async move { Ok(()) })
+    }
+
     fn list_participant_identities<'a>(
         &'a self,
         _room: &'a waddle_sfu::CallId,
@@ -808,5 +826,140 @@ async fn muji_session_terminate_skips_delete_room_when_call_still_has_participan
     assert!(
         deletes.is_empty(),
         "DeleteRoom must not fire while the call still has participants; got {deletes:?}",
+    );
+}
+
+// ── Role-derived media grants in the minted LiveKit token ──────────
+
+/// Decoded `video` grant claim of a minted LiveKit join JWT.
+#[derive(serde::Deserialize)]
+struct DecodedVideoGrant {
+    #[serde(rename = "canPublish")]
+    can_publish: bool,
+    #[serde(rename = "canSubscribe")]
+    can_subscribe: bool,
+    #[serde(rename = "canPublishData")]
+    can_publish_data: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct DecodedClaims {
+    video: DecodedVideoGrant,
+}
+
+/// Extract the issued LiveKit token from the Muji session-accept and
+/// decode its `video` grant with the fixture signing secret.
+fn accepted_video_grant(events: &[OutboundEvent]) -> DecodedVideoGrant {
+    let accept = session_accept_payload_to(events, TEST_INITIATOR)
+        .unwrap_or_else(|| panic!("expected Muji session-accept: {events:?}"));
+    let jingle = Jingle::try_from(accept.clone()).expect("session-accept parses as jingle");
+    let content = jingle.contents.first().expect("accept carries content");
+    let Some(Transport::Unknown(elem)) = &content.transport else {
+        panic!("content missing Waddle transport");
+    };
+    let WaddleLiveKitTransport::Issued(issued) =
+        WaddleLiveKitTransport::try_from(elem).expect("transport parses")
+    else {
+        panic!("server must issue the transport");
+    };
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_required_spec_claims::<&str>(&[]);
+    let key = jsonwebtoken::DecodingKey::from_secret(b"super-secret-secret-32-bytes-min");
+    jsonwebtoken::decode::<DecodedClaims>(issued.token.as_str(), &key, &validation)
+        .expect("issued token decodes with fixture secret")
+        .claims
+        .video
+}
+
+fn ctx_with_caps<'a>(
+    jid: &'a jid::FullJid,
+    caps: Option<waddle_sfu::MediaCapabilities>,
+) -> StanzaContext<'a> {
+    StanzaContext {
+        domain: TEST_DOMAIN,
+        full_jid: jid,
+        media_capabilities: caps,
+    }
+}
+
+/// XEP-0045 voice → SFU grant conformance: a voiced occupant's
+/// authorization (derived by the websocket-layer Muji gate) mints a
+/// token that may publish.
+#[test]
+fn muji_initiate_with_participant_grants_mints_publishing_token() {
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-grants-participant",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(
+        &iq,
+        &ctx_with_caps(
+            &jid,
+            Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+                waddle_xmpp_core::types::Voice::Voiced,
+            )),
+        ),
+    );
+
+    let grant = accepted_video_grant(&events);
+    assert!(grant.can_publish && grant.can_subscribe && grant.can_publish_data);
+}
+
+/// A visitor (occupant without voice) gets a listen-only token: the
+/// SFU itself rejects publish attempts regardless of client behaviour.
+#[test]
+fn muji_initiate_with_visitor_grants_mints_listen_only_token() {
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-grants-visitor",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(
+        &iq,
+        &ctx_with_caps(
+            &jid,
+            Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+                waddle_xmpp_core::types::Voice::Muted,
+            )),
+        ),
+    );
+
+    let grant = accepted_video_grant(&events);
+    assert!(grant.can_subscribe, "a visitor may still listen");
+    assert!(!grant.can_publish);
+    assert!(!grant.can_publish_data);
+}
+
+/// Fail closed: a Muji mint reached without gate-derived capabilities
+/// must issue NO token at all. A subscribe-only JWT is still a usable
+/// credential for the room's media, so an unverified caller must not
+/// receive one — the request is refused instead.
+#[test]
+fn muji_initiate_without_gate_capabilities_is_refused() {
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-grants-ungated",
+    );
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let events = handler.handle(&iq, &ctx_with_caps(&jid, None));
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::Forbidden),
+        "an ungated Muji join must be forbidden, not granted a listener token: {events:?}",
+    );
+    assert!(
+        session_accept_payload_to(&events, TEST_INITIATOR).is_none(),
+        "no session-accept (and therefore no token) may be issued: {events:?}",
     );
 }

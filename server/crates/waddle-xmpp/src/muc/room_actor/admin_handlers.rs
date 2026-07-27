@@ -11,7 +11,7 @@ use crate::muc::{
     build_membership_removal_presence, build_role_change_presence, MucPresenceStatus, MucRoom,
     Occupant,
 };
-use crate::types::{Affiliation, Role};
+use crate::types::{Affiliation, Role, Voice};
 use crate::xep::xep0421::{OccupantIdSecret, OccupantIdentity};
 
 const STATUS_AFFILIATION_CHANGE_REMOVAL: &str = "321";
@@ -93,6 +93,15 @@ pub(super) fn apply_affiliation_change(
         }
     }
 
+    // An affiliation change re-derives the occupant's role
+    // (`MucRoom::set_affiliation_with_provenance`), so it can silently
+    // take voice away — e.g. `admin → none` demotes Moderator →
+    // Visitor in a moderated room. Snapshot each affected session's
+    // voice BEFORE the mutation so the non-removal path below can
+    // report what actually changed and callers can converge live SFU
+    // grants.
+    let voices_before = session_voices(room, &target_jid);
+
     let change = room.set_affiliation(target_jid.clone(), new_affiliation);
     if change.is_none() {
         return Ok(AdminItemsApplied::default());
@@ -138,6 +147,7 @@ pub(super) fn apply_affiliation_change(
         return Ok(AdminItemsApplied {
             presence_updates: updates,
             removed_by_moderation,
+            voice_changes: Vec::new(),
         });
     }
 
@@ -152,15 +162,25 @@ pub(super) fn apply_affiliation_change(
                 actor,
             ));
         }
+        // Status-321 removal (affiliation loss in a members-only room)
+        // ends room membership just as surely as a kick or ban, so it
+        // must end SFU call participation too: occupancy is the
+        // precondition for being in the call at all, and leaving the
+        // removed user connected would let a non-occupant keep
+        // publishing to — and listening in on — a room they can no
+        // longer enter. #935 originally scoped eviction to 307/301;
+        // that exemption was a hole.
+        let removed_by_moderation: Vec<FullJid> = affected_occupants
+            .iter()
+            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+            .collect();
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
         }
-        // Status-321 removals (affiliation loss in a members-only
-        // room) are deliberately NOT marked for SFU eviction — issue
-        // #935 scoped eviction to kick (307) and ban (301) only.
         return Ok(AdminItemsApplied {
             presence_updates: updates,
-            removed_by_moderation: Vec::new(),
+            removed_by_moderation,
+            voice_changes: Vec::new(),
         });
     }
 
@@ -193,15 +213,60 @@ pub(super) fn apply_affiliation_change(
     Ok(AdminItemsApplied {
         presence_updates: updates,
         removed_by_moderation: Vec::new(),
+        voice_changes: changed_session_voices(&voices_before, &session_voices(room, &target_jid)),
     })
 }
 
+/// Current voice of every active session belonging to `target_jid`,
+/// keyed by session full JID.
+fn session_voices(room: &MucRoom, target_jid: &BareJid) -> Vec<(FullJid, Voice)> {
+    let moderation = room.moderation();
+    occupants_for_bare(room, target_jid)
+        .into_iter()
+        .flat_map(|occupant| {
+            let voice = occupant.role.voice(moderation);
+            room.get_occupant_sessions(&occupant.nick)
+                .into_iter()
+                .map(move |session| (session, voice))
+        })
+        .collect()
+}
+
+/// The sessions whose voice differs between two [`session_voices`]
+/// snapshots, carrying the new value. Sessions that vanished between
+/// snapshots are removals and are reported through
+/// `removed_by_moderation`, not here.
+fn changed_session_voices(
+    before: &[(FullJid, Voice)],
+    after: &[(FullJid, Voice)],
+) -> Vec<(FullJid, Voice)> {
+    after
+        .iter()
+        .filter(|(session, voice)| {
+            before
+                .iter()
+                .find(|(prior_session, _)| prior_session == session)
+                .is_none_or(|(_, prior_voice)| prior_voice != voice)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Eject occupants who lack the member affiliation after a room became
+/// members-only (XEP-0045 status 322).
+///
+/// Returns removals as well as presences: a status-322 ejection ends
+/// room membership, and occupancy is the precondition for call
+/// participation, so the ejected occupant's SFU session must end too.
+/// Leaving them connected would let a non-occupant keep publishing into
+/// — and listening in on — a room they can no longer enter. Same
+/// reasoning as the 307/301/321 paths.
 fn enforce_members_only(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
-) -> Vec<(FullJid, Presence)> {
+) -> AdminItemsApplied {
     if !room.config.members_only {
-        return Vec::new();
+        return AdminItemsApplied::default();
     }
     let removed_occupants: Vec<Occupant> = room
         .occupants
@@ -210,6 +275,7 @@ fn enforce_members_only(
         .cloned()
         .collect();
     let mut presence_updates = Vec::new();
+    let mut removed_by_moderation = Vec::new();
     for occupant in &removed_occupants {
         presence_updates.extend(removal_presence_updates(
             room,
@@ -218,11 +284,16 @@ fn enforce_members_only(
             STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
             None,
         ));
+        removed_by_moderation.extend(room.get_occupant_sessions(&occupant.nick));
     }
     for occupant in removed_occupants {
         room.remove_occupant(&occupant.nick);
     }
-    presence_updates
+    AdminItemsApplied {
+        presence_updates,
+        removed_by_moderation,
+        voice_changes: Vec::new(),
+    }
 }
 
 /// XEP-0045 role-change authorization: target protection first, actor
@@ -343,6 +414,20 @@ pub struct ApplyAdminItems {
 pub struct AdminItemsApplied {
     pub presence_updates: Vec<(FullJid, Presence)>,
     pub removed_by_moderation: Vec<FullJid>,
+    /// Every session whose XEP-0045 voice changed *without* leaving
+    /// the room, with the voice now in effect. Callers owning an SFU
+    /// handle must converge these sessions' live media grants — losing
+    /// voice revokes publish rights on the SFU, regaining it restores
+    /// them.
+    ///
+    /// Both triggers are covered: an explicit `<item role='…'/>`
+    /// change, and an affiliation change that re-derives the
+    /// occupant's role (e.g. `admin → none` demotes Moderator →
+    /// Visitor in a moderated room — see
+    /// [`MucRoom::set_affiliation_with_provenance`]). Removals
+    /// (kick/ban) never appear here; they are terminal and carried by
+    /// `removed_by_moderation` instead.
+    pub voice_changes: Vec<(FullJid, Voice)>,
 }
 
 impl kameo::message::Message<ApplyAdminItems> for RoomActor {
@@ -369,6 +454,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         }
         let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
         let mut removed_by_moderation: Vec<FullJid> = Vec::new();
+        let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
         // FIX 2: a persist failure partway through this batch must not
         // abort the loop early — earlier items in the same batch have
         // already mutated `self.room` (bans/kicks remove occupants), so
@@ -454,6 +540,14 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 } else {
                     if let Some(occ) = self.room.occupants.get_mut(&target_nick) {
                         occ.role = new_role;
+                    }
+                    let new_voice = new_role.voice(self.room.moderation());
+                    if target_occupant.role.voice(self.room.moderation()) != new_voice {
+                        voice_changes.extend(
+                            target_sessions
+                                .iter()
+                                .map(|session| (session.clone(), new_voice)),
+                        );
                     }
                     for recipient in all_room_sessions(&self.room) {
                         let target_identity = OccupantIdentity {
@@ -612,6 +706,10 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 }
                 presence_updates.extend(applied.presence_updates);
                 removed_by_moderation.extend(applied.removed_by_moderation);
+                // An affiliation change can re-derive the occupant's
+                // role and thus take voice away; those sessions must
+                // reach the caller so live SFU grants converge.
+                voice_changes.extend(applied.voice_changes);
             }
         }
         for nick in occupants_to_kick {
@@ -630,6 +728,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         Ok(AdminItemsApplied {
             presence_updates,
             removed_by_moderation,
+            voice_changes,
         })
     }
 }
@@ -678,14 +777,17 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
 pub struct EnforceMembersOnly;
 
 impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
-    type Reply = Vec<(FullJid, Presence)>;
+    type Reply = Result<AdminItemsApplied, Infallible>;
 
     async fn handle(
         &mut self,
         _msg: EnforceMembersOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        enforce_members_only(&mut self.room, &self.occupant_id_secret)
+        Ok(enforce_members_only(
+            &mut self.room,
+            &self.occupant_id_secret,
+        ))
     }
 }
 
@@ -694,7 +796,7 @@ pub struct EnforceMembersOnlyAffiliations {
 }
 
 impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
-    type Reply = Result<Vec<(FullJid, Presence)>, super::AffiliationMutationError>;
+    type Reply = Result<AdminItemsApplied, super::AffiliationMutationError>;
 
     async fn handle(
         &mut self,
@@ -723,6 +825,14 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         // `self.room`), collect the first failure and surface it typed
         // only after the full batch has run.
         let mut persist_failure: Option<super::DurablePersistError> = None;
+        // These `set_affiliation` calls re-derive occupant roles, so an
+        // occupant who is NOT ejected below can still silently lose
+        // voice. Snapshot before the loop so the caller can converge
+        // their live SFU grants.
+        let voices_before: Vec<(FullJid, Voice)> = occupied_jids
+            .iter()
+            .flat_map(|jid| session_voices(&self.room, jid))
+            .collect();
         for jid in occupied_jids {
             let affiliation = affiliations.get(&jid).copied().unwrap_or(Affiliation::None);
             self.invalidate_invite_grant(&jid);
@@ -745,10 +855,30 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         if let Some(error) = persist_failure {
             return Err(error.into());
         }
-        Ok(enforce_members_only(
-            &mut self.room,
-            &self.occupant_id_secret,
-        ))
+        let mut applied = enforce_members_only(&mut self.room, &self.occupant_id_secret);
+        // Report voice losses for occupants who survived the
+        // members-only sweep; ejected sessions are carried by
+        // `removed_by_moderation` and must not be double-reported.
+        // Expand per occupant (not per bare JID) so a bare seated under
+        // two nicks is not counted twice.
+        let moderation = self.room.moderation();
+        let voices_after: Vec<(FullJid, Voice)> = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                let voice = occupant.role.voice(moderation);
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(move |session| (session, voice))
+            })
+            .collect();
+        applied.voice_changes = changed_session_voices(&voices_before, &voices_after)
+            .into_iter()
+            .filter(|(session, _)| !applied.removed_by_moderation.contains(session))
+            .collect();
+        Ok(applied)
     }
 }
 
@@ -761,5 +891,195 @@ impl kameo::message::Message<IsOwner> for RoomActor {
 
     async fn handle(&mut self, msg: IsOwner, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.room.get_affiliation(&msg.jid) == Affiliation::Owner
+    }
+}
+
+#[cfg(test)]
+mod voice_change_tests {
+    use super::*;
+    use crate::muc::RoomConfig;
+    use crate::xep::xep0421::OccupantIdSecret;
+
+    fn moderated_room() -> MucRoom {
+        MucRoom::new(
+            "voiceroom@muc.example.com".parse().expect("room jid"),
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            // An OPEN moderated room: `members_only` defaults to true,
+            // and affiliation loss in a members-only room is a removal
+            // (status 321) rather than a devoice, which is a different
+            // path.
+            RoomConfig {
+                moderated: true,
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        )
+    }
+
+    fn secret() -> OccupantIdSecret {
+        OccupantIdSecret::new(b"occupant-id-secret-at-least-32-bytes".to_vec())
+            .expect("test secret meets min length")
+    }
+
+    fn seat(room: &mut MucRoom, nick: &str, jid: &str, affiliation: Affiliation, role: Role) {
+        let real_jid: FullJid = jid.parse().expect("occupant full jid");
+        room.set_affiliation(real_jid.to_bare(), affiliation);
+        room.add_occupant(Occupant {
+            real_jid,
+            nick: nick.to_string(),
+            role,
+            affiliation,
+            is_remote: false,
+            home_server: None,
+        });
+    }
+
+    /// An affiliation change re-derives the occupant's role, so
+    /// `admin → none` in a moderated room silently takes voice away.
+    /// That MUST surface as a voice change or the occupant keeps
+    /// publishing on the SFU while XMPP treats them as a visitor.
+    #[test]
+    fn affiliation_demotion_that_removes_voice_reports_a_voice_change() {
+        let mut room = moderated_room();
+        seat(
+            &mut room,
+            "mallory",
+            "mallory@example.com/web",
+            Affiliation::Admin,
+            Role::Moderator,
+        );
+        // Keep an owner seated so the last-owner guard doesn't fire.
+        seat(
+            &mut room,
+            "owner",
+            "owner@example.com/web",
+            Affiliation::Owner,
+            Role::Moderator,
+        );
+
+        let applied = apply_affiliation_change(
+            &mut room,
+            &secret(),
+            "mallory@example.com".parse().expect("bare jid"),
+            Affiliation::None,
+            None,
+            None,
+        )
+        .expect("affiliation change applies");
+
+        assert_eq!(
+            applied.voice_changes.len(),
+            1,
+            "the demoted session's lost voice must be reported: {:?}",
+            applied.voice_changes
+        );
+        assert_eq!(
+            applied.voice_changes[0].0.to_string(),
+            "mallory@example.com/web"
+        );
+        assert_eq!(applied.voice_changes[0].1, Voice::Muted);
+        assert!(
+            applied.removed_by_moderation.is_empty(),
+            "an affiliation demotion is not a removal"
+        );
+    }
+
+    /// The same demotion in an UNMODERATED room leaves voice intact
+    /// (XEP-0045 §5.1.2 footnote), so there is nothing to converge and
+    /// no wasted SFU round-trip.
+    #[test]
+    fn affiliation_demotion_in_unmoderated_room_reports_no_voice_change() {
+        let mut room = MucRoom::new(
+            "openroom@muc.example.com".parse().expect("room jid"),
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            RoomConfig {
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+        assert!(!room.config.moderated, "fixture must be unmoderated");
+        seat(
+            &mut room,
+            "mallory",
+            "mallory@example.com/web",
+            Affiliation::Admin,
+            Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "owner",
+            "owner@example.com/web",
+            Affiliation::Owner,
+            Role::Moderator,
+        );
+
+        let applied = apply_affiliation_change(
+            &mut room,
+            &secret(),
+            "mallory@example.com".parse().expect("bare jid"),
+            Affiliation::None,
+            None,
+            None,
+        )
+        .expect("affiliation change applies");
+
+        assert!(
+            applied.voice_changes.is_empty(),
+            "an unmoderated room's participant keeps voice: {:?}",
+            applied.voice_changes
+        );
+    }
+
+    /// A members-only room's affiliation-loss removal (status 321)
+    /// ends room membership, so it must also end SFU participation —
+    /// otherwise a non-occupant keeps publishing into a room they can
+    /// no longer enter.
+    #[test]
+    fn members_only_affiliation_removal_evicts_from_the_call() {
+        let mut room = MucRoom::new(
+            "privateroom@muc.example.com".parse().expect("room jid"),
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            RoomConfig {
+                members_only: true,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "owner",
+            "owner@example.com/web",
+            Affiliation::Owner,
+            Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "bob",
+            "bob@example.com/web",
+            Affiliation::Member,
+            Role::Participant,
+        );
+
+        let applied = apply_affiliation_change(
+            &mut room,
+            &secret(),
+            "bob@example.com".parse().expect("bare jid"),
+            Affiliation::None,
+            None,
+            None,
+        )
+        .expect("affiliation change applies");
+
+        assert_eq!(
+            applied
+                .removed_by_moderation
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["bob@example.com/web".to_string()],
+            "a 321 removal must evict the removed occupant's SFU session"
+        );
     }
 }

@@ -269,6 +269,14 @@ pub struct MujiPresenceState {
 }
 
 impl MucRoom {
+    /// This room's XEP-0045 moderation state, as the typed input to
+    /// [`crate::types::Role::voice`]. Every voice decision — text
+    /// broadcast (§7.5) and SFU media grants alike — goes through
+    /// that one predicate, so they cannot drift apart.
+    pub fn moderation(&self) -> crate::types::Moderation {
+        crate::types::Moderation::from_moderated_flag(self.config.moderated)
+    }
+
     /// Create a new MUC room.
     pub fn new(
         room_jid: BareJid,

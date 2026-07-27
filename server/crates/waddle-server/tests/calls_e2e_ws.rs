@@ -23,6 +23,14 @@ const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
+// Namespaces for the stanzas these tests build come from the shared
+// definitions, never re-spelled here — a local copy would silently drift
+// from the wire shape the server actually implements.
+use waddle_xmpp::muc::{NS_MUC_ADMIN, NS_MUC_OWNER};
+use waddle_xmpp::ns::JABBER_CLIENT as NS_JABBER_CLIENT;
+use waddle_xmpp::xep::xep0166::NS_JINGLE;
+use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
+use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
 const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 const NS_SID: &str = "urn:xmpp:sid:0";
@@ -1350,5 +1358,274 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
             || archived_ended[0].contains(&format!("id=\"{anchor_origin_id}\"")),
         "archived ended fastening must target the anchor origin id: {}",
         archived_ended[0]
+    );
+}
+
+// ── XEP-0045 role → LiveKit media grants, end to end ──────────────────────
+
+/// The `video` grant of a LiveKit join JWT, decoded with the test
+/// deployment's signing secret.
+#[derive(serde::Deserialize)]
+struct E2eVideoGrant {
+    #[serde(rename = "canPublish")]
+    can_publish: bool,
+    #[serde(rename = "canSubscribe")]
+    can_subscribe: bool,
+    #[serde(rename = "canPublishData")]
+    can_publish_data: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct E2eClaims {
+    video: E2eVideoGrant,
+}
+
+/// Pull the `<token/>` out of an issued Waddle LiveKit transport and
+/// decode its grants.
+fn decode_issued_grant(frame: &str) -> E2eVideoGrant {
+    let elem: Element = frame.parse().expect("frame parses as XML");
+    let jingle = elem
+        .children()
+        .find(|child| child.name() == "jingle")
+        .expect("iq carries <jingle/>");
+    let content = jingle
+        .children()
+        .find(|child| child.name() == "content")
+        .expect("jingle carries <content/>");
+    let transport = content
+        .children()
+        .find(|child| child.name() == "transport")
+        .expect("content carries <transport/>");
+    let token = transport
+        .children()
+        .find(|child| child.name() == "token")
+        .expect("issued transport carries <token/>")
+        .text();
+
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_required_spec_claims::<&str>(&[]);
+    validation.validate_exp = false;
+    let key = jsonwebtoken::DecodingKey::from_secret(
+        "test-secret-with-at-least-32-bytes-of-payload".as_bytes(),
+    );
+    jsonwebtoken::decode::<E2eClaims>(&token, &key, &validation)
+        .expect("issued token decodes with the deployment signing secret")
+        .claims
+        .video
+}
+
+/// `muc#owner` config-submit IQ carrying the given form fields.
+fn owner_config_iq(room: &str, id: &str, fields: &[(&str, &str)]) -> Element {
+    let mut form = Element::builder("x", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    for (var, value) in fields {
+        form = form.append(
+            Element::builder("field", NS_DATA)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), *var)
+                .append(
+                    Element::builder("value", NS_DATA)
+                        .append(minidom::Node::Text((*value).to_string()))
+                        .build(),
+                )
+                .build(),
+        );
+    }
+    Element::builder("iq", NS_JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room)
+        .append(
+            Element::builder("query", NS_MUC_OWNER)
+                .append(form.build())
+                .build(),
+        )
+        .build()
+}
+
+/// `muc#admin` role-change IQ (XEP-0045 §8.4 voice grant/revoke).
+fn muc_admin_role_iq(room: &str, id: &str, nick: &str, role: &str) -> Element {
+    Element::builder("iq", NS_JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room)
+        .append(
+            Element::builder("query", NS_MUC_ADMIN)
+                .append(
+                    Element::builder("item", NS_MUC_ADMIN)
+                        .attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick)
+                        .attr(minidom::rxml::xml_ncname!("role").to_owned(), role)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+/// Send a Muji `session-initiate` for `room` and return the focus's
+/// `session-accept` frame carrying the issued transport.
+async fn muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str) -> String {
+    // Built with `minidom` builders, not string formatting, per the
+    // repo's XML-generation rule: interpolating `room`/`sid` into raw
+    // XML is exactly the shape that rule forbids.
+    let payload_type = Element::builder("payload-type", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+        .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+        .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+        .build();
+    let description = Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+        .append(payload_type)
+        .build();
+    let content = Element::builder("content", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("creator").to_owned(),
+            "initiator",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+        .append(description)
+        .append(Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build())
+        .build();
+    let jingle = Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-initiate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .append(content)
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .attr(minidom::rxml::xml_ncname!("room").to_owned(), room)
+                .build(),
+        )
+        .build();
+    let iq = Element::builder("iq", NS_JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            format!("mji-{sid}"),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "calls.localhost",
+        )
+        .append(jingle)
+        .build();
+    client
+        .send(&String::from(&iq))
+        .await
+        .expect("muji session-initiate");
+    client
+        .recv_matching(|frame| frame.contains("session-accept") && frame.contains("<token"))
+        .await
+        .expect("focus replies with a session-accept carrying an issued token")
+}
+
+/// End-to-end pin for the websocket gate → sans-I/O mint seam: a
+/// voiced occupant's Muji join must mint a token that may publish.
+/// This is the ONLY test that exercises the real
+/// `handlers/iq/sans_io.rs` wiring which carries the gate's derived
+/// capabilities into the mint — unit tests either call the gate
+/// directly or build `StanzaContext` by hand.
+#[tokio::test]
+async fn muji_join_by_voiced_occupant_mints_publishing_token_end_to_end() {
+    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let admin_pass = server.fixed_account_password().to_string();
+    // The server-owner localpart is required for instant-room creation.
+    let mut owner = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "grants-owner",
+    )
+    .await
+    .expect("owner connects");
+    let room = format!("grants-voiced-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    muji_join_room(&mut owner, &room, "admin").await;
+
+    let accept = muji_session_initiate(&mut owner, &room, "grant-e2e-voiced").await;
+    let grant = decode_issued_grant(&accept);
+
+    assert!(
+        grant.can_publish,
+        "an occupant with voice must be able to publish: {accept}"
+    );
+    assert!(grant.can_subscribe);
+    assert!(grant.can_publish_data);
+}
+
+/// End-to-end pin for the security property: an occupant who has been
+/// devoiced to `visitor` in a moderated room joins the call as a
+/// listener — the SFU token itself forbids publishing, so no client
+/// cooperation is required.
+#[tokio::test]
+async fn muji_join_by_devoiced_visitor_mints_listen_only_token_end_to_end() {
+    let server = TestServer::start_with_extra_envs(&[(BOB, BOB_PW)], &livekit_test_envs());
+    let admin_pass = server.fixed_account_password().to_string();
+    // The owner creates the room (and is therefore its moderator);
+    // bob joins as a regular occupant and is then devoiced.
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "grants-owner",
+    )
+    .await
+    .expect("owner connects");
+    let mut bob = WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, BOB, BOB_PW, "bx")
+        .await
+        .expect("bob connects");
+    let room = format!("grants-devoiced-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    muji_join_room(&mut alice, &room, "admin").await;
+    muji_join_room(&mut bob, &room, "bob").await;
+
+    // Make the room moderated so the visitor role actually withholds
+    // voice (XEP-0045 §Terminology), then devoice bob.
+    alice
+        .send(&String::from(&owner_config_iq(
+            &room,
+            "cfg-moderated",
+            &[
+                ("FORM_TYPE", "http://jabber.org/protocol/muc#roomconfig"),
+                ("muc#roomconfig_moderatedroom", "1"),
+            ],
+        )))
+        .await
+        .expect("owner config submit");
+    let _ = alice
+        .recv_matching(|frame| frame.contains("id='cfg-moderated'"))
+        .await
+        .expect("room config result");
+
+    alice
+        .send(&String::from(&muc_admin_role_iq(
+            &room,
+            "devoice-bob",
+            "bob",
+            "visitor",
+        )))
+        .await
+        .expect("devoice bob");
+    let _ = alice
+        .recv_matching(|frame| frame.contains("id='devoice-bob'"))
+        .await
+        .expect("devoice result");
+
+    let accept = muji_session_initiate(&mut bob, &room, "grant-e2e-visitor").await;
+    let grant = decode_issued_grant(&accept);
+
+    assert!(
+        !grant.can_publish,
+        "a devoiced visitor must NOT receive publish rights: {accept}"
+    );
+    assert!(
+        !grant.can_publish_data,
+        "a devoiced visitor must NOT receive data-publish rights: {accept}"
+    );
+    assert!(
+        grant.can_subscribe,
+        "a visitor may still listen and watch: {accept}"
     );
 }
