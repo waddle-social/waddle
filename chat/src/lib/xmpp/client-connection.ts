@@ -35,7 +35,7 @@ export type XmppResumeState = {
   outboundH: number;
   maxResumeSeconds?: number;
   hasUnackedOutbound?: boolean;
-  unhandledOutboundStanzas?: string[];
+  unhandledOutboundEntries?: Array<{ xml: string; sentAt: string }>;
   resource?: string;
 };
 
@@ -101,18 +101,18 @@ function validResumeMaxSeconds(value: number | undefined): number | undefined {
 
 export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppResumeState): void {
   const wasmConfig = config as {
-    with_resume_state_stanzas_with_max?: (
+    with_resume_state_entries_with_max?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      stanzas: string[],
+      entries: Array<{ xml: string; sentAt: string }>,
       maxResumeSeconds: number,
     ) => void;
-    with_resume_state_stanzas?: (
+    with_resume_state_entries?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      stanzas: string[],
+      entries: Array<{ xml: string; sentAt: string }>,
     ) => void;
     with_resume_state_with_max?: (
       previd: string,
@@ -124,31 +124,36 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
   };
   const maxResumeSeconds = validResumeMaxSeconds(resumeState.maxResumeSeconds);
   if (
-    resumeState.unhandledOutboundStanzas?.length
+    resumeState.unhandledOutboundEntries?.length
     && maxResumeSeconds !== undefined
-    && typeof wasmConfig.with_resume_state_stanzas_with_max === "function"
+    && typeof wasmConfig.with_resume_state_entries_with_max === "function"
   ) {
-    wasmConfig.with_resume_state_stanzas_with_max(
+    wasmConfig.with_resume_state_entries_with_max(
       resumeState.previd,
       resumeState.inboundH,
       resumeState.outboundH,
-      resumeState.unhandledOutboundStanzas,
+      resumeState.unhandledOutboundEntries,
       maxResumeSeconds,
     );
     return;
   }
   if (
-    resumeState.unhandledOutboundStanzas?.length
-    && typeof wasmConfig.with_resume_state_stanzas === "function"
+    resumeState.unhandledOutboundEntries?.length
+    && typeof wasmConfig.with_resume_state_entries === "function"
   ) {
-    wasmConfig.with_resume_state_stanzas(
+    wasmConfig.with_resume_state_entries(
       resumeState.previd,
       resumeState.inboundH,
       resumeState.outboundH,
-      resumeState.unhandledOutboundStanzas,
+      resumeState.unhandledOutboundEntries,
     );
     return;
   }
+  // An entry-bearing snapshot must never be passed to a legacy constructor:
+  // it would restore the counters but discard the sender-owned tail, making
+  // `<resumed h>` validation and replay ownership unsound. Falling through to
+  // a fresh stream leaves the durable browser queue as the sole retry owner.
+  if (resumeState.unhandledOutboundEntries?.length) return;
   if (maxResumeSeconds !== undefined && typeof wasmConfig.with_resume_state_with_max === "function") {
     wasmConfig.with_resume_state_with_max(
       resumeState.previd,
@@ -337,7 +342,7 @@ export class ResumeStateStore {
     const state = liveState ?? this.stateValue;
     this.persistence.preparePagehideHandoff();
     if (state) {
-      if (state.hasUnackedOutbound && !state.unhandledOutboundStanzas?.length) {
+      if (state.hasUnackedOutbound && !state.unhandledOutboundEntries?.length) {
         this.stateValue = null;
         this.persistence.clearSm();
         persistJoinedRooms();
@@ -387,6 +392,12 @@ export class OfflineSendQueue {
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
   private depthHeartbeat: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Fences continuations which began before teardown.  A queued send is
+   * persisted before it is attempted, so a stale completion must never
+   * remove or re-mark an entry owned by a later client generation.
+   */
+  private generation = 0;
 
   constructor(private readonly deps: OfflineSendQueueDeps) {}
 
@@ -399,9 +410,18 @@ export class OfflineSendQueue {
     this.inflightQueuedIds.add(id);
   }
 
-  /** Fresh session: pre-resume in-flight sends will never be acked. */
-  clearInflight(): void {
-    this.inflightQueuedIds.clear();
+  /**
+   * Fresh session: ordinary pre-resume writes will never be acknowledged.
+   *
+   * A failed XEP-0198 resume is also followed by a fresh bind, but its
+   * sender-owned tail remains in the Rust runtime until it has retried the
+   * stanzas after the fresh `<enabled/>`. Keep those IDs in-flight so the JS
+   * queue cannot write a second copy during the fresh session-ready flush.
+   */
+  clearOrdinaryInflight(): void {
+    for (const id of this.inflightQueuedIds) {
+      if (!this.resumeReplayQueuedIds.has(id)) this.inflightQueuedIds.delete(id);
+    }
   }
 
   /** Record send time for ack-latency telemetry. */
@@ -415,8 +435,8 @@ export class OfflineSendQueue {
    * on resume are tracked so their acks clear the persisted queue copy.
    */
   seedFromResumeState(state: XmppResumeState | null | undefined): void {
-    for (const xml of state?.unhandledOutboundStanzas ?? []) {
-      const id = messageStanzaIdFromSerializedXml(xml);
+    for (const entry of state?.unhandledOutboundEntries ?? []) {
+      const id = messageStanzaIdFromSerializedXml(entry.xml);
       if (id) {
         this.inflightQueuedIds.add(id);
         this.resumeReplayQueuedIds.add(id);
@@ -435,6 +455,10 @@ export class OfflineSendQueue {
    *  destroying `disconnect()` so a logged-out client neither beacons
    *  a signed-out account's queue nor pins the object graph. */
   dispose(): void {
+    this.generation += 1;
+    this.inflightQueuedIds.clear();
+    this.resumeReplayQueuedIds.clear();
+    this.pendingSendAt.clear();
     if (this.depthHeartbeat !== null) {
       clearInterval(this.depthHeartbeat);
       this.depthHeartbeat = null;
@@ -455,16 +479,19 @@ export class OfflineSendQueue {
   }
 
   handleFailed(id: string): void {
+    // A native XEP-0198 replay can transiently fail while the resumable
+    // transport is being replaced. Its persisted browser row remains the
+    // crash-safe source for a fresh-session fallback, so keep all ownership
+    // and terminal telemetry until an ack or explicit discard decides it.
+    if (this.resumeReplayQueuedIds.has(id)) return;
     const wasQueued = this.inflightQueuedIds.delete(id);
-    const wasResumeReplay = this.resumeReplayQueuedIds.delete(id);
-    if (wasResumeReplay) removeQueuedMessage(this.deps.queueScope(), id);
     this.deps.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
       this.deps.events.emitSafe("messageDeliveryFailed", id, { kind: pending.kind });
     }
-    if (wasQueued || wasResumeReplay) this.emitQueueDepth();
+    if (wasQueued) this.emitQueueDepth();
   }
 
   discardNonRetryable(id: string): void {
@@ -581,26 +608,37 @@ export class OfflineSendQueue {
         if (!this.deps.canUseConnectedSession()) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
+        // Claim before invoking the host. A WASM/mock host is allowed to
+        // synchronously emit the XEP-0198 acknowledgement while returning
+        // its promise; marking afterwards loses that ack and strands the
+        // persisted row forever.
+        const generation = this.generation;
+        this.inflightQueuedIds.add(entry.id);
+        this.notePendingSend(entry.id, "dm");
         let messageId: string | null;
         try {
           messageId = await this.deps.sendDirect(entry.mucPm ? entry.peerJid : barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.mucPm ? { mucPm: true } : {}), id: entry.id });
         } catch (error) {
+          this.rollbackAttempt(entry.id, generation);
           if (isNonRetryableWasmSendFailure(error)) {
-            this.discardNonRetryable(entry.id);
+            if (generation === this.generation) this.discardNonRetryable(entry.id);
             continue;
           }
           throw error;
         }
-        if (messageId) {
-          this.inflightQueuedIds.add(entry.id);
-          this.notePendingSend(entry.id, "dm");
+        if (messageId !== entry.id) {
+          this.rollbackAttempt(entry.id, generation);
+          if (messageId) {
+            throw new Error("queued XMPP send returned a mismatched stanza id");
+          }
         }
       }
     })();
-    this.directFlushPromise = promise.finally(() => {
-      if (this.directFlushPromise === promise) this.directFlushPromise = null;
+    const flushPromise = promise.finally(() => {
+      if (this.directFlushPromise === flushPromise) this.directFlushPromise = null;
     });
-    return this.directFlushPromise;
+    this.directFlushPromise = flushPromise;
+    return flushPromise;
   }
 
   async flushRoom(roomJid: string): Promise<void | undefined> {
@@ -613,26 +651,33 @@ export class OfflineSendQueue {
         if (!this.deps.roomIsReady(roomJid)) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
+        const generation = this.generation;
+        this.inflightQueuedIds.add(entry.id);
+        this.notePendingSend(entry.id, "room");
         let messageId: string | null;
         try {
           messageId = await this.deps.sendRoom(roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.deps.roomMemberJids(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
         } catch (error) {
+          this.rollbackAttempt(entry.id, generation);
           if (isNonRetryableWasmSendFailure(error)) {
-            this.discardNonRetryable(entry.id);
+            if (generation === this.generation) this.discardNonRetryable(entry.id);
             continue;
           }
           throw error;
         }
-        if (messageId) {
-          this.inflightQueuedIds.add(entry.id);
-          this.notePendingSend(entry.id, "room");
+        if (messageId !== entry.id) {
+          this.rollbackAttempt(entry.id, generation);
+          if (messageId) {
+            throw new Error("queued XMPP send returned a mismatched stanza id");
+          }
         }
       }
     })();
-    this.roomFlushes.set(roomJid, promise.finally(() => {
-      if (this.roomFlushes.get(roomJid) === promise) this.roomFlushes.delete(roomJid);
-    }));
-    return this.roomFlushes.get(roomJid);
+    const flushPromise = promise.finally(() => {
+      if (this.roomFlushes.get(roomJid) === flushPromise) this.roomFlushes.delete(roomJid);
+    });
+    this.roomFlushes.set(roomJid, flushPromise);
+    return flushPromise;
   }
 
   private emitQueueDepth(): void {
@@ -655,6 +700,14 @@ export class OfflineSendQueue {
       clearInterval(this.depthHeartbeat);
       this.depthHeartbeat = null;
     }
+  }
+
+  /** Roll back only the attempt which still owns this queue generation. */
+  private rollbackAttempt(id: string, generation: number): void {
+    if (generation !== this.generation) return;
+    this.inflightQueuedIds.delete(id);
+    this.pendingSendAt.delete(id);
+    this.emitQueueDepth();
   }
 
   private noteQueuedMessage(): void {

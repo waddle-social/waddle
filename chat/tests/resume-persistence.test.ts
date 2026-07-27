@@ -291,8 +291,8 @@ describe("applyResumeStateToWasmConfig", () => {
 
   test("uses max-aware stanza resume when both unhandled stanzas and max are available", () => {
     const { config, calls } = configWith([
-      "with_resume_state_stanzas_with_max",
-      "with_resume_state_stanzas",
+      "with_resume_state_entries_with_max",
+      "with_resume_state_entries",
       "with_resume_state_with_max",
       "with_resume_state",
     ]);
@@ -302,13 +302,13 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 7,
       outboundH: 11,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message/>"],
+      unhandledOutboundEntries: [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas_with_max",
-        args: ["prev-1", 7, 11, ["<message/>"], 300],
+        method: "with_resume_state_entries_with_max",
+        args: ["prev-1", 7, 11, [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z" }], 300],
       },
     ]);
   });
@@ -331,23 +331,37 @@ describe("applyResumeStateToWasmConfig", () => {
     ]);
   });
 
-  test("falls back to old stanza resume when generated WASM lacks max-aware stanza support", () => {
-    const { config, calls } = configWith(["with_resume_state_stanzas", "with_resume_state"]);
+  test("uses entry resume when generated WASM lacks max-aware entry support", () => {
+    const { config, calls } = configWith(["with_resume_state_entries", "with_resume_state"]);
 
     applyResumeStateToWasmConfig(config, {
       previd: "prev-3",
       inboundH: 1,
       outboundH: 2,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<presence/>"],
+      unhandledOutboundEntries: [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas",
-        args: ["prev-3", 1, 2, ["<presence/>"]],
+        method: "with_resume_state_entries",
+        args: ["prev-3", 1, 2, [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z" }]],
       },
     ]);
+  });
+
+  test("does not configure a legacy resume API when sender-owned entries are present", () => {
+    const { config, calls } = configWith(["with_resume_state_with_max", "with_resume_state"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-legacy",
+      inboundH: 1,
+      outboundH: 2,
+      maxResumeSeconds: 300,
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+    });
+
+    expect(calls).toEqual([]);
   });
 
   test("falls back to old plain resume when generated WASM has only the legacy method", () => {
@@ -369,6 +383,47 @@ describe("applyResumeStateToWasmConfig", () => {
   });
 });
 
+describe("malformed persisted SM snapshots", () => {
+  test("BrowserXmppClient discards only the SM snapshot and reconnects with a clean config", async () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({
+      previd: "corrupt-sm",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{ xml: "<not-xml", sentAt: "not-a-timestamp" }],
+    });
+    let configs = 0;
+    let connected = 0;
+    class StubConfig {
+      constructor(..._args: unknown[]) { configs += 1; }
+      with_resume_state_entries() { throw new Error("invalid resume stanza XML"); }
+    }
+    class StubClient {
+      async connect() { connected += 1; }
+    }
+    const client = new BrowserXmppClient(
+      {
+        jid: "alice@example.com",
+        username: "alice",
+        session_id: "token",
+        xmpp_websocket_url: "wss://xmpp.example/ws",
+      } as WaddleSession,
+      persistence,
+    );
+    const state = client as unknown as {
+      loadModule: () => Promise<unknown>;
+      doConnect: () => Promise<void>;
+    };
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+
+    await state.doConnect();
+
+    expect(configs).toBe(2);
+    expect(connected).toBe(1);
+    expect(persistence.smSnapshot()).toBeNull();
+  });
+});
+
 describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   test("round-trips a catchup snapshot through localStorage", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
@@ -386,12 +441,26 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='m1'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     };
     persistence.saveSm(state);
     // Round-trip strips the internal `savedAt` so the caller gets
     // the same shape it passed in.
     expect(persistence.loadSm()).toEqual(state);
+  });
+
+  test("fails closed for a legacy nonempty stanza snapshot", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    window.localStorage.setItem("waddle.chat.sm-resume.alice@example.com", JSON.stringify({
+      previd: "legacy",
+      inboundH: 1,
+      outboundH: 2,
+      savedAt: Date.now(),
+      ownerId: "unowned",
+      unhandledOutboundStanzas: ["<message id='m1'/>"] ,
+    }));
+
+    expect(persistence.loadSm()).toBeNull();
   });
 
   test("round-trips the bound resource with SM resume state", () => {
@@ -588,7 +657,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           outboundH: number;
           maxResumeSeconds: number;
           hasUnackedOutbound: boolean;
-          unhandledOutboundStanzas: string[];
+          unhandledOutboundEntries: Array<{ xml: string; sentAt: string }>;
         };
       };
     }).xmpp = {
@@ -598,7 +667,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         outboundH: 9,
         maxResumeSeconds: 300,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+        unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
       }),
     };
 
@@ -609,7 +678,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       inboundH: 4,
       outboundH: 9,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
   });
 
@@ -619,7 +688,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -639,13 +708,13 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
-  test("BrowserXmppClient removes restored SM queue entries when native fallback retry owns resend", () => {
+  test("BrowserXmppClient retains restored SM queue entries through native replay failure until ack", () => {
     const persistence = inMemoryPersistence();
     persistence.saveSm({
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -662,6 +731,11 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
 
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id)).toEqual([
+      "dm-live-1",
+    ]);
+
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 

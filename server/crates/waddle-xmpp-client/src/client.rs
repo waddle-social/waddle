@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use minidom::Element;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::{self, Duration, Instant, MissedTickBehavior};
 
 use crate::command::XmppCommand;
 use crate::config::ClientConfig;
@@ -234,8 +235,22 @@ impl DriverTask {
             }
         }
 
+        // The runtime owns XEP-0198 acknowledgement policy; the native host
+        // only supplies a bounded clock pulse. Starting after one full period
+        // avoids an artificial retry the moment this task is created.
+        let mut stream_management_clock = time::interval_at(
+            Instant::now() + Duration::from_millis(250),
+            Duration::from_millis(250),
+        );
+        stream_management_clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
+                _ = stream_management_clock.tick() => {
+                    if !self.poll_stream_management_clock_at(chrono::Utc::now()).await {
+                        return;
+                    }
+                }
                 result = self.transport.next_event() => {
                     match result {
                         Ok(Some(event)) => {
@@ -376,6 +391,32 @@ impl DriverTask {
         };
         self.publish_resume_state_snapshot();
 
+        if !self.apply_client_events(client_events).await {
+            return false;
+        }
+
+        self.flush_deferred_commands().await;
+
+        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+        !is_terminal
+    }
+
+    /// Route runtime-owned XEP-0198 clock events through exactly the same
+    /// native event dispatcher and typed transport path as transport events.
+    async fn poll_stream_management_clock_at(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let client_events = self.runtime.poll_stream_management_clock(now);
+        if !self.apply_client_events(client_events).await {
+            return false;
+        }
+
+        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+        true
+    }
+
+    async fn apply_client_events(&mut self, client_events: Vec<ClientEvent>) -> bool {
         for evt in client_events {
             if let Some(msg) = self.dispatch_client_event(evt) {
                 if self.send_transport_message(msg).await.is_err() {
@@ -384,11 +425,7 @@ impl DriverTask {
                 }
             }
         }
-
-        self.flush_deferred_commands().await;
-
-        *self.state.write().unwrap() = self.runtime.snapshot().clone();
-        !is_terminal
+        true
     }
 
     /// Dispatch one client event.
@@ -429,12 +466,12 @@ impl DriverTask {
                 None
             }
             ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                StreamManagementEvent::AckReceived { h },
+                StreamManagementEvent::AckReceived { h, progressed },
             )) => {
                 let _ =
                     self.events
                         .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                            StreamManagementEvent::AckReceived { h },
+                            StreamManagementEvent::AckReceived { h, progressed },
                         )));
                 None
             }
@@ -445,6 +482,14 @@ impl DriverTask {
                     self.events
                         .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                             StreamManagementEvent::Failed,
+                        )));
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(event)) => {
+                let _ =
+                    self.events
+                        .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                            event,
                         )));
                 None
             }

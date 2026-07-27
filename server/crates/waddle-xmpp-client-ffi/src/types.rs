@@ -12,14 +12,9 @@ pub struct WaddleConfig {
     pub resume_state: Option<WaddleSmResumeState>,
 }
 
-/// XEP-0198 client resume snapshot crossing the FFI as an opaque
-/// persistence round-trip: the Swift app stores it on disconnect and
-/// feeds it back through [`WaddleConfig`] on the next connect. Queued
-/// outbound stanzas travel as serialized XML strings — the message
-/// stanza-id is re-derived from the element's `id` attribute on
-/// restore, and the original enqueue instant survives only when the
-/// element already carries a `<delay/>` stamp (identical semantics to
-/// the wasm client's localStorage persistence of the same snapshot).
+/// XEP-0198 client resume snapshot crossing the FFI as a durable
+/// typed-entry round-trip. XML is serialized only at this persistence
+/// boundary; every entry also retains its original send timestamp.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleSmResumeState {
     /// SM resumption token from `<enabled id='…'/>`.
@@ -30,9 +25,17 @@ pub struct WaddleSmResumeState {
     pub outbound_h: u32,
     /// Server-advertised resumption window in seconds, when supplied.
     pub max_resume_seconds: Option<u32>,
-    /// Outbound stanzas the server had not acked at snapshot time,
-    /// serialized to XML in send order for lossless replay.
-    pub queued_stanzas_xml: Vec<String>,
+    /// Outbound entries the server had not acked at snapshot time, in send
+    /// order for exact identity and timestamp-preserving replay.
+    pub unhandled_outbound_entries: Vec<WaddleUnhandledOutboundEntry>,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleUnhandledOutboundEntry {
+    /// Serialized at the FFI persistence boundary and parsed once on restore.
+    pub xml: String,
+    /// Original send instant, RFC3339 UTC.
+    pub sent_at: String,
 }
 
 #[derive(uniffi::Record, Clone)]

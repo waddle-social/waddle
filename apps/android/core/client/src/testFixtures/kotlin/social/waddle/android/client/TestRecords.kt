@@ -26,6 +26,7 @@ import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleSmResumeState
 import social.waddle.client.ffi.WaddleTune
+import social.waddle.client.ffi.WaddleUnhandledOutboundEntry
 import social.waddle.client.ffi.WaddleVCard4
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
@@ -346,5 +347,10 @@ fun testResumeState(
     inboundH = inboundH,
     outboundH = outboundH,
     maxResumeSeconds = 300u,
-    queuedStanzasXml = listOf("<message/>"),
+    unhandledOutboundEntries = listOf(
+        WaddleUnhandledOutboundEntry(
+            xml = "<message/>",
+            sentAt = "2026-07-26T12:34:56.789Z",
+        ),
+    ),
 )

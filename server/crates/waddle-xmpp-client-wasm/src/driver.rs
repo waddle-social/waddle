@@ -1,5 +1,62 @@
 use super::*;
 
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+enum JsStreamManagementTelemetry {
+    AckRequested { reason: JsSmAckRequestReason },
+    AckValidated { progress: bool },
+    AckRetry { attempt: u8 },
+    AckRequestTimedOut,
+    ProgressTimedOut,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum JsSmAckRequestReason {
+    OutboundStanza,
+    ResumedUnackedTail,
+    PeerRequest,
+    Pagehide,
+}
+
+impl From<waddle_xmpp_client::SmAckRequestReason> for JsSmAckRequestReason {
+    fn from(reason: waddle_xmpp_client::SmAckRequestReason) -> Self {
+        match reason {
+            waddle_xmpp_client::SmAckRequestReason::OutboundStanza => Self::OutboundStanza,
+            waddle_xmpp_client::SmAckRequestReason::ResumedUnackedTail => Self::ResumedUnackedTail,
+            waddle_xmpp_client::SmAckRequestReason::PeerRequest => Self::PeerRequest,
+            waddle_xmpp_client::SmAckRequestReason::Pagehide => Self::Pagehide,
+        }
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn stream_management_telemetry_uses_closed_kebab_case_values() {
+        let pagehide = serde_json::to_value(JsStreamManagementTelemetry::AckRequested {
+            reason: JsSmAckRequestReason::Pagehide,
+        })
+        .unwrap();
+        let no_progress =
+            serde_json::to_value(JsStreamManagementTelemetry::AckValidated { progress: false })
+                .unwrap();
+        let timeout = serde_json::to_value(JsStreamManagementTelemetry::ProgressTimedOut).unwrap();
+
+        assert_eq!(
+            pagehide,
+            serde_json::json!({ "kind": "ack-requested", "reason": "pagehide" })
+        );
+        assert_eq!(
+            no_progress,
+            serde_json::json!({ "kind": "ack-validated", "progress": false })
+        );
+        assert_eq!(timeout, serde_json::json!({ "kind": "progress-timed-out" }));
+    }
+}
+
 pub(crate) async fn driver_loop(
     config: ClientConfig,
     ws: WasmWebSocket,
@@ -27,6 +84,23 @@ impl WasmDriverTask {
         event_tx: mpsc::Sender<DriverEvent>,
         inner: Rc<RefCell<WaddleClientInner>>,
     ) -> DriverResult<Self> {
+        let (sm_clock_tx, sm_clock_rx) = mpsc::channel(1);
+        let (sm_clock_timer, sm_clock_callback) = if let Some(window) = web_sys::window() {
+            let callback = Closure::wrap(Box::new(move || {
+                // Coalesce browser timer wakeups; the runtime owns every
+                // deadline and sees the authoritative wall clock on polling.
+                let _ = sm_clock_tx.clone().try_send(());
+            }) as Box<dyn FnMut()>);
+            let timer = window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    callback.as_ref().unchecked_ref(),
+                    250,
+                )
+                .ok();
+            (timer, Some(callback))
+        } else {
+            (None, None)
+        };
         Ok(Self {
             runtime: XmppRuntime::new(config)?,
             ws,
@@ -38,6 +112,9 @@ impl WasmDriverTask {
             pending_inbox_queries: HashMap::new(),
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
+            sm_clock_timer,
+            sm_clock_callback,
+            sm_clock_rx,
         })
     }
 
@@ -62,11 +139,13 @@ impl WasmDriverTask {
         loop {
             let ws_event_fut = self.ws.rx.next().fuse();
             let cmd_fut = self.cmd_rx.next().fuse();
-            pin_mut!(ws_event_fut, cmd_fut);
+            let sm_clock_fut = self.sm_clock_rx.next().fuse();
+            pin_mut!(ws_event_fut, cmd_fut, sm_clock_fut);
 
             let keep_running = select! {
                 ws_event = ws_event_fut => self.handle_wasm_transport_event(ws_event).await,
                 cmd = cmd_fut => self.handle_command(cmd).await,
+                tick = sm_clock_fut => if tick.is_some() { self.poll_stream_management_clock().await } else { true },
             };
 
             if !keep_running {
@@ -121,6 +200,18 @@ impl WasmDriverTask {
                 false
             }
         }
+    }
+
+    async fn poll_stream_management_clock(&mut self) -> bool {
+        for event in self
+            .runtime
+            .poll_stream_management_clock(chrono::Utc::now())
+        {
+            if !self.handle_client_event(event).await {
+                return false;
+            }
+        }
+        true
     }
 
     async fn handle_command(&mut self, cmd: Option<WasmCommand>) -> bool {
@@ -190,6 +281,19 @@ impl WasmDriverTask {
                 let result = self
                     .send_transport_message(TransportMessage::Close(StreamClose))
                     .await;
+                let keep_running = result.is_ok();
+                let _ = responder.send(result);
+                keep_running
+            }
+            Some(WasmCommand::RequestStreamManagementAck { responder }) => {
+                let events = self.runtime.request_stream_management_ack();
+                let mut result = Ok(());
+                for event in events {
+                    if !self.handle_client_event(event).await {
+                        result = Err(ClientError::Disconnected);
+                        break;
+                    }
+                }
                 let keep_running = result.is_ok();
                 let _ = responder.send(result);
                 keep_running
@@ -408,8 +512,13 @@ impl WasmDriverTask {
         let events = self.runtime.apply_transport_event(event)?;
         self.publish_resume_state_snapshot();
         for event in events {
-            if self.dispatch_client_event(event).await.is_some() {
-                return Err(ClientError::Disconnected);
+            if let Some(follow_up) = self.dispatch_client_event(event).await {
+                // A successful application-stanza write can open the first
+                // XEP-0198 unhandled tail, which immediately generates an
+                // `<r/>`. Write that typed control frame in-order; do not
+                // treat it as an impossible re-entrant transport event.
+                // `MessageSent(<r/>)` cannot itself create another request.
+                Box::pin(self.send_transport_message(follow_up)).await?;
             }
         }
         Ok(())
@@ -454,15 +563,53 @@ impl WasmDriverTask {
                 None
             }
             ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                StreamManagementEvent::AckReceived { h },
+                StreamManagementEvent::AckReceived { h, progressed },
             )) => {
+                self.emit_stream_management_telemetry(JsStreamManagementTelemetry::AckValidated {
+                    progress: progressed,
+                });
                 let _ = self
                     .event_tx
                     .clone()
                     .send(client_driver_event(ClientEvent::Connection(
-                        ConnectionEvent::StreamManagement(StreamManagementEvent::AckReceived { h }),
+                        ConnectionEvent::StreamManagement(StreamManagementEvent::AckReceived {
+                            h,
+                            progressed,
+                        }),
                     )))
                     .await;
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested { reason },
+            )) => {
+                self.emit_stream_management_telemetry(JsStreamManagementTelemetry::AckRequested {
+                    reason: reason.into(),
+                });
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRetry { attempt },
+            )) => {
+                self.emit_stream_management_telemetry(JsStreamManagementTelemetry::AckRetry {
+                    attempt,
+                });
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequestTimedOut,
+            )) => {
+                self.emit_stream_management_telemetry(
+                    JsStreamManagementTelemetry::AckRequestTimedOut,
+                );
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::ReconnectRequired,
+            )) => {
+                self.emit_stream_management_telemetry(
+                    JsStreamManagementTelemetry::ProgressTimedOut,
+                );
                 None
             }
             ClientEvent::Connection(ConnectionEvent::StreamManagement(
@@ -569,11 +716,24 @@ impl WasmDriverTask {
             .await;
     }
 
+    fn emit_stream_management_telemetry(&self, event: JsStreamManagementTelemetry) {
+        let callback = self.inner.borrow().on_stream_management.clone();
+        if let (Some(callback), Ok(value)) = (callback, to_js_value(&event)) {
+            let _ = callback.call1(&JsValue::NULL, &value);
+        }
+    }
+
     fn publish_resume_state_snapshot(&self) {
         publish_resume_state_snapshot(&self.inner, &self.runtime, self.explicit_disconnect);
     }
 
     async fn finish(&mut self) {
+        if let Some(timer) = self.sm_clock_timer.take() {
+            if let Some(window) = web_sys::window() {
+                window.clear_interval_with_handle(timer);
+            }
+        }
+        self.sm_clock_callback.take();
         self.publish_resume_state_snapshot();
         let resume_state = self.inner.borrow().resume_state.clone();
         let _ = self
@@ -753,6 +913,7 @@ mod tests {
             on_mds_displayed: None,
             on_pubsub_event: None,
             on_call: None,
+            on_stream_management: None,
             resume_state: None,
         }))
     }

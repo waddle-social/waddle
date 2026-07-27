@@ -42,6 +42,7 @@ import type {
   MdsDisplayedEntry,
   PubsubEvent,
   RoomAccessChangedEvent,
+  StreamManagementTelemetry,
 } from "./client-events";
 import {
   OfflineSendQueue,
@@ -349,9 +350,11 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
+  set_on_stream_management?: (cb: (event: StreamManagementTelemetry) => void) => void;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
+  request_stream_management_ack?: () => Promise<void>;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
@@ -883,6 +886,7 @@ export class BrowserXmppClient {
   onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
   onCatchup(hook: (info: CatchupHookInfo) => void) { this.events.on("catchup", hook); }
   onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.events.on("resumeDrain", hook); }
+  onStreamManagement(hook: (event: StreamManagementTelemetry) => void) { this.events.on("streamManagement", hook); }
 
   private emitError(event: XmppErrorEvent) { this.events.emitSafe("error", event); }
 
@@ -945,6 +949,27 @@ export class BrowserXmppClient {
     );
   }
 
+  /**
+   * XMPP owns the page lifecycle so persistence cannot depend on whether a
+   * call surface is mounted. This is synchronous by browser design: pagehide
+   * cannot await a network round trip.
+   */
+  prepareForPageHide(): void {
+    try {
+      // `pagehide` must never await I/O. Queue the runtime-owned typed
+      // XEP-0198 command first, then immediately take the synchronous snapshot.
+      void this.xmpp?.request_stream_management_ack?.().catch(() => undefined);
+    } catch {}
+    this.persistResumeStateForPageHide();
+  }
+
+  /** A BFCache restore retains this client; reconnect only if it lost its wire. */
+  resumeAfterPageShow(): void {
+    if (!this.destroying && !this.connected) {
+      void this.connect().catch(() => undefined);
+    }
+  }
+
   private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
     if (xmpp.enableCarbons) {
       try { await xmpp.enableCarbons(); } catch {}
@@ -974,17 +999,26 @@ export class BrowserXmppClient {
     // Abort before creating a handle — the current attempt owns the
     // connection now.
     if (epoch !== this.connectEpoch || this.destroying) return;
-    const config = new mod.WaddleConfig(
+    const createConfig = () => new mod.WaddleConfig(
       websocketUrl,
       this.session.jid,
       this.session.session_id,
       this.resource,
     );
+    let config = createConfig();
     if (this.resume.handle && typeof config.with_resume_state_handle === "function") {
       config.with_resume_state_handle(this.resume.handle);
       this.clearResumeState();
     } else if (this.resume.state) {
-      applyResumeStateToWasmConfig(config, this.resume.state);
+      try {
+        applyResumeStateToWasmConfig(config, this.resume.state);
+      } catch {
+        // The Rust WASM boundary owns XML and RFC3339 parsing. A corrupt
+        // persisted SM-only snapshot must not wedge reconnect or leave a
+        // partially-mutated config: discard it and use a clean fresh stream.
+        this.resume.discardState();
+        config = createConfig();
+      }
       this.resume.discardState();
     }
     const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
@@ -2590,7 +2624,7 @@ export class BrowserXmppClient {
     if (this.sessionReadyHandledXmpp === xmpp) return;
     this.sessionReadyHandledXmpp = xmpp;
     if (lifecycle.type === "fresh") {
-      this.outboundQueue.clearInflight();
+      this.outboundQueue.clearOrdinaryInflight();
       void this.enableCarbons(xmpp);
       // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
       // to future +notify events. Both are best-effort and fully
@@ -3176,6 +3210,10 @@ export class BrowserXmppClient {
     xmpp.set_on_message_delivery_failed?.((id: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handleMessageFailed(id);
+    });
+    xmpp.set_on_stream_management?.((event: StreamManagementTelemetry) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.events.emitSafe("streamManagement", event);
     });
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       if (!this.isCurrentXmpp(xmpp)) return;

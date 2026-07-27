@@ -1,19 +1,87 @@
 use std::collections::VecDeque;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use minidom::Element;
 
 use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
+use crate::state::StreamId;
 
 pub const NS_SM: &str = "urn:xmpp:sm:3";
 const NS_DELAY: &str = "urn:xmpp:delay";
+const NS_STANZA_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+const ACK_RETRY_DELAYS_MS: [i64; 5] = [250, 500, 1_000, 2_000, 5_000];
+const ACK_REQUEST_TIMEOUT_MS: i64 = 5_000;
+pub const SM_PROGRESS_TIMEOUT_MS: i64 = 30_000;
 
+/// A bounded outcome for the Rust-owned XEP-0198 acknowledgement clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmAcknowledgementClockAction {
+    Retry { attempt: u8 },
+    RequestTimedOut,
+    ProgressTimedOut,
+}
+
+/// A validated inbound XEP-0198 control element.
+///
+/// Raw XML is accepted at the transport boundary only. The runtime receives
+/// this typed form so that no acknowledgement, queue, or resumption mutation
+/// can happen before the control's XEP-0198 shape has been checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QueuedOutboundStanza {
+pub enum SmInboundControl {
+    RequestAck,
+    Ack {
+        h: u32,
+    },
+    Enabled {
+        previd: Option<StreamId>,
+        max_resume_seconds: Option<u32>,
+    },
+    Resumed {
+        h: u32,
+        previd: StreamId,
+    },
+    Failed {
+        h: Option<u32>,
+    },
+}
+
+/// The received control element is not a valid XEP-0198 wire shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidSmInboundControl;
+
+/// A sender-owned outbound stanza retained for XEP-0198 resumption.
+///
+/// The core deliberately keeps the parsed stanza, its stable message identity,
+/// and original send time typed. Hosts serialize XML only at their durable
+/// storage boundary and parse it exactly once when restoring this entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnhandledOutboundEntry {
     element: Element,
     message_stanza_id: Option<StanzaId>,
     sent_at: DateTime<Utc>,
+}
+
+impl UnhandledOutboundEntry {
+    pub fn new(element: Element, sent_at: DateTime<Utc>) -> Self {
+        Self {
+            message_stanza_id: message_delivery_stanza_id(&element),
+            element,
+            sent_at,
+        }
+    }
+
+    pub fn stanza(&self) -> &Element {
+        &self.element
+    }
+
+    pub fn sent_at(&self) -> DateTime<Utc> {
+        self.sent_at
+    }
+
+    pub fn message_stanza_id(&self) -> Option<&StanzaId> {
+        self.message_stanza_id.as_ref()
+    }
 }
 
 /// In-memory XEP-0198 resume snapshot carried across a reconnect attempt.
@@ -23,7 +91,7 @@ pub struct SmResumeState {
     inbound_h: u32,
     outbound_h: u32,
     max_resume_seconds: Option<u32>,
-    outbound_queue: VecDeque<QueuedOutboundStanza>,
+    outbound_queue: VecDeque<UnhandledOutboundEntry>,
 }
 
 impl SmResumeState {
@@ -51,27 +119,20 @@ impl SmResumeState {
         previd: impl Into<String>,
         inbound_h: u32,
         outbound_h: u32,
-        outbound_queue: VecDeque<QueuedOutboundStanza>,
+        outbound_queue: VecDeque<UnhandledOutboundEntry>,
     ) -> ClientResult<Self> {
         let mut state = Self::new(previd, inbound_h, outbound_h)?;
         state.outbound_queue = outbound_queue;
         Ok(state)
     }
 
-    pub fn from_unhandled_outbound_stanzas(
+    pub fn from_unhandled_outbound_entries(
         previd: impl Into<String>,
         inbound_h: u32,
         outbound_h: u32,
-        stanzas: impl IntoIterator<Item = Element>,
+        entries: impl IntoIterator<Item = UnhandledOutboundEntry>,
     ) -> ClientResult<Self> {
-        let outbound_queue = stanzas
-            .into_iter()
-            .map(|element| QueuedOutboundStanza {
-                message_stanza_id: message_delivery_stanza_id(&element),
-                sent_at: existing_delay_stamp(&element).unwrap_or_else(Utc::now),
-                element,
-            })
-            .collect();
+        let outbound_queue = entries.into_iter().collect();
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
 
@@ -95,8 +156,8 @@ impl SmResumeState {
         !self.outbound_queue.is_empty()
     }
 
-    pub fn unhandled_outbound_stanzas(&self) -> impl Iterator<Item = &Element> {
-        self.outbound_queue.iter().map(|queued| &queued.element)
+    pub fn unhandled_outbound_entries(&self) -> impl Iterator<Item = &UnhandledOutboundEntry> {
+        self.outbound_queue.iter()
     }
 
     pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
@@ -134,7 +195,19 @@ pub struct SmState {
     pub outbound_enabled: bool,
     /// Whether SM is currently enabled for this session.
     pub enabled: bool,
-    outbound_queue: VecDeque<QueuedOutboundStanza>,
+    /// True after we have requested an acknowledgement for the current
+    /// unhandled outbound tail. A valid `<a/>`, including one whose `h`
+    /// makes no progress, clears this edge so the next unhandled stanza can
+    /// ask again. This is deliberately protocol state rather than a browser
+    /// timer: every transport uses the same XEP-0198 acknowledgement edge.
+    ack_request_outstanding: bool,
+    ack_request_started_at: Option<DateTime<Utc>>,
+    next_ack_retry_at: Option<DateTime<Utc>>,
+    ack_retry_attempt: u8,
+    ack_request_timed_out: bool,
+    last_ack_progress_at: Option<DateTime<Utc>>,
+    progress_timed_out: bool,
+    outbound_queue: VecDeque<UnhandledOutboundEntry>,
     replay_in_flight: VecDeque<Element>,
 }
 
@@ -176,17 +249,46 @@ impl SmState {
     }
 
     /// Record a newly sent outbound stanza unless it is a queued replay.
-    pub fn record_sent_stanza(&mut self, element: &Element) {
+    /// Record an application stanza and report whether it opened a new
+    /// unacknowledged tail that needs an immediate XEP-0198 `<r/>` request.
+    pub fn record_sent_stanza(&mut self, element: &Element) -> bool {
+        self.record_sent_stanza_at(element, Utc::now())
+    }
+
+    /// Record at an explicit clock instant so every timer boundary is testable.
+    pub fn record_sent_stanza_at(&mut self, element: &Element, now: DateTime<Utc>) -> bool {
         if self.suppress_replay_sent_record(element) {
-            return;
+            return false;
         }
 
         self.record_sent(1);
-        self.outbound_queue.push_back(QueuedOutboundStanza {
-            message_stanza_id: message_delivery_stanza_id(element),
-            element: element.clone(),
-            sent_at: existing_delay_stamp(element).unwrap_or_else(Utc::now),
-        });
+        self.outbound_queue.push_back(UnhandledOutboundEntry::new(
+            element.clone(),
+            existing_delay_stamp(element).unwrap_or(now),
+        ));
+        self.arm_acknowledgement_clock(now)
+    }
+
+    /// Arm the acknowledgement policy for an already sender-owned tail.
+    ///
+    /// A successful XEP-0198 `<resumed/>` retains the prior outbound counter
+    /// and may leave entries to replay. This method starts the same clock as a
+    /// newly-sent stanza without recording or counting another stanza.
+    pub fn arm_acknowledgement_clock(&mut self, now: DateTime<Utc>) -> bool {
+        if self.outbound_queue.is_empty() || self.ack_request_outstanding {
+            return false;
+        }
+
+        self.ack_request_outstanding = true;
+        self.ack_request_started_at = Some(now);
+        self.next_ack_retry_at = Some(now + Duration::milliseconds(ACK_RETRY_DELAYS_MS[0]));
+        self.ack_retry_attempt = 0;
+        self.ack_request_timed_out = false;
+        if self.last_ack_progress_at.is_none() {
+            self.last_ack_progress_at = Some(now);
+            self.progress_timed_out = false;
+        }
+        true
     }
 
     /// Start a fresh inbound SM sequence after receiving `<enabled/>`.
@@ -210,12 +312,14 @@ impl SmState {
         self.outbound_enabled = true;
         self.outbound_queue.clear();
         self.replay_in_flight.clear();
+        self.cancel_acknowledgement_clock();
     }
 
     /// Stop all SM counters after `<failed/>` or stream termination.
     pub fn stop(&mut self) {
         self.outbound_enabled = false;
         self.enabled = false;
+        self.cancel_acknowledgement_clock();
     }
 
     /// Increment the inbound stanza counter by `count`.
@@ -225,7 +329,25 @@ impl SmState {
 
     /// Update `server_h` from an `<a h='...'/>` ack.
     pub fn process_ack(&mut self, h: u32) -> Vec<StanzaId> {
+        self.process_ack_at(h, Utc::now())
+    }
+
+    /// Process a valid acknowledgement at an explicit time.
+    pub fn process_ack_at(&mut self, h: u32, now: DateTime<Utc>) -> Vec<StanzaId> {
+        // XEP-0198 permits unrequested acknowledgements and a peer may send
+        // the same handled count again. Either is proof that the outstanding
+        // `<r/>` reached a live peer, so it clears the request edge even when
+        // no queued stanza is newly acknowledged.
+        self.ack_request_outstanding = false;
+        self.ack_request_started_at = None;
+        self.next_ack_retry_at = None;
+        self.ack_retry_attempt = 0;
+        self.ack_request_timed_out = false;
         let handled_since_last_ack = h.wrapping_sub(self.server_h);
+        if handled_since_last_ack != 0 {
+            self.last_ack_progress_at = Some(now);
+            self.progress_timed_out = false;
+        }
         self.server_h = h;
         let mut acked = Vec::new();
         let to_drop = usize::try_from(handled_since_last_ack)
@@ -238,7 +360,75 @@ impl SmState {
                 }
             }
         }
+        // Once the peer has handled the whole sender-owned tail there is
+        // nothing left whose acknowledgement can make progress. Keeping the
+        // old progress deadline would turn an otherwise idle, fully-acked
+        // stream into a spurious reconnect thirty seconds later.
+        if self.outbound_queue.is_empty() {
+            self.cancel_acknowledgement_clock();
+        }
         acked
+    }
+
+    /// Advance acknowledgement policy using a caller-supplied clock.
+    ///
+    /// The first request is emitted with the first unhandled stanza. Retries
+    /// occur at 250ms, 500ms, 1s, 2s, and 5s after that request, then stay
+    /// on the five-second plateau. Five seconds without any valid `<a/>`
+    /// emits an outcome but does not stop retries. Independently, 30s without
+    /// `h` progress requires a resumable reconnect.
+    pub fn poll_acknowledgement_clock(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Vec<SmAcknowledgementClockAction> {
+        let mut actions = Vec::new();
+        if self.ack_request_outstanding {
+            if self
+                .next_ack_retry_at
+                .is_some_and(|deadline| now >= deadline)
+            {
+                let attempt = self.ack_retry_attempt + 1;
+                self.ack_retry_attempt = attempt;
+                self.next_ack_retry_at = self.ack_request_started_at.map(|started| {
+                    let delay = ACK_RETRY_DELAYS_MS
+                        .get(usize::from(attempt))
+                        .copied()
+                        .unwrap_or(ACK_REQUEST_TIMEOUT_MS);
+                    let scheduled = started + Duration::milliseconds(delay);
+                    if scheduled > now {
+                        scheduled
+                    } else {
+                        now + Duration::milliseconds(ACK_REQUEST_TIMEOUT_MS)
+                    }
+                });
+                actions.push(SmAcknowledgementClockAction::Retry { attempt });
+            }
+            if self.ack_request_started_at.is_some_and(|started| {
+                now >= started + Duration::milliseconds(ACK_REQUEST_TIMEOUT_MS)
+            }) && !self.ack_request_timed_out
+            {
+                self.ack_request_timed_out = true;
+                actions.push(SmAcknowledgementClockAction::RequestTimedOut);
+            }
+        }
+        if self.last_ack_progress_at.is_some_and(|progress| {
+            now >= progress + Duration::milliseconds(SM_PROGRESS_TIMEOUT_MS)
+        }) && !self.progress_timed_out
+        {
+            self.progress_timed_out = true;
+            actions.push(SmAcknowledgementClockAction::ProgressTimedOut);
+        }
+        actions
+    }
+
+    pub fn cancel_acknowledgement_clock(&mut self) {
+        self.ack_request_outstanding = false;
+        self.ack_request_started_at = None;
+        self.next_ack_retry_at = None;
+        self.ack_retry_attempt = 0;
+        self.ack_request_timed_out = false;
+        self.last_ack_progress_at = None;
+        self.progress_timed_out = false;
     }
 
     pub fn handled_count_too_high(&self, h: u32) -> bool {
@@ -259,7 +449,7 @@ impl SmState {
     pub fn unhandled_stanzas_for_fallback_retry(&self) -> Vec<Element> {
         self.outbound_queue
             .iter()
-            .map(QueuedOutboundStanza::element_for_fallback_retry)
+            .map(UnhandledOutboundEntry::element_for_fallback_retry)
             .collect()
     }
 
@@ -322,53 +512,184 @@ impl SmState {
             .build()
     }
 
-    /// Extract the resumption `id` from an `<enabled/>` element, if present.
-    pub fn parse_enabled(element: &Element) -> Option<String> {
-        if element.name() == "enabled" && element.ns() == NS_SM {
-            if !matches!(element.attr("resume"), Some("true") | Some("1")) {
-                return None;
+    /// Parse an inbound XEP-0198 control after validating its schema shape.
+    pub fn parse_inbound_control(
+        element: &Element,
+    ) -> Result<SmInboundControl, InvalidSmInboundControl> {
+        if element.ns() != NS_SM {
+            return Err(InvalidSmInboundControl);
+        }
+
+        match element.name() {
+            "r" if is_empty_control(element) && has_only_attributes(element, &[]) => {
+                Ok(SmInboundControl::RequestAck)
             }
-            element.attr("id").map(|s| s.to_string())
-        } else {
-            None
+            "a" if is_empty_control(element) && has_only_attributes(element, &["h"]) => {
+                let h = parse_exact_u32(element.attr("h").ok_or(InvalidSmInboundControl)?)
+                    .ok_or(InvalidSmInboundControl)?;
+                Ok(SmInboundControl::Ack { h })
+            }
+            "enabled"
+                if is_empty_control(element)
+                    && has_only_attributes(element, &["id", "location", "max", "resume"]) =>
+            {
+                let resume = element
+                    .attr("resume")
+                    .map(parse_xsd_boolean)
+                    .transpose()?
+                    .unwrap_or(false);
+                let max_resume_seconds = element.attr("max").map(parse_positive_u32).transpose()?;
+                let previd = if resume {
+                    let id = element.attr("id").ok_or(InvalidSmInboundControl)?;
+                    if id.is_empty() {
+                        return Err(InvalidSmInboundControl);
+                    }
+                    Some(StreamId::new(id))
+                } else {
+                    None
+                };
+                Ok(SmInboundControl::Enabled {
+                    previd,
+                    max_resume_seconds,
+                })
+            }
+            "resumed"
+                if is_empty_control(element) && has_only_attributes(element, &["h", "previd"]) =>
+            {
+                let h = parse_exact_u32(element.attr("h").ok_or(InvalidSmInboundControl)?)
+                    .ok_or(InvalidSmInboundControl)?;
+                let previd = element.attr("previd").ok_or(InvalidSmInboundControl)?;
+                if previd.is_empty() {
+                    return Err(InvalidSmInboundControl);
+                }
+                Ok(SmInboundControl::Resumed {
+                    h,
+                    previd: StreamId::new(previd),
+                })
+            }
+            "failed"
+                if has_only_attributes(element, &["h"])
+                    && has_optional_stanza_error_condition(element) =>
+            {
+                let h = match element.attr("h") {
+                    Some(value) => Some(parse_exact_u32(value).ok_or(InvalidSmInboundControl)?),
+                    None => None,
+                };
+                Ok(SmInboundControl::Failed { h })
+            }
+            _ => Err(InvalidSmInboundControl),
         }
-    }
-
-    /// Extract the advertised resumption window from a resumable `<enabled/>`.
-    pub fn parse_enabled_max(element: &Element) -> Option<u32> {
-        if Self::parse_enabled(element).is_some() {
-            element.attr("max")?.parse().ok()
-        } else {
-            None
-        }
-    }
-
-    /// Extract the `h` value from an `<a h='...'/>` ack element.
-    pub fn parse_ack_h(element: &Element) -> Option<u32> {
-        if element.name() == "a" && element.ns() == NS_SM {
-            element.attr("h")?.parse().ok()
-        } else {
-            None
-        }
-    }
-
-    /// Return `true` if `element` is an `<r/>` ack request from the server.
-    pub fn is_request_ack(element: &Element) -> bool {
-        element.name() == "r" && element.ns() == NS_SM
     }
 }
 
-impl QueuedOutboundStanza {
+fn is_empty_control(element: &Element) -> bool {
+    element.nodes().next().is_none()
+}
+
+fn has_only_attributes(element: &Element, allowed: &[&str]) -> bool {
+    element.attrs().iter().all(|((namespace, name), _)| {
+        namespace.is_empty() && allowed.iter().any(|allowed_name| *allowed_name == name)
+    })
+}
+
+fn parse_exact_u32(value: &str) -> Option<u32> {
+    let value = trim_xml_whitespace(value);
+    let value = value.strip_prefix('+').unwrap_or(value);
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, InvalidSmInboundControl> {
+    let value = parse_exact_u32(value).ok_or(InvalidSmInboundControl)?;
+    (value != 0).then_some(value).ok_or(InvalidSmInboundControl)
+}
+
+fn parse_xsd_boolean(value: &str) -> Result<bool, InvalidSmInboundControl> {
+    match trim_xml_whitespace(value) {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(InvalidSmInboundControl),
+    }
+}
+
+fn has_optional_stanza_error_condition(element: &Element) -> bool {
+    let mut nodes = element.nodes().filter(|node| !is_xml_whitespace_node(node));
+    let Some(node) = nodes.next() else {
+        return true;
+    };
+    if nodes.next().is_some() {
+        return false;
+    }
+    let Some(condition) = node.as_element() else {
+        return false;
+    };
+
+    condition.ns() == NS_STANZA_ERRORS
+        && condition.children().next().is_none()
+        && condition.attrs().is_empty()
+        && is_standard_stanza_error_condition(condition.name())
+        && (is_text_stanza_error_condition(condition.name()) || condition.nodes().next().is_none())
+}
+
+fn trim_xml_whitespace(value: &str) -> &str {
+    value.trim_matches(is_xml_whitespace)
+}
+
+fn is_xml_whitespace_node(node: &minidom::Node) -> bool {
+    node.as_text()
+        .is_some_and(|text| text.chars().all(is_xml_whitespace))
+}
+
+fn is_xml_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\n' | '\r')
+}
+
+fn is_text_stanza_error_condition(name: &str) -> bool {
+    matches!(name, "gone" | "redirect")
+}
+
+fn is_standard_stanza_error_condition(name: &str) -> bool {
+    matches!(
+        name,
+        "bad-request"
+            | "conflict"
+            | "feature-not-implemented"
+            | "forbidden"
+            | "gone"
+            | "internal-server-error"
+            | "item-not-found"
+            | "jid-malformed"
+            | "not-acceptable"
+            | "not-allowed"
+            | "not-authorized"
+            | "policy-violation"
+            | "recipient-unavailable"
+            | "redirect"
+            | "registration-required"
+            | "remote-server-not-found"
+            | "remote-server-timeout"
+            | "resource-constraint"
+            | "service-unavailable"
+            | "subscription-required"
+            | "undefined-condition"
+            | "unexpected-request"
+    )
+}
+
+impl UnhandledOutboundEntry {
     fn element_for_fallback_retry(&self) -> Element {
         if self.element.name() != "message" {
-            return self.element.clone();
-        }
-        if self.element.get_child("delay", NS_DELAY).is_some() {
             return self.element.clone();
         }
 
         let stamp = self.sent_at.to_rfc3339_opts(SecondsFormat::Millis, true);
         let mut element = self.element.clone();
+        // XEP-0203 delay is a record of the original delivery time. A
+        // persisted stanza can contain a stale, malformed, offset, or
+        // duplicated delay, so always replace every delay child with one
+        // builder-generated UTC value from the typed send timestamp.
+        while element.remove_child("delay", NS_DELAY).is_some() {}
         element.append_child(
             Element::builder("delay", NS_DELAY)
                 .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp)
@@ -396,6 +717,8 @@ fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+
     use super::*;
 
     fn serialize(element: &Element) -> String {
@@ -440,93 +763,265 @@ mod tests {
     }
 
     #[test]
-    fn parse_enabled_extracts_previd() {
+    fn parse_inbound_control_accepts_exact_schema_shapes() {
         let el = Element::builder("enabled", NS_SM)
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
             .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
             .attr(minidom::rxml::xml_ncname!("max").to_owned(), "300")
             .build();
-        assert_eq!(SmState::parse_enabled(&el), Some("abc123".to_string()));
-        assert_eq!(SmState::parse_enabled_max(&el), Some(300));
+        assert_eq!(
+            SmState::parse_inbound_control(&el),
+            Ok(SmInboundControl::Enabled {
+                previd: Some(StreamId::new("abc123")),
+                max_resume_seconds: Some(300),
+            })
+        );
+        assert_eq!(
+            SmState::parse_inbound_control(&Element::builder("r", NS_SM).build()),
+            Ok(SmInboundControl::RequestAck)
+        );
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("a", NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("h").to_owned(), " +4294967295 ")
+                    .build()
+            ),
+            Ok(SmInboundControl::Ack { h: u32::MAX })
+        );
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("enabled", NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("resume").to_owned(), " true ")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
+                    .build()
+            ),
+            Ok(SmInboundControl::Enabled {
+                previd: Some(StreamId::new("abc123")),
+                max_resume_seconds: None,
+            })
+        );
     }
 
     #[test]
-    fn parse_enabled_requires_resumable_response() {
-        let el = Element::builder("enabled", NS_SM)
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
-            .attr(minidom::rxml::xml_ncname!("max").to_owned(), "300")
+    fn parse_inbound_control_rejects_malformed_empty_controls_and_counters() {
+        for element in [
+            Element::builder("r", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("unexpected").to_owned(), "value")
+                .build(),
+            Element::builder("a", NS_SM).build(),
+            Element::builder("a", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1 2")
+                .build(),
+            Element::builder("resumed", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "")
+                .build(),
+        ] {
+            assert_eq!(
+                SmState::parse_inbound_control(&element),
+                Err(InvalidSmInboundControl)
+            );
+        }
+        let mut whitespace_only_ack = Element::builder("a", NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
             .build();
-        assert_eq!(SmState::parse_enabled(&el), None);
-        assert_eq!(SmState::parse_enabled_max(&el), None);
-
-        let el = Element::builder("enabled", NS_SM)
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
-            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "false")
-            .build();
-        assert_eq!(SmState::parse_enabled(&el), None);
+        whitespace_only_ack.append_text_node(" ");
+        assert_eq!(
+            SmState::parse_inbound_control(&whitespace_only_ack),
+            Err(InvalidSmInboundControl)
+        );
     }
 
     #[test]
-    fn parse_enabled_returns_none_when_no_id() {
-        let el = Element::builder("enabled", NS_SM).build();
-        assert_eq!(SmState::parse_enabled(&el), None);
+    fn parse_inbound_control_requires_valid_enabled_boolean_and_resume_id() {
+        for element in [
+            Element::builder("enabled", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "yes")
+                .build(),
+            Element::builder("enabled", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .build(),
+            Element::builder("enabled", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "1")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "")
+                .build(),
+            Element::builder("enabled", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("max").to_owned(), "0")
+                .build(),
+            Element::builder("enabled", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("max").to_owned(), "4294967296")
+                .build(),
+        ] {
+            assert_eq!(
+                SmState::parse_inbound_control(&element),
+                Err(InvalidSmInboundControl)
+            );
+        }
+        for resume in ["false", "0"] {
+            let element = Element::builder("enabled", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), resume)
+                .build();
+            assert_eq!(
+                SmState::parse_inbound_control(&element),
+                Ok(SmInboundControl::Enabled {
+                    previd: None,
+                    max_resume_seconds: None,
+                })
+            );
+        }
     }
 
     #[test]
-    fn parse_enabled_returns_none_for_wrong_element() {
-        let el = Element::builder("enable", NS_SM)
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
-            .build();
-        assert_eq!(SmState::parse_enabled(&el), None);
+    fn parse_inbound_control_only_allows_one_standard_failed_condition() {
+        let condition = Element::builder("item-not-found", NS_STANZA_ERRORS).build();
+        let mut valid = Element::builder("failed", NS_SM).build();
+        valid.append_text_node("\n  ");
+        valid.append_child(condition);
+        valid.append_text_node("\n");
+        assert_eq!(
+            SmState::parse_inbound_control(&valid),
+            Ok(SmInboundControl::Failed { h: None })
+        );
 
-        let el2 = Element::builder("enabled", "urn:ietf:params:xml:ns:xmpp-bind")
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
-            .build();
-        assert_eq!(SmState::parse_enabled(&el2), None);
+        let mut redirect = Element::builder("redirect", NS_STANZA_ERRORS).build();
+        redirect.append_text_node("xmpp:replacement.example");
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("failed", NS_SM).append(redirect).build()
+            ),
+            Ok(SmInboundControl::Failed { h: None })
+        );
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("failed", NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("h").to_owned(), " +1 ")
+                    .build()
+            ),
+            Ok(SmInboundControl::Failed { h: Some(1) })
+        );
+
+        for invalid in [
+            Element::builder("failed", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "not-a-u32")
+                .build(),
+            Element::builder("failed", NS_SM)
+                .attr(minidom::rxml::xml_ncname!("unexpected").to_owned(), "value")
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("custom", NS_STANZA_ERRORS).build())
+                .build(),
+        ] {
+            assert_eq!(
+                SmState::parse_inbound_control(&invalid),
+                Err(InvalidSmInboundControl)
+            );
+        }
     }
 
     #[test]
-    fn parse_ack_h_extracts_value() {
-        let el = Element::builder("a", NS_SM)
-            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "7")
+    fn first_unhandled_stanza_requests_ack_and_no_progress_ack_reopens_edge() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        let message = Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "one")
             .build();
-        assert_eq!(SmState::parse_ack_h(&el), Some(7));
+
+        assert!(state.record_sent_stanza(&message));
+        assert!(!state.record_sent_stanza(&message));
+        assert!(state.process_ack(0).is_empty());
+        assert!(state.record_sent_stanza(&message));
     }
 
     #[test]
-    fn parse_ack_h_returns_none_for_wrong_element() {
-        let el = Element::builder("b", NS_SM)
-            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "7")
-            .build();
-        assert_eq!(SmState::parse_ack_h(&el), None);
+    fn acknowledgement_clock_retries_then_times_out_without_an_ack() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let message = Element::builder("message", "jabber:client").build();
+        assert!(state.record_sent_stanza_at(&message, now));
 
-        let el2 = Element::builder("a", "jabber:client")
-            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "7")
-            .build();
-        assert_eq!(SmState::parse_ack_h(&el2), None);
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::milliseconds(249))
+            .is_empty());
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(250)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 1 }]
+        );
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(500)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 2 }]
+        );
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(1_000)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 3 }]
+        );
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(2_000)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 4 }]
+        );
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(5_000)),
+            vec![
+                SmAcknowledgementClockAction::Retry { attempt: 5 },
+                SmAcknowledgementClockAction::RequestTimedOut,
+            ]
+        );
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(10_000)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 6 }]
+        );
     }
 
     #[test]
-    fn parse_ack_h_returns_none_for_bad_parse() {
-        let el = Element::builder("a", NS_SM)
-            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "notanumber")
-            .build();
-        assert_eq!(SmState::parse_ack_h(&el), None);
+    fn partial_progress_ack_cancels_request_timer_and_rearms_progress_deadline() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let message = Element::builder("message", "jabber:client").build();
+        assert!(state.record_sent_stanza_at(&message, now));
+        assert!(state
+            .process_ack_at(0, now + Duration::milliseconds(100))
+            .is_empty());
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::milliseconds(5_000))
+            .is_empty());
+
+        assert!(state.record_sent_stanza_at(&message, now + Duration::seconds(1)));
+        state.process_ack_at(1, now + Duration::seconds(2));
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::seconds(31))
+            .is_empty());
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::seconds(32)),
+            vec![SmAcknowledgementClockAction::ProgressTimedOut]
+        );
     }
 
     #[test]
-    fn is_request_ack_matches_r_element() {
-        let el = Element::builder("r", NS_SM).build();
-        assert!(SmState::is_request_ack(&el));
-    }
+    fn full_ack_cancels_idle_progress_deadline_and_next_stanza_rearms_it() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let message = Element::builder("message", "jabber:client").build();
 
-    #[test]
-    fn is_request_ack_rejects_other_elements() {
-        let el = Element::builder("a", NS_SM).build();
-        assert!(!SmState::is_request_ack(&el));
+        assert!(state.record_sent_stanza_at(&message, now));
+        assert!(state
+            .process_ack_at(1, now + Duration::seconds(1))
+            .is_empty());
+        assert!(state.outbound_queue.is_empty());
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::seconds(31))
+            .is_empty());
 
-        let el2 = Element::builder("r", "jabber:client").build();
-        assert!(!SmState::is_request_ack(&el2));
+        let next = now + Duration::seconds(32);
+        assert!(state.record_sent_stanza_at(&message, next));
+        assert_eq!(
+            state.poll_acknowledgement_clock(next + Duration::milliseconds(250)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 1 }]
+        );
+        assert!(state
+            .poll_acknowledgement_clock(next + Duration::seconds(30))
+            .contains(&SmAcknowledgementClockAction::ProgressTimedOut));
     }
 
     #[test]
@@ -698,59 +1193,113 @@ mod tests {
     }
 
     #[test]
-    fn resume_state_can_restore_serialized_unhandled_stanzas() {
+    fn resume_state_round_trips_timestamped_unhandled_outbound_entries() {
         let stanza = Element::builder("message", "jabber:client")
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
             .build();
+        let sent_at = "2026-07-26T12:34:56.789Z"
+            .parse::<DateTime<Utc>>()
+            .expect("timestamp");
 
-        let resume_state = SmResumeState::from_unhandled_outbound_stanzas(
+        let resume_state = SmResumeState::from_unhandled_outbound_entries(
             "previous-stream",
             4,
             9,
-            [stanza.clone()],
+            [UnhandledOutboundEntry::new(stanza.clone(), sent_at)],
         )
         .expect("resume state");
 
         assert!(resume_state.has_unhandled_outbound_stanzas());
         assert_eq!(
             resume_state
-                .unhandled_outbound_stanzas()
+                .unhandled_outbound_entries()
+                .map(UnhandledOutboundEntry::stanza)
                 .collect::<Vec<_>>(),
             vec![&stanza],
+        );
+        assert_eq!(
+            resume_state
+                .unhandled_outbound_entries()
+                .map(UnhandledOutboundEntry::sent_at)
+                .collect::<Vec<_>>(),
+            vec![sent_at],
         );
     }
 
     #[test]
-    fn fallback_retry_preserves_existing_delay_stamp() {
-        let mut state = SmState::new();
-        state.outbound_enabled = true;
-        let message = Element::builder("message", "jabber:client")
-            .attr(
-                minidom::rxml::xml_ncname!("id").to_owned(),
-                "already-delayed",
-            )
-            .append(
-                Element::builder("delay", NS_DELAY)
-                    .attr(
-                        minidom::rxml::xml_ncname!("stamp").to_owned(),
-                        "2024-01-15T10:00:00Z",
-                    )
-                    .build(),
-            )
-            .build();
+    fn resumed_unacked_tail_clock_keeps_counters_and_uses_normal_deadlines() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let message = Element::builder("message", "jabber:client").build();
+        let resume = SmResumeState::from_unhandled_outbound_entries(
+            "previous-stream",
+            3,
+            9,
+            [UnhandledOutboundEntry::new(message, now)],
+        )
+        .unwrap();
+        let mut state = SmState::from_resume_state(&resume);
 
-        state.record_sent_stanza(&message);
-        let retry = state
-            .unhandled_stanzas_for_fallback_retry()
-            .into_iter()
-            .next()
-            .expect("fallback retry");
-        let delays = retry
-            .children()
-            .filter(|child| child.name() == "delay" && child.ns() == NS_DELAY)
-            .collect::<Vec<_>>();
+        assert!(state.arm_acknowledgement_clock(now));
+        assert_eq!(state.outbound_count, 9);
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(250)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 1 }]
+        );
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::seconds(5))
+            .contains(&SmAcknowledgementClockAction::RequestTimedOut));
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::seconds(30))
+            .contains(&SmAcknowledgementClockAction::ProgressTimedOut));
+    }
 
-        assert_eq!(delays.len(), 1);
-        assert_eq!(delays[0].attr("stamp"), Some("2024-01-15T10:00:00Z"));
+    #[test]
+    fn fallback_retry_normalizes_persisted_delay_to_one_utc_stamp() {
+        let sent_at = Utc.with_ymd_and_hms(2025, 2, 3, 4, 5, 6).unwrap();
+        let cases = [
+            (
+                vec![Some("2024-01-15T10:00:00Z")],
+                "2024-01-15T10:00:00.000Z",
+            ),
+            (
+                vec![Some("2024-01-15T10:00:00+01:00")],
+                "2024-01-15T09:00:00.000Z",
+            ),
+            (vec![], "2025-02-03T04:05:06.000Z"),
+            (vec![Some("not-a-timestamp")], "2025-02-03T04:05:06.000Z"),
+            (
+                vec![Some("2024-01-15T10:00:00Z"), None],
+                "2024-01-15T10:00:00.000Z",
+            ),
+        ];
+
+        for (delay_stamps, expected_stamp) in cases {
+            let mut message = Element::builder("message", "jabber:client")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "persisted")
+                .build();
+            for stamp in delay_stamps {
+                let mut delay = Element::builder("delay", NS_DELAY);
+                if let Some(stamp) = stamp {
+                    delay = delay.attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp);
+                }
+                message.append_child(delay.build());
+            }
+
+            let mut state = SmState::new();
+            state.outbound_enabled = true;
+            state.record_sent_stanza_at(&message, sent_at);
+            let retry = state
+                .unhandled_stanzas_for_fallback_retry()
+                .into_iter()
+                .next()
+                .expect("fallback retry");
+            let delays = retry
+                .children()
+                .filter(|child| child.name() == "delay" && child.ns() == NS_DELAY)
+                .collect::<Vec<_>>();
+
+            assert_eq!(delays.len(), 1);
+            assert_eq!(delays[0].attr("stamp"), Some(expected_stamp));
+        }
     }
 }

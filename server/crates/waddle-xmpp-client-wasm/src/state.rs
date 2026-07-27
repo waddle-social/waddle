@@ -62,47 +62,35 @@ impl WaddleConfig {
         Ok(())
     }
 
-    pub fn with_resume_state_stanzas(
+    pub fn with_resume_state_entries(
         &mut self,
         previd: String,
         inbound_h: u32,
         outbound_h: u32,
-        stanzas: Vec<String>,
+        entries: JsValue,
     ) -> Result<(), JsValue> {
-        let stanzas = stanzas
-            .into_iter()
-            .map(|xml| {
-                xml.parse::<Element>()
-                    .map_err(|err| js_error(format!("invalid resume stanza XML: {err}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let entries = resume_entries_from_js(entries)?;
         self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_stanzas(
-                previd, inbound_h, outbound_h, stanzas,
+            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
+                previd, inbound_h, outbound_h, entries,
             )
             .map_err(|err| js_error(err.to_string()))?,
         );
         Ok(())
     }
 
-    pub fn with_resume_state_stanzas_with_max(
+    pub fn with_resume_state_entries_with_max(
         &mut self,
         previd: String,
         inbound_h: u32,
         outbound_h: u32,
-        stanzas: Vec<String>,
+        entries: JsValue,
         max_resume_seconds: u32,
     ) -> Result<(), JsValue> {
-        let stanzas = stanzas
-            .into_iter()
-            .map(|xml| {
-                xml.parse::<Element>()
-                    .map_err(|err| js_error(format!("invalid resume stanza XML: {err}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let entries = resume_entries_from_js(entries)?;
         self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_stanzas(
-                previd, inbound_h, outbound_h, stanzas,
+            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
+                previd, inbound_h, outbound_h, entries,
             )
             .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
             .map_err(|err| js_error(err.to_string()))?,
@@ -143,25 +131,63 @@ pub(crate) struct JsResumeState {
     pub(crate) inbound_h: u32,
     pub(crate) outbound_h: u32,
     pub(crate) has_unacked_outbound: bool,
-    pub(crate) unhandled_outbound_stanzas: Vec<String>,
+    pub(crate) unhandled_outbound_entries: Vec<JsUnhandledOutboundEntry>,
     pub(crate) max_resume_seconds: Option<u32>,
 }
 
 impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
     fn from(value: waddle_xmpp_client::SmResumeState) -> Self {
-        let unhandled_outbound_stanzas = value
-            .unhandled_outbound_stanzas()
-            .filter_map(|element| element_to_xml_string(element).ok())
+        let unhandled_outbound_entries = value
+            .unhandled_outbound_entries()
+            .filter_map(|entry| {
+                element_to_xml_string(entry.stanza())
+                    .ok()
+                    .map(|xml| JsUnhandledOutboundEntry {
+                        xml,
+                        sent_at: entry
+                            .sent_at()
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    })
+            })
             .collect();
         Self {
             previd: value.previd().to_string(),
             inbound_h: value.inbound_h(),
             outbound_h: value.outbound_h(),
             has_unacked_outbound: value.has_unhandled_outbound_stanzas(),
-            unhandled_outbound_stanzas,
+            unhandled_outbound_entries,
             max_resume_seconds: value.max_resume_seconds(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JsUnhandledOutboundEntry {
+    xml: String,
+    sent_at: String,
+}
+
+fn resume_entries_from_js(
+    entries: JsValue,
+) -> Result<Vec<waddle_xmpp_client::UnhandledOutboundEntry>, JsValue> {
+    let entries: Vec<JsUnhandledOutboundEntry> = serde_wasm_bindgen::from_value(entries)
+        .map_err(|err| js_error(format!("invalid resume entries: {err}")))?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            let stanza = entry
+                .xml
+                .parse::<Element>()
+                .map_err(|err| js_error(format!("invalid resume stanza XML: {err}")))?;
+            let sent_at = chrono::DateTime::parse_from_rfc3339(&entry.sent_at)
+                .map_err(|err| js_error(format!("invalid resume stanza timestamp: {err}")))?
+                .with_timezone(&chrono::Utc);
+            Ok(waddle_xmpp_client::UnhandledOutboundEntry::new(
+                stanza, sent_at,
+            ))
+        })
+        .collect()
 }
 
 #[wasm_bindgen]
@@ -187,6 +213,7 @@ pub(crate) struct WaddleClientInner {
     pub(crate) on_mds_displayed: Option<Function>,
     pub(crate) on_pubsub_event: Option<Function>,
     pub(crate) on_call: Option<Function>,
+    pub(crate) on_stream_management: Option<Function>,
     pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
 }
 
@@ -214,6 +241,9 @@ pub(crate) enum WasmCommand {
         responder: oneshot::Sender<DriverResult<()>>,
     },
     Disconnect {
+        responder: oneshot::Sender<DriverResult<()>>,
+    },
+    RequestStreamManagementAck {
         responder: oneshot::Sender<DriverResult<()>>,
     },
 }
@@ -307,4 +337,9 @@ pub(crate) struct WasmDriverTask {
     pub(crate) pending_inbox_queries: HashMap<String, PendingInboxQuery>,
     pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,
     pub(crate) explicit_disconnect: bool,
+    /// Browser-owned wakeup only: XEP-0198 timing and outcomes remain in the
+    /// Rust runtime. The closure is retained for exactly the driver's life.
+    pub(crate) sm_clock_timer: Option<i32>,
+    pub(crate) sm_clock_callback: Option<Closure<dyn FnMut()>>,
+    pub(crate) sm_clock_rx: mpsc::Receiver<()>,
 }

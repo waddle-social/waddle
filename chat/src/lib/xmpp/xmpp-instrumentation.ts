@@ -25,6 +25,7 @@ import {
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
+  reportStreamManagement,
   markErrorReportedToTelemetry,
   setXmppResourceForTelemetry,
 } from "@/lib/telemetry";
@@ -101,6 +102,7 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   client.onReconnectScheduled((info) => reportReconnectScheduled(info));
   client.onCatchup((info) => reportCatchup(info));
   client.onResumeDrain((info) => reportResumeDrain(info));
+  client.onStreamManagement((event) => reportStreamManagement(event));
 }
 
 function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefined): string {

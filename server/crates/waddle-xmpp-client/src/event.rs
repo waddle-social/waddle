@@ -106,10 +106,25 @@ pub enum ConnectionEvent {
 #[derive(Debug, Clone)]
 pub enum StreamManagementEvent {
     Enabled { previd: Option<String> },
-    AckReceived { h: u32 },
-    AckRequested,
+    AckReceived { h: u32, progressed: bool },
+    AckRequested { reason: SmAckRequestReason },
+    AckRetry { attempt: u8 },
+    AckRequestTimedOut,
+    ReconnectRequired,
     Resumed { h: u32 },
     Failed,
+}
+
+/// Why this endpoint emitted a typed XEP-0198 acknowledgement request.
+///
+/// This stays a closed protocol value: hosts must not infer protocol state
+/// from XML, counters, or transport diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmAckRequestReason {
+    OutboundStanza,
+    ResumedUnackedTail,
+    PeerRequest,
+    Pagehide,
 }
 
 /// Typed stream-error extension detail carried alongside the RFC 6120

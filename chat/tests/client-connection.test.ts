@@ -160,6 +160,78 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(sent).toEqual(["second"]);
   });
 
+  test("synchronous XEP-0198 ack cannot strand a persisted queued send", async () => {
+    let queue: OfflineSendQueue;
+    const created = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        // A host may dispatch the acknowledgement while resolving its send
+        // promise. The queue must have claimed the stable stanza id already.
+        queue.handleAck(opts.id);
+        return opts.id;
+      },
+    });
+    queue = created.queue;
+    queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-sync-ack" });
+
+    await queue.flushDirect();
+
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+  });
+
+  test("null, throwing, and mismatched send outcomes release the attempt for a later retry", async () => {
+    const outcomes: Array<"null" | "throw" | "mismatch"> = ["null", "throw", "mismatch"];
+    for (const outcome of outcomes) {
+      const { queue } = createQueue({
+        sendDirect: async (_peer, _body, opts) => {
+          if (outcome === "throw") throw new Error("transport closed");
+          return outcome === "mismatch" ? `${opts.id}-wrong` : null;
+        },
+      });
+      const id = `dm-${outcome}`;
+      queue.queueDirectMessage("bob@example.com", outcome, { id });
+      await queue.flushDirect().catch(() => undefined);
+
+      // The persisted identity remains available to a later generation;
+      // it was not left falsely in-flight by the failed host attempt.
+      expect(listQueuedMessages(SCOPE).some((entry) => entry.id === id)).toBe(true);
+      await queue.flushDirect().catch(() => undefined);
+    }
+  });
+
+  test("a stale direct non-retryable rejection after dispose cannot delete the persisted entry", async () => {
+    let continueSend: (() => void) | undefined;
+    const { queue } = createQueue({
+      sendDirect: async () => {
+        await new Promise<void>((resolve) => { continueSend = resolve; });
+        return compatWasmSendResult({ kind: "invalid-recipient" });
+      },
+    });
+    queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-stale-dispose" });
+    const flush = queue.flushDirect();
+    queue.dispose();
+    continueSend?.();
+    await flush;
+
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toContain("dm-stale-dispose");
+  });
+
+  test("a stale room non-retryable rejection after dispose cannot delete the persisted entry", async () => {
+    let continueSend: (() => void) | undefined;
+    const { queue } = createQueue({
+      sendRoom: async () => {
+        await new Promise<void>((resolve) => { continueSend = resolve; });
+        return compatWasmSendResult({ kind: "invalid-recipient" });
+      },
+    });
+    queue.queueRoomMessage("general@muc.example.com", "hello", { id: "room-stale-dispose" });
+    const flush = queue.flushRoom("general@muc.example.com");
+    queue.dispose();
+    continueSend?.();
+    await flush;
+
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toContain("room-stale-dispose");
+  });
+
   test("ack removes the persisted copy and reports queue depth + latency", async () => {
     const { queue, events } = createQueue();
     const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
@@ -255,7 +327,10 @@ describe("OfflineSendQueue drain ordering", () => {
       previd: "p",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundStanzas: ['<message id="dm-native" to="bob@example.com"><body>native replay</body></message>'],
+      unhandledOutboundEntries: [{
+        xml: '<message id="dm-native" to="bob@example.com"><body>native replay</body></message>',
+        sentAt: "2026-07-26T12:34:56.789Z",
+      }],
     });
 
     queue.handleAck("dm-native");
@@ -265,6 +340,82 @@ describe("OfflineSendQueue drain ordering", () => {
       { kind: "dm", persisted: 0, inflight: 0 },
       { kind: "room", persisted: 0, inflight: 0 },
     ]);
+  });
+
+  test("fresh fallback leaves the native resume tail owned until its core retry is acked", async () => {
+    const sent: string[] = [];
+    const { queue } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        sent.push(opts.id);
+        return opts.id;
+      },
+    });
+    queue.queueDirectMessage("bob@example.com", "native fallback", { id: "dm-native" });
+    queue.queueDirectMessage("bob@example.com", "ordinary reconnect", { id: "dm-ordinary" });
+    queue.seedFromResumeState({
+      previd: "old-sm",
+      inboundH: 0,
+      outboundH: 1,
+      unhandledOutboundEntries: [{
+        xml: '<message id="dm-native"><body>native fallback</body></message>',
+        sentAt: "2026-07-26T12:34:56.789Z",
+      }],
+    });
+    queue.markInflight("dm-ordinary");
+
+    // `<failed h='0'/>` leads to a fresh session-ready before the Rust
+    // runtime receives the fresh `<enabled/>`. Only the ordinary write may
+    // re-enter the JS flush; the resume tail must wait for core fallback.
+    queue.clearOrdinaryInflight();
+    await queue.flushDirect();
+    expect(sent).toEqual(["dm-ordinary"]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id))
+      .toEqual(["dm-native", "dm-ordinary"]);
+
+    // The Rust fallback emits the one retained native stanza after
+    // `<enabled/>`; its acknowledgement is the only normal release of that
+    // queue ownership.
+    queue.handleAck("dm-native");
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-ordinary"]);
+  });
+
+  test("transient native replay failure survives teardown and a fallback ack releases once", async () => {
+    const initial = createQueue();
+    const failures: string[] = [];
+    initial.events.on("messageDeliveryFailure", (id) => failures.push(id));
+    initial.queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-replay-failed" });
+    initial.queue.seedFromResumeState({
+      previd: "p",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{
+        xml: '<message id="dm-replay-failed"><body>native replay</body></message>',
+        sentAt: "2026-07-26T12:34:56.789Z",
+      }],
+    });
+
+    initial.queue.handleFailed("dm-replay-failed");
+    expect(failures).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-replay-failed"]);
+
+    // The replay still owns the id until teardown, so this generation cannot
+    // double-send it. A fresh fallback generation can retry the durable row.
+    await initial.queue.flushDirect();
+    initial.queue.dispose();
+
+    const fallbackSends: string[] = [];
+    const fallback = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        fallbackSends.push(opts.id);
+        return opts.id;
+      },
+    });
+    await fallback.queue.flushDirect();
+    expect(fallbackSends).toEqual(["dm-replay-failed"]);
+
+    fallback.queue.handleAck("dm-replay-failed");
+    fallback.queue.handleAck("dm-replay-failed");
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
   });
 });
 

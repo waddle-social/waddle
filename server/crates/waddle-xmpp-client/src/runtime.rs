@@ -6,12 +6,13 @@ use crate::bootstrap::{
 };
 use crate::config::ClientConfig;
 use crate::error::{ClientError, ClientResult};
-use crate::event::{ClientEvent, ConnectionEvent, LifecycleEvent};
+use crate::event::{ClientEvent, ConnectionEvent, LifecycleEvent, StreamManagementEvent};
 use crate::request::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
-use crate::stream_management::{SmResumeState, SmState};
+use crate::stream_management::{SmAcknowledgementClockAction, SmResumeState, SmState};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 use crate::AuthenticationConfig;
+use chrono::{DateTime, Utc};
 use minidom::Element;
 
 mod app_stanza;
@@ -35,10 +36,24 @@ pub struct XmppRuntime {
     bootstrap: BootstrapState,
     next_bootstrap_stanza: u64,
     sm_state: SmState,
+    sm_negotiation: SmNegotiationState,
     sm_advertised: bool,
     pending_fallback_retries: VecDeque<Element>,
     fallback_resume_state: Option<SmResumeState>,
     fallback_retry_writes_in_flight: VecDeque<Element>,
+}
+
+/// Client-side XEP-0198 negotiation ownership for the current stream.
+///
+/// This is deliberately distinct from the SM counters: sending `<enable/>`
+/// starts the sender counter, while the session becomes enabled only after the
+/// peer's matching `<enabled/>` response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SmNegotiationState {
+    #[default]
+    Inactive,
+    AwaitingEnableResponse,
+    Enabled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +86,7 @@ impl XmppRuntime {
             bootstrap: BootstrapState::Idle,
             next_bootstrap_stanza: 0,
             sm_state,
+            sm_negotiation: SmNegotiationState::Inactive,
             sm_advertised: false,
             pending_fallback_retries: VecDeque::new(),
             fallback_resume_state: None,
@@ -185,6 +201,65 @@ impl XmppRuntime {
         Ok(events)
     }
 
+    /// Drive the Rust-owned XEP-0198 acknowledgement clock. Hosts supply time
+    /// so browser and native timer implementations cannot redefine protocol
+    /// cadence and tests can exercise every boundary deterministically.
+    pub fn poll_stream_management_clock(&mut self, now: DateTime<Utc>) -> Vec<ClientEvent> {
+        let mut events = Vec::new();
+        for action in self.sm_state.poll_acknowledgement_clock(now) {
+            match action {
+                SmAcknowledgementClockAction::Retry { attempt } => {
+                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        TransportMessage::Element(SmState::build_request_ack()),
+                    )));
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        StreamManagementEvent::AckRetry { attempt },
+                    )));
+                }
+                SmAcknowledgementClockAction::RequestTimedOut => {
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        StreamManagementEvent::AckRequestTimedOut,
+                    )));
+                }
+                SmAcknowledgementClockAction::ProgressTimedOut => {
+                    // A reconnect terminates this stream's acknowledgement
+                    // policy. Actions returned earlier in the same poll (such
+                    // as a retry on the five-second plateau) must not reach
+                    // the transport after the terminal decision.
+                    self.sm_state.cancel_acknowledgement_clock();
+                    events.clear();
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        StreamManagementEvent::ReconnectRequired,
+                    )));
+                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        TransportMessage::Close(StreamClose),
+                    )));
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    /// Request a peer acknowledgement through the runtime-owned XEP-0198
+    /// builder. Browser callers use this during `pagehide`; the host never
+    /// constructs XML or redefines whether the current stream can carry SM.
+    pub fn request_stream_management_ack(&self) -> Vec<ClientEvent> {
+        if !self.sm_state.enabled {
+            return Vec::new();
+        }
+        vec![
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(
+                SmState::build_request_ack(),
+            ))),
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested {
+                    reason: crate::event::SmAckRequestReason::Pagehide,
+                },
+            )),
+        ]
+    }
+
     fn resolved_event(&self, pending: PendingRequest) -> ClientEvent {
         ClientEvent::RequestResolved(pending.correlation())
     }
@@ -212,7 +287,7 @@ impl XmppRuntime {
                 self.handle_received_element(element, events)?;
             }
             TransportEvent::MessageSent(TransportMessage::Element(element)) => {
-                self.handle_sent_element(&element);
+                self.handle_sent_element(&element, events);
             }
             TransportEvent::MessageReceived(TransportMessage::Close(_))
             | TransportEvent::StateChanged(TransportState::Closed)
@@ -220,6 +295,7 @@ impl XmppRuntime {
                 self.snapshot.binding = None;
                 self.bootstrap = BootstrapState::Idle;
                 self.sm_state.stop();
+                self.sm_negotiation = SmNegotiationState::Inactive;
                 self.set_phase(SessionPhase::Disconnected)?;
             }
             TransportEvent::StateChanged(TransportState::Closing) => {
@@ -233,15 +309,30 @@ impl XmppRuntime {
         Ok(())
     }
 
-    fn handle_sent_element(&mut self, element: &Element) {
+    fn handle_sent_element(&mut self, element: &Element, events: &mut Vec<ClientEvent>) {
         if element.ns() == crate::stream_management::NS_SM && element.name() == "enable" {
-            self.sm_state.start_outbound();
+            if matches!(self.bootstrap, BootstrapState::Ready)
+                && self.snapshot.binding.is_some()
+                && matches!(self.sm_negotiation, SmNegotiationState::Inactive)
+            {
+                self.sm_state.start_outbound();
+                self.sm_negotiation = SmNegotiationState::AwaitingEnableResponse;
+            }
             return;
         }
 
-        if self.sm_state.outbound_enabled && matches!(element.name(), "iq" | "message" | "presence")
+        if self.sm_state.outbound_enabled
+            && matches!(element.name(), "iq" | "message" | "presence")
+            && self.sm_state.record_sent_stanza(element)
         {
-            self.sm_state.record_sent_stanza(element);
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(SmState::build_request_ack()),
+            )));
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested {
+                    reason: crate::event::SmAckRequestReason::OutboundStanza,
+                },
+            )));
         }
         self.mark_fallback_retry_sent(element);
     }

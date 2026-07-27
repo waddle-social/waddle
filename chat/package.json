@@ -44,6 +44,7 @@
     "@tiptap/vue-3": "^3.25.0",
     "@workadventure/noise-suppression": "0.0.4",
     "astro": "^6.4.3",
+    "effect": "3.22.0",
     "emojilib": "^4.0.3",
     "events": "^3.3.0",
     "hls.js": "^1.6.16",

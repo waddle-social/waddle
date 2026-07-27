@@ -10947,14 +10947,9 @@ public object FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer<WaddleSha
 
 
 /**
- * XEP-0198 client resume snapshot crossing the FFI as an opaque
- * persistence round-trip: the Swift app stores it on disconnect and
- * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound stanzas travel as serialized XML strings — the message
- * stanza-id is re-derived from the element's `id` attribute on
- * restore, and the original enqueue instant survives only when the
- * element already carries a `<delay/>` stamp (identical semantics to
- * the wasm client's localStorage persistence of the same snapshot).
+ * XEP-0198 client resume snapshot crossing the FFI as a durable
+ * typed-entry round-trip. XML is serialized only at this persistence
+ * boundary; every entry also retains its original send timestamp.
  */
 data class WaddleSmResumeState (
     /**
@@ -10978,10 +10973,10 @@ data class WaddleSmResumeState (
     var `maxResumeSeconds`: kotlin.UInt?
     ,
     /**
-     * Outbound stanzas the server had not acked at snapshot time,
-     * serialized to XML in send order for lossless replay.
+     * Outbound entries the server had not acked at snapshot time, in send
+     * order for exact identity and timestamp-preserving replay.
      */
-    var `queuedStanzasXml`: List<kotlin.String>
+    var `unhandledOutboundEntries`: List<WaddleUnhandledOutboundEntry>
 
 ){
 
@@ -11002,7 +10997,7 @@ public object FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer<Waddle
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterOptionalUInt.read(buf),
-            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceTypeWaddleUnhandledOutboundEntry.read(buf),
         )
     }
 
@@ -11011,7 +11006,7 @@ public object FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer<Waddle
             FfiConverterUInt.allocationSize(value.`inboundH`) +
             FfiConverterUInt.allocationSize(value.`outboundH`) +
             FfiConverterOptionalUInt.allocationSize(value.`maxResumeSeconds`) +
-            FfiConverterSequenceString.allocationSize(value.`queuedStanzasXml`)
+            FfiConverterSequenceTypeWaddleUnhandledOutboundEntry.allocationSize(value.`unhandledOutboundEntries`)
     )
 
     override fun write(value: WaddleSmResumeState, buf: ByteBuffer) {
@@ -11019,7 +11014,7 @@ public object FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer<Waddle
             FfiConverterUInt.write(value.`inboundH`, buf)
             FfiConverterUInt.write(value.`outboundH`, buf)
             FfiConverterOptionalUInt.write(value.`maxResumeSeconds`, buf)
-            FfiConverterSequenceString.write(value.`queuedStanzasXml`, buf)
+            FfiConverterSequenceTypeWaddleUnhandledOutboundEntry.write(value.`unhandledOutboundEntries`, buf)
     }
 }
 
@@ -11417,6 +11412,50 @@ public object FfiConverterTypeWaddleTune: FfiConverterRustBuffer<WaddleTune> {
             FfiConverterOptionalString.write(value.`uri`, buf)
             FfiConverterOptionalUInt.write(value.`lengthSeconds`, buf)
             FfiConverterOptionalUByte.write(value.`rating`, buf)
+    }
+}
+
+
+
+data class WaddleUnhandledOutboundEntry (
+    /**
+     * Serialized at the FFI persistence boundary and parsed once on restore.
+     */
+    var `xml`: kotlin.String
+    ,
+    /**
+     * Original send instant, RFC3339 UTC.
+     */
+    var `sentAt`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleUnhandledOutboundEntry: FfiConverterRustBuffer<WaddleUnhandledOutboundEntry> {
+    override fun read(buf: ByteBuffer): WaddleUnhandledOutboundEntry {
+        return WaddleUnhandledOutboundEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleUnhandledOutboundEntry) = (
+            FfiConverterString.allocationSize(value.`xml`) +
+            FfiConverterString.allocationSize(value.`sentAt`)
+    )
+
+    override fun write(value: WaddleUnhandledOutboundEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`xml`, buf)
+            FfiConverterString.write(value.`sentAt`, buf)
     }
 }
 
@@ -16526,6 +16565,34 @@ public object FfiConverterSequenceTypeWaddleStickerPack: FfiConverterRustBuffer<
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleStickerPack.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleUnhandledOutboundEntry: FfiConverterRustBuffer<List<WaddleUnhandledOutboundEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleUnhandledOutboundEntry> {
+        val len = buf.getInt()
+        return List<WaddleUnhandledOutboundEntry>(len) {
+            FfiConverterTypeWaddleUnhandledOutboundEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleUnhandledOutboundEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleUnhandledOutboundEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleUnhandledOutboundEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleUnhandledOutboundEntry.write(it, buf)
         }
     }
 }

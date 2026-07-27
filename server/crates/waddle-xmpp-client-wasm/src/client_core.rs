@@ -19,6 +19,7 @@ impl WaddleClient {
                 on_mds_displayed: None,
                 on_pubsub_event: None,
                 on_call: None,
+                on_stream_management: None,
                 resume_state: None,
             })),
         }
@@ -96,6 +97,22 @@ impl WaddleClient {
     /// the Rust side for the typed input.
     pub fn set_on_call(&mut self, cb: Function) {
         self.inner.borrow_mut().on_call = Some(cb);
+    }
+
+    /// Register closed, bounded XEP-0198 lifecycle outcomes. The callback
+    /// deliberately receives no stanza XML, stream identifiers, or counters.
+    pub fn set_on_stream_management(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_stream_management = Some(cb);
+    }
+
+    /// Best-effort XEP-0198 acknowledgement request for synchronous browser
+    /// pagehide. The Rust runtime produces the typed `<r/>` control element.
+    pub fn request_stream_management_ack(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            request_stream_management_ack_command(inner).await?;
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     pub fn connect(&self) -> Promise {

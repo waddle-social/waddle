@@ -1987,7 +1987,7 @@ describe("client send readiness", () => {
     messaging.disconnect();
   });
 
-  test("native failed-resume fallback owns resend for live unacked DM sends", async () => {
+  test("native failed-resume fallback retains the durable live unacked DM row until ack", async () => {
     const xmpp = {
       send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
       get_resume_state: () => ({
@@ -1995,7 +1995,7 @@ describe("client send readiness", () => {
         inboundH: 4,
         outboundH: 9,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+        unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
       }),
     };
     const client = new BrowserXmppClient(session());
@@ -2007,6 +2007,11 @@ describe("client send readiness", () => {
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id)).toEqual([
+      "dm-live-1",
+    ]);
+
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 });

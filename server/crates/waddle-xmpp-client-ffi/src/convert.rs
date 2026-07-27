@@ -18,7 +18,7 @@ use waddle_xmpp_client::{
         thread::ThreadRef,
     },
     ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
-    MessagingEvent, SmResumeState,
+    MessagingEvent, SmResumeState, UnhandledOutboundEntry,
 };
 
 use crate::{
@@ -33,7 +33,7 @@ use crate::{
     WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
     WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
     WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType,
-    WaddleStanzaId, WaddleStickerHash, WaddleStickerPack,
+    WaddleStanzaId, WaddleStickerHash, WaddleStickerPack, WaddleUnhandledOutboundEntry,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -689,18 +689,22 @@ fn carbon_to_ffi(direction: CarbonDirection) -> WaddleCarbonDirection {
 // ── XEP-0198 resume snapshot round-trip ──────────────────────────────────────
 
 /// Serialize the typed resume snapshot for opaque persistence on the
-/// app side. Queued stanzas cross as XML strings — the message
-/// stanza-id is re-derived from each element on restore, so the
-/// round trip is lossless for replay identity.
+/// app side. XML crosses only at this durable boundary; each typed entry
+/// retains its original send time for exact fallback-delay semantics.
 pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
     WaddleSmResumeState {
         previd: state.previd().to_string(),
         inbound_h: state.inbound_h(),
         outbound_h: state.outbound_h(),
         max_resume_seconds: state.max_resume_seconds(),
-        queued_stanzas_xml: state
-            .unhandled_outbound_stanzas()
-            .map(String::from)
+        unhandled_outbound_entries: state
+            .unhandled_outbound_entries()
+            .map(|entry| WaddleUnhandledOutboundEntry {
+                xml: String::from(entry.stanza()),
+                sent_at: entry
+                    .sent_at()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            })
             .collect(),
     }
 }
@@ -710,19 +714,25 @@ pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
 /// malformed persisted state is surfaced as a human-readable error
 /// (via the listener) rather than silently dropped.
 pub(super) fn resume_state_from_ffi(state: WaddleSmResumeState) -> Result<SmResumeState, String> {
-    let stanzas = state
-        .queued_stanzas_xml
+    let entries = state
+        .unhandled_outbound_entries
         .into_iter()
-        .map(|xml| {
-            xml.parse::<Element>()
-                .map_err(|err| format!("invalid resume stanza XML: {err}"))
+        .map(|entry| {
+            let stanza = entry
+                .xml
+                .parse::<Element>()
+                .map_err(|err| format!("invalid resume stanza XML: {err}"))?;
+            let sent_at = chrono::DateTime::parse_from_rfc3339(&entry.sent_at)
+                .map_err(|err| format!("invalid resume stanza timestamp: {err}"))?
+                .with_timezone(&chrono::Utc);
+            Ok(UnhandledOutboundEntry::new(stanza, sent_at))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    SmResumeState::from_unhandled_outbound_stanzas(
+    SmResumeState::from_unhandled_outbound_entries(
         state.previd,
         state.inbound_h,
         state.outbound_h,
-        stanzas,
+        entries,
     )
     .map(|resume| resume.with_max_resume_seconds(state.max_resume_seconds))
     .map_err(|err| err.to_string())
@@ -2372,7 +2382,10 @@ mod tests {
             inbound_h: 5,
             outbound_h: 9,
             max_resume_seconds: Some(300),
-            queued_stanzas_xml: vec![String::from(&queued)],
+            unhandled_outbound_entries: vec![WaddleUnhandledOutboundEntry {
+                xml: String::from(&queued),
+                sent_at: "2026-06-01T12:00:00.000Z".to_string(),
+            }],
         };
 
         // FFI record → typed SmResumeState (as threaded into
@@ -2406,10 +2419,32 @@ mod tests {
             inbound_h: 0,
             outbound_h: 1,
             max_resume_seconds: None,
-            queued_stanzas_xml: vec!["<not-xml".to_string()],
+            unhandled_outbound_entries: vec![WaddleUnhandledOutboundEntry {
+                xml: "<not-xml".to_string(),
+                sent_at: "2026-06-01T12:00:00.000Z".to_string(),
+            }],
         })
         .expect_err("malformed XML must be rejected");
         assert!(err.contains("invalid resume stanza XML"), "err: {err}");
+    }
+
+    #[test]
+    fn resume_state_from_ffi_rejects_malformed_stanza_timestamp() {
+        let err = resume_state_from_ffi(WaddleSmResumeState {
+            previd: "prev-stream".to_string(),
+            inbound_h: 0,
+            outbound_h: 1,
+            max_resume_seconds: None,
+            unhandled_outbound_entries: vec![WaddleUnhandledOutboundEntry {
+                xml: "<message xmlns='jabber:client'/>".to_string(),
+                sent_at: "not-rfc3339".to_string(),
+            }],
+        })
+        .expect_err("malformed timestamp must be rejected");
+        assert!(
+            err.contains("invalid resume stanza timestamp"),
+            "err: {err}"
+        );
     }
 
     /// In-test listener that captures every dispatched event in

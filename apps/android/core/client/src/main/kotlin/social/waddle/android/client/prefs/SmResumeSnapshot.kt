@@ -2,6 +2,7 @@ package social.waddle.android.client.prefs
 
 import kotlinx.serialization.Serializable
 import social.waddle.client.ffi.WaddleSmResumeState
+import social.waddle.client.ffi.WaddleUnhandledOutboundEntry
 
 /**
  * JSON-serializable mirror of the FFI [WaddleSmResumeState], persisted in
@@ -14,7 +15,13 @@ data class SmResumeSnapshot(
     val inboundH: UInt,
     val outboundH: UInt,
     val maxResumeSeconds: UInt? = null,
-    val queuedStanzasXml: List<String> = emptyList(),
+    val unhandledOutboundEntries: List<SmUnhandledOutboundEntry> = emptyList(),
+)
+
+@Serializable
+data class SmUnhandledOutboundEntry(
+    val xml: String,
+    val sentAt: String,
 )
 
 fun WaddleSmResumeState.toSnapshot(): SmResumeSnapshot = SmResumeSnapshot(
@@ -22,7 +29,9 @@ fun WaddleSmResumeState.toSnapshot(): SmResumeSnapshot = SmResumeSnapshot(
     inboundH = inboundH,
     outboundH = outboundH,
     maxResumeSeconds = maxResumeSeconds,
-    queuedStanzasXml = queuedStanzasXml,
+    unhandledOutboundEntries = unhandledOutboundEntries.map { entry ->
+        SmUnhandledOutboundEntry(xml = entry.xml, sentAt = entry.sentAt)
+    },
 )
 
 fun SmResumeSnapshot.toFfi(): WaddleSmResumeState = WaddleSmResumeState(
@@ -30,5 +39,7 @@ fun SmResumeSnapshot.toFfi(): WaddleSmResumeState = WaddleSmResumeState(
     inboundH = inboundH,
     outboundH = outboundH,
     maxResumeSeconds = maxResumeSeconds,
-    queuedStanzasXml = queuedStanzasXml,
+    unhandledOutboundEntries = unhandledOutboundEntries.map { entry ->
+        WaddleUnhandledOutboundEntry(xml = entry.xml, sentAt = entry.sentAt)
+    },
 )

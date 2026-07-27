@@ -180,12 +180,15 @@ impl WaddleClient {
         // the wasm client threads it through StoredConfig.
         if let Some(resume) = self.config.resume_state.clone() {
             match resume_state_from_ffi(resume) {
-                Ok(state) => {
-                    client_config.session.stream_management.resume_state = Some(state);
-                }
+                Ok(state) => client_config.session.stream_management.resume_state = Some(state),
                 Err(e) => {
-                    self.emit_error(format!("Invalid resume state: {e}"));
-                    return;
+                    // Persisted SM state is optional acceleration data. Fail
+                    // closed to a fresh stream while notifying Android to
+                    // clear only its snapshot; durable outbound queue
+                    // ownership remains outside this record.
+                    self.listener
+                        .on_event(WaddleClientEvent::ResumeStateChanged { state: None });
+                    self.emit_error(format!("Invalid resume state discarded: {e}"));
                 }
             }
         }

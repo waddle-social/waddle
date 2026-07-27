@@ -59,6 +59,12 @@ import type {
 
 type MessageKind = "room" | "dm";
 type DisplayedMarkerLatencyBand = "unknown" | "under-250ms" | "250ms-1s" | "1s-5s" | "over-5s";
+type StreamManagementTelemetryPayload =
+  | { kind: "ack-requested"; reason: "outbound-stanza" | "resumed-unacked-tail" | "peer-request" | "pagehide" }
+  | { kind: "ack-validated"; progress: boolean }
+  | { kind: "ack-retry"; attempt: number }
+  | { kind: "ack-request-timed-out" }
+  | { kind: "progress-timed-out" };
 
 /** Errors we classify coarsely so Tempo filters stay useful. */
 export type ErrorKind =
@@ -1502,6 +1508,31 @@ export function reportResumeDrain(payload: { buffered: number; durationMs: numbe
     type: "chat.xmpp.resume_drain",
     values: { buffered: payload.buffered, duration_ms: Math.round(payload.durationMs), hidden_ms: metric.hiddenMs },
   }, { context: metric.context });
+}
+
+/**
+ * Closed XEP-0198 health signal. Its attributes are deliberately limited to
+ * the event discriminant, closed request reason, boolean progress, and a
+ * bounded retry attempt: no XML, JIDs, stanza IDs, or server-provided text
+ * can reach the Faro collector through this path.
+ */
+export function reportStreamManagement(event: StreamManagementTelemetryPayload): void {
+  const attributes: Record<string, string> = { kind: event.kind };
+  switch (event.kind) {
+    case "ack-requested":
+      attributes.reason = event.reason;
+      break;
+    case "ack-validated":
+      attributes.progress = String(event.progress);
+      break;
+    case "ack-retry":
+      attributes.attempt = String(Math.min(10, Math.max(0, Math.floor(event.attempt))));
+      break;
+    case "ack-request-timed-out":
+    case "progress-timed-out":
+      break;
+  }
+  faro?.api.pushEvent("chat.xmpp.stream_management", attributes);
 }
 
 /**

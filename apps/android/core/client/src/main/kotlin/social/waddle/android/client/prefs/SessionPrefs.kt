@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import social.waddle.android.client.calls.MucCallSessionCache
 import kotlin.random.Random
 
@@ -33,9 +34,7 @@ class SessionPrefs(
     val joinedRooms: Flow<Set<String>> = dataStore.data.map { it[KEY_JOINED_ROOMS] ?: emptySet() }
 
     val smResume: Flow<SmResumeSnapshot?> = dataStore.data.map { prefs ->
-        prefs[KEY_SM_RESUME]?.let { stored ->
-            runCatching { json.decodeFromString<SmResumeSnapshot>(stored) }.getOrNull()
-        }
+        prefs[KEY_SM_RESUME]?.let(::decodeSmResume)
     }
 
     val lastSeen: Flow<Map<String, String>> = dataStore.data.map { prefs ->
@@ -130,6 +129,18 @@ class SessionPrefs(
         runCatching { json.decodeFromString<List<QueuedOutboundMessage>>(stored) }.getOrNull()
 
     /**
+     * Older snapshots carried an untyped XML queue under this key.  A counter
+     * snapshot without its matching typed tail is unsafe to resume, so reject
+     * the whole persisted state at the JSON boundary rather than migrating it.
+     */
+    private fun decodeSmResume(stored: String): SmResumeSnapshot? {
+        val objectValue = runCatching { json.parseToJsonElement(stored).jsonObject }.getOrNull()
+            ?: return null
+        if (LEGACY_QUEUED_STANZAS_XML_KEY in objectValue) return null
+        return runCatching { json.decodeFromString<SmResumeSnapshot>(stored) }.getOrNull()
+    }
+
+    /**
      * Stable-per-install 8-hex suffix for the XMPP resource
      * (`waddle-android-<suffix>`); generated once, atomically, and kept
      * across [clear] so reinstalls — not logouts — rotate the resource.
@@ -171,5 +182,6 @@ class SessionPrefs(
 
         const val RESOURCE_SUFFIX_LENGTH = 8
         const val HEX_ALPHABET = "0123456789abcdef"
+        const val LEGACY_QUEUED_STANZAS_XML_KEY = "queuedStanzasXml"
     }
 }

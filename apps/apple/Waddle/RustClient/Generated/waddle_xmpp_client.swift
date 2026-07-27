@@ -10562,14 +10562,9 @@ public func FfiConverterTypeWaddleSharedFile_lower(_ value: WaddleSharedFile) ->
 
 
 /**
- * XEP-0198 client resume snapshot crossing the FFI as an opaque
- * persistence round-trip: the Swift app stores it on disconnect and
- * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound stanzas travel as serialized XML strings — the message
- * stanza-id is re-derived from the element's `id` attribute on
- * restore, and the original enqueue instant survives only when the
- * element already carries a `<delay/>` stamp (identical semantics to
- * the wasm client's localStorage persistence of the same snapshot).
+ * XEP-0198 client resume snapshot crossing the FFI as a durable
+ * typed-entry round-trip. XML is serialized only at this persistence
+ * boundary; every entry also retains its original send timestamp.
  */
 public struct WaddleSmResumeState: Equatable, Hashable {
     /**
@@ -10589,10 +10584,10 @@ public struct WaddleSmResumeState: Equatable, Hashable {
      */
     public var maxResumeSeconds: UInt32?
     /**
-     * Outbound stanzas the server had not acked at snapshot time,
-     * serialized to XML in send order for lossless replay.
+     * Outbound entries the server had not acked at snapshot time, in send
+     * order for exact identity and timestamp-preserving replay.
      */
-    public var queuedStanzasXml: [String]
+    public var unhandledOutboundEntries: [WaddleUnhandledOutboundEntry]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10610,14 +10605,14 @@ public struct WaddleSmResumeState: Equatable, Hashable {
          * Server-advertised resumption window in seconds, when supplied.
          */maxResumeSeconds: UInt32?,
         /**
-         * Outbound stanzas the server had not acked at snapshot time,
-         * serialized to XML in send order for lossless replay.
-         */queuedStanzasXml: [String]) {
+         * Outbound entries the server had not acked at snapshot time, in send
+         * order for exact identity and timestamp-preserving replay.
+         */unhandledOutboundEntries: [WaddleUnhandledOutboundEntry]) {
         self.previd = previd
         self.inboundH = inboundH
         self.outboundH = outboundH
         self.maxResumeSeconds = maxResumeSeconds
-        self.queuedStanzasXml = queuedStanzasXml
+        self.unhandledOutboundEntries = unhandledOutboundEntries
     }
 
 
@@ -10640,7 +10635,7 @@ public struct FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer {
                 inboundH: FfiConverterUInt32.read(from: &buf),
                 outboundH: FfiConverterUInt32.read(from: &buf),
                 maxResumeSeconds: FfiConverterOptionUInt32.read(from: &buf),
-                queuedStanzasXml: FfiConverterSequenceString.read(from: &buf)
+                unhandledOutboundEntries: FfiConverterSequenceTypeWaddleUnhandledOutboundEntry.read(from: &buf)
         )
     }
 
@@ -10649,7 +10644,7 @@ public struct FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.inboundH, into: &buf)
         FfiConverterUInt32.write(value.outboundH, into: &buf)
         FfiConverterOptionUInt32.write(value.maxResumeSeconds, into: &buf)
-        FfiConverterSequenceString.write(value.queuedStanzasXml, into: &buf)
+        FfiConverterSequenceTypeWaddleUnhandledOutboundEntry.write(value.unhandledOutboundEntries, into: &buf)
     }
 }
 
@@ -11191,6 +11186,72 @@ public func FfiConverterTypeWaddleTune_lift(_ buf: RustBuffer) throws -> WaddleT
 #endif
 public func FfiConverterTypeWaddleTune_lower(_ value: WaddleTune) -> RustBuffer {
     return FfiConverterTypeWaddleTune.lower(value)
+}
+
+
+public struct WaddleUnhandledOutboundEntry: Equatable, Hashable {
+    /**
+     * Serialized at the FFI persistence boundary and parsed once on restore.
+     */
+    public var xml: String
+    /**
+     * Original send instant, RFC3339 UTC.
+     */
+    public var sentAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Serialized at the FFI persistence boundary and parsed once on restore.
+         */xml: String,
+        /**
+         * Original send instant, RFC3339 UTC.
+         */sentAt: String) {
+        self.xml = xml
+        self.sentAt = sentAt
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleUnhandledOutboundEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleUnhandledOutboundEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleUnhandledOutboundEntry {
+        return
+            try WaddleUnhandledOutboundEntry(
+                xml: FfiConverterString.read(from: &buf),
+                sentAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleUnhandledOutboundEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.xml, into: &buf)
+        FfiConverterString.write(value.sentAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUnhandledOutboundEntry_lift(_ buf: RustBuffer) throws -> WaddleUnhandledOutboundEntry {
+    return try FfiConverterTypeWaddleUnhandledOutboundEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUnhandledOutboundEntry_lower(_ value: WaddleUnhandledOutboundEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleUnhandledOutboundEntry.lower(value)
 }
 
 
@@ -16678,6 +16739,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleStickerPack: FfiConverterRustBu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleStickerPack.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleUnhandledOutboundEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleUnhandledOutboundEntry]
+
+    public static func write(_ value: [WaddleUnhandledOutboundEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleUnhandledOutboundEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleUnhandledOutboundEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleUnhandledOutboundEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleUnhandledOutboundEntry.read(from: &buf))
         }
         return seq
     }

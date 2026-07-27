@@ -32,6 +32,7 @@ import {
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
+  reportStreamManagement,
   setXmppResourceForTelemetry,
   websocketUrlWithTraceparent,
 } from "../src/lib/telemetry";
@@ -291,6 +292,7 @@ describe("telemetry module no-op behaviour", () => {
       reportReconnectScheduled({ attempt: 1, delayMs: 2_000 });
       reportCatchup({ conversations: 1, pages: 1, pageFailures: 0, messages: 1, durationMs: 10 });
       reportResumeDrain({ buffered: 1, durationMs: 10 });
+      reportStreamManagement({ kind: "ack-validated", progress: true });
     }).not.toThrow();
   });
 
@@ -316,6 +318,7 @@ describe("telemetry module no-op behaviour", () => {
       outcome: "aborted",
     });
     reportResumeDrain({ buffered: 5, durationMs: 12.4 });
+    reportStreamManagement({ kind: "ack-retry", attempt: 99 });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toEqual([
@@ -326,11 +329,13 @@ describe("telemetry module no-op behaviour", () => {
       "chat.xmpp.status",
       "chat.xmpp.status",
       "chat.xmpp.reconnect.scheduled",
+      "chat.xmpp.stream_management",
     ]);
     expect(stub.events[0].attributes).toEqual({ kind: "room" });
     expect(stub.events[1].attributes).toEqual({ kind: "dm" });
     expect(stub.events[4].attributes).toEqual({ state: "reconnecting" });
     expect(stub.events[6].attributes).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+    expect(stub.events[7].attributes).toEqual({ kind: "ack-retry", attempt: "10" });
 
     const measurementTypes = stub.measurements.map((m) => m.type);
     expect(measurementTypes).toEqual([
@@ -1127,6 +1132,13 @@ describe("BrowserXmppClient telemetry hooks", () => {
       outcome: "completed",
     });
     internal.events.emitSafe("resumeDrain", { buffered: 7, durationMs: 8 });
+    // Every closed XEP-0198 telemetry variant is carried through the
+    // BrowserXmppClient hook, never by direct instrumentation access to WASM.
+    internal.events.emitSafe("streamManagement", { kind: "ack-requested", reason: "outbound-stanza" });
+    internal.events.emitSafe("streamManagement", { kind: "ack-validated", progress: true });
+    internal.events.emitSafe("streamManagement", { kind: "ack-retry", attempt: 99 });
+    internal.events.emitSafe("streamManagement", { kind: "ack-request-timed-out" });
+    internal.events.emitSafe("streamManagement", { kind: "progress-timed-out" });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toContain("chat.xmpp.message.acked");
@@ -1143,6 +1155,14 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.reconnect.attempt")).toBe(true);
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.catchup")).toBe(true);
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.resume_drain")).toBe(true);
+    expect(stub.events.filter((event) => event.name === "chat.xmpp.stream_management"))
+      .toEqual([
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-requested", reason: "outbound-stanza" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-validated", progress: "true" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-retry", attempt: "10" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-request-timed-out" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "progress-timed-out" } },
+      ]);
   });
 
   test("catch-up hook reports failed outcomes and processed conversation count", async () => {

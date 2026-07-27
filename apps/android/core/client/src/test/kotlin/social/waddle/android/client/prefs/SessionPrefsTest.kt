@@ -1,6 +1,9 @@
 package social.waddle.android.client.prefs
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,10 +28,14 @@ class SessionPrefsTest {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private fun newPrefs(): SessionPrefs {
+    private fun newDataStore(): DataStore<androidx.datastore.preferences.core.Preferences> {
         val file = File(tempFolder.root, "session.preferences_pb")
-        return SessionPrefs(PreferenceDataStoreFactory.create(scope = scope) { file })
+        return PreferenceDataStoreFactory.create(scope = scope) { file }
     }
+
+    private fun newPrefs(
+        dataStore: DataStore<androidx.datastore.preferences.core.Preferences> = newDataStore(),
+    ): SessionPrefs = SessionPrefs(dataStore)
 
     @After
     fun tearDown() {
@@ -58,14 +65,50 @@ class SessionPrefsTest {
             inboundH = 5u,
             outboundH = 7u,
             maxResumeSeconds = 300u,
-            queuedStanzasXml = listOf("<message/>"),
+            unhandledOutboundEntries = listOf(
+                SmUnhandledOutboundEntry(
+                    xml = "<message/>",
+                    sentAt = "2026-07-26T12:34:56.789Z",
+                ),
+            ),
         )
 
         prefs.setSmResume(snapshot)
         assertEquals(snapshot, prefs.smResume.first())
+        assertEquals(1, prefs.smResume.first()!!.toFfi().unhandledOutboundEntries.size)
 
         prefs.setSmResume(null)
         assertNull(prefs.smResume.first())
+    }
+
+    @Test
+    fun `legacy queued stanza snapshots fail closed before ffi conversion`() = runBlocking {
+        val dataStore = newDataStore()
+        val prefs = newPrefs(dataStore)
+        dataStore.edit { stored ->
+            stored[stringPreferencesKey("sm_resume")] = """
+                {"previd":"prev-legacy","inboundH":1,"outboundH":2,"queuedStanzasXml":["legacy-payload"]}
+            """.trimIndent()
+        }
+
+        assertNull(prefs.smResume.first())
+    }
+
+    @Test
+    fun `current empty resume snapshot round trips to ffi`() = runBlocking {
+        val prefs = newPrefs()
+        val snapshot = SmResumeSnapshot(
+            previd = "prev-empty",
+            inboundH = 0u,
+            outboundH = 0u,
+            unhandledOutboundEntries = emptyList(),
+        )
+
+        prefs.setSmResume(snapshot)
+        val restored = prefs.smResume.first()
+
+        assertEquals(snapshot, restored)
+        assertTrue(restored!!.toFfi().unhandledOutboundEntries.isEmpty())
     }
 
     @Test
