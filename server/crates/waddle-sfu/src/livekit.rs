@@ -301,6 +301,22 @@ impl LiveKitSfu {
             .remove(&(call_id.clone(), identity.clone()));
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
+        // Dropping a queued grant intent here is correct, and load-bearing
+        // to reason about: every caller of `clear_local_state` means the
+        // participant is gone or is being removed, so a pending downgrade
+        // has nothing left to apply.
+        //   - `unregister_call_participant` also schedules
+        //     `RemoveParticipant`, which strictly supersedes any grant
+        //     change; and if that admin call fails, the participant is by
+        //     then no longer an occupant, so the voice-reconciliation
+        //     backstop evicts them.
+        //   - `note_participant_left` runs because LiveKit told us they
+        //     already left.
+        //   - the reconciliation sweep only clears participants LiveKit
+        //     has confirmed absent across consecutive passes.
+        // A new caller that does NOT imply departure must not reuse this
+        // path, or it would silently discard a downgrade for someone still
+        // publishing.
         self.desired_grants
             .remove(&(call_id.clone(), identity.clone()));
         // `grant_locks` is deliberately NOT cleared here: a push task
