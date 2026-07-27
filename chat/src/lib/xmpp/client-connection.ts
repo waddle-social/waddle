@@ -46,6 +46,12 @@ export interface OutboundSendResult {
   state: "queued" | "sending";
 }
 
+/** Opaque ownership of one live-send attempt. */
+export type LiveSendAttempt = Readonly<{
+  id: string;
+  generation: number;
+}>;
+
 export function browserOffline(): boolean {
   return typeof navigator !== "undefined" && navigator.onLine === false;
 }
@@ -452,14 +458,15 @@ export class OfflineSendQueue {
    * durable row. Callers must either leave this claim alone after a matching
    * result or roll it back when no matching send was accepted.
    */
-  beginLiveAttempt(id: string, kind: "room" | "dm"): void {
+  beginLiveAttempt(id: string, kind: "room" | "dm"): LiveSendAttempt {
     this.markInflight(id);
     this.notePendingSend(id, kind);
+    return { id, generation: this.generation };
   }
 
   /** Undo a live-send claim when the host did not accept its exact id. */
-  rollbackLiveAttempt(id: string): void {
-    this.rollbackAttempt(id, this.generation);
+  rollbackLiveAttempt(attempt: LiveSendAttempt): void {
+    this.rollbackAttempt(attempt.id, attempt.generation);
   }
 
   /**
@@ -546,7 +553,9 @@ export class OfflineSendQueue {
     if (wasQueued) this.emitQueueDepth();
   }
 
-  discardNonRetryable(id: string): void {
+  discardNonRetryable(attempt: LiveSendAttempt): void {
+    const { id, generation } = attempt;
+    if (generation !== this.generation) return;
     this.inflightQueuedIds.delete(id);
     this.resumeReplayQueuedIds.delete(id);
     removeQueuedMessage(this.deps.queueScope(), id);
@@ -673,7 +682,7 @@ export class OfflineSendQueue {
         } catch (error) {
           this.rollbackAttempt(entry.id, generation);
           if (isNonRetryableWasmSendFailure(error)) {
-            if (generation === this.generation) this.discardNonRetryable(entry.id);
+            this.discardNonRetryable({ id: entry.id, generation });
             continue;
           }
           throw error;
@@ -712,7 +721,7 @@ export class OfflineSendQueue {
         } catch (error) {
           this.rollbackAttempt(entry.id, generation);
           if (isNonRetryableWasmSendFailure(error)) {
-            if (generation === this.generation) this.discardNonRetryable(entry.id);
+            this.discardNonRetryable({ id: entry.id, generation });
             continue;
           }
           throw error;

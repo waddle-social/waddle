@@ -25,6 +25,7 @@ import org.junit.Test
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.session.ActiveSession
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import java.io.IOException
@@ -350,6 +351,32 @@ class XmppSessionManagerQueueTest {
         )
 
         harness.manager.logout()
+    }
+
+    @Test
+    fun `an old same-account lease cannot invoke the relogin client`() = runTest {
+        val activeSession = ActiveSession()
+        val oldClient = FakeWaddleClient()
+        val successorClient = FakeWaddleClient()
+        activeSession.ownBareJid = "icepuma@waddle.test"
+        activeSession.advanceGeneration()
+        activeSession.onReady(oldClient)
+        val oldLease = checkNotNull(activeSession.captureOwnerLease())
+
+        // Logout and a login to the same bare JID replace the attempt. The
+        // old lease must not select the newly-ready FFI client.
+        activeSession.advanceGeneration()
+        activeSession.endAttempt()
+        activeSession.ownBareJid = "icepuma@waddle.test"
+        activeSession.onReady(successorClient)
+
+        val result = activeSession.sendIfCurrent(oldLease) { client ->
+            client.sendChatMessage("alice@waddle.test", "must stay fenced", null)
+        }
+
+        assertEquals(ActiveSession.LeaseSendResult.Stale, result)
+        assertTrue("the old lease cannot use its retired client", oldClient.sendCalls.isEmpty())
+        assertTrue("the old lease cannot switch to the relogin client", successorClient.sendCalls.isEmpty())
     }
 
     @Test

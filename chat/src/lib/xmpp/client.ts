@@ -1756,16 +1756,16 @@ export class BrowserXmppClient {
       // Claim before the compat host call. A host may synchronously deliver
       // the matching XEP-0198 ack, in which case marking afterwards would
       // resurrect an already-settled in-flight claim.
-      this.outboundQueue.beginLiveAttempt(outboundId, "room");
+      const attempt = this.outboundQueue.beginLiveAttempt(outboundId, "room");
       let id: string | null;
       try {
         id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
       } catch (error) {
-        this.outboundQueue.rollbackLiveAttempt(outboundId);
-        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
+        this.outboundQueue.rollbackLiveAttempt(attempt);
+        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(attempt);
         throw error;
       }
-      if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(outboundId);
+      if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(attempt);
       return { id, state: "sending" };
     }
     const queued = this.outboundQueue.queueRoomMessage(roomJid, body, opts);
@@ -1807,16 +1807,16 @@ export class BrowserXmppClient {
       this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
       // See the room-send path: the durable claim must precede a host that
       // can synchronously dispatch its matching SM acknowledgement.
-      this.outboundQueue.beginLiveAttempt(outboundId, "dm");
+      const attempt = this.outboundQueue.beginLiveAttempt(outboundId, "dm");
       let id: string | null;
       try {
         id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
       } catch (error) {
-        this.outboundQueue.rollbackLiveAttempt(outboundId);
-        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
+        this.outboundQueue.rollbackLiveAttempt(attempt);
+        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(attempt);
         throw error;
       }
-      if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(outboundId);
+      if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(attempt);
       return { id, state: "sending" };
     }
     return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);

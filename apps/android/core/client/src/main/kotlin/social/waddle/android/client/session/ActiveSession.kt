@@ -151,8 +151,19 @@ internal class ActiveSession {
         lease: OwnerLease,
         op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
     ): LeaseSendResult {
+        // Capture the attempt's transport before validating its lease.  The
+        // validation fences logout/relogin, while the captured reference
+        // prevents a successor's `onReady` from being re-read and used by a
+        // send that began for its predecessor.
+        val liveClient = client ?: return LeaseSendResult.Attempted(WaddleSendMessageOutcome.NotConnected)
         if (!isCurrent(lease)) return LeaseSendResult.Stale
-        return LeaseSendResult.Attempted(send(op))
+        return try {
+            LeaseSendResult.Attempted(op(liveClient))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            LeaseSendResult.Attempted(WaddleSendMessageOutcome.TransportError)
+        }
     }
 
     /** Nullable fetch shape: `null` when no session is ready or the call threw. */

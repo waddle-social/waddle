@@ -1953,6 +1953,96 @@ describe("client send readiness", () => {
       .toEqual(["dm-mismatch", "dm-null", "dm-throw"]);
   });
 
+  test("a disposed DM client ignores a deferred null live-send completion", async () => {
+    let release: ((id: string | null) => void) | undefined;
+    const sent = new Promise<string | null>((resolve) => { release = resolve; });
+    const client = new BrowserXmppClient(session());
+    const failures: string[] = [];
+    const depths: unknown[] = [];
+    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onQueueDepthChange((depth) => depths.push(depth));
+    const xmpp = { send_chat_message: mock(async () => await sent) };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const send = client.sendDirectMessage("bob@example.com", "deferred", { id: "dm-disposed-null" });
+    await Promise.resolve();
+    await client.dispose();
+    const depthCountAtDispose = depths.length;
+    release?.(null);
+    await send;
+
+    const queue = (client as unknown as {
+      outboundQueue: { depthHeartbeat: unknown; inflightQueuedIds: Set<string> };
+    }).outboundQueue;
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+      .toEqual(["dm-disposed-null"]);
+    expect(failures).toEqual([]);
+    expect(depths).toHaveLength(depthCountAtDispose);
+    expect(queue.depthHeartbeat).toBeNull();
+    expect(queue.inflightQueuedIds).not.toContain("dm-disposed-null");
+  });
+
+  test("a disposed DM client ignores a deferred mismatched live-send completion", async () => {
+    let release: ((id: string | null) => void) | undefined;
+    const sent = new Promise<string | null>((resolve) => { release = resolve; });
+    const client = new BrowserXmppClient(session());
+    const failures: string[] = [];
+    const depths: unknown[] = [];
+    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onQueueDepthChange((depth) => depths.push(depth));
+    const xmpp = { send_chat_message: mock(async () => await sent) };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const send = client.sendDirectMessage("bob@example.com", "deferred", { id: "dm-disposed-mismatch" });
+    await Promise.resolve();
+    await client.dispose();
+    const depthCountAtDispose = depths.length;
+    release?.("different-id");
+    await send;
+
+    const queue = (client as unknown as {
+      outboundQueue: { depthHeartbeat: unknown; inflightQueuedIds: Set<string> };
+    }).outboundQueue;
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+      .toEqual(["dm-disposed-mismatch"]);
+    expect(failures).toEqual([]);
+    expect(depths).toHaveLength(depthCountAtDispose);
+    expect(queue.depthHeartbeat).toBeNull();
+    expect(queue.inflightQueuedIds).not.toContain("dm-disposed-mismatch");
+  });
+
+  test("a disposed DM client ignores a deferred non-retryable live-send failure", async () => {
+    let release: ((result: { kind: "invalid-recipient" }) => void) | undefined;
+    const sent = new Promise<{ kind: "invalid-recipient" }>((resolve) => { release = resolve; });
+    const client = new BrowserXmppClient(session());
+    const failures: string[] = [];
+    const depths: unknown[] = [];
+    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onQueueDepthChange((depth) => depths.push(depth));
+    const xmpp = { send_chat_message: mock(async () => await sent) };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const send = client.sendDirectMessage("bob@example.com", "deferred", { id: "dm-disposed-rejected" });
+    await Promise.resolve();
+    await client.dispose();
+    const depthCountAtDispose = depths.length;
+    release?.({ kind: "invalid-recipient" });
+    await expect(send).rejects.toThrow("XMPP send failed: invalid-recipient");
+
+    const queue = (client as unknown as {
+      outboundQueue: { depthHeartbeat: unknown; inflightQueuedIds: Set<string> };
+    }).outboundQueue;
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+      .toEqual(["dm-disposed-rejected"]);
+    expect(failures).toEqual([]);
+    expect(depths).toHaveLength(depthCountAtDispose);
+    expect(queue.depthHeartbeat).toBeNull();
+    expect(queue.inflightQueuedIds).not.toContain("dm-disposed-rejected");
+  });
+
   test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {
     const sentTargets: string[] = [];
     const captureTarget = async (target: string) => { sentTargets.push(target); };
