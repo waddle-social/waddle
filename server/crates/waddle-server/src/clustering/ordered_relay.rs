@@ -121,11 +121,12 @@ pub enum OrderedRelayMucProxyKind {
     BareRoomIq,
     OccupantIq,
     FanoutChunk,
-    /// A Muji (XEP-0272) `session-initiate` relayed to the room-owning
-    /// node (#1445). Unlike `BareRoomIq` the stanza is NOT addressed
-    /// to the room: `to` is the calls mixer (`calls.<domain>`) and the
-    /// target room lives in the `<muji room='…'/>` payload, which the
-    /// envelope validation binds to the channel's room.
+    /// A Muji (XEP-0272) `session-initiate` or `session-terminate`
+    /// relayed to the room-owning node (#1445). Unlike `BareRoomIq`
+    /// the stanza is NOT addressed to the room: `to` is the calls
+    /// mixer (`calls.<domain>`) and the target room lives in the
+    /// `<muji room='…'/>` payload, which the envelope validation binds
+    /// to the channel's room.
     MujiJingleIq,
 }
 
@@ -1017,9 +1018,10 @@ fn muc_proxy_stanza_is_addressed_to_room(
 /// JID lives in the `<muji room='…'/>` payload. Bind that payload room
 /// to the channel's room so an envelope on room A's ordered channel
 /// (fenced by room A's claim epoch) cannot smuggle a token mint for
-/// room B past the fence. Only `session-initiate` rides this kind:
-/// terminate stays local (idempotent on the SFU, converged by webhooks
-/// and the reconcile sweep).
+/// room B past the fence. Both `session-initiate` and
+/// `session-terminate` ride this kind — the initiate registers the
+/// participant on the owner, so the terminate must reach that same
+/// node to unregister them.
 fn muji_iq_targets_room(room_jid: &jid::BareJid, iq: &xmpp_parsers::iq::Iq) -> bool {
     let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
         return false;

@@ -289,12 +289,19 @@ async fn relay_muji_to_room_owner(
     // A terminate that cannot be relayed falls back to this node
     // instead of erroring; an initiate that cannot be relayed is a
     // real failure the client must see.
+    //
+    // The error builders are passed as closures and invoked ONLY on
+    // the initiate branch. They have telemetry side effects (a denial
+    // counter, a call-setup failure, a WARN naming the room and user),
+    // and a hangup is neither a token denial nor a call-setup attempt
+    // — evaluating them eagerly would fabricate `room_not_found`
+    // denials on every cross-node teardown.
     let is_terminate = super::jingle_muji_gate::muji_session_terminate_room(iq).is_some();
-    let unrelayable = |frames: Vec<String>| {
+    let unrelayable = |frames: &dyn Fn() -> Vec<String>| {
         if is_terminate {
             MujiRelayOutcome::ProcessLocally
         } else {
-            MujiRelayOutcome::Frames(frames)
+            MujiRelayOutcome::Frames(frames())
         }
     };
 
@@ -307,9 +314,11 @@ async fn relay_muji_to_room_owner(
         )]
     };
     let retry_later = || {
-        waddle_xmpp::telemetry::call::record_call_setup_rejected(
-            waddle_xmpp::telemetry::attributes::CallSetupFailureReason::MembershipCheckFailed,
-        );
+        // `record_sfu_token_denial` already records the call-setup
+        // attempted/failed pair via `setup_failure_reason`, so this
+        // must NOT also call `record_call_setup_rejected` — doing both
+        // double-counted every relay failure in exactly the #1452 SLI
+        // this path exists to feed.
         super::super::super::call_signaling_telemetry::record_sfu_token_denial(
             room_jid,
             &full_jid.to_bare(),
@@ -344,7 +353,7 @@ async fn relay_muji_to_room_owner(
     let room_is_local =
         room_jid.domain().as_str() == format!("muc.{}", state.deps.auth_state.xmpp_domain.as_str());
     if !addressed_to_mixer || !room_is_local {
-        return unrelayable(deny());
+        return unrelayable(&deny);
     }
 
     let bridge = state
@@ -356,7 +365,7 @@ async fn relay_muji_to_room_owner(
     let (Some(bridge), Some(origin)) = (bridge, conn_state.ordered_relay_origin.as_ref()) else {
         // No relay substrate (clustering disabled at runtime): local
         // absence is definitive, exactly the pre-#1445 semantics.
-        return unrelayable(deny());
+        return unrelayable(&deny);
     };
     // Stamp the authenticated full JID as `from` before relaying:
     // clients legitimately omit `from` (the server derives the sender
@@ -397,10 +406,10 @@ async fn relay_muji_to_room_owner(
         // treats as terminal — the client's IQ would get no result and
         // no error, and the call would silently never start.
         MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
-            unrelayable(retry_later())
+            unrelayable(&retry_later)
         }
         MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
-            unrelayable(deny())
+            unrelayable(&deny)
         }
         MucProxyRouteDecision::Attempted(
             OrderedRelayMucProxyOutcome::Unavailable
@@ -409,7 +418,7 @@ async fn relay_muji_to_room_owner(
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
         )
         | MucProxyRouteDecision::RoomClaimUnavailable
-        | MucProxyRouteDecision::OriginUnavailable => unrelayable(retry_later()),
+        | MucProxyRouteDecision::OriginUnavailable => unrelayable(&retry_later),
     }
 }
 
@@ -481,4 +490,100 @@ async fn mirror_remote_carbons_update(
     _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     _enabled: bool,
 ) {
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_calls;
+    use waddle_xmpp::xep::xep0167::MediaKind;
+    use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+    use xmpp_parsers::iq::Iq;
+    use xmpp_parsers::jingle::{Action, Jingle, SessionId};
+
+    fn muji_terminate_iq(room: &str) -> Iq {
+        let jingle = Jingle::new(Action::SessionTerminate, SessionId("t-sid".into()));
+        let mut elem: xmpp_parsers::minidom::Element = jingle.into();
+        elem.append_child(
+            Muji {
+                room: Some(room.parse().expect("valid room jid")),
+                preparing: false,
+                contents: vec![MujiContent::new(
+                    "audio",
+                    Creator::Initiator,
+                    MediaKind::Audio,
+                )],
+            }
+            .to_element(),
+        );
+        Iq::Set {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some("calls.example.com".parse().expect("valid mixer jid")),
+            id: "term-1".into(),
+            payload: elem,
+        }
+    }
+
+    /// #1445: a cross-node hangup falls back to local execution when
+    /// it cannot be relayed, and that fallback must be SILENT. The
+    /// error builders it bypasses carry telemetry side effects — a
+    /// token-denial counter, a call-setup failure, a WARN naming the
+    /// room and user — and a hangup is neither a token denial nor a
+    /// call-setup attempt. Evaluating them eagerly (rather than as
+    /// closures behind the initiate branch) fabricated a
+    /// `room_not_found` denial on every cross-node teardown, including
+    /// every hangup for a non-local room on a single-node deployment.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unrelayable_terminate_records_no_denial_telemetry() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let alice: jid::FullJid = "alice@example.com/web".parse().unwrap();
+        let room: jid::BareJid = "general@muc.example.com".parse().unwrap();
+        let mut carbons = false;
+        let mut roster = false;
+        let mut blocklist = false;
+        let conn_state = super::IqConnState {
+            carbons_enabled: &mut carbons,
+            roster_interested: &mut roster,
+            blocklist_interested: &mut blocklist,
+            registry_owner: None,
+            state_machine: None,
+            ordered_relay_origin: None,
+        };
+
+        let outcome = super::relay_muji_to_room_owner(
+            &state,
+            &conn_state,
+            &alice,
+            &muji_terminate_iq("general@muc.example.com"),
+            &room,
+            super::IqReplyAddressing {
+                id: "term-1",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, super::MujiRelayOutcome::ProcessLocally),
+            "an unrelayable terminate must fall back to local execution"
+        );
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "waddle.call.sfu_token.denied",
+                    &[("reason", "room_not_found")]
+                )
+                .unwrap_or(0),
+            0,
+            "a hangup must not record a token denial"
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.attempted", &[])
+                .unwrap_or(0),
+            0,
+            "a hangup is not a call-setup attempt"
+        );
+    }
 }

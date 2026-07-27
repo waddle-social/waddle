@@ -122,10 +122,18 @@ fn is_local_jingle_peer(peer: &Jid, ctx: &StanzaContext<'_>) -> bool {
 /// registry. Other servers should run their own SFU; this gate stops
 /// us proxying as theirs.
 fn is_local_muji_room(room: &BareJid, ctx: &StanzaContext<'_>) -> bool {
-    // Single MUC service per server, derived from the apex like the
-    // rest of the routing layer (`waddle-xmpp/src/routing.rs:80`).
-    let expected = format!("muc.{}", ctx.domain);
-    room.domain().as_str() == expected
+    room_is_on_local_muc_service(room, ctx.domain)
+}
+
+/// Whether `room` lives on this server's MUC service.
+///
+/// Single MUC service per server, derived from the apex like the rest
+/// of the routing layer (`waddle-xmpp/src/routing.rs:80`). Public so
+/// the websocket layer's #1445 relay pre-check uses the SAME predicate
+/// as the handler's payload guard — two independent spellings of
+/// "local MUC domain" would drift.
+pub fn room_is_on_local_muc_service(room: &BareJid, server_domain: &str) -> bool {
+    room.domain().as_str() == format!("muc.{server_domain}")
 }
 
 #[derive(Clone)]

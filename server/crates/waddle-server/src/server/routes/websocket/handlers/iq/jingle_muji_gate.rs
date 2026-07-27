@@ -18,9 +18,12 @@
 //! `session-initiate` it asks the room actor whether `full_jid` is
 //! a current occupant; if not, the gate short-circuits with
 //! `<forbidden/>` and the SFU is never touched.
-//! `session-terminate` is intentionally not gated — `unregister`
-//! on the SFU is idempotent and harmless, and an over-eager leave
-//! from a non-occupant is benign cleanup.
+//! `session-terminate` is intentionally not membership-gated —
+//! `unregister` on the SFU is idempotent and harmless, and an
+//! over-eager leave from a non-occupant is benign cleanup. It is
+//! still checked for room LOCALITY (#1445), because the matching
+//! initiate registered the participant on the room-owning node and
+//! the terminate has to reach that same node to undo it.
 //!
 //! Replaces the legacy `muc_call_gate.rs` (which gated the
 //! `urn:waddle:muc-call:0` `<request-join>` IQ surface).

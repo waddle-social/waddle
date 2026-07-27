@@ -1057,28 +1057,20 @@ impl OrderedRelayDeliveryBridge {
                     OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
                 );
             }
-            if kind == OrderedRelayMucProxyKind::MujiJingleIq {
-                // #1445: a Muji initiate must never leave a sticky
-                // diversion on this channel. The channel key is shared
-                // with the sender's MUC join/leave/groupchat relays for
-                // the same room, so a diverted channel would silently
-                // drop the user's ordinary MUC traffic until they
-                // reconnect or the room's claim epoch changes.
-                //
-                // This is not hypothetical during a rolling deploy: a
-                // node that predates `MujiJingleIq` cannot deserialize
-                // the envelope at all, which surfaces here as a codec
-                // failure classified `maybe_committed`.
-                //
-                // Forgetting is safe for THIS kind specifically because
-                // a re-executed initiate is idempotent — registration
-                // is a set-insert and a second token supersedes the
-                // first — so the usual reason to preserve a
-                // maybe-committed sequence does not apply. The caller
-                // maps the outcome to a `type='wait'` error and the
-                // client retries onto a clean channel.
-                self.forget_channel(&retry_channel).await;
-            }
+            // A `MujiJingleIq` maybe-committed deliberately gets the
+            // same treatment as every other kind: the channel keeps
+            // its diversion. An earlier attempt to `forget_channel`
+            // here was WRONG and is recorded so it is not retried —
+            // `OrderedRelaySenderState::forget_channel` drops
+            // `next_by_channel`, resetting the SENDER's sequence to
+            // FIRST while the receiver's `next_expected` is untouched.
+            // The next envelope on the channel (the user's next
+            // groupchat message or leave presence) would then arrive
+            // with a stale sequence and NACK as an ordering gap,
+            // converting a bounded failure into a diversion attached
+            // to unrelated MUC traffic. Only the `JoinPresence` arm
+            // above can forget safely, because it immediately re-sends
+            // and has `try_proxy_muc_join_repair` as a backstop.
             return MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted);
         }
 

@@ -1,5 +1,6 @@
-//! Owner-side executor for a Muji `session-initiate` relayed from the
-//! replica that received it (#1445).
+//! Owner-side executor for a Muji `session-initiate` or
+//! `session-terminate` relayed from the replica that received it
+//! (#1445).
 //!
 //! The producing replica had no local room actor, so it relayed the IQ
 //! over the ordered MUC proxy to the node holding the room's claim —
@@ -13,13 +14,14 @@
 //! socket there.
 
 use super::super::super::interpret_loop::build_interpret_deps;
-use super::super::super::transport_xml::build_iq_error_xml_typed;
+use super::super::super::transport_xml::{build_iq_error_xml_typed, build_iq_result_xml};
 use super::super::super::WebSocketState;
 use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
 use super::sans_io::events_contain_iq_error;
 use super::ProtocolStanzaContext;
 
-/// Execute a relayed Muji `session-initiate` on the room-owning node.
+/// Execute a relayed Muji `session-initiate` or `session-terminate`
+/// on the room-owning node.
 ///
 /// Returns `None` only on a wire-shape failure (the IQ carries no full
 /// sender JID) — the caller NACKs the envelope as a parse failure.
@@ -77,9 +79,27 @@ pub(crate) async fn handle_relayed_muji_initiate(
         GateOutcome::RoomNotLocal { room_jid } => {
             // We hold (or held) the room's claim yet no actor lives
             // here: every occupant has left and the actor is gone, or
-            // ownership moved after the producer's claim read. Either
-            // way the requester is not an occupant of a live local
-            // room — the terminal denial, never a re-relay.
+            // ownership moved after the producer's claim read.
+            //
+            // A hangup must never fail on that. The common way to
+            // reach this arm with a terminate is two occupants leaving
+            // at once — the first empties the room and tears the actor
+            // down, and the second arrives to find nothing. Answering
+            // `<forbidden/>` ("join the MUC first") to someone hanging
+            // up would be nonsense, and would also emit a bogus
+            // `room_not_found` denial. Unregistering is idempotent, so
+            // the empty IQ result is the honest answer.
+            if jingle_muji_gate::muji_session_terminate_room(iq).is_some() {
+                return Some(vec![build_iq_result_xml(
+                    id,
+                    response_from.as_deref(),
+                    Some(response_to.as_str()),
+                    None,
+                )]);
+            }
+            // An initiate, though, genuinely cannot proceed: the
+            // requester is not an occupant of a live local room. The
+            // terminal denial, never a re-relay.
             let error = jingle_muji_gate::deny_room_not_found(&room_jid, &sender.to_bare());
             Some(vec![build_iq_error_xml_typed(
                 id,
@@ -274,6 +294,42 @@ mod tests {
         assert!(
             !sfu.has_call_participant(&call, &identity),
             "the relayed terminate must unregister on the node holding the registration"
+        );
+    }
+
+    /// A hangup must never fail. Two occupants leaving at once is the
+    /// ordinary way to reach the owner with no room actor left: the
+    /// first terminate empties the room and tears the actor down, the
+    /// second finds nothing. Answering `<forbidden/>` ("join the MUC
+    /// first") to someone hanging up would be nonsense and would also
+    /// emit a bogus `room_not_found` denial.
+    #[tokio::test]
+    async fn relayed_terminate_after_the_room_actor_is_gone_still_succeeds() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+
+        let frames = handle_relayed_muji_initiate(
+            &state,
+            &muji_terminate_iq("alice@example.com/web", "vanished@muc.example.com"),
+        )
+        .await
+        .expect("terminate executes");
+
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert!(
+            frames[0].contains("type='result'") || frames[0].contains("type=\"result\""),
+            "a hangup for a room whose actor is gone must be acked, not denied: {}",
+            frames[0]
+        );
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "waddle.call.sfu_token.denied",
+                    &[("reason", "room_not_found")]
+                )
+                .unwrap_or(0),
+            0,
+            "a hangup is not a token denial"
         );
     }
 
