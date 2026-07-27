@@ -6,6 +6,12 @@ flake = "../.."
 digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
 lockfile = "apps/android/../../flake.lock"
 
+[runtimes.chat]
+type = "nix"
+flake = ".."
+digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+lockfile = "chat/../flake.lock"
+
 [runtimes.colony]
 type = "nix"
 flake = ".."

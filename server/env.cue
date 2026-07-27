@@ -226,7 +226,7 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
-					cuenv sync --check -p ..
+					cuenv sync --check -A
 					git diff --exit-code -- ../.gitignore ../cuenv.lock
 				"""#]
 			inputs: [

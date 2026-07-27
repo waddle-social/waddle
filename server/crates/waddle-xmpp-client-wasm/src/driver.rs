@@ -1161,6 +1161,110 @@ mod tests {
         }))
     }
 
+    fn send_bound_stream_management_enable(runtime: &mut XmppRuntime) {
+        let server: BareJid = "example.test".parse().expect("server JID");
+
+        runtime
+            .queue_request(ClientRequest::Connect)
+            .expect("connect request");
+        runtime
+            .apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
+            .expect("transport open");
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+                waddle_xmpp_client::transport::StreamOpen::from_server(server.clone()),
+            )))
+            .expect("server stream open");
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("features", "http://etherx.jabber.org/streams")
+                    .append(
+                        Element::builder("mechanisms", "urn:ietf:params:xml:ns:xmpp-sasl")
+                            .append(
+                                Element::builder("mechanism", "urn:ietf:params:xml:ns:xmpp-sasl")
+                                    .append("OAUTHBEARER")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )))
+            .expect("authentication features");
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("success", "urn:ietf:params:xml:ns:xmpp-sasl").build(),
+            )))
+            .expect("authentication success");
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+                waddle_xmpp_client::transport::StreamOpen::from_server(server),
+            )))
+            .expect("post-authentication stream open");
+        let binding_events = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("features", "http://etherx.jabber.org/streams")
+                    .append(Element::builder("bind", "urn:ietf:params:xml:ns:xmpp-bind").build())
+                    .append(
+                        Element::builder("sm", waddle_xmpp_client::stream_management::NS_SM)
+                            .build(),
+                    )
+                    .build(),
+            )))
+            .expect("post-authentication features");
+        let binding_id = binding_events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                    Some(request.stanza_id.clone())
+                }
+                _ => None,
+            })
+            .expect("resource binding request");
+        let ready_events = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("iq", NS_CLIENT)
+                    .attr(
+                        minidom::rxml::xml_ncname!("id").to_owned(),
+                        binding_id.as_str(),
+                    )
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+                    .append(
+                        Element::builder("bind", "urn:ietf:params:xml:ns:xmpp-bind")
+                            .append(
+                                Element::builder("jid", "urn:ietf:params:xml:ns:xmpp-bind")
+                                    .append("alice@example.test/web")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )))
+            .expect("resource binding result");
+        assert_eq!(
+            runtime.snapshot().phase,
+            waddle_xmpp_client::SessionPhase::Established,
+            "SM may only be enabled after resource binding has reached Ready",
+        );
+        let enable = ready_events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                    TransportMessage::Element(element),
+                )) if element.name() == "enable"
+                    && element.ns() == waddle_xmpp_client::stream_management::NS_SM =>
+                {
+                    Some(element.clone())
+                }
+                _ => None,
+            })
+            .expect("bound stream-management enable");
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                enable,
+            )))
+            .expect("bound stream-management enable sent");
+    }
+
     fn build_archived(mam_id: &str, query_id: &str, body: &str) -> ArchivedMessage {
         let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
             mam_id,
@@ -1375,11 +1479,7 @@ mod tests {
         };
         let mut runtime =
             XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
-        runtime
-            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-                waddle_xmpp_client::stream_management::SmState::build_enable(true),
-            )))
-            .expect("enable sent");
+        send_bound_stream_management_enable(&mut runtime);
         runtime
             .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
                 Element::builder("enabled", waddle_xmpp_client::stream_management::NS_SM)
@@ -1428,6 +1528,43 @@ mod tests {
             .as_ref()
             .expect("snapshot")
             .has_unhandled_outbound_stanzas());
+    }
+
+    #[test]
+    fn publish_resume_state_snapshot_rejects_unbound_enable_and_enabled() {
+        let inner = test_inner();
+        let stored = inner.borrow().config.clone();
+        let mut runtime =
+            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                waddle_xmpp_client::stream_management::SmState::build_enable(true),
+            )))
+            .expect("unbound enable write is observed but cannot negotiate SM");
+        let events = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("enabled", waddle_xmpp_client::stream_management::NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "forged-stream")
+                    .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                    .build(),
+            )))
+            .expect("forged enabled is handled as a protocol violation");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element)
+            )) if element.name() == "error"
+                && element
+                    .get_child("policy-violation", "urn:ietf:params:xml:ns:xmpp-streams")
+                    .is_some()
+        )));
+        publish_resume_state_snapshot(&inner, &runtime, false);
+        assert!(
+            inner.borrow().resume_state.is_none(),
+            "unbound or unauthenticated SM controls must never create a resume snapshot",
+        );
     }
 
     #[test]
