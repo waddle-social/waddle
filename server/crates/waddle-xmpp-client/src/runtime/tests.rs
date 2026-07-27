@@ -49,6 +49,8 @@ fn runtime_immediately_requests_ack_for_first_unhandled_outbound_stanza() {
         )))
         .unwrap();
 
+    assert!(runtime.acknowledgement_clock_pending());
+
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
@@ -145,6 +147,7 @@ fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
     assert!(runtime
         .poll_stream_management_clock(now + Duration::seconds(35))
         .is_empty());
+    assert!(!runtime.acknowledgement_clock_pending());
 }
 
 #[test]
@@ -767,6 +770,8 @@ fn runtime_resumed_unacked_tail_replays_before_requesting_ack_without_recounting
                 .build(),
         )))
         .unwrap();
+
+    assert!(runtime.acknowledgement_clock_pending());
 
     #[derive(Debug, PartialEq, Eq)]
     enum ResumeEvent<'a> {

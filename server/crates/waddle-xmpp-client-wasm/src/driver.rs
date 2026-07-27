@@ -31,6 +31,78 @@ impl From<waddle_xmpp_client::SmAckRequestReason> for JsSmAckRequestReason {
     }
 }
 
+/// The browser owns only wakeups. This small, deterministic scheduler owns
+/// their lifetime, while the Rust runtime remains the sole owner of every
+/// XEP-0198 deadline and transition.
+#[derive(Debug, Default)]
+pub(crate) struct SmClockTimerSchedule {
+    next_generation: u64,
+    active_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmClockTimerTransition {
+    Noop,
+    Arm { generation: u64 },
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmClockTimerArmFailure {
+    WindowUnavailable,
+    IntervalUnavailable,
+}
+
+impl From<SmClockTimerArmFailure> for ClientError {
+    fn from(_: SmClockTimerArmFailure) -> Self {
+        Self::StreamManagementClockUnavailable
+    }
+}
+
+impl SmClockTimerSchedule {
+    fn sync(&mut self, pending: bool) -> SmClockTimerTransition {
+        match (pending, self.active_generation) {
+            (true, Some(_)) | (false, None) => SmClockTimerTransition::Noop,
+            (true, None) => {
+                self.next_generation = self.next_generation.wrapping_add(1);
+                // Zero is reserved for the pre-arm state so an obsolete
+                // callback can never be mistaken for a live timer.
+                if self.next_generation == 0 {
+                    self.next_generation = 1;
+                }
+                SmClockTimerTransition::Arm {
+                    generation: self.next_generation,
+                }
+            }
+            (false, Some(_)) => {
+                self.active_generation = None;
+                SmClockTimerTransition::Clear
+            }
+        }
+    }
+
+    fn accepts_wakeup(&self, generation: u64, pending: bool) -> bool {
+        pending && self.active_generation == Some(generation)
+    }
+
+    /// Commit a successfully installed browser interval. Until this point a
+    /// generation is provisional and cannot admit a wakeup.
+    fn install<T>(
+        &mut self,
+        generation: u64,
+        install: impl FnOnce(u64) -> Result<T, SmClockTimerArmFailure>,
+    ) -> Result<T, SmClockTimerArmFailure> {
+        let installed = install(generation)?;
+        debug_assert!(self.active_generation.is_none());
+        self.active_generation = Some(generation);
+        Ok(installed)
+    }
+
+    fn clear(&mut self) {
+        self.active_generation = None;
+    }
+}
+
 #[cfg(test)]
 mod telemetry_tests {
     use super::*;
@@ -57,6 +129,107 @@ mod telemetry_tests {
         );
         assert_eq!(timeout, serde_json::json!({ "kind": "progress-timed-out" }));
         assert_eq!(failed, serde_json::json!({ "kind": "failed" }));
+    }
+}
+
+#[cfg(test)]
+mod sm_clock_timer_schedule_tests {
+    use super::*;
+
+    #[test]
+    fn arms_only_for_pending_work_and_rejects_stale_wakeups() {
+        let mut schedule = SmClockTimerSchedule::default();
+
+        // An idle client owns no browser interval.
+        assert_eq!(schedule.sync(false), SmClockTimerTransition::Noop);
+
+        let first_generation = match schedule.sync(true) {
+            SmClockTimerTransition::Arm { generation } => generation,
+            transition => panic!("expected first arm, got {transition:?}"),
+        };
+        schedule
+            .install(first_generation, |_| Ok(()))
+            .expect("timer installed");
+        // Repeated runtime transitions preserve the single interval.
+        assert_eq!(schedule.sync(true), SmClockTimerTransition::Noop);
+        assert!(schedule.accepts_wakeup(first_generation, true));
+
+        // A no-progress ack clears retries but retains the 30-second
+        // progress deadline, so it does not tear down the wakeup.
+        assert_eq!(schedule.sync(true), SmClockTimerTransition::Noop);
+
+        // Full ack, failed/reset state, and a terminal clock poll all supply
+        // the same false predicate. Only the first transition clears.
+        assert_eq!(schedule.sync(false), SmClockTimerTransition::Clear);
+        assert_eq!(schedule.sync(false), SmClockTimerTransition::Noop);
+        assert!(!schedule.accepts_wakeup(first_generation, false));
+
+        let second_generation = match schedule.sync(true) {
+            SmClockTimerTransition::Arm { generation } => generation,
+            transition => panic!("expected re-arm, got {transition:?}"),
+        };
+        schedule
+            .install(second_generation, |_| Ok(()))
+            .expect("timer reinstalled");
+        assert_ne!(second_generation, first_generation);
+        assert!(schedule.accepts_wakeup(second_generation, true));
+
+        // A callback queued before clear must not poll or emit a retry after
+        // a reset, nor after a fresh timer generation replaces it.
+        assert!(!schedule.accepts_wakeup(first_generation, true));
+    }
+
+    #[test]
+    fn arm_failures_are_typed_transactional_and_leave_fresh_drivers_rearmable() {
+        let mut schedule = SmClockTimerSchedule::default();
+        let missing_window_generation = match schedule.sync(true) {
+            SmClockTimerTransition::Arm { generation } => generation,
+            transition => panic!("expected arm, got {transition:?}"),
+        };
+
+        assert_eq!(
+            schedule.install(missing_window_generation, |_| {
+                Err::<(), _>(SmClockTimerArmFailure::WindowUnavailable)
+            }),
+            Err(SmClockTimerArmFailure::WindowUnavailable)
+        );
+        assert!(
+            !schedule.accepts_wakeup(missing_window_generation, true),
+            "a missing window must never publish an active timer generation"
+        );
+        assert_eq!(schedule.sync(false), SmClockTimerTransition::Noop);
+
+        let interval_failure_generation = match schedule.sync(true) {
+            SmClockTimerTransition::Arm { generation } => generation,
+            transition => panic!("expected retryable arm, got {transition:?}"),
+        };
+        assert_eq!(
+            schedule.install(interval_failure_generation, |_| {
+                Err::<(), _>(SmClockTimerArmFailure::IntervalUnavailable)
+            }),
+            Err(SmClockTimerArmFailure::IntervalUnavailable)
+        );
+        assert!(!schedule.accepts_wakeup(interval_failure_generation, true));
+        assert!(matches!(
+            ClientError::from(SmClockTimerArmFailure::IntervalUnavailable),
+            ClientError::StreamManagementClockUnavailable
+        ));
+
+        // The failing driver exits and tears down. A fresh driver starts with
+        // a fresh schedule and can install exactly one interval normally.
+        let mut fresh_driver_schedule = SmClockTimerSchedule::default();
+        let fresh_generation = match fresh_driver_schedule.sync(true) {
+            SmClockTimerTransition::Arm { generation } => generation,
+            transition => panic!("expected fresh arm, got {transition:?}"),
+        };
+        fresh_driver_schedule
+            .install(fresh_generation, |_| Ok(()))
+            .expect("fresh driver installs its timer");
+        assert!(fresh_driver_schedule.accepts_wakeup(fresh_generation, true));
+        assert_eq!(
+            fresh_driver_schedule.sync(false),
+            SmClockTimerTransition::Clear
+        );
     }
 }
 
@@ -88,22 +261,6 @@ impl WasmDriverTask {
         inner: Rc<RefCell<WaddleClientInner>>,
     ) -> DriverResult<Self> {
         let (sm_clock_tx, sm_clock_rx) = mpsc::channel(1);
-        let (sm_clock_timer, sm_clock_callback) = if let Some(window) = web_sys::window() {
-            let callback = Closure::wrap(Box::new(move || {
-                // Coalesce browser timer wakeups; the runtime owns every
-                // deadline and sees the authoritative wall clock on polling.
-                let _ = sm_clock_tx.clone().try_send(());
-            }) as Box<dyn FnMut()>);
-            let timer = window
-                .set_interval_with_callback_and_timeout_and_arguments_0(
-                    callback.as_ref().unchecked_ref(),
-                    250,
-                )
-                .ok();
-            (timer, Some(callback))
-        } else {
-            (None, None)
-        };
         Ok(Self {
             runtime: XmppRuntime::new(config)?,
             ws,
@@ -115,9 +272,11 @@ impl WasmDriverTask {
             pending_inbox_queries: HashMap::new(),
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
-            sm_clock_timer,
-            sm_clock_callback,
+            sm_clock_timer: None,
+            sm_clock_callback: None,
+            sm_clock_tx,
             sm_clock_rx,
+            sm_clock_schedule: SmClockTimerSchedule::default(),
         })
     }
 
@@ -130,6 +289,11 @@ impl WasmDriverTask {
                         self.finish().await;
                         return;
                     }
+                }
+                if let Err(err) = self.sync_sm_clock_timer() {
+                    self.emit_error(err.to_string()).await;
+                    self.finish().await;
+                    return;
                 }
             }
             Err(err) => {
@@ -148,7 +312,14 @@ impl WasmDriverTask {
             let keep_running = select! {
                 ws_event = ws_event_fut => self.handle_wasm_transport_event(ws_event).await,
                 cmd = cmd_fut => self.handle_command(cmd).await,
-                tick = sm_clock_fut => if tick.is_some() { self.poll_stream_management_clock().await } else { true },
+                tick = sm_clock_fut => match tick {
+                    Some(generation) if self.sm_clock_schedule.accepts_wakeup(
+                        generation,
+                        self.runtime.acknowledgement_clock_pending(),
+                    ) => self.poll_stream_management_clock().await,
+                    Some(_) => true,
+                    None => true,
+                },
             };
 
             if !keep_running {
@@ -214,7 +385,71 @@ impl WasmDriverTask {
                 return false;
             }
         }
-        true
+        match self.sync_sm_clock_timer() {
+            Ok(()) => true,
+            Err(err) => {
+                self.emit_error(err.to_string()).await;
+                false
+            }
+        }
+    }
+
+    /// Bring the browser wakeup in line with the runtime's XEP-0198 state.
+    ///
+    /// This is deliberately called after every runtime transition. In
+    /// particular, a valid no-progress `<a/>` clears retry state but retains
+    /// the progress deadline, whereas a fully acknowledged tail removes both.
+    fn sync_sm_clock_timer(&mut self) -> DriverResult<()> {
+        match self
+            .sm_clock_schedule
+            .sync(self.runtime.acknowledgement_clock_pending())
+        {
+            SmClockTimerTransition::Noop => Ok(()),
+            SmClockTimerTransition::Arm { generation } => self.arm_sm_clock_timer(generation),
+            SmClockTimerTransition::Clear => {
+                self.clear_sm_clock_timer();
+                Ok(())
+            }
+        }
+    }
+
+    fn arm_sm_clock_timer(&mut self, generation: u64) -> DriverResult<()> {
+        debug_assert!(self.sm_clock_timer.is_none());
+        debug_assert!(self.sm_clock_callback.is_none());
+
+        let sm_clock_tx = self.sm_clock_tx.clone();
+        let (timer, callback) = self
+            .sm_clock_schedule
+            .install(generation, move |generation| {
+                let window = web_sys::window().ok_or(SmClockTimerArmFailure::WindowUnavailable)?;
+                let callback = Closure::wrap(Box::new(move || {
+                    // Coalesce browser timer wakeups; the runtime owns every
+                    // deadline and sees the authoritative wall clock on
+                    // polling. The generation makes a callback queued before
+                    // clear harmless after a reset or fresh arm.
+                    let _ = sm_clock_tx.clone().try_send(generation);
+                }) as Box<dyn FnMut()>);
+                let timer = window
+                    .set_interval_with_callback_and_timeout_and_arguments_0(
+                        callback.as_ref().unchecked_ref(),
+                        250,
+                    )
+                    .map_err(|_| SmClockTimerArmFailure::IntervalUnavailable)?;
+                Ok((timer, callback))
+            })
+            .map_err(ClientError::from)?;
+        self.sm_clock_timer = Some(timer);
+        self.sm_clock_callback = Some(callback);
+        Ok(())
+    }
+
+    fn clear_sm_clock_timer(&mut self) {
+        if let Some(timer) = self.sm_clock_timer.take() {
+            if let Some(window) = web_sys::window() {
+                window.clear_interval_with_handle(timer);
+            }
+        }
+        self.sm_clock_callback.take();
     }
 
     async fn handle_command(&mut self, cmd: Option<WasmCommand>) -> bool {
@@ -296,6 +531,11 @@ impl WasmDriverTask {
                         result = Err(ClientError::Disconnected);
                         break;
                     }
+                }
+                let timer_result = self.sync_sm_clock_timer();
+                if let Err(err) = timer_result {
+                    self.emit_error(err.to_string()).await;
+                    result = Err(err);
                 }
                 let keep_running = result.is_ok();
                 let _ = responder.send(result);
@@ -498,7 +738,13 @@ impl WasmDriverTask {
             return false;
         }
 
-        true
+        match self.sync_sm_clock_timer() {
+            Ok(()) => true,
+            Err(err) => {
+                self.emit_error(err.to_string()).await;
+                false
+            }
+        }
     }
 
     async fn handle_client_event(&mut self, event: ClientEvent) -> bool {
@@ -524,6 +770,7 @@ impl WasmDriverTask {
                 Box::pin(self.send_transport_message(follow_up)).await?;
             }
         }
+        self.sync_sm_clock_timer()?;
         Ok(())
     }
 
@@ -728,12 +975,8 @@ impl WasmDriverTask {
     }
 
     async fn finish(&mut self) {
-        if let Some(timer) = self.sm_clock_timer.take() {
-            if let Some(window) = web_sys::window() {
-                window.clear_interval_with_handle(timer);
-            }
-        }
-        self.sm_clock_callback.take();
+        self.sm_clock_schedule.clear();
+        self.clear_sm_clock_timer();
         self.publish_resume_state_snapshot();
         let resume_state = self.inner.borrow().resume_state.clone();
         let _ = self

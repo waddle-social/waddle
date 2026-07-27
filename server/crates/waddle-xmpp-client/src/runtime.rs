@@ -137,6 +137,12 @@ impl XmppRuntime {
         true
     }
 
+    /// Whether a host timer must continue polling the Rust-owned XEP-0198
+    /// acknowledgement policy.
+    pub fn acknowledgement_clock_pending(&self) -> bool {
+        self.sm_state.acknowledgement_clock_pending()
+    }
+
     pub fn queue_request(&mut self, request: ClientRequest) -> ClientResult<Vec<ClientEvent>> {
         let previous = self.snapshot.clone();
         let pending = self.requests.register(request)?;

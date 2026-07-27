@@ -345,10 +345,13 @@ pub(crate) struct WasmDriverTask {
     pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,
     pub(crate) explicit_disconnect: bool,
     /// Browser-owned wakeup only: XEP-0198 timing and outcomes remain in the
-    /// Rust runtime. The closure is retained for exactly the driver's life.
+    /// Rust runtime. These exist only while an acknowledgement deadline is
+    /// pending, rather than for the whole lifetime of an idle client.
     pub(crate) sm_clock_timer: Option<i32>,
     pub(crate) sm_clock_callback: Option<Closure<dyn FnMut()>>,
-    pub(crate) sm_clock_rx: mpsc::Receiver<()>,
+    pub(crate) sm_clock_tx: mpsc::Sender<u64>,
+    pub(crate) sm_clock_rx: mpsc::Receiver<u64>,
+    pub(crate) sm_clock_schedule: super::driver::SmClockTimerSchedule,
 }
 
 #[cfg(test)]

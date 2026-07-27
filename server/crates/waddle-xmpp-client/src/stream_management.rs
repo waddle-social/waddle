@@ -493,6 +493,18 @@ impl SmState {
         self.progress_timed_out = false;
     }
 
+    /// Whether the host needs to keep driving the XEP-0198 acknowledgement
+    /// clock.
+    ///
+    /// A valid `<a/>` can clear the retry edge without advancing `h`. In that
+    /// case the retry schedule is no longer pending, but the 30-second
+    /// no-progress deadline is still authoritative. Conversely, a fully
+    /// acknowledged tail cancels both pieces of state. Hosts must use this
+    /// predicate rather than deriving liveness from the outbound queue.
+    pub fn acknowledgement_clock_pending(&self) -> bool {
+        self.ack_request_outstanding || self.last_ack_progress_at.is_some()
+    }
+
     pub fn handled_count_too_high(&self, h: u32) -> bool {
         h.wrapping_sub(self.server_h) > self.outbound_count.wrapping_sub(self.server_h)
     }
@@ -992,6 +1004,28 @@ mod tests {
         assert!(!state.record_sent_stanza(&message));
         assert!(state.process_ack(0).is_empty());
         assert!(state.record_sent_stanza(&message));
+    }
+
+    #[test]
+    fn acknowledgement_clock_stays_pending_for_no_progress_ack_only_until_terminal_reset() {
+        let mut state = SmState::new();
+        state.outbound_enabled = true;
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let message = Element::builder("message", "jabber:client").build();
+
+        assert!(!state.acknowledgement_clock_pending());
+        assert!(state.record_sent_stanza_at(&message, now));
+        assert!(state.acknowledgement_clock_pending());
+
+        // A valid no-progress `<a/>` clears the retry edge, but the original
+        // h-progress deadline must continue to run.
+        assert!(state
+            .process_ack_at(0, now + Duration::milliseconds(1))
+            .is_empty());
+        assert!(state.acknowledgement_clock_pending());
+
+        state.stop();
+        assert!(!state.acknowledgement_clock_pending());
     }
 
     #[test]
