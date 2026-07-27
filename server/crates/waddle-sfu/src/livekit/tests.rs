@@ -789,6 +789,95 @@ async fn last_participant_delete_room_skipped_when_someone_rejoins() {
     );
 }
 
+#[tokio::test]
+async fn delete_room_skipped_when_livekit_reports_another_replicas_participant() {
+    // #1445 second-order defect: with two waddle-server replicas the
+    // registry is process-local, so "our map just emptied" says
+    // nothing about the other replica's participants in the same
+    // LiveKit room. The teardown must confirm emptiness against
+    // LiveKit itself before DeleteRoom.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-cross-replica").unwrap();
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+
+    // Only Alice is registered locally; Bob joined via the other
+    // replica, so LiveKit sees both.
+    sfu.register_call_participant(&call, &alice);
+    admin.set_live(&call, vec![alice.clone(), bob.clone()]);
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended, "locally the call just emptied");
+    drain_admin_tasks().await;
+
+    assert_eq!(
+        admin.remove_snapshot().len(),
+        1,
+        "RemoveParticipant for Alice must still fire"
+    );
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "DeleteRoom must be suppressed while LiveKit reports another \
+         replica's participant; got {:?}",
+        admin.delete_snapshot(),
+    );
+}
+
+#[tokio::test]
+async fn delete_room_fires_when_livekit_reports_only_the_departing_participant() {
+    // LiveKit's participant list can momentarily still contain the
+    // participant we just issued RemoveParticipant for. That stale
+    // echo of the departing identity must not suppress the delete,
+    // or every clean last-leave would leak the room until
+    // empty_timeout.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-departing-echo").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended);
+    drain_admin_tasks().await;
+
+    assert_eq!(
+        admin.delete_snapshot(),
+        vec![call],
+        "DeleteRoom must fire when LiveKit reports nobody but the leaver"
+    );
+}
+
+#[tokio::test]
+async fn delete_room_skipped_when_livekit_occupancy_cannot_be_confirmed() {
+    // Fail-safe: if the ListParticipants probe errors we cannot rule
+    // out participants on the other replica, so the delete is
+    // skipped and the room lapses via LiveKit's own empty_timeout.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-list-error").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    admin.fail_list();
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended);
+    drain_admin_tasks().await;
+
+    assert_eq!(
+        admin.remove_snapshot().len(),
+        1,
+        "RemoveParticipant must still fire"
+    );
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "DeleteRoom must be suppressed when occupancy cannot be confirmed"
+    );
+}
+
 // -------- Reconciliation backstop --------
 
 use crate::SfuReconciler;

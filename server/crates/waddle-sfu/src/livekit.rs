@@ -355,7 +355,10 @@ impl LiveKitSfu {
     /// at the call site — and even then re-checks `calls` inside the
     /// spawn to close the rejoin race: another participant may have
     /// registered in the same tick, in which case kicking the room
-    /// would evict them too. Spawn target is the runtime handle
+    /// would evict them too — and then confirmed against LiveKit's
+    /// own participant list, because local emptiness says nothing
+    /// about participants registered on another replica (#1445); see
+    /// [`delete_room_if_livekit_empty`]. Spawn target is the runtime handle
     /// captured at construction; when none is attached (e.g. plain
     /// `#[test]` fixtures) the remote leg silently drops, matching
     /// pre-admin behaviour for those tests. The admin concurrency
@@ -395,13 +398,7 @@ impl LiveKitSfu {
                 // session, so only proceed when the call is *still*
                 // empty in our local view.
                 if calls.get(&call_id).is_none() {
-                    if let Err(err) = admin.delete_room(&call_id).await {
-                        tracing::warn!(
-                            call_id = %call_id,
-                            error = %err,
-                            "LiveKit DeleteRoom failed; empty room will linger until empty_timeout"
-                        );
-                    }
+                    delete_room_if_livekit_empty(admin.as_ref(), &call_id, &identity).await;
                 }
             }
         });
@@ -885,6 +882,57 @@ impl SfuService for LiveKitSfu {
             .get(call_id)
             .map(|entry| entry.iter().cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+/// `DeleteRoom` precondition against shared ground truth (#1445): the
+/// participant registry is process-local, so with multiple
+/// waddle-server replicas "our map just emptied" says nothing about
+/// participants registered by another replica in the same LiveKit
+/// room. LiveKit itself is the one component every replica shares, so
+/// ask it who is connected before tearing the room down.
+///
+/// The list may still echo `departing` (the identity whose
+/// `RemoveParticipant` was issued moments ago); anyone *else* means
+/// another replica's participant is live and the delete is skipped.
+/// Fail-safe: if the probe errors, occupancy cannot be ruled out, so
+/// the delete is skipped and an abandoned room lapses via LiveKit's
+/// own `empty_timeout`.
+///
+/// Known residual race, accepted: a joiner whose token was minted on
+/// another replica but who has not yet connected is invisible to this
+/// probe. LiveKit auto-creates rooms on join, so an over-eager delete
+/// is disruptive but self-healing; closing it needs the durable
+/// generation-keyed registry tracked in #1449.
+async fn delete_room_if_livekit_empty(
+    admin: &dyn LiveKitAdmin,
+    call_id: &CallId,
+    departing: &Identity,
+) {
+    match admin.list_participant_identities(call_id).await {
+        Ok(live) if live.iter().all(|p| p == departing) => {
+            if let Err(err) = admin.delete_room(call_id).await {
+                tracing::warn!(
+                    call_id = %call_id,
+                    error = %err,
+                    "LiveKit DeleteRoom failed; empty room will linger until empty_timeout"
+                );
+            }
+        }
+        Ok(live) => {
+            tracing::info!(
+                call_id = %call_id,
+                live_participants = live.len(),
+                "DeleteRoom skipped; LiveKit reports live participants (another replica's registrations)"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                call_id = %call_id,
+                error = %err,
+                "DeleteRoom skipped; LiveKit occupancy could not be confirmed"
+            );
+        }
     }
 }
 
