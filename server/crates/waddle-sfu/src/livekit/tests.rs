@@ -221,10 +221,19 @@ struct RecordingAdmin {
     /// from the map lists as empty (room not found). Drives the
     /// reconciliation tests.
     live: Mutex<std::collections::HashMap<CallId, Vec<Identity>>>,
-    /// When set, `list_participant_identities` errors instead of
-    /// returning a set — used to assert reconcile skips a call it
-    /// can't confirm rather than sweeping it.
+    /// How many NON-Waddle participants LiveKit reports per call
+    /// (an egress recorder, a SIP participant): occupancy that can
+    /// never be a registry ghost but must still block DeleteRoom.
+    foreign_live: Mutex<std::collections::HashMap<CallId, usize>>,
+    /// When set, `room_occupancy` errors instead of returning a set —
+    /// used to assert reconcile skips a call it can't confirm rather
+    /// than sweeping it.
     list_errors: Mutex<bool>,
+    /// Parks `room_occupancy` until released, so a test can register a
+    /// participant while the probe is genuinely in flight.
+    list_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// Signalled once a parked `room_occupancy` call has been entered.
+    list_entered: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl RecordingAdmin {
@@ -249,6 +258,57 @@ impl RecordingAdmin {
             .lock()
             .expect("recording lock")
             .insert(call.clone(), identities);
+    }
+
+    fn set_foreign_live(&self, call: &CallId, count: usize) {
+        self.foreign_live
+            .lock()
+            .expect("recording lock")
+            .insert(call.clone(), count);
+    }
+
+    /// Park the next `room_occupancy` call until [`Self::release_list`].
+    fn hold_list(&self) {
+        *self.list_gate.lock().expect("recording lock") =
+            Some(Arc::new(tokio::sync::Notify::new()));
+        *self.list_entered.lock().expect("recording lock") =
+            Some(Arc::new(tokio::sync::Notify::new()));
+    }
+
+    fn release_list(&self) {
+        let gate = self.list_gate.lock().expect("recording lock").clone();
+        if let Some(gate) = gate {
+            // `notify_one`, not `notify_waiters`: the latter drops the
+            // signal when no waiter is registered yet, and both signals
+            // in this handshake are one-shot events whose ordering
+            // against the other task's registration is not guaranteed
+            // on a multi-threaded runtime. A stored permit makes them
+            // ordering-independent.
+            gate.notify_one();
+        }
+    }
+
+    /// Wait until a parked `room_occupancy` call has actually been
+    /// entered, so the test's registration lands mid-probe rather than
+    /// racing the spawn.
+    ///
+    /// Both sides of the handshake use `notify_one` so neither signal
+    /// can be lost to a registration race. Panics if the probe never
+    /// starts. Swallowing that timeout made
+    /// the post-probe-registry test vacuous: `release_list` would
+    /// notify before the probe installed its waiter, the teardown would
+    /// stay parked forever, and the assertion that no `DeleteRoom`
+    /// fired would pass without the guard ever being exercised.
+    async fn await_list_in_flight(&self, within: StdDuration) {
+        let entered = self
+            .list_entered
+            .lock()
+            .expect("recording lock")
+            .clone()
+            .expect("hold_list must be called before awaiting the probe");
+        tokio::time::timeout(within, entered.notified())
+            .await
+            .expect("the occupancy probe must actually start, or this test proves nothing");
     }
 
     fn fail_list(&self) {
@@ -315,22 +375,40 @@ impl LiveKitAdmin for RecordingAdmin {
         })
     }
 
-    fn list_participant_identities<'a>(
+    fn room_occupancy<'a>(
         &'a self,
         room: &'a CallId,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Identity>, SfuError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<crate::admin::RoomOccupancy, SfuError>> + Send + 'a>>
+    {
         let room = room.clone();
         Box::pin(async move {
             if *self.list_errors.lock().expect("recording lock") {
                 return Err(SfuError::InvalidCallId("simulated list failure".into()));
             }
-            Ok(self
-                .live
-                .lock()
-                .expect("recording lock")
-                .get(&room)
-                .cloned()
-                .unwrap_or_default())
+            let gate = self.list_gate.lock().expect("recording lock").clone();
+            if let Some(gate) = gate {
+                let waiter = gate.notified();
+                if let Some(entered) = self.list_entered.lock().expect("recording lock").clone() {
+                    entered.notify_one();
+                }
+                waiter.await;
+            }
+            Ok(crate::admin::RoomOccupancy {
+                waddle: self
+                    .live
+                    .lock()
+                    .expect("recording lock")
+                    .get(&room)
+                    .cloned()
+                    .unwrap_or_default(),
+                foreign: self
+                    .foreign_live
+                    .lock()
+                    .expect("recording lock")
+                    .get(&room)
+                    .copied()
+                    .unwrap_or(0),
+            })
         })
     }
 }
@@ -786,6 +864,166 @@ async fn last_participant_delete_room_skipped_when_someone_rejoins() {
         admin.delete_snapshot().is_empty(),
         "DeleteRoom must be suppressed by the rejoin re-check; got {:?}",
         admin.delete_snapshot(),
+    );
+}
+
+#[tokio::test]
+async fn delete_room_skipped_when_livekit_reports_another_replicas_participant() {
+    // #1445 second-order defect: with two waddle-server replicas the
+    // registry is process-local, so "our map just emptied" says
+    // nothing about the other replica's participants in the same
+    // LiveKit room. The teardown must confirm emptiness against
+    // LiveKit itself before DeleteRoom.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-cross-replica").unwrap();
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+
+    // Only Alice is registered locally; Bob joined via the other
+    // replica, so LiveKit sees both.
+    sfu.register_call_participant(&call, &alice);
+    admin.set_live(&call, vec![alice.clone(), bob.clone()]);
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended, "locally the call just emptied");
+    drain_admin_tasks().await;
+
+    assert_eq!(
+        admin.remove_snapshot().len(),
+        1,
+        "RemoveParticipant for Alice must still fire"
+    );
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "DeleteRoom must be suppressed while LiveKit reports another \
+         replica's participant; got {:?}",
+        admin.delete_snapshot(),
+    );
+}
+
+#[tokio::test]
+async fn delete_room_fires_when_livekit_reports_only_the_departing_participant() {
+    // LiveKit's participant list can momentarily still contain the
+    // participant we just issued RemoveParticipant for. That stale
+    // echo of the departing identity must not suppress the delete,
+    // or every clean last-leave would leak the room until
+    // empty_timeout.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-departing-echo").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended);
+    drain_admin_tasks().await;
+
+    assert_eq!(
+        admin.delete_snapshot(),
+        vec![call],
+        "DeleteRoom must fire when LiveKit reports nobody but the leaver"
+    );
+}
+
+#[tokio::test]
+async fn delete_room_skipped_when_only_a_foreign_participant_remains() {
+    // An egress recorder (or SIP/ingress participant) has an identity
+    // we never minted, so it can never be a registry ghost — but it IS
+    // occupancy. Deleting the room around it would kill the recording.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-egress").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    admin.set_live(&call, vec![alice.clone()]);
+    admin.set_foreign_live(&call, 1);
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended);
+    drain_admin_tasks().await;
+
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "DeleteRoom must be suppressed while a non-Waddle participant \
+         (egress/SIP) is still connected; got {:?}",
+        admin.delete_snapshot(),
+    );
+}
+
+#[tokio::test]
+async fn delete_room_skipped_when_a_participant_registers_during_the_occupancy_probe() {
+    // The local rejoin re-check happens BEFORE the LiveKit round-trip,
+    // so the probe itself is a second window in which a fresh joiner
+    // can register locally — and the already-taken LiveKit snapshot
+    // cannot see them, because they have not connected yet. The guard
+    // must re-check the registry after the probe (#1129 + #1445).
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let call = CallId::new("r-probe-race").unwrap();
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+
+    sfu.register_call_participant(&call, &alice);
+    // LiveKit reports only the departing participant, so the probe
+    // says "empty" — the decision then rests entirely on the
+    // post-probe local re-check.
+    admin.set_live(&call, vec![alice.clone()]);
+    admin.hold_list();
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended);
+
+    // Bob joins while the probe is parked in flight.
+    admin.await_list_in_flight(StdDuration::from_secs(5)).await;
+    sfu.register_call_participant(&call, &bob);
+    admin.release_list();
+
+    for _ in 0..50 {
+        if !admin.delete_snapshot().is_empty() {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "DeleteRoom must be suppressed by the post-probe re-check; got {:?}",
+        admin.delete_snapshot(),
+    );
+}
+
+#[tokio::test]
+async fn delete_room_skipped_when_livekit_occupancy_cannot_be_confirmed() {
+    // Fail-safe: if the ListParticipants probe errors we cannot rule
+    // out participants on the other replica, so the delete is
+    // skipped and the room lapses via LiveKit's own empty_timeout.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-list-error").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    admin.fail_list();
+
+    let state = sfu.unregister_call_participant(&call, &alice);
+    assert_eq!(state, CallState::Ended);
+    drain_admin_tasks().await;
+
+    assert_eq!(
+        admin.remove_snapshot().len(),
+        1,
+        "RemoveParticipant must still fire"
+    );
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "DeleteRoom must be suppressed when occupancy cannot be confirmed"
     );
 }
 

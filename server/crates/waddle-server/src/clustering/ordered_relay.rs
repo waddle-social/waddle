@@ -121,6 +121,13 @@ pub enum OrderedRelayMucProxyKind {
     BareRoomIq,
     OccupantIq,
     FanoutChunk,
+    /// A Muji (XEP-0272) `session-initiate` or `session-terminate`
+    /// relayed to the room-owning node (#1445). Unlike `BareRoomIq`
+    /// the stanza is NOT addressed to the room: `to` is the calls
+    /// mixer (`calls.<domain>`) and the target room lives in the
+    /// `<muji room='…'/>` payload, which the envelope validation binds
+    /// to the channel's room.
+    MujiJingleIq,
 }
 
 impl OrderedRelayMucProxyKind {
@@ -136,7 +143,9 @@ impl OrderedRelayMucProxyKind {
                     | OrderedRelayMucProxyKind::FanoutChunk,
                 waddle_xmpp::Stanza::Message(_)
             ) | (
-                OrderedRelayMucProxyKind::BareRoomIq | OrderedRelayMucProxyKind::OccupantIq,
+                OrderedRelayMucProxyKind::BareRoomIq
+                    | OrderedRelayMucProxyKind::OccupantIq
+                    | OrderedRelayMucProxyKind::MujiJingleIq,
                 waddle_xmpp::Stanza::Iq(_)
             )
         )
@@ -969,6 +978,12 @@ fn muc_proxy_stanza_is_addressed_to_room(
     let Some(to) = stanza_to(stanza) else {
         return false;
     };
+    // The Muji Jingle IQ (#1445) is the one MUC-proxy shape not
+    // addressed to the room: `to` is the calls mixer and the room
+    // binding lives in the `<muji room='…'/>` payload instead.
+    if let (OrderedRelayMucProxyKind::MujiJingleIq, waddle_xmpp::Stanza::Iq(iq)) = (kind, stanza) {
+        return jid_is_bare(to) && muji_iq_targets_room(room_jid, iq);
+    }
     if to.to_bare() != *room_jid {
         return false;
     }
@@ -996,6 +1011,40 @@ fn muc_proxy_stanza_is_addressed_to_room(
         (OrderedRelayMucProxyKind::OccupantIq, waddle_xmpp::Stanza::Iq(_)) => jid_is_full(to),
         _ => false,
     }
+}
+
+/// #1445: a relayed Muji `session-initiate` is the one MUC-proxy shape
+/// not addressed to the room — `to` is the calls mixer and the room
+/// JID lives in the `<muji room='…'/>` payload. Bind that payload room
+/// to the channel's room so an envelope on room A's ordered channel
+/// (fenced by room A's claim epoch) cannot smuggle a token mint for
+/// room B past the fence. Both `session-initiate` and
+/// `session-terminate` ride this kind — the initiate registers the
+/// participant on the owner, so the terminate must reach that same
+/// node to unregister them.
+fn muji_iq_targets_room(room_jid: &jid::BareJid, iq: &xmpp_parsers::iq::Iq) -> bool {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return false;
+    };
+    if payload.ns() != waddle_xmpp::xep::xep0166::NS_JINGLE || payload.name() != "jingle" {
+        return false;
+    }
+    // Only the two actions with node-local side effects ride this
+    // kind: `session-initiate` mints and registers on the owner, and
+    // `session-terminate` must unregister on that same owner.
+    if !matches!(
+        payload.attr("action"),
+        Some("session-initiate") | Some("session-terminate")
+    ) {
+        return false;
+    }
+    let Some(muji_elem) = waddle_xmpp::xep::xep0272::find_muji(payload) else {
+        return false;
+    };
+    let Ok(muji) = waddle_xmpp::xep::xep0272::Muji::try_from(muji_elem) else {
+        return false;
+    };
+    muji.room.as_ref() == Some(room_jid)
 }
 
 fn jid_is_full(jid: &jid::Jid) -> bool {
@@ -1790,6 +1839,199 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// #1445: a Muji `session-initiate` is not addressed to the room —
+    /// `to` is the calls mixer and the room lives in the `<muji/>`
+    /// payload — so its envelope validation must bind the payload's
+    /// room to the channel's room instead of the stanza's `to`.
+    fn muji_envelope(kind: OrderedRelayMucProxyKind, stanza: RemoteStanza) -> RemoteStanzaEnvelope {
+        RemoteStanzaEnvelope {
+            asserted_origin_node: origin_node(),
+            channel: room_channel(),
+            sequence: OrderedRelaySequence(1),
+            origin_inbound_sequence: inbound(1),
+            origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
+            target_claim: room_claim(),
+            payload: OrderedRelayPayload::MucProxy {
+                room_jid: room_jid(),
+                kind,
+                stanza,
+            },
+            origin_proof: None,
+        }
+    }
+
+    fn muji_initiate_stanza(action: xmpp_parsers::jingle::Action, room: &str) -> RemoteStanza {
+        use waddle_xmpp::xep::xep0167::MediaKind;
+        use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+        let muji = Muji {
+            room: Some(room.parse().expect("valid room jid")),
+            preparing: false,
+            contents: vec![MujiContent::new(
+                "audio",
+                Creator::Initiator,
+                MediaKind::Audio,
+            )],
+        };
+        let jingle = xmpp_parsers::jingle::Jingle::new(
+            action,
+            xmpp_parsers::jingle::SessionId("muji-sid-1".into()),
+        );
+        let mut payload: xmpp_parsers::minidom::Element = jingle.into();
+        payload.append_child(muji.to_element());
+        RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
+            xmpp_parsers::iq::Iq::Set {
+                from: Some(jid::Jid::from_str("romeo@example.test/phone").expect("full jid")),
+                to: Some(jid::Jid::from_str("calls.example.test").expect("mixer jid")),
+                id: "muji-iq-1".into(),
+                payload,
+            },
+        )))
+    }
+
+    #[test]
+    fn muji_jingle_iq_validation_binds_payload_room_to_channel_room() {
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(
+                        OrderedRelayMucProxyKind::MujiJingleIq,
+                        muji_initiate_stanza(
+                            xmpp_parsers::jingle::Action::SessionInitiate,
+                            "room@example.test"
+                        ),
+                    ),
+                ),
+                OrderedRelayReply::Ack(OrderedRelayAck { .. })
+            ),
+            "a session-initiate whose <muji room> matches the channel room must validate"
+        );
+
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(
+                        OrderedRelayMucProxyKind::MujiJingleIq,
+                        muji_initiate_stanza(
+                            xmpp_parsers::jingle::Action::SessionInitiate,
+                            "other-room@example.test"
+                        ),
+                    ),
+                ),
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::ParseFailure,
+                    ..
+                })
+            ),
+            "a <muji room> naming a different room than the channel must be rejected"
+        );
+    }
+
+    /// `session-terminate` rides the same kind as `session-initiate`
+    /// (#1445): the initiate registers the participant on the room
+    /// owner, so the terminate must reach that same node to unregister
+    /// them — a locally-executed terminate would leave a phantom
+    /// in-call participant there.
+    #[test]
+    fn muji_jingle_iq_validation_accepts_terminate_for_the_channel_room() {
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(
+                        OrderedRelayMucProxyKind::MujiJingleIq,
+                        muji_initiate_stanza(
+                            xmpp_parsers::jingle::Action::SessionTerminate,
+                            "room@example.test"
+                        ),
+                    ),
+                ),
+                OrderedRelayReply::Ack(OrderedRelayAck { .. })
+            ),
+            "a terminate for the channel's room must relay to the owner"
+        );
+
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(
+                        OrderedRelayMucProxyKind::MujiJingleIq,
+                        muji_initiate_stanza(
+                            xmpp_parsers::jingle::Action::SessionTerminate,
+                            "other-room@example.test"
+                        ),
+                    ),
+                ),
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::ParseFailure,
+                    ..
+                })
+            ),
+            "the payload room must stay bound to the channel room on terminate"
+        );
+    }
+
+    #[test]
+    fn muji_jingle_iq_validation_rejects_other_actions_and_non_muji_iqs() {
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(
+                        OrderedRelayMucProxyKind::MujiJingleIq,
+                        muji_initiate_stanza(
+                            xmpp_parsers::jingle::Action::SessionInfo,
+                            "room@example.test"
+                        ),
+                    ),
+                ),
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::ParseFailure,
+                    ..
+                })
+            ),
+            "only initiate and terminate have owner-node side effects"
+        );
+
+        let plain_jingle = {
+            let payload: xmpp_parsers::minidom::Element = xmpp_parsers::jingle::Jingle::new(
+                xmpp_parsers::jingle::Action::SessionInitiate,
+                xmpp_parsers::jingle::SessionId("p2p-sid".into()),
+            )
+            .into();
+            RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
+                xmpp_parsers::iq::Iq::Set {
+                    from: Some(jid::Jid::from_str("romeo@example.test/phone").expect("full jid")),
+                    to: Some(jid::Jid::from_str("calls.example.test").expect("mixer jid")),
+                    id: "p2p-iq".into(),
+                    payload,
+                },
+            )))
+        };
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(OrderedRelayMucProxyKind::MujiJingleIq, plain_jingle),
+                ),
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::ParseFailure,
+                    ..
+                })
+            ),
+            "a Jingle IQ without a <muji/> child (1:1 call) must never ride this kind"
+        );
     }
 
     #[test]

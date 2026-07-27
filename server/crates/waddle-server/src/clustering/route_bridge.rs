@@ -1057,6 +1057,20 @@ impl OrderedRelayDeliveryBridge {
                     OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
                 );
             }
+            // A `MujiJingleIq` maybe-committed deliberately gets the
+            // same treatment as every other kind: the channel keeps
+            // its diversion. An earlier attempt to `forget_channel`
+            // here was WRONG and is recorded so it is not retried —
+            // `OrderedRelaySenderState::forget_channel` drops
+            // `next_by_channel`, resetting the SENDER's sequence to
+            // FIRST while the receiver's `next_expected` is untouched.
+            // The next envelope on the channel (the user's next
+            // groupchat message or leave presence) would then arrive
+            // with a stale sequence and NACK as an ordering gap,
+            // converting a bounded failure into a diversion attached
+            // to unrelated MUC traffic. Only the `JoinPresence` arm
+            // above can forget safely, because it immediately re-sends
+            // and has `try_proxy_muc_join_repair` as a backstop.
             return MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted);
         }
 
@@ -2442,6 +2456,20 @@ impl OrderedRelayDeliveryBridge {
                 kind,
                 stanza,
             } => {
+                // This path can execute the payload locally WITHOUT the
+                // envelope validation (`envelope_is_consistent` /
+                // `validate_claims`) that the ordered-relay receiver
+                // applies, so nothing here has bound the stanza's
+                // `from` to the sending session. That is tolerable for
+                // the presence/message kinds, but `MujiJingleIq` mints
+                // a media credential from whatever `from` says (#1445),
+                // so bind it to the registration this call already
+                // authenticated (`msg.source_jid`) before dispatch.
+                let stanza = if kind == OrderedRelayMucProxyKind::MujiJingleIq {
+                    RemoteStanza(rebind_stanza_sender(&stanza.0, &msg.source_jid))
+                } else {
+                    stanza
+                };
                 let outcome = if let Some(remote) = self
                     .try_proxy_muc_remote(&room_jid, &stanza.0, kind, &origin)
                     .await
@@ -4180,6 +4208,27 @@ fn relay_payload_target(
     }
 }
 
+/// Return `stanza` with its `from` replaced by `sender`.
+///
+/// Used where a locally-executed relay payload must be attributed to
+/// the session the caller already authenticated rather than to
+/// whatever the serialized stanza claims (#1445).
+fn rebind_stanza_sender(stanza: &Stanza, sender: &jid::FullJid) -> Stanza {
+    let mut rebound = stanza.clone();
+    let from = Some(jid::Jid::from(sender.clone()));
+    match &mut rebound {
+        Stanza::Iq(iq) => match iq.as_mut() {
+            xmpp_parsers::iq::Iq::Get { from: f, .. }
+            | xmpp_parsers::iq::Iq::Set { from: f, .. }
+            | xmpp_parsers::iq::Iq::Result { from: f, .. }
+            | xmpp_parsers::iq::Iq::Error { from: f, .. } => *f = from,
+        },
+        Stanza::Message(message) => message.from = from,
+        Stanza::Presence(presence) => presence.from = from,
+    }
+    rebound
+}
+
 async fn deliver_reserved_muc_proxy(
     services: &OrderedRelayDeliveryServices,
     room_jid: &jid::BareJid,
@@ -4203,8 +4252,44 @@ async fn deliver_reserved_muc_proxy(
         (OrderedRelayMucProxyKind::OccupantPresence, Stanza::Presence(presence)) => {
             deliver_reserved_muc_occupant_presence(state.as_ref(), room_jid, presence).await
         }
+        (OrderedRelayMucProxyKind::MujiJingleIq, Stanza::Iq(iq)) => {
+            deliver_reserved_muji_iq(state.as_ref(), room_jid, iq).await
+        }
         _ => Err(OrderedRelayNackReason::ParseFailure),
     }
+}
+
+/// #1445: execute a relayed Muji `session-initiate` on this node — the
+/// room-claim owner — and carry the reply frames (IQ ack +
+/// server-initiated `session-accept` with the LiveKit token) back to
+/// the origin node as client replies. Envelope validation has already
+/// bound the payload's `<muji room>` to `room_jid`, so the room
+/// binding needs no re-check here; the executor re-runs the membership
+/// gate against the local room actor and is terminal (a denial comes
+/// back as a delivered IQ-error frame, never a NACK, so no relay
+/// loop can form).
+async fn deliver_reserved_muji_iq(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    iq: &xmpp_parsers::iq::Iq,
+) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+    let frames = tokio::time::timeout(
+        ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+        crate::server::routes::websocket::handlers::iq::jingle_muji_relay::handle_relayed_muji_initiate(
+            state, iq,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        tracing::warn!(
+            room = %room_jid,
+            timeout_ms = ORDERED_RECEIVER_DELIVERY_TIMEOUT.as_millis(),
+            "ordered relay: Muji Jingle execution timed out"
+        );
+        OrderedRelayNackReason::MaybeCommitted
+    })?
+    .ok_or(OrderedRelayNackReason::ParseFailure)?;
+    remote_replies_from_frames(frames)
 }
 
 async fn deliver_reserved_muc_occupant_presence(

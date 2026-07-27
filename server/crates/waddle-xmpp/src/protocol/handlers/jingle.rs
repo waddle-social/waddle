@@ -122,10 +122,18 @@ fn is_local_jingle_peer(peer: &Jid, ctx: &StanzaContext<'_>) -> bool {
 /// registry. Other servers should run their own SFU; this gate stops
 /// us proxying as theirs.
 fn is_local_muji_room(room: &BareJid, ctx: &StanzaContext<'_>) -> bool {
-    // Single MUC service per server, derived from the apex like the
-    // rest of the routing layer (`waddle-xmpp/src/routing.rs:80`).
-    let expected = format!("muc.{}", ctx.domain);
-    room.domain().as_str() == expected
+    room_is_on_local_muc_service(room, ctx.domain)
+}
+
+/// Whether `room` lives on this server's MUC service.
+///
+/// Single MUC service per server, derived from the apex like the rest
+/// of the routing layer (`waddle-xmpp/src/routing.rs:80`). Public so
+/// the websocket layer's #1445 relay pre-check uses the SAME predicate
+/// as the handler's payload guard — two independent spellings of
+/// "local MUC domain" would drift.
+pub fn room_is_on_local_muc_service(room: &BareJid, server_domain: &str) -> bool {
+    room.domain().as_str() == format!("muc.{server_domain}")
 }
 
 #[derive(Clone)]
@@ -536,6 +544,27 @@ impl JingleHandler {
         }
 
         if jingle.action == Action::SessionInitiate {
+            // Same rate limit as 1:1 session-initiate, and for the
+            // same reason: a Muji initiate mints a JWT and grows the
+            // SFU registry. It costs strictly more than the 1:1 case
+            // since #1445 — an initiate for a room this replica does
+            // not own also buys a claim-store lookup and a cross-node
+            // relay — so the unlimited Muji branch would be the
+            // cheapest amplification primitive in the call path.
+            let initiator_bare = ctx.full_jid.to_bare();
+            if let Err(exceeded) = self.rate_limit.check_and_record(&initiator_bare) {
+                tracing::warn!(
+                    jid = %initiator_bare,
+                    %exceeded,
+                    "rate-limit dropped Muji session-initiate"
+                );
+                attempt.failed(CallSetupFailureReason::RateLimited);
+                return error_reply(
+                    iq,
+                    DefinedCondition::PolicyViolation,
+                    "session-initiate rate limit exceeded",
+                );
+            }
             // XEP-0166 §7.1 spoofing defense: when present on
             // session-initiate, `initiator` must match the
             // authenticated session. Non-initiate actions should not

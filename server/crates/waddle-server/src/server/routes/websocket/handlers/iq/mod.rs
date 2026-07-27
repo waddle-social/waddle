@@ -92,6 +92,8 @@ mod extension_forms;
 mod extension_route_items;
 mod full_jid_forward;
 mod jingle_muji_gate;
+#[cfg(feature = "clustering")]
+pub(crate) mod jingle_muji_relay;
 mod last_activity;
 mod link_preview_lookup;
 pub(crate) mod link_preview_player_embed;

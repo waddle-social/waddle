@@ -33,7 +33,7 @@ mod token;
 mod turn;
 mod webhook;
 
-pub use admin::LiveKitAdmin;
+pub use admin::{LiveKitAdmin, RoomOccupancy};
 pub use call::{CallId, CallState, Identity, MediaCapabilities};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
