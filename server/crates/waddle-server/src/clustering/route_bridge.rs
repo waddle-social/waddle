@@ -1057,6 +1057,28 @@ impl OrderedRelayDeliveryBridge {
                     OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
                 );
             }
+            if kind == OrderedRelayMucProxyKind::MujiJingleIq {
+                // #1445: a Muji initiate must never leave a sticky
+                // diversion on this channel. The channel key is shared
+                // with the sender's MUC join/leave/groupchat relays for
+                // the same room, so a diverted channel would silently
+                // drop the user's ordinary MUC traffic until they
+                // reconnect or the room's claim epoch changes.
+                //
+                // This is not hypothetical during a rolling deploy: a
+                // node that predates `MujiJingleIq` cannot deserialize
+                // the envelope at all, which surfaces here as a codec
+                // failure classified `maybe_committed`.
+                //
+                // Forgetting is safe for THIS kind specifically because
+                // a re-executed initiate is idempotent — registration
+                // is a set-insert and a second token supersedes the
+                // first — so the usual reason to preserve a
+                // maybe-committed sequence does not apply. The caller
+                // maps the outcome to a `type='wait'` error and the
+                // client retries onto a clean channel.
+                self.forget_channel(&retry_channel).await;
+            }
             return MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted);
         }
 
@@ -2442,6 +2464,20 @@ impl OrderedRelayDeliveryBridge {
                 kind,
                 stanza,
             } => {
+                // This path can execute the payload locally WITHOUT the
+                // envelope validation (`envelope_is_consistent` /
+                // `validate_claims`) that the ordered-relay receiver
+                // applies, so nothing here has bound the stanza's
+                // `from` to the sending session. That is tolerable for
+                // the presence/message kinds, but `MujiJingleIq` mints
+                // a media credential from whatever `from` says (#1445),
+                // so bind it to the registration this call already
+                // authenticated (`msg.source_jid`) before dispatch.
+                let stanza = if kind == OrderedRelayMucProxyKind::MujiJingleIq {
+                    RemoteStanza(rebind_stanza_sender(&stanza.0, &msg.source_jid))
+                } else {
+                    stanza
+                };
                 let outcome = if let Some(remote) = self
                     .try_proxy_muc_remote(&room_jid, &stanza.0, kind, &origin)
                     .await
@@ -4178,6 +4214,27 @@ fn relay_payload_target(
         }
         OrderedRelayRecipient::Room(_) => Err(OrderedRelayNackReason::ParseFailure),
     }
+}
+
+/// Return `stanza` with its `from` replaced by `sender`.
+///
+/// Used where a locally-executed relay payload must be attributed to
+/// the session the caller already authenticated rather than to
+/// whatever the serialized stanza claims (#1445).
+fn rebind_stanza_sender(stanza: &Stanza, sender: &jid::FullJid) -> Stanza {
+    let mut rebound = stanza.clone();
+    let from = Some(jid::Jid::from(sender.clone()));
+    match &mut rebound {
+        Stanza::Iq(iq) => match iq.as_mut() {
+            xmpp_parsers::iq::Iq::Get { from: f, .. }
+            | xmpp_parsers::iq::Iq::Set { from: f, .. }
+            | xmpp_parsers::iq::Iq::Result { from: f, .. }
+            | xmpp_parsers::iq::Iq::Error { from: f, .. } => *f = from,
+        },
+        Stanza::Message(message) => message.from = from,
+        Stanza::Presence(presence) => presence.from = from,
+    }
+    rebound
 }
 
 async fn deliver_reserved_muc_proxy(

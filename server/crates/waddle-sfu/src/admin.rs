@@ -44,6 +44,36 @@ const ADMIN_JWT_TTL: Duration = Duration::seconds(60);
 /// leak runtime tasks indefinitely.
 const ADMIN_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
+/// LiveKit's own view of who is connected to a room.
+///
+/// The split is load-bearing (#1445): `waddle` holds the participants
+/// whose identity round-trips to a JID we minted, and `foreign` counts
+/// everyone else — an egress recorder, a SIP or ingress participant,
+/// anything not issued by this server. Ghost reconciliation may only
+/// ever reason about `waddle` entries (a foreign participant cannot be
+/// a registry ghost we own), but an emptiness decision MUST consider
+/// `foreign` too: deleting a room because the only occupant left is
+/// the recorder would kill the recording.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoomOccupancy {
+    /// Connected participants this server minted tokens for.
+    pub waddle: Vec<Identity>,
+    /// Connected participants whose identity is not one of ours.
+    pub foreign: usize,
+}
+
+impl RoomOccupancy {
+    /// True when the only connected participant LiveKit reports is
+    /// `departing` (or nobody at all). LiveKit's list can still echo
+    /// the participant whose `RemoveParticipant` was just issued, so
+    /// that one identity does not count as occupancy — but any other
+    /// Waddle participant (typically registered by another replica)
+    /// or ANY foreign participant does.
+    pub fn is_empty_except(&self, departing: &Identity) -> bool {
+        self.foreign == 0 && self.waddle.iter().all(|identity| identity == departing)
+    }
+}
+
 /// Abstract LiveKit admin operations. Public so integration tests in
 /// consuming crates (e.g. `waddle-xmpp`'s XEP-0272 Muji suite) can
 /// inject a recording mock via [`crate::LiveKitSfu::with_admin`]; the
@@ -75,17 +105,18 @@ pub trait LiveKitAdmin: Send + Sync + 'static {
         capabilities: MediaCapabilities,
     ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>>;
 
-    /// List the identities LiveKit currently reports as joined to
-    /// `room`. The authoritative answer to "who is *actually* in this
-    /// call right now", used by the reconciliation backstop to detect
-    /// registry ghosts left behind when a `participant_left` /
-    /// `room_finished` webhook delivery was lost. A `not_found` room
-    /// (LiveKit has GC'd it or never saw it) resolves to an empty
-    /// vec — nobody is connected — not an error.
-    fn list_participant_identities<'a>(
+    /// Who LiveKit currently reports as connected to `room` — the
+    /// authoritative cross-replica answer to "is anyone actually in
+    /// this call right now". Used by the reconciliation backstop to
+    /// detect registry ghosts (lost `participant_left` /
+    /// `room_finished` webhooks) and by the teardown path to confirm
+    /// emptiness before `DeleteRoom` (#1445). A `not_found` room
+    /// (LiveKit GC'd it or never saw it) resolves to an empty
+    /// occupancy — nobody is connected — not an error.
+    fn room_occupancy<'a>(
         &'a self,
         room: &'a CallId,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Identity>, SfuError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<RoomOccupancy, SfuError>> + Send + 'a>>;
 }
 
 /// Production admin client. Holds a long-lived `reqwest::Client` so
@@ -276,10 +307,10 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
         })
     }
 
-    fn list_participant_identities<'a>(
+    fn room_occupancy<'a>(
         &'a self,
         room: &'a CallId,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Identity>, SfuError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<RoomOccupancy, SfuError>> + Send + 'a>> {
         let body = ListParticipantsRequest {
             room: room.as_str().to_string(),
         };
@@ -289,21 +320,22 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
                 .await?;
             // `None` => room not found on LiveKit => nobody connected.
             let Some(resp) = resp else {
-                return Ok(Vec::new());
+                return Ok(RoomOccupancy::default());
             };
             // LiveKit identities are the stringified FullJids we minted
             // into the JWT `sub`. Parse each back into a typed
-            // [`Identity`]; silently skip any that don't round-trip (a
-            // foreign participant or a malformed identity is simply not
-            // one of our registry entries, so it can't be a ghost we
-            // own).
-            let identities = resp
-                .participants
-                .into_iter()
-                .filter_map(|p| p.identity.parse::<jid::FullJid>().ok())
-                .map(Identity::from_jid)
-                .collect();
-            Ok(identities)
+            // [`Identity`]; anything that does not round-trip is a
+            // participant we did not issue (egress recorder, SIP,
+            // ingress). It can never be a ghost of ours, but it IS
+            // occupancy — count it rather than dropping it.
+            let mut occupancy = RoomOccupancy::default();
+            for participant in resp.participants {
+                match participant.identity.parse::<jid::FullJid>() {
+                    Ok(jid) => occupancy.waddle.push(Identity::from_jid(jid)),
+                    Err(_) => occupancy.foreign += 1,
+                }
+            }
+            Ok(occupancy)
         })
     }
 }

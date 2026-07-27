@@ -1,6 +1,6 @@
 use super::*;
 
-fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> bool {
+pub(super) fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> bool {
     use waddle_xmpp::protocol::OutboundEvent;
     use waddle_xmpp::Stanza;
     events.iter().any(|event| {
@@ -131,7 +131,14 @@ pub(super) async fn handle_sans_io_iq(
         // child — 1:1 Jingle traffic passes through untouched.
         let mut media_capabilities = None;
         if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
-            match super::jingle_muji_gate::verify_muji_jingle_request(state, full_jid, iq).await {
+            match super::jingle_muji_gate::verify_muji_jingle_request(
+                state,
+                full_jid,
+                iq,
+                super::jingle_muji_gate::GateInvocation::ClientOrigin,
+            )
+            .await
+            {
                 super::jingle_muji_gate::GateOutcome::Allow {
                     media_capabilities: gate_capabilities,
                 } => {
@@ -152,20 +159,27 @@ pub(super) async fn handle_sans_io_iq(
                 super::jingle_muji_gate::GateOutcome::RoomNotLocal { room_jid } => {
                     // #1445: no room actor in this process. On a
                     // clustered deployment the room may be alive on the
-                    // claim-owning node — relay the session-initiate
-                    // there instead of denying a join for a room that
-                    // exists.
+                    // claim-owning node — relay the Muji IQ there
+                    // instead of answering for a room that exists
+                    // elsewhere.
                     let reply = IqReplyAddressing {
                         id,
                         response_from,
                         response_to,
                     };
-                    return Some(
-                        relay_muji_initiate_or_deny(
-                            state, conn_state, full_jid, iq, &room_jid, reply,
-                        )
-                        .await,
-                    );
+                    match relay_muji_to_room_owner(
+                        state, conn_state, full_jid, iq, &room_jid, reply,
+                    )
+                    .await
+                    {
+                        MujiRelayOutcome::Frames(frames) => return Some(frames),
+                        // Terminate could not be relayed. Fall through
+                        // to local dispatch, which is what this path
+                        // did before the relay existed: unregistering
+                        // is idempotent, so a local no-op is strictly
+                        // better than failing the client's hangup.
+                        MujiRelayOutcome::ProcessLocally => {}
+                    }
                 }
             }
         }
@@ -216,31 +230,73 @@ pub(super) async fn handle_sans_io_iq(
     None
 }
 
-/// Resolve a Muji `session-initiate` whose room has no local actor
-/// (#1445): relay it to the room's claim-owning node over the ordered
-/// MUC proxy — the owner runs the gate + mint where the occupancy
-/// lives, and its replies (the IQ ack and the server-initiated
-/// `session-accept` carrying the LiveKit token) ride back on the relay
-/// ACK to be written to this socket. Outcome mapping:
-/// - `Delivered` → the owner's reply frames, verbatim.
-/// - `RoomUnclaimed` → no node owns the room, so it genuinely does not
-///   exist: the terminal `room_not_found` denial (same wire shape and
-///   telemetry as ever).
-/// - everything else (claim unavailable, origin unavailable, relay
-///   dropped/maybe-committed, claim-says-local race) → a `type='wait'`
-///   internal-server-error so the client retries; a duplicate mint on
-///   retry is harmless (set-insert registration, superseding token).
+/// What the caller should do after a relay attempt.
 #[cfg(feature = "clustering")]
-async fn relay_muji_initiate_or_deny(
+enum MujiRelayOutcome {
+    /// Terminal: send these frames to the client.
+    Frames(Vec<String>),
+    /// Non-terminal: handle the IQ on this node after all. Only ever
+    /// returned for `session-terminate`, whose local execution is an
+    /// idempotent no-op and therefore a better answer than an error.
+    ProcessLocally,
+}
+
+/// Resolve a Muji IQ whose room has no local actor (#1445): relay it
+/// to the room's claim-owning node over the ordered MUC proxy — the
+/// owner runs the gate, mint, and registry mutation where the
+/// occupancy lives, and its replies (for an initiate: the IQ ack and
+/// the server-initiated `session-accept` carrying the LiveKit token)
+/// ride back on the relay ACK to be written to this socket.
+///
+/// `session-terminate` is relayed too, and must be: since an initiate
+/// registers the participant on the OWNER, a terminate executed here
+/// would clear nothing there, leaving a phantom in-call participant
+/// that also suppresses `DeleteRoom` for everyone else in the room.
+/// When a terminate cannot be relayed it degrades to local execution
+/// rather than an error.
+///
+/// Outcome mapping for an initiate:
+/// - `Delivered` with frames → the owner's reply frames, verbatim.
+/// - `RoomUnclaimed` and `LocalRoom` → terminal `room_not_found`
+///   denial. `LocalRoom` belongs here, not in the retry bucket: it
+///   means the claim store says THIS node owns the room while the gate
+///   found no local actor, so the room has no occupants and no retry
+///   can change that — the same conclusion the owner-side executor
+///   reaches. Retrying would loop forever against a stale claim row.
+/// - everything else (claim unavailable, origin unavailable, relay
+///   dropped/maybe-committed, or a `Delivered` carrying no frames) → a
+///   `type='wait'` internal-server-error so the client retries; a
+///   duplicate mint on retry is harmless (set-insert registration,
+///   superseding token).
+///
+/// Every terminal arm records call-setup telemetry — `deny` through
+/// [`deny_room_not_found`], `retry_later` explicitly — because a relay
+/// failure is a complete, client-visible call-setup attempt. Leaving
+/// it uncounted would hide exactly the cross-node failure class #1445
+/// exists to fix (#1452).
+#[cfg(feature = "clustering")]
+async fn relay_muji_to_room_owner(
     state: &WebSocketState,
     conn_state: &IqConnState<'_>,
     full_jid: &FullJid,
     iq: &xmpp_parsers::iq::Iq,
     room_jid: &jid::BareJid,
     reply: IqReplyAddressing<'_>,
-) -> Vec<String> {
+) -> MujiRelayOutcome {
     use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
     use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+
+    // A terminate that cannot be relayed falls back to this node
+    // instead of erroring; an initiate that cannot be relayed is a
+    // real failure the client must see.
+    let is_terminate = super::jingle_muji_gate::muji_session_terminate_room(iq).is_some();
+    let unrelayable = |frames: Vec<String>| {
+        if is_terminate {
+            MujiRelayOutcome::ProcessLocally
+        } else {
+            MujiRelayOutcome::Frames(frames)
+        }
+    };
 
     let deny = || {
         vec![build_iq_error_xml_typed(
@@ -251,6 +307,14 @@ async fn relay_muji_initiate_or_deny(
         )]
     };
     let retry_later = || {
+        waddle_xmpp::telemetry::call::record_call_setup_rejected(
+            waddle_xmpp::telemetry::attributes::CallSetupFailureReason::MembershipCheckFailed,
+        );
+        super::super::super::call_signaling_telemetry::record_sfu_token_denial(
+            room_jid,
+            &full_jid.to_bare(),
+            waddle_xmpp::telemetry::attributes::SfuDenialReason::InternalError,
+        );
         vec![build_iq_error_xml_typed(
             reply.id,
             reply.response_from,
@@ -262,6 +326,27 @@ async fn relay_muji_initiate_or_deny(
         )]
     };
 
+    // The relay's envelope validation requires a bare `to` naming the
+    // calls mixer; anything else is NACKed as a parse failure by the
+    // receiver, which diverts the shared ordered channel and would
+    // silently break this sender's ordinary MUC traffic for the room.
+    // A client controls `to`, so reject the shape here rather than
+    // letting a malformed (or hostile) one reach the relay at all.
+    // Same for a room outside this server's MUC domain: it can have no
+    // local claim, so relaying it only buys a claim-store lookup.
+    let addressed_to_mixer = iq.to().is_some_and(|to| {
+        to.resource().is_none()
+            && to.to_bare()
+                == waddle_xmpp::protocol::handlers::jingle::calls_mixer_jid(
+                    state.deps.auth_state.xmpp_domain.as_str(),
+                )
+    });
+    let room_is_local =
+        room_jid.domain().as_str() == format!("muc.{}", state.deps.auth_state.xmpp_domain.as_str());
+    if !addressed_to_mixer || !room_is_local {
+        return unrelayable(deny());
+    }
+
     let bridge = state
         .deps
         .app_state
@@ -271,7 +356,7 @@ async fn relay_muji_initiate_or_deny(
     let (Some(bridge), Some(origin)) = (bridge, conn_state.ordered_relay_origin.as_ref()) else {
         // No relay substrate (clustering disabled at runtime): local
         // absence is definitive, exactly the pre-#1445 semantics.
-        return deny();
+        return unrelayable(deny());
     };
     // Stamp the authenticated full JID as `from` before relaying:
     // clients legitimately omit `from` (the server derives the sender
@@ -297,22 +382,34 @@ async fn relay_muji_initiate_or_deny(
         )
         .await
     {
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(replies)) => {
-            replies
-                .iter()
-                .map(crate::server::routes::websocket::transport_xml::stanza_to_xml)
-                .collect()
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(replies))
+            if !replies.is_empty() =>
+        {
+            MujiRelayOutcome::Frames(
+                replies
+                    .iter()
+                    .map(crate::server::routes::websocket::transport_xml::stanza_to_xml)
+                    .collect(),
+            )
         }
-        MucProxyRouteDecision::RoomUnclaimed => deny(),
+        // A `Delivered` carrying no frames (e.g. `QueuedDetached`)
+        // would otherwise return `Some(vec![])`, which the caller
+        // treats as terminal — the client's IQ would get no result and
+        // no error, and the call would silently never start.
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
+            unrelayable(retry_later())
+        }
+        MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
+            unrelayable(deny())
+        }
         MucProxyRouteDecision::Attempted(
             OrderedRelayMucProxyOutcome::Unavailable
             | OrderedRelayMucProxyOutcome::Dropped
             | OrderedRelayMucProxyOutcome::MaybeCommitted
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
         )
-        | MucProxyRouteDecision::LocalRoom
         | MucProxyRouteDecision::RoomClaimUnavailable
-        | MucProxyRouteDecision::OriginUnavailable => retry_later(),
+        | MucProxyRouteDecision::OriginUnavailable => unrelayable(retry_later()),
     }
 }
 
@@ -320,20 +417,29 @@ async fn relay_muji_initiate_or_deny(
 /// room, so local absence is definitive — the terminal denial,
 /// byte-identical to the pre-#1445 wire behavior.
 #[cfg(not(feature = "clustering"))]
-async fn relay_muji_initiate_or_deny(
+enum MujiRelayOutcome {
+    Frames(Vec<String>),
+    ProcessLocally,
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn relay_muji_to_room_owner(
     _state: &WebSocketState,
     _conn_state: &IqConnState<'_>,
     full_jid: &FullJid,
-    _iq: &xmpp_parsers::iq::Iq,
+    iq: &xmpp_parsers::iq::Iq,
     room_jid: &jid::BareJid,
     reply: IqReplyAddressing<'_>,
-) -> Vec<String> {
-    vec![build_iq_error_xml_typed(
+) -> MujiRelayOutcome {
+    if super::jingle_muji_gate::muji_session_terminate_room(iq).is_some() {
+        return MujiRelayOutcome::ProcessLocally;
+    }
+    MujiRelayOutcome::Frames(vec![build_iq_error_xml_typed(
         reply.id,
         reply.response_from,
         reply.response_to,
         *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
-    )]
+    )])
 }
 
 /// The (id, from, to) triple every IQ error reply is stamped with —

@@ -536,6 +536,27 @@ impl JingleHandler {
         }
 
         if jingle.action == Action::SessionInitiate {
+            // Same rate limit as 1:1 session-initiate, and for the
+            // same reason: a Muji initiate mints a JWT and grows the
+            // SFU registry. It costs strictly more than the 1:1 case
+            // since #1445 — an initiate for a room this replica does
+            // not own also buys a claim-store lookup and a cross-node
+            // relay — so the unlimited Muji branch would be the
+            // cheapest amplification primitive in the call path.
+            let initiator_bare = ctx.full_jid.to_bare();
+            if let Err(exceeded) = self.rate_limit.check_and_record(&initiator_bare) {
+                tracing::warn!(
+                    jid = %initiator_bare,
+                    %exceeded,
+                    "rate-limit dropped Muji session-initiate"
+                );
+                attempt.failed(CallSetupFailureReason::RateLimited);
+                return error_reply(
+                    iq,
+                    DefinedCondition::PolicyViolation,
+                    "session-initiate rate limit exceeded",
+                );
+            }
             // XEP-0166 §7.1 spoofing defense: when present on
             // session-initiate, `initiator` must match the
             // authenticated session. Non-initiate actions should not

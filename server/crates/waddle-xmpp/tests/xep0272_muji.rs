@@ -692,20 +692,20 @@ impl waddle_sfu::LiveKitAdmin for RecordingAdmin {
         Box::pin(async move { Ok(()) })
     }
 
-    fn list_participant_identities<'a>(
+    fn room_occupancy<'a>(
         &'a self,
         _room: &'a waddle_sfu::CallId,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<Vec<waddle_sfu::Identity>, waddle_sfu::SfuError>,
+                    Output = Result<waddle_sfu::RoomOccupancy, waddle_sfu::SfuError>,
                 > + Send
                 + 'a,
         >,
     > {
         // These Muji teardown tests don't exercise the reconciliation
-        // backstop; report no live participants.
-        Box::pin(async move { Ok(Vec::new()) })
+        // backstop; report an empty room.
+        Box::pin(async move { Ok(waddle_sfu::RoomOccupancy::default()) })
     }
 }
 
@@ -961,5 +961,44 @@ fn muji_initiate_without_gate_capabilities_is_refused() {
     assert!(
         session_accept_payload_to(&events, TEST_INITIATOR).is_none(),
         "no session-accept (and therefore no token) may be issued: {events:?}",
+    );
+}
+
+// ── #1445: cross-replica routing of Muji signalling ──────────────────
+
+/// The per-JID `session-initiate` rate limit must cover the Muji
+/// branch, not just 1:1 Jingle. Before #1445 the Muji branch returned
+/// before the limiter ran, so an unlimited stream of Muji initiates
+/// could mint JWTs and grow the SFU registry — and since #1445 each
+/// one also costs a claim-store lookup and, for a foreign-owned room,
+/// a cross-node relay.
+#[test]
+fn muji_session_initiate_is_rate_limited_per_bare_jid() {
+    let jid = test_full_jid();
+    let handler = JingleHandler::new(fixture_sfu());
+    let mixer = calls_mixer_jid(TEST_DOMAIN).to_string();
+
+    // The limiter's default budget is 5 initiates per 30s; the sixth
+    // in the same window must be rejected.
+    let mut conditions = Vec::new();
+    for attempt in 0..7 {
+        let iq = muji_session_initiate_iq(
+            TEST_INITIATOR,
+            &mixer,
+            "room@muc.waddle.test",
+            &format!("muji-rate-{attempt}"),
+        );
+        let events = handler.handle(&iq, &ctx(&jid));
+        conditions.push(first_error_condition(&events));
+    }
+
+    assert!(
+        conditions.contains(&Some(DefinedCondition::PolicyViolation)),
+        "a sustained Muji session-initiate burst must hit the rate limit: {conditions:?}",
+    );
+    assert!(
+        conditions[0].is_none(),
+        "the first initiate in the window must still succeed: {:?}",
+        conditions[0],
     );
 }

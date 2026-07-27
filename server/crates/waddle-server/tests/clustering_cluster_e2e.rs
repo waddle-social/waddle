@@ -2410,6 +2410,27 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
         "the relayed mint must produce a token-bearing session-accept: {replies:?}"
     );
 
+    // Cross-node teardown (#1445): the terminate must reach the SAME
+    // node the initiate registered on, or the owner keeps a phantom
+    // in-call participant — which additionally suppresses DeleteRoom
+    // for every other occupant. Here we assert only that the relayed
+    // terminate is accepted rather than erroring; the owner-side
+    // registry effect is pinned deterministically by
+    // `jingle_muji_relay`'s unit tests, which can observe the SFU
+    // registry directly instead of inferring it from the wire.
+    client_b
+        .send(&String::from(&muji_terminate_iq(&room, "cross-node-1")))
+        .await
+        .expect("client B sends Muji session-terminate against node B");
+    let terminate_reply = client_b
+        .recv_matching(|frame| frame.contains("mjt-cross-node-1"))
+        .await
+        .expect("the relayed terminate is answered");
+    assert!(
+        !terminate_reply.contains("<error"),
+        "a cross-node hangup must never fail: {terminate_reply}"
+    );
+
     // Negative control: a room with NO claim anywhere is genuinely
     // nonexistent — the terminal room_not_found denial survives.
     let ghost = format!("muji-ghost-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
@@ -2430,6 +2451,40 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
     drop(server_a);
     drop(server_b);
     drop(client_a);
+}
+
+/// Muji `session-terminate` IQ for `room` — the hangup counterpart of
+/// [`muji_initiate_iq`]. XEP-0272 requires only the `<muji room='…'/>`
+/// marker on terminate, no contents.
+fn muji_terminate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
+    use waddle_xmpp::xep::xep0166::NS_JINGLE;
+    use waddle_xmpp::xep::xep0272::NS_MUJI;
+    use xmpp_parsers::minidom::Element;
+
+    let jingle = Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-terminate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .attr(minidom::rxml::xml_ncname!("room").to_owned(), room)
+                .build(),
+        )
+        .build();
+    Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            format!("mjt-{sid}"),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "calls.localhost",
+        )
+        .append(jingle)
+        .build()
 }
 
 /// Muji `session-initiate` IQ for `room`, built with minidom builders

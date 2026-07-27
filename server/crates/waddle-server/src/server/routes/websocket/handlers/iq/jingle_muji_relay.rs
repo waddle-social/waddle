@@ -15,7 +15,8 @@
 use super::super::super::interpret_loop::build_interpret_deps;
 use super::super::super::transport_xml::build_iq_error_xml_typed;
 use super::super::super::WebSocketState;
-use super::jingle_muji_gate::{self, GateOutcome};
+use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
+use super::sans_io::events_contain_iq_error;
 use super::ProtocolStanzaContext;
 
 /// Execute a relayed Muji `session-initiate` on the room-owning node.
@@ -35,17 +36,36 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let response_from = iq.to().map(|to| to.to_string());
     let response_to = jid::Jid::from(sender.clone()).to_string();
 
-    match jingle_muji_gate::verify_muji_jingle_request(state, &sender, iq).await {
+    match jingle_muji_gate::verify_muji_jingle_request(
+        state,
+        &sender,
+        iq,
+        GateInvocation::RelayedReplay,
+    )
+    .await
+    {
         GateOutcome::Allow { media_capabilities } => {
             let ctx = ProtocolStanzaContext {
                 domain: state.deps.auth_state.xmpp_domain.as_str(),
                 full_jid: &sender,
                 media_capabilities,
             };
+            let muji_terminate_room = jingle_muji_gate::muji_session_terminate_room(iq);
             let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
+            let clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
             let session = synthetic_session(&sender);
             let deps = build_interpret_deps(state, Some(&session));
             let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
+            // Mirror the local adapter's post-terminate Muji-presence
+            // clear. It has to run HERE, on the owner, because that is
+            // where the room actor and the SFU registration both live
+            // — running it on the client's replica would find neither.
+            if let Some(room_jid) = clear_after {
+                crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
+                    state, &room_jid, &sender,
+                )
+                .await;
+            }
             Some(outcome.frames)
         }
         GateOutcome::Deny(error) => Some(vec![build_iq_error_xml_typed(
@@ -191,6 +211,69 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("session-accept") && f.contains("<token")),
             "the focus session-accept with an issued token must be among the replies: {frames:?}"
+        );
+    }
+
+    fn muji_terminate_iq(from: &str, room: &str) -> Iq {
+        let jingle = Jingle::new(Action::SessionTerminate, SessionId("relay-sid".into()));
+        let mut elem: xmpp_parsers::minidom::Element = jingle.into();
+        elem.append_child(
+            Muji {
+                room: Some(room.parse().expect("valid room jid")),
+                preparing: false,
+                contents: vec![],
+            }
+            .to_element(),
+        );
+        Iq::Set {
+            from: Some(from.parse().expect("valid from jid")),
+            to: Some("calls.example.com".parse().expect("valid mixer jid")),
+            id: "relay-term-1".into(),
+            payload: elem,
+        }
+    }
+
+    /// #1445: an initiate registers the participant on the ROOM OWNER,
+    /// so the matching terminate has to unregister on that same node.
+    /// Executing it on the client's own replica would clear nothing
+    /// here, leaving a phantom in-call participant that also keeps the
+    /// call non-empty and so suppresses `DeleteRoom` for everyone
+    /// else. Asserted against the owner's SFU registry directly.
+    #[tokio::test]
+    async fn relayed_terminate_unregisters_on_the_owner() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        create_room_and_join(&state, &room, "alice", &alice).await;
+        let sfu = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("the calls fixture wires an SFU");
+        let call = waddle_sfu::CallId::new(room.to_string()).expect("room JID is a valid call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+
+        handle_relayed_muji_initiate(
+            &state,
+            &muji_initiate_iq(Some("alice@example.com/web"), "general@muc.example.com"),
+        )
+        .await
+        .expect("relayed initiate executes");
+        assert!(
+            sfu.has_call_participant(&call, &identity),
+            "the relayed initiate must register the participant on this node"
+        );
+
+        handle_relayed_muji_initiate(
+            &state,
+            &muji_terminate_iq("alice@example.com/web", "general@muc.example.com"),
+        )
+        .await
+        .expect("relayed terminate executes");
+        assert!(
+            !sfu.has_call_participant(&call, &identity),
+            "the relayed terminate must unregister on the node holding the registration"
         );
     }
 

@@ -1027,7 +1027,13 @@ fn muji_iq_targets_room(room_jid: &jid::BareJid, iq: &xmpp_parsers::iq::Iq) -> b
     if payload.ns() != waddle_xmpp::xep::xep0166::NS_JINGLE || payload.name() != "jingle" {
         return false;
     }
-    if payload.attr("action") != Some("session-initiate") {
+    // Only the two actions with node-local side effects ride this
+    // kind: `session-initiate` mints and registers on the owner, and
+    // `session-terminate` must unregister on that same owner.
+    if !matches!(
+        payload.attr("action"),
+        Some("session-initiate") | Some("session-terminate")
+    ) {
         return false;
     }
     let Some(muji_elem) = waddle_xmpp::xep::xep0272::find_muji(payload) else {
@@ -1925,8 +1931,13 @@ mod tests {
         );
     }
 
+    /// `session-terminate` rides the same kind as `session-initiate`
+    /// (#1445): the initiate registers the participant on the room
+    /// owner, so the terminate must reach that same node to unregister
+    /// them — a locally-executed terminate would leave a phantom
+    /// in-call participant there.
     #[test]
-    fn muji_jingle_iq_validation_rejects_non_initiate_and_non_muji_iqs() {
+    fn muji_jingle_iq_validation_accepts_terminate_for_the_channel_room() {
         let mut receiver = OrderedRelayReceiverState::default();
         assert!(
             matches!(
@@ -1940,12 +1951,54 @@ mod tests {
                         ),
                     ),
                 ),
+                OrderedRelayReply::Ack(OrderedRelayAck { .. })
+            ),
+            "a terminate for the channel's room must relay to the owner"
+        );
+
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(
+                        OrderedRelayMucProxyKind::MujiJingleIq,
+                        muji_initiate_stanza(
+                            xmpp_parsers::jingle::Action::SessionTerminate,
+                            "other-room@example.test"
+                        ),
+                    ),
+                ),
                 OrderedRelayReply::Nack(OrderedRelayNack {
                     reason: OrderedRelayNackReason::ParseFailure,
                     ..
                 })
             ),
-            "only session-initiate is relayed; terminate stays local"
+            "the payload room must stay bound to the channel room on terminate"
+        );
+    }
+
+    #[test]
+    fn muji_jingle_iq_validation_rejects_other_actions_and_non_muji_iqs() {
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receive(
+                    &mut receiver,
+                    muji_envelope(
+                        OrderedRelayMucProxyKind::MujiJingleIq,
+                        muji_initiate_stanza(
+                            xmpp_parsers::jingle::Action::SessionInfo,
+                            "room@example.test"
+                        ),
+                    ),
+                ),
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::ParseFailure,
+                    ..
+                })
+            ),
+            "only initiate and terminate have owner-node side effects"
         );
 
         let plain_jingle = {

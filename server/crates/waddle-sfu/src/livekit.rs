@@ -398,7 +398,7 @@ impl LiveKitSfu {
                 // session, so only proceed when the call is *still*
                 // empty in our local view.
                 if calls.get(&call_id).is_none() {
-                    delete_room_if_livekit_empty(admin.as_ref(), &call_id, &identity).await;
+                    delete_room_if_livekit_empty(admin.as_ref(), &calls, &call_id, &identity).await;
                 }
             }
         });
@@ -606,8 +606,11 @@ impl LiveKitSfu {
 
         let mut swept = Vec::new();
         for (call_id, registered) in snapshot {
-            let live = match self.admin.list_participant_identities(&call_id).await {
-                Ok(live) => live,
+            // Ghost detection reasons only about participants we
+            // minted; a foreign participant (recorder, SIP) is by
+            // definition not one of our registry entries.
+            let live = match self.admin.room_occupancy(&call_id).await {
+                Ok(occupancy) => occupancy.waddle,
                 Err(err) => {
                     tracing::warn!(
                         call_id = %call_id,
@@ -689,8 +692,8 @@ impl LiveKitSfu {
 impl crate::SfuReconciler for LiveKitSfu {
     fn live_participants<'a>(&'a self, call_id: &'a CallId) -> crate::LiveParticipantsFuture<'a> {
         Box::pin(async move {
-            match self.admin.list_participant_identities(call_id).await {
-                Ok(identities) => Some(identities),
+            match self.admin.room_occupancy(call_id).await {
+                Ok(occupancy) => Some(occupancy.waddle),
                 Err(error) => {
                     // `None`, never an empty vec: an outage must not be
                     // mistaken for "nobody is connected", which would
@@ -900,39 +903,57 @@ impl SfuService for LiveKitSfu {
 /// own `empty_timeout`.
 ///
 /// Known residual race, accepted: a joiner whose token was minted on
-/// another replica but who has not yet connected is invisible to this
-/// probe. LiveKit auto-creates rooms on join, so an over-eager delete
-/// is disruptive but self-healing; closing it needs the durable
-/// generation-keyed registry tracked in #1449.
+/// another replica but who has not yet connected is invisible to both
+/// this probe and the local registry. LiveKit auto-creates rooms on
+/// join, so an over-eager delete is disruptive but self-healing;
+/// closing it needs the durable generation-keyed registry tracked in
+/// #1449.
 async fn delete_room_if_livekit_empty(
     admin: &dyn LiveKitAdmin,
+    calls: &CallRegistry,
     call_id: &CallId,
     departing: &Identity,
 ) {
-    match admin.list_participant_identities(call_id).await {
-        Ok(live) if live.iter().all(|p| p == departing) => {
-            if let Err(err) = admin.delete_room(call_id).await {
-                tracing::warn!(
-                    call_id = %call_id,
-                    error = %err,
-                    "LiveKit DeleteRoom failed; empty room will linger until empty_timeout"
-                );
-            }
-        }
-        Ok(live) => {
-            tracing::info!(
-                call_id = %call_id,
-                live_participants = live.len(),
-                "DeleteRoom skipped; LiveKit reports live participants (another replica's registrations)"
-            );
-        }
+    let occupancy = match admin.room_occupancy(call_id).await {
+        Ok(occupancy) => occupancy,
         Err(err) => {
             tracing::warn!(
                 call_id = %call_id,
                 error = %err,
                 "DeleteRoom skipped; LiveKit occupancy could not be confirmed"
             );
+            return;
         }
+    };
+    if !occupancy.is_empty_except(departing) {
+        tracing::info!(
+            call_id = %call_id,
+            waddle_participants = occupancy.waddle.len(),
+            foreign_participants = occupancy.foreign,
+            "DeleteRoom skipped; LiveKit reports live participants \
+             (another replica's registrations, or an egress/SIP participant)"
+        );
+        return;
+    }
+    // Re-check the local registry AFTER the probe, not just before it
+    // (#1129 rejoin race): the round-trip above is a second window in
+    // which a fresh participant can register locally, and the
+    // already-taken LiveKit snapshot cannot see them because they have
+    // not connected yet. Deleting here would evict that session.
+    if calls.get(call_id).is_some() {
+        tracing::info!(
+            call_id = %call_id,
+            "DeleteRoom skipped; a participant registered locally while \
+             LiveKit occupancy was being confirmed"
+        );
+        return;
+    }
+    if let Err(err) = admin.delete_room(call_id).await {
+        tracing::warn!(
+            call_id = %call_id,
+            error = %err,
+            "LiveKit DeleteRoom failed; empty room will linger until empty_timeout"
+        );
     }
 }
 
