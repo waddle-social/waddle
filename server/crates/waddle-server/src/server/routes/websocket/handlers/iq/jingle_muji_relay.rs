@@ -1,0 +1,253 @@
+//! Owner-side executor for a Muji `session-initiate` relayed from the
+//! replica that received it (#1445).
+//!
+//! The producing replica had no local room actor, so it relayed the IQ
+//! over the ordered MUC proxy to the node holding the room's claim —
+//! this node. Here the membership gate re-runs against the local room
+//! actor (which holds the occupancy), the LiveKit token is minted with
+//! gate-derived capabilities, and the SFU participant is registered in
+//! THIS process's registry — consolidating call state on the room
+//! owner. The returned frames (the empty IQ ack and the
+//! server-initiated `session-accept` carrying the token) ride back to
+//! the origin node on the relay ACK and are written to the client's
+//! socket there.
+
+use super::super::super::interpret_loop::build_interpret_deps;
+use super::super::super::transport_xml::build_iq_error_xml_typed;
+use super::super::super::WebSocketState;
+use super::jingle_muji_gate::{self, GateOutcome};
+use super::ProtocolStanzaContext;
+
+/// Execute a relayed Muji `session-initiate` on the room-owning node.
+///
+/// Returns `None` only on a wire-shape failure (the IQ carries no full
+/// sender JID) — the caller NACKs the envelope as a parse failure.
+/// Every authorization outcome, including a denial, is `Some(frames)`:
+/// a delivered IQ-error is the correct reply for the client, not a
+/// relay failure, and returning it as frames prevents any re-relay
+/// loop — this executor is terminal.
+pub(crate) async fn handle_relayed_muji_initiate(
+    state: &WebSocketState,
+    iq: &xmpp_parsers::iq::Iq,
+) -> Option<Vec<String>> {
+    let sender = iq.from()?.clone().try_into_full().ok()?;
+    let id = iq.id();
+    let response_from = iq.to().map(|to| to.to_string());
+    let response_to = jid::Jid::from(sender.clone()).to_string();
+
+    match jingle_muji_gate::verify_muji_jingle_request(state, &sender, iq).await {
+        GateOutcome::Allow { media_capabilities } => {
+            let ctx = ProtocolStanzaContext {
+                domain: state.deps.auth_state.xmpp_domain.as_str(),
+                full_jid: &sender,
+                media_capabilities,
+            };
+            let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
+            let session = synthetic_session(&sender);
+            let deps = build_interpret_deps(state, Some(&session));
+            let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
+            Some(outcome.frames)
+        }
+        GateOutcome::Deny(error) => Some(vec![build_iq_error_xml_typed(
+            id,
+            response_from.as_deref(),
+            Some(response_to.as_str()),
+            *error,
+        )]),
+        GateOutcome::RoomNotLocal { room_jid } => {
+            // We hold (or held) the room's claim yet no actor lives
+            // here: every occupant has left and the actor is gone, or
+            // ownership moved after the producer's claim read. Either
+            // way the requester is not an occupant of a live local
+            // room — the terminal denial, never a re-relay.
+            let error = jingle_muji_gate::deny_room_not_found(&room_jid, &sender.to_bare());
+            Some(vec![build_iq_error_xml_typed(
+                id,
+                response_from.as_deref(),
+                Some(response_to.as_str()),
+                *error,
+            )])
+        }
+    }
+}
+
+/// Minimal synthetic session for interpret-side owner checks, same
+/// shape the other reserved MUC-proxy deliveries use.
+fn synthetic_session(sender: &jid::FullJid) -> crate::auth::Session {
+    let bare = sender.to_bare();
+    let localpart = bare
+        .node()
+        .map(|node| node.to_string())
+        .unwrap_or_else(|| bare.to_string());
+    crate::auth::Session::new(
+        bare.to_string().as_str(),
+        localpart.as_str(),
+        localpart.as_str(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_calls;
+    use jid::{BareJid, FullJid};
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::CreateInstantRoom;
+    use waddle_xmpp::xep::xep0167::MediaKind;
+    use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+    use waddle_xmpp_core::{Affiliation, Role};
+    use xmpp_parsers::iq::Iq;
+    use xmpp_parsers::jingle::{
+        Action, Content, ContentId, Creator as JingleCreator, Jingle, SessionId,
+    };
+
+    fn muji_initiate_iq(from: Option<&str>, room: &str) -> Iq {
+        let mut content = Content::new(JingleCreator::Initiator, ContentId("audio".into()));
+        content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+            waddle_xmpp::xep::xep0167::opus_audio_description(),
+        ));
+        content.transport = Some(xmpp_parsers::jingle::Transport::Unknown(
+            waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::Request
+                .to_element(),
+        ));
+        // No `initiator` attribute: XEP-0166 §7.1 makes it optional
+        // and the handler resolves an omitted value to the
+        // authenticated session (a present value must equal the FULL
+        // sender JID, which varies per test case here).
+        let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("relay-sid".into()));
+        jingle.contents.push(content);
+        let mut elem: xmpp_parsers::minidom::Element = jingle.into();
+        elem.append_child(
+            Muji {
+                room: Some(room.parse().expect("valid room jid")),
+                preparing: false,
+                contents: vec![MujiContent::new(
+                    "audio",
+                    Creator::Initiator,
+                    MediaKind::Audio,
+                )],
+            }
+            .to_element(),
+        );
+        Iq::Set {
+            from: from.map(|f| f.parse().expect("valid from jid")),
+            to: Some("calls.example.com".parse().expect("valid mixer jid")),
+            id: "relay-1".into(),
+            payload: elem,
+        }
+    }
+
+    async fn create_room_and_join(
+        state: &crate::server::routes::websocket::WebSocketState,
+        room: &BareJid,
+        nick: &str,
+        jid: &FullJid,
+    ) {
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateInstantRoom {
+                room_jid: room.clone(),
+            })
+            .await
+            .expect("create instant room")
+            .actor_ref;
+        actor
+            .ask(Join {
+                nick: nick.to_string(),
+                real_jid: jid.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+
+    /// The relayed mint on the owner: gate passes against the local
+    /// room actor and the reply frames carry the IQ ack plus the
+    /// focus's `session-accept` with an issued token — exactly what
+    /// rides back to the origin node as client replies.
+    #[tokio::test]
+    async fn occupant_relayed_initiate_mints_and_returns_ack_and_accept() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        create_room_and_join(&state, &room, "alice", &alice).await;
+
+        let iq = muji_initiate_iq(Some("alice@example.com/web"), "general@muc.example.com");
+        let frames = handle_relayed_muji_initiate(&state, &iq)
+            .await
+            .expect("well-formed relayed IQ executes");
+
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.contains("type='result'") || f.contains("type=\"result\"")),
+            "the IQ ack must be among the replies: {frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.contains("session-accept") && f.contains("<token")),
+            "the focus session-accept with an issued token must be among the replies: {frames:?}"
+        );
+    }
+
+    /// A non-occupant relayed to the owner is denied as a delivered
+    /// IQ-error frame — never a relay NACK, so no re-relay loop.
+    #[tokio::test]
+    async fn non_occupant_relayed_initiate_returns_forbidden_frame() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        create_room_and_join(&state, &room, "alice", &alice).await;
+
+        let iq = muji_initiate_iq(
+            Some("mallory@example.com/laptop"),
+            "general@muc.example.com",
+        );
+        let frames = handle_relayed_muji_initiate(&state, &iq)
+            .await
+            .expect("a denial is a delivered reply, not a shape failure");
+
+        assert_eq!(frames.len(), 1, "exactly the IQ error: {frames:?}");
+        assert!(
+            frames[0].contains("<forbidden") && frames[0].contains("relay-1"),
+            "denial must be the forbidden IQ error for the original id: {}",
+            frames[0]
+        );
+    }
+
+    /// Ownership moved (or the room died) after the producer's claim
+    /// read: no local actor here either. Terminal denial, no re-relay.
+    #[tokio::test]
+    async fn missing_room_on_owner_returns_terminal_room_not_found_frame() {
+        let state = create_test_websocket_state_with_calls().await;
+
+        let iq = muji_initiate_iq(Some("alice@example.com/web"), "ghost@muc.example.com");
+        let frames = handle_relayed_muji_initiate(&state, &iq)
+            .await
+            .expect("terminal denial is a delivered reply");
+
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("<forbidden"), "{}", frames[0]);
+    }
+
+    /// No full sender JID is a wire-shape failure: the caller NACKs
+    /// the envelope instead of replying.
+    #[tokio::test]
+    async fn bare_or_missing_sender_is_a_shape_failure() {
+        let state = create_test_websocket_state_with_calls().await;
+
+        let no_from = muji_initiate_iq(None, "general@muc.example.com");
+        assert!(handle_relayed_muji_initiate(&state, &no_from)
+            .await
+            .is_none());
+
+        let bare_from = muji_initiate_iq(Some("alice@example.com"), "general@muc.example.com");
+        assert!(handle_relayed_muji_initiate(&state, &bare_from)
+            .await
+            .is_none());
+    }
+}

@@ -149,6 +149,24 @@ pub(super) async fn handle_sans_io_iq(
                         *stanza_error,
                     )]);
                 }
+                super::jingle_muji_gate::GateOutcome::RoomNotLocal { room_jid } => {
+                    // #1445: no room actor in this process. On a
+                    // clustered deployment the room may be alive on the
+                    // claim-owning node — relay the session-initiate
+                    // there instead of denying a join for a room that
+                    // exists.
+                    let reply = IqReplyAddressing {
+                        id,
+                        response_from,
+                        response_to,
+                    };
+                    return Some(
+                        relay_muji_initiate_or_deny(
+                            state, conn_state, full_jid, iq, &room_jid, reply,
+                        )
+                        .await,
+                    );
+                }
             }
         }
         let ctx = ProtocolStanzaContext {
@@ -196,6 +214,134 @@ pub(super) async fn handle_sans_io_iq(
         return Some(outcome.frames);
     }
     None
+}
+
+/// Resolve a Muji `session-initiate` whose room has no local actor
+/// (#1445): relay it to the room's claim-owning node over the ordered
+/// MUC proxy — the owner runs the gate + mint where the occupancy
+/// lives, and its replies (the IQ ack and the server-initiated
+/// `session-accept` carrying the LiveKit token) ride back on the relay
+/// ACK to be written to this socket. Outcome mapping:
+/// - `Delivered` → the owner's reply frames, verbatim.
+/// - `RoomUnclaimed` → no node owns the room, so it genuinely does not
+///   exist: the terminal `room_not_found` denial (same wire shape and
+///   telemetry as ever).
+/// - everything else (claim unavailable, origin unavailable, relay
+///   dropped/maybe-committed, claim-says-local race) → a `type='wait'`
+///   internal-server-error so the client retries; a duplicate mint on
+///   retry is harmless (set-insert registration, superseding token).
+#[cfg(feature = "clustering")]
+async fn relay_muji_initiate_or_deny(
+    state: &WebSocketState,
+    conn_state: &IqConnState<'_>,
+    full_jid: &FullJid,
+    iq: &xmpp_parsers::iq::Iq,
+    room_jid: &jid::BareJid,
+    reply: IqReplyAddressing<'_>,
+) -> Vec<String> {
+    use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+    use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+
+    let deny = || {
+        vec![build_iq_error_xml_typed(
+            reply.id,
+            reply.response_from,
+            reply.response_to,
+            *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
+        )]
+    };
+    let retry_later = || {
+        vec![build_iq_error_xml_typed(
+            reply.id,
+            reply.response_from,
+            reply.response_to,
+            internal_server_error_iq_error(
+                "the requested room is owned by another node and could not be reached; \
+                 please retry",
+            ),
+        )]
+    };
+
+    let bridge = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref();
+    let (Some(bridge), Some(origin)) = (bridge, conn_state.ordered_relay_origin.as_ref()) else {
+        // No relay substrate (clustering disabled at runtime): local
+        // absence is definitive, exactly the pre-#1445 semantics.
+        return deny();
+    };
+    // Stamp the authenticated full JID as `from` before relaying:
+    // clients legitimately omit `from` (the server derives the sender
+    // from the bound session), but the envelope's sender-claim
+    // validation and the owner-side executor both read the stanza's
+    // `from`. Unconditional overwrite — a client-supplied `from` is
+    // never trusted.
+    let mut relayed = iq.clone();
+    let stamped_from = Some(jid::Jid::from(full_jid.clone()));
+    match &mut relayed {
+        xmpp_parsers::iq::Iq::Get { from, .. }
+        | xmpp_parsers::iq::Iq::Set { from, .. }
+        | xmpp_parsers::iq::Iq::Result { from, .. }
+        | xmpp_parsers::iq::Iq::Error { from, .. } => *from = stamped_from,
+    }
+    let stanza = waddle_xmpp::Stanza::Iq(Box::new(relayed));
+    match bridge
+        .try_proxy_muc_remote_decision(
+            room_jid,
+            &stanza,
+            OrderedRelayMucProxyKind::MujiJingleIq,
+            origin,
+        )
+        .await
+    {
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(replies)) => {
+            replies
+                .iter()
+                .map(crate::server::routes::websocket::transport_xml::stanza_to_xml)
+                .collect()
+        }
+        MucProxyRouteDecision::RoomUnclaimed => deny(),
+        MucProxyRouteDecision::Attempted(
+            OrderedRelayMucProxyOutcome::Unavailable
+            | OrderedRelayMucProxyOutcome::Dropped
+            | OrderedRelayMucProxyOutcome::MaybeCommitted
+            | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+        )
+        | MucProxyRouteDecision::LocalRoom
+        | MucProxyRouteDecision::RoomClaimUnavailable
+        | MucProxyRouteDecision::OriginUnavailable => retry_later(),
+    }
+}
+
+/// Non-clustering builds have no other replica that could own the
+/// room, so local absence is definitive — the terminal denial,
+/// byte-identical to the pre-#1445 wire behavior.
+#[cfg(not(feature = "clustering"))]
+async fn relay_muji_initiate_or_deny(
+    _state: &WebSocketState,
+    _conn_state: &IqConnState<'_>,
+    full_jid: &FullJid,
+    _iq: &xmpp_parsers::iq::Iq,
+    room_jid: &jid::BareJid,
+    reply: IqReplyAddressing<'_>,
+) -> Vec<String> {
+    vec![build_iq_error_xml_typed(
+        reply.id,
+        reply.response_from,
+        reply.response_to,
+        *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
+    )]
+}
+
+/// The (id, from, to) triple every IQ error reply is stamped with —
+/// bundled so the relay helper's signature stays readable.
+struct IqReplyAddressing<'a> {
+    id: &'a str,
+    response_from: Option<&'a str>,
+    response_to: Option<&'a str>,
 }
 
 #[cfg(feature = "clustering")]

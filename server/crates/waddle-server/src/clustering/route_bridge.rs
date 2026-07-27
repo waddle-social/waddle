@@ -4203,8 +4203,44 @@ async fn deliver_reserved_muc_proxy(
         (OrderedRelayMucProxyKind::OccupantPresence, Stanza::Presence(presence)) => {
             deliver_reserved_muc_occupant_presence(state.as_ref(), room_jid, presence).await
         }
+        (OrderedRelayMucProxyKind::MujiJingleIq, Stanza::Iq(iq)) => {
+            deliver_reserved_muji_iq(state.as_ref(), room_jid, iq).await
+        }
         _ => Err(OrderedRelayNackReason::ParseFailure),
     }
+}
+
+/// #1445: execute a relayed Muji `session-initiate` on this node — the
+/// room-claim owner — and carry the reply frames (IQ ack +
+/// server-initiated `session-accept` with the LiveKit token) back to
+/// the origin node as client replies. Envelope validation has already
+/// bound the payload's `<muji room>` to `room_jid`, so the room
+/// binding needs no re-check here; the executor re-runs the membership
+/// gate against the local room actor and is terminal (a denial comes
+/// back as a delivered IQ-error frame, never a NACK, so no relay
+/// loop can form).
+async fn deliver_reserved_muji_iq(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    iq: &xmpp_parsers::iq::Iq,
+) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+    let frames = tokio::time::timeout(
+        ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+        crate::server::routes::websocket::handlers::iq::jingle_muji_relay::handle_relayed_muji_initiate(
+            state, iq,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        tracing::warn!(
+            room = %room_jid,
+            timeout_ms = ORDERED_RECEIVER_DELIVERY_TIMEOUT.as_millis(),
+            "ordered relay: Muji session-initiate execution timed out"
+        );
+        OrderedRelayNackReason::MaybeCommitted
+    })?
+    .ok_or(OrderedRelayNackReason::ParseFailure)?;
+    remote_replies_from_frames(frames)
 }
 
 async fn deliver_reserved_muc_occupant_presence(

@@ -55,11 +55,33 @@ use super::errors::{bad_request_iq_error, forbidden_iq_error, internal_server_er
 /// mints the SFU token with exactly those grants. `None` means no
 /// membership check applied (non-Jingle, 1:1 Jingle, non-initiate
 /// actions) — the Muji mint path treats that as listen-only.
+/// `RoomNotLocal` means no room actor lives in this process. That is
+/// NOT a room-existence verdict: with multiple replicas the room actor
+/// is claimed by exactly one node, so a perfectly live room looks
+/// absent from every other replica (#1445). The caller decides —
+/// relay the IQ to the claim-owning node when possible, or convert to
+/// the terminal denial via [`deny_room_not_found`].
 pub(super) enum GateOutcome {
     Allow {
         media_capabilities: Option<MediaCapabilities>,
     },
     Deny(Box<StanzaError>),
+    RoomNotLocal {
+        room_jid: BareJid,
+    },
+}
+
+/// The terminal `room_not_found` denial: no room actor here AND no
+/// other node owns the room (or relay was impossible). Records the
+/// SFU-token denial telemetry and produces the exact `<forbidden/>`
+/// wire shape this path has always had. Every terminal decision site
+/// must funnel through here so the #1452 SLI keeps counting complete
+/// call-setup attempts.
+pub(super) fn deny_room_not_found(room_jid: &BareJid, user: &BareJid) -> Box<StanzaError> {
+    record_sfu_token_denial(room_jid, user, SfuDenialReason::RoomNotFound);
+    Box::new(forbidden_iq_error(
+        "not an occupant of the requested room — join the MUC first",
+    ))
 }
 
 /// `Allow` for stanzas the Muji membership gate does not apply to.
@@ -180,17 +202,18 @@ async fn verify_room_membership(
     full_jid: &FullJid,
     room_jid: &BareJid,
 ) -> GateOutcome {
-    // No room actor → the user definitively hasn't joined the room
-    // through the XEP-0045 path. (The room actor is created on
-    // first MUC join; absence means "no one has joined this room
-    // in this process's lifetime.")
+    // No LOCAL room actor. That is not the same as "the room does not
+    // exist": room actors are claimed by exactly one node, so on a
+    // non-owning replica a live room's occupancy is simply elsewhere
+    // (#1445 — this exact branch denied ~29% of production joins as
+    // `room_not_found`). Surface `RoomNotLocal` and let the caller
+    // relay to the claim owner or convert to the terminal denial.
     let actor = match get_room_actor_result(state, room_jid).await {
         Ok(Some(actor)) => actor,
         Ok(None) => {
-            record_sfu_token_denial(room_jid, &full_jid.to_bare(), SfuDenialReason::RoomNotFound);
-            return GateOutcome::Deny(Box::new(forbidden_iq_error(
-                "not an occupant of the requested room — join the MUC first",
-            )));
+            return GateOutcome::RoomNotLocal {
+                room_jid: room_jid.clone(),
+            };
         }
         Err(error) => {
             tracing::debug!(room = %room_jid, error = %error, "Muji gate room lookup failed");
@@ -565,7 +588,11 @@ mod tests {
     /// #1452: a gate denial is a *complete* call-setup attempt — the
     /// sans-I/O Jingle handler never runs, so the gate must count the
     /// attempted/failed pair itself or `room_not_found` would show up
-    /// as failures with no denominator.
+    /// as failures with no denominator. Since #1445 the gate reports
+    /// `RoomNotLocal` and the CALLER decides whether that is terminal
+    /// (no claim owner to relay to) — the telemetry lives in
+    /// [`deny_room_not_found`], which every terminal site funnels
+    /// through; this test drives that terminal mapping.
     #[tokio::test(flavor = "current_thread")]
     async fn room_not_found_denial_records_a_call_setup_failure() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -574,8 +601,15 @@ mod tests {
         let iq = ghost_room_session_initiate_iq();
 
         let outcome = verify_muji_jingle_request(&state, &alice, &iq).await;
-
-        assert!(matches!(outcome, GateOutcome::Deny(_)));
+        let GateOutcome::RoomNotLocal { room_jid } = outcome else {
+            panic!("expected RoomNotLocal for a room with no local actor");
+        };
+        let error = deny_room_not_found(&room_jid, &alice.to_bare());
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::Forbidden,
+            "terminal denial keeps the historical wire shape"
+        );
         assert_eq!(
             metrics.counter_sum("waddle.call.setup.attempted", &[]),
             Some(1)
@@ -642,7 +676,12 @@ mod tests {
         let state = create_test_websocket_state().await;
         let alice = full("alice@example.com/web");
 
-        verify_muji_jingle_request(&state, &alice, &ghost_room_session_initiate_iq()).await;
+        let outcome =
+            verify_muji_jingle_request(&state, &alice, &ghost_room_session_initiate_iq()).await;
+        let GateOutcome::RoomNotLocal { room_jid } = outcome else {
+            panic!("expected RoomNotLocal for a room with no local actor");
+        };
+        deny_room_not_found(&room_jid, &alice.to_bare());
 
         let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
             .expect("captured logs are UTF-8");
@@ -691,30 +730,21 @@ mod tests {
     /// A MUC room JID that no test ever creates a room actor for.
     const GHOST_ROOM: &str = "ghost-room@muc.example.com";
 
+    /// #1445: local absence is NOT a room-existence verdict — the room
+    /// actor may be claimed by another node. The gate must surface
+    /// `RoomNotLocal` (so the caller can relay to the claim owner)
+    /// instead of denying outright.
     #[tokio::test]
-    async fn deny_when_room_actor_does_not_exist() {
+    async fn missing_room_actor_reports_room_not_local_instead_of_denying() {
         let state = create_test_websocket_state().await;
         let alice = full("alice@example.com/web");
 
-        let mut iq = build_jingle_muji_iq(Action::SessionInitiate, "ghost-room@muc.example.com");
-        // Re-stamp the embedded `<muji>` so its `room` attr points
-        // at the same ghost room.
-        if let Iq::Set { payload, .. } = &mut iq {
-            payload.children().for_each(drop);
-            payload.append_child(
-                Muji {
-                    room: Some("ghost-room@muc.example.com".parse().unwrap()),
-                    preparing: false,
-                    contents: muji_audio().contents,
-                }
-                .to_element(),
-            );
-        }
+        let iq = ghost_room_session_initiate_iq();
         let outcome = verify_muji_jingle_request(&state, &alice, &iq).await;
-        let GateOutcome::Deny(err) = outcome else {
-            panic!("expected Deny");
+        let GateOutcome::RoomNotLocal { room_jid } = outcome else {
+            panic!("expected RoomNotLocal");
         };
-        assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
+        assert_eq!(room_jid.to_string(), GHOST_ROOM);
     }
 
     #[tokio::test]

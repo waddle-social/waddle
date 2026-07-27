@@ -316,9 +316,23 @@ async fn spawn_cluster_server(
     swarm_port: u16,
     bootstrap_ports: &[u16],
 ) -> (TestServer, String, String) {
+    spawn_cluster_server_with_envs(postgres_url, pool_env, swarm_port, bootstrap_ports, &[]).await
+}
+
+/// [`spawn_cluster_server`] plus caller-supplied extra envs (e.g. the
+/// `LIVEKIT_*` set for the Muji route-to-owner test — the JWT mint is
+/// pure, so no real LiveKit is needed).
+async fn spawn_cluster_server_with_envs(
+    postgres_url: &str,
+    pool_env: &str,
+    swarm_port: u16,
+    bootstrap_ports: &[u16],
+    extra_envs: &[(&'static str, &'static str)],
+) -> (TestServer, String, String) {
     let postgres_url = postgres_url.to_string();
     let pool_env = pool_env.to_string();
     let bootstrap_ports = bootstrap_ports.to_vec();
+    let extra_envs = extra_envs.to_vec();
     tokio::task::spawn_blocking(move || {
         let node_id_file = std::env::temp_dir().join(format!(
             "waddle-clustering-e2e-node-{}",
@@ -399,6 +413,7 @@ async fn spawn_cluster_server(
         if !bootstrap_peers.is_empty() {
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
         }
+        envs.extend(extra_envs.iter().copied());
 
         let server = TestServer::start_with_extra_envs(
             &[(CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD)],
@@ -2247,6 +2262,229 @@ async fn muc_join_routes_to_foreign_room_owner() {
     drop(server_a);
     drop(server_b);
     drop(client_a);
+}
+
+/// #1445: a Muji (XEP-0272) `session-initiate` whose signaling lands on
+/// the replica that does NOT own the room actor must succeed — relayed
+/// to the claim owner, minted there, replies written back through the
+/// receiving node — instead of the historical `room_not_found`
+/// `<forbidden/>` denial (~29% of production joins at 2 replicas).
+///
+/// Negative control: a room no node has ever created (no claim row
+/// anywhere) still denies with `<forbidden/>` — the relay must not turn
+/// genuinely-nonexistent rooms into retry loops.
+#[tokio::test]
+async fn muji_initiate_routes_to_foreign_room_owner() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping muji_initiate_routes_to_foreign_room_owner: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const OWNER_USERNAME: &str = "admin";
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+    // The api-secret must be >= 32 bytes; none of these reach a real
+    // LiveKit — the mint is a pure local JWT signature.
+    let livekit_envs: &[(&'static str, &'static str)] = &[
+        ("LIVEKIT_API_KEY", "APItestkeycluster"),
+        (
+            "LIVEKIT_API_SECRET",
+            "test-secret-with-at-least-32-bytes-of-payload",
+        ),
+        ("LIVEKIT_WS_URL", "wss://livekit.example.test"),
+        ("LIVEKIT_TURN_HOST", "turn.example.test"),
+        (
+            "LIVEKIT_TURN_SHARED_SECRET",
+            "turn-shared-secret-value-also-long-enough",
+        ),
+        (
+            "LIVEKIT_WEBHOOK_SECRET",
+            "test-webhook-secret-with-at-least-32-bytes",
+        ),
+    ];
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        port_a,
+        &[port_b],
+        livekit_envs,
+    )
+    .await;
+    let (server_b, _node_b, _peer_b) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        port_b,
+        &[port_a],
+        livekit_envs,
+    )
+    .await;
+
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let owner_password = server_b.fixed_account_password().to_string();
+    let room = format!("muji-foreign-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    // Client A creates and joins the room on node A — node A holds the
+    // room claim and the occupancy.
+    let resource_a = format!("muji-owner-a-{}", uuid::Uuid::new_v4());
+    let mut client_a = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        OWNER_USERNAME,
+        &owner_password,
+        &resource_a,
+    )
+    .await
+    .expect("client A connects to node A");
+    client_a
+        .send(&format!(
+            r#"<presence to="{room}/owner-a"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("client A sends join presence");
+    client_a
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("client A's join completes (room created, A is Owner)");
+
+    // Client B joins the same room THROUGH NODE B (relayed join), so B
+    // is an occupant whose occupancy lives on node A.
+    let resource_b = format!("muji-joiner-b-{}", uuid::Uuid::new_v4());
+    let mut client_b = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &resource_b,
+    )
+    .await
+    .expect("client B connects to node B");
+    client_b
+        .send(&format!(
+            r#"<presence to="{room}/joiner-b"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("client B sends join presence");
+    client_b
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("client B's relayed join completes");
+
+    // Client B's Muji session-initiate hits node B, which has no room
+    // actor. Pre-#1445 this denied with room_not_found; now it must be
+    // relayed to node A, minted there, and answered with the IQ ack +
+    // the focus's session-accept carrying a real token.
+    client_b
+        .send(&String::from(&muji_initiate_iq(&room, "cross-node-1")))
+        .await
+        .expect("client B sends Muji session-initiate against node B");
+    let replies = client_b
+        .recv_until(|frame| frame.contains("session-accept"))
+        .await
+        .expect("client B receives the focus's session-accept via the relay");
+    assert!(
+        replies.iter().all(|frame| !frame.contains("<forbidden")
+            && !frame.contains("type='error'")
+            && !frame.contains("type=\"error\"")),
+        "cross-node Muji join must not be denied: {replies:?}"
+    );
+    assert!(
+        replies.iter().any(|frame| {
+            frame.contains("session-accept")
+                && frame.contains("<token")
+                && frame.contains("isfocus")
+        }),
+        "the relayed mint must produce a token-bearing session-accept: {replies:?}"
+    );
+
+    // Negative control: a room with NO claim anywhere is genuinely
+    // nonexistent — the terminal room_not_found denial survives.
+    let ghost = format!("muji-ghost-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    client_b
+        .send(&String::from(&muji_initiate_iq(&ghost, "ghost-1")))
+        .await
+        .expect("client B sends Muji session-initiate for an unclaimed room");
+    let denial = client_b
+        .recv_matching(|frame| frame.contains("mji-ghost-1") && frame.contains("<error"))
+        .await
+        .expect("unclaimed room still denies");
+    assert!(
+        denial.contains("<forbidden"),
+        "unclaimed-room denial must keep the historical <forbidden/> shape: {denial}"
+    );
+
+    client_b.close().await.expect("client B closes");
+    drop(server_a);
+    drop(server_b);
+    drop(client_a);
+}
+
+/// Muji `session-initiate` IQ for `room`, built with minidom builders
+/// per the repo's XML-generation rule (id = `mji-{sid}`).
+fn muji_initiate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
+    use waddle_xmpp::xep::xep0166::NS_JINGLE;
+    use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
+    use waddle_xmpp::xep::xep0272::NS_MUJI;
+    use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
+    use xmpp_parsers::minidom::Element;
+
+    let payload_type = Element::builder("payload-type", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+        .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+        .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+        .build();
+    let description = Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+        .append(payload_type)
+        .build();
+    let content = Element::builder("content", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("creator").to_owned(),
+            "initiator",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+        .append(description)
+        .append(Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build())
+        .build();
+    let jingle = Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-initiate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .append(content)
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .attr(minidom::rxml::xml_ncname!("room").to_owned(), room)
+                .build(),
+        )
+        .build();
+    Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            format!("mji-{sid}"),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "calls.localhost",
+        )
+        .append(jingle)
+        .build()
 }
 
 /// ADR-0017 Phase 4: subscription presence and probes use the same ordered
