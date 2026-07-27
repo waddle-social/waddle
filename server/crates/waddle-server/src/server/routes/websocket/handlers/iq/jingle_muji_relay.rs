@@ -14,7 +14,7 @@
 //! socket there.
 
 use super::super::super::interpret_loop::build_interpret_deps;
-use super::super::super::transport_xml::{build_iq_error_xml_typed, build_iq_result_xml};
+use super::super::super::transport_xml::build_iq_error_xml_typed;
 use super::super::super::WebSocketState;
 use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
 use super::sans_io::events_contain_iq_error;
@@ -38,7 +38,8 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let response_from = iq.to().map(|to| to.to_string());
     let response_to = jid::Jid::from(sender.clone()).to_string();
 
-    match jingle_muji_gate::verify_muji_jingle_request(
+    let is_terminate = jingle_muji_gate::muji_session_terminate_room(iq).is_some();
+    let media_capabilities = match jingle_muji_gate::verify_muji_jingle_request(
         state,
         &sender,
         iq,
@@ -46,69 +47,73 @@ pub(crate) async fn handle_relayed_muji_initiate(
     )
     .await
     {
-        GateOutcome::Allow { media_capabilities } => {
-            let ctx = ProtocolStanzaContext {
-                domain: state.deps.auth_state.xmpp_domain.as_str(),
-                full_jid: &sender,
-                media_capabilities,
-            };
-            let muji_terminate_room = jingle_muji_gate::muji_session_terminate_room(iq);
-            let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
-            let clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
-            let session = synthetic_session(&sender);
-            let deps = build_interpret_deps(state, Some(&session));
-            let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
-            // Mirror the local adapter's post-terminate Muji-presence
-            // clear. It has to run HERE, on the owner, because that is
-            // where the room actor and the SFU registration both live
-            // — running it on the client's replica would find neither.
-            if let Some(room_jid) = clear_after {
-                crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-                    state, &room_jid, &sender,
-                )
-                .await;
-            }
-            Some(outcome.frames)
-        }
-        GateOutcome::Deny(error) => Some(vec![build_iq_error_xml_typed(
-            id,
-            response_from.as_deref(),
-            Some(response_to.as_str()),
-            *error,
-        )]),
-        GateOutcome::RoomNotLocal { room_jid } => {
-            // We hold (or held) the room's claim yet no actor lives
-            // here: every occupant has left and the actor is gone, or
-            // ownership moved after the producer's claim read.
-            //
-            // A hangup must never fail on that. The common way to
-            // reach this arm with a terminate is two occupants leaving
-            // at once — the first empties the room and tears the actor
-            // down, and the second arrives to find nothing. Answering
-            // `<forbidden/>` ("join the MUC first") to someone hanging
-            // up would be nonsense, and would also emit a bogus
-            // `room_not_found` denial. Unregistering is idempotent, so
-            // the empty IQ result is the honest answer.
-            if jingle_muji_gate::muji_session_terminate_room(iq).is_some() {
-                return Some(vec![build_iq_result_xml(
-                    id,
-                    response_from.as_deref(),
-                    Some(response_to.as_str()),
-                    None,
-                )]);
-            }
-            // An initiate, though, genuinely cannot proceed: the
-            // requester is not an occupant of a live local room. The
-            // terminal denial, never a re-relay.
-            let error = jingle_muji_gate::deny_room_not_found(&room_jid, &sender.to_bare());
-            Some(vec![build_iq_error_xml_typed(
+        GateOutcome::Allow { media_capabilities } => media_capabilities,
+        GateOutcome::Deny(error) => {
+            return Some(vec![build_iq_error_xml_typed(
                 id,
                 response_from.as_deref(),
                 Some(response_to.as_str()),
                 *error,
-            )])
+            )]);
         }
+        // We hold (or held) the room's claim yet no actor lives here:
+        // every occupant has left and the actor is gone, or ownership
+        // moved after the producer's claim read.
+        //
+        // A terminate MUST still execute. The ordinary way to reach
+        // this arm is two occupants leaving at once — the first
+        // empties the room and tears the actor down, the second
+        // arrives to find nothing. The departing participant may well
+        // still hold an SFU registration and a live LiveKit session
+        // here, and only running the handler unregisters them and
+        // fires `RemoveParticipant`. Synthesizing a bare IQ result
+        // instead would tell the client the call ended while leaving
+        // their media session connected until the reconcile sweep
+        // eventually noticed. This mirrors the MUC-leave path, which
+        // deliberately tears the SFU participant down even when the
+        // room actor is already gone (`handlers/presence/muc.rs`).
+        // Terminate is never membership-gated, so executing it with no
+        // derived capabilities is exactly what the local path does.
+        GateOutcome::RoomNotLocal { room_jid } if is_terminate => {
+            let _ = room_jid;
+            None
+        }
+        // An initiate, though, genuinely cannot proceed: the requester
+        // is not an occupant of a live local room. Terminal denial,
+        // never a re-relay.
+        GateOutcome::RoomNotLocal { room_jid } => {
+            let error = jingle_muji_gate::deny_room_not_found(&room_jid, &sender.to_bare());
+            return Some(vec![build_iq_error_xml_typed(
+                id,
+                response_from.as_deref(),
+                Some(response_to.as_str()),
+                *error,
+            )]);
+        }
+    };
+
+    let ctx = ProtocolStanzaContext {
+        domain: state.deps.auth_state.xmpp_domain.as_str(),
+        full_jid: &sender,
+        media_capabilities,
+    };
+    let muji_terminate_room = jingle_muji_gate::muji_session_terminate_room(iq);
+    let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
+    let clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
+    let session = synthetic_session(&sender);
+    let deps = build_interpret_deps(state, Some(&session));
+    let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
+    // Mirror the local adapter's post-terminate Muji-presence clear. It
+    // has to run HERE, on the owner, because that is where the room
+    // actor and the SFU registration both live — running it on the
+    // client's replica would find neither.
+    if let Some(room_jid) = clear_after {
+        crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
+            state, &room_jid, &sender,
+        )
+        .await;
     }
+    Some(outcome.frames)
 }
 
 /// Minimal synthetic session for interpret-side owner checks, same
@@ -297,16 +302,34 @@ mod tests {
         );
     }
 
-    /// A hangup must never fail. Two occupants leaving at once is the
-    /// ordinary way to reach the owner with no room actor left: the
-    /// first terminate empties the room and tears the actor down, the
-    /// second finds nothing. Answering `<forbidden/>` ("join the MUC
-    /// first") to someone hanging up would be nonsense and would also
-    /// emit a bogus `room_not_found` denial.
+    /// A hangup must never fail, and must actually tear the media
+    /// session down. Two occupants leaving at once is the ordinary way
+    /// to reach the owner with no room actor left: the first empties
+    /// the room and tears the actor down, the second finds nothing.
+    ///
+    /// The regression this pins: synthesizing a bare IQ result for
+    /// that case told the client the call had ended while never
+    /// running the handler — so the participant kept their SFU
+    /// registration and their live LiveKit session until the reconcile
+    /// sweep eventually noticed. Registration state, not the reply
+    /// shape, is the assertion that matters here.
     #[tokio::test]
-    async fn relayed_terminate_after_the_room_actor_is_gone_still_succeeds() {
-        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    async fn relayed_terminate_tears_down_media_even_when_the_room_actor_is_gone() {
         let state = create_test_websocket_state_with_calls().await;
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        let sfu = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("the calls fixture wires an SFU");
+        // A registration with NO room actor for its room — exactly the
+        // state a departing occupant is left in when the last MUC leave
+        // tore the actor down before their Jingle terminate arrived.
+        let call = waddle_sfu::CallId::new("vanished@muc.example.com").expect("valid call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        sfu.register_call_participant(&call, &identity);
+        assert!(sfu.has_call_participant(&call, &identity));
 
         let frames = handle_relayed_muji_initiate(
             &state,
@@ -315,21 +338,16 @@ mod tests {
         .await
         .expect("terminate executes");
 
-        assert_eq!(frames.len(), 1, "{frames:?}");
         assert!(
-            frames[0].contains("type='result'") || frames[0].contains("type=\"result\""),
-            "a hangup for a room whose actor is gone must be acked, not denied: {}",
-            frames[0]
+            !sfu.has_call_participant(&call, &identity),
+            "the hangup must unregister the participant even with no room actor; \
+             acking without executing would strand their LiveKit session"
         );
-        assert_eq!(
-            metrics
-                .counter_sum(
-                    "waddle.call.sfu_token.denied",
-                    &[("reason", "room_not_found")]
-                )
-                .unwrap_or(0),
-            0,
-            "a hangup is not a token denial"
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.contains("type='result'") || f.contains("type=\"result\"")),
+            "and the client must still be told the hangup succeeded: {frames:?}"
         );
     }
 
