@@ -285,11 +285,21 @@ impl RecordingAdmin {
     /// Wait until a parked `room_occupancy` call has actually been
     /// entered, so the test's registration lands mid-probe rather than
     /// racing the spawn.
+    /// Panics if the probe never starts. Swallowing that timeout made
+    /// the post-probe-registry test vacuous: `release_list` would
+    /// notify before the probe installed its waiter, the teardown would
+    /// stay parked forever, and the assertion that no `DeleteRoom`
+    /// fired would pass without the guard ever being exercised.
     async fn await_list_in_flight(&self, within: StdDuration) {
-        let entered = self.list_entered.lock().expect("recording lock").clone();
-        if let Some(entered) = entered {
-            let _ = tokio::time::timeout(within, entered.notified()).await;
-        }
+        let entered = self
+            .list_entered
+            .lock()
+            .expect("recording lock")
+            .clone()
+            .expect("hold_list must be called before awaiting the probe");
+        tokio::time::timeout(within, entered.notified())
+            .await
+            .expect("the occupancy probe must actually start, or this test proves nothing");
     }
 
     fn fail_list(&self) {
