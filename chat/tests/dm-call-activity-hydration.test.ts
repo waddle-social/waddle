@@ -62,7 +62,7 @@ describe("DM call activity hydration", () => {
     expect(secondClient.fullJid).not.toBe("alice@example.com/web-existing-resource");
   });
 
-  test("does not publish transient reconnect resources into shared SM persistence", () => {
+  test("does not publish transient reconnect resources into the pagehide SM handoff", () => {
     let sm: ReturnType<ResumePersistence["loadSm"]> = null;
     const savedStates: NonNullable<typeof sm>[] = [];
     const persistence: ResumePersistence = {

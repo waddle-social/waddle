@@ -321,11 +321,11 @@ export class ResumeStateStore {
 
   /**
    * Capture resume state from a disconnecting WASM handle. Keeps the
-   * captured state in this JS context only — the shared per-account
-   * persisted SM slot is a pagehide handoff for true tab replacement;
-   * writing it during ordinary disconnects would let another live tab
-   * claim this same resource while this client is still reconnecting
-   * with its in-memory handle.
+   * captured state in this JS context only — the owner-scoped persisted
+   * SM tail is a pagehide handoff for true tab replacement. Writing it
+   * during ordinary disconnects would preserve a stale tail while this
+   * client is still reconnecting with its in-memory handle; a duplicate
+   * tab cannot claim this owner's persisted resource.
    */
   captureFromDisconnect(source: ResumeStateSource, resource: string): XmppResumeState | null {
     this.setHandle(source.get_resume_state_handle?.() ?? null);

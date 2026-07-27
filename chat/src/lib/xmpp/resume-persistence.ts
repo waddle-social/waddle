@@ -1,9 +1,9 @@
 /**
  * Persisted resume state across page reloads.
  *
- * Two kinds of state survive a full reload, both keyed per account:
+ * Two kinds of state survive a full reload:
  *
- *   * MAM catch-up cursors (`PersistedReconnectCatchup`) — the
+ *   * MAM catch-up cursors (`PersistedReconnectCatchup`), keyed per account — the
  *     timestamp + optional XEP-0313 archive UID + dedupe seen-ids
  *     for every DM peer and MUC room the user has seen. Without
  *     this, a hard reload (cold start, mobile Safari eviction)
@@ -13,7 +13,7 @@
  *     re-fetched if the user manually scrolls back.
  *
  *   * XEP-0198 Stream Management resume state
- *     (`PersistedSmResumeState`) — the `previd` plus inbound /
+ *     (`PersistedSmResumeState`), keyed per account and browser owner — the `previd` plus inbound /
  *     outbound stanza counts and advertised resume window. The richer
  *     "handle" form from the WASM client is a live JS object that cannot
  *     be serialized; the POD `{previd, inboundH, outboundH}` triple can be.
@@ -23,7 +23,8 @@
  *     resume state with an empty replay queue.
  *
  * The shape mirrors `outbound-queue-store.ts` (same `waddle.chat.*`
- * prefix family, same per-account key namespacing, same defensive
+ * prefix family, account-scoped catch-up and account-and-owner-scoped SM
+ * key namespacing, and the same defensive
  * read/write error handling around localStorage availability and
  * quota) so the storage surface stays uniform.
  */
@@ -80,6 +81,11 @@ interface PersistedSmEnvelope extends PersistedSmResumeState {
   claimId?: string;
 }
 
+type PersistedSmConsumedMarker = {
+  marker: string;
+  savedAt: number;
+};
+
 type ResumeOwner = {
   ownerId: string;
   instanceId: string;
@@ -108,6 +114,7 @@ const SM_SAVED_AT_FUTURE_SKEW_MS = 60_000;
 const OWNER_LEASE_TTL_MS = 45_000;
 const OWNER_HEARTBEAT_MS = 15_000;
 const OWNER_HANDOFF_TTL_MS = OWNER_LEASE_TTL_MS;
+const MAX_SM_OWNER_SLOTS = 64;
 const liveOwnerInstances = new Map<string, string>();
 const liveOwnerHeartbeats = new Set<string>();
 
@@ -152,7 +159,10 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
   // `alice@example.com` consume `alice@example.com.evil` shards.
   const catchupKeyPrefix = `${CATCHUP_PREFIX}.${accountKey.length}:${accountKey}`;
   const catchupKey = `${catchupKeyPrefix}.${owner.ownerId}`;
-  const smKey = `${SM_PREFIX}.${accountKey}`;
+  // A stream-management tail belongs to its tab owner, not merely the
+  // account. Length prefixes keep account and owner enumeration disjoint.
+  const smAccountKeyPrefix = `${SM_PREFIX}.${accountKey.length}:${accountKey}`;
+  const smKey = `${smAccountKeyPrefix}.${owner.ownerId.length}:${owner.ownerId}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
   const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
 
@@ -167,6 +177,11 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       removeKeysWithPrefix(`${catchupKeyPrefix}.`, "catchup");
     },
     loadSm() {
+      gcSmOwnerSlots(smAccountKeyPrefix);
+      // A consume tombstone means responsibility may already have moved. Do
+      // not even expose its resource to a fresh connection before the later
+      // consume path can reject it.
+      if (storage()?.getItem(`${smKey}.consumed`)) return null;
       const envelope = readJson<PersistedSmEnvelope>(smKey, isPersistedSmEnvelope, "sm");
       if (!envelope) return null;
       // Drop entries past the advertised resume window — the server has GC'd the
@@ -190,9 +205,19 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       };
     },
     consumeSm() {
+      gcSmOwnerSlots(smAccountKeyPrefix);
       return consumeSmEnvelope(smKey, owner.ownerId);
     },
     saveSm(state) {
+      gcSmOwnerSlots(smAccountKeyPrefix);
+      if (!canPersistSmOwnerSlot(smAccountKeyPrefix, smKey)) {
+        reportError("storage.quota", new Error("SM owner-slot retention is full"), {
+          recoverable: true,
+          detail: "resume-persistence retained every live owner tail",
+          storage_area: "sm-resume",
+        });
+        return;
+      }
       const envelope: PersistedSmEnvelope = { ...state, savedAt: Date.now(), ownerId: owner.ownerId };
       removeKey(`${smKey}.consumed`, "sm-consumed");
       writeJson(smKey, envelope, "sm");
@@ -285,25 +310,25 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
     }
     if (parsed.ownerId !== ownerId) return null;
     if (parsed.claimId) return null;
-    if (s.getItem(consumedKey) === consumedMarker) {
+    if (smConsumedMarkerMatches(s.getItem(consumedKey), consumedMarker)) {
       s.removeItem(key);
       return null;
     }
 
     const claimId = randomClaimId();
-    if (s.getItem(key) !== raw || s.getItem(consumedKey) === consumedMarker) return null;
+    if (s.getItem(key) !== raw || smConsumedMarkerMatches(s.getItem(consumedKey), consumedMarker)) return null;
     s.setItem(key, JSON.stringify({ ...parsed, claimId }));
 
     const claimedRaw = s.getItem(key);
     if (!claimedRaw) return null;
     const claimed: unknown = JSON.parse(claimedRaw);
     if (!isPersistedSmEnvelope(claimed) || claimed.claimId !== claimId) return null;
-    if (s.getItem(consumedKey) === consumedMarker) {
+    if (smConsumedMarkerMatches(s.getItem(consumedKey), consumedMarker)) {
       s.removeItem(key);
       return null;
     }
 
-    s.setItem(consumedKey, consumedMarker);
+    s.setItem(consumedKey, JSON.stringify({ marker: consumedMarker, savedAt: Date.now() }));
     s.removeItem(key);
     const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = claimed;
     return {
@@ -322,6 +347,94 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
     });
     return null;
   }
+}
+
+function smConsumedMarkerMatches(raw: string | null, marker: string): boolean {
+  if (!raw) return false;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return !isPersistedSmConsumedMarker(parsed) || parsed.marker === marker;
+  } catch {
+    // An uncertain marker must never permit a second resume attempt.
+    return true;
+  }
+}
+
+function gcSmOwnerSlots(accountKeyPrefix: string): void {
+  const prefix = `${accountKeyPrefix}.`;
+  for (const key of storageKeysWithPrefix(prefix)) {
+    const slot = smSlotKeyInfo(accountKeyPrefix, key);
+    if (!slot) {
+      removeKey(key, "sm");
+      continue;
+    }
+    if (slot.consumed) {
+      const marker = readJson<PersistedSmConsumedMarker>(key, isPersistedSmConsumedMarker, "sm-consumed");
+      const snapshotKey = key.slice(0, -".consumed".length);
+      if (!marker || smMarkerExpired(marker) || storage()?.getItem(snapshotKey)) {
+        // A marker and a sibling snapshot can coexist only across an
+        // interrupted claim. Preserve at-most-once responsibility by
+        // discarding both rather than letting damaged storage replay it.
+        removeKey(key, "sm-consumed");
+        removeKey(snapshotKey, "sm");
+      }
+      continue;
+    }
+    const envelope = readJson<PersistedSmEnvelope>(key, isPersistedSmEnvelope, "sm");
+    if (
+      !envelope
+      || smEnvelopeExpired(envelope)
+      || envelope.ownerId !== slot.ownerId
+      || !!envelope.claimId
+    ) {
+      removeKey(key, "sm");
+      removeKey(`${key}.consumed`, "sm-consumed");
+    }
+  }
+}
+
+function smSlotKeyInfo(
+  accountKeyPrefix: string,
+  key: string,
+): { ownerId: string; consumed: boolean } | null {
+  const prefix = `${accountKeyPrefix}.`;
+  if (!key.startsWith(prefix)) return null;
+  const encodedOwner = key.slice(prefix.length);
+  const separator = encodedOwner.indexOf(":");
+  if (separator <= 0) return null;
+  const declaredLengthText = encodedOwner.slice(0, separator);
+  if (!/^[1-9]\d*$/.test(declaredLengthText)) return null;
+  const declaredLength = Number(declaredLengthText);
+  const ownerAndMarker = encodedOwner.slice(separator + 1);
+  if (!Number.isSafeInteger(declaredLength)) return null;
+  const ownerId = ownerAndMarker.slice(0, declaredLength);
+  if (ownerId.length !== declaredLength) return null;
+  if (ownerAndMarker.length === declaredLength) return { ownerId, consumed: false };
+  return ownerAndMarker === `${ownerId}.consumed` ? { ownerId, consumed: true } : null;
+}
+
+function canPersistSmOwnerSlot(accountKeyPrefix: string, ownKey: string): boolean {
+  const s = storage();
+  if (!s) return false;
+  if (s.getItem(ownKey)) return true;
+  const ownSlot = smSlotKeyInfo(accountKeyPrefix, ownKey);
+  if (!ownSlot) return false;
+  const retainedOwners = new Set(
+    storageKeysWithPrefix(`${accountKeyPrefix}.`)
+      .flatMap((key) => {
+        const slot = smSlotKeyInfo(accountKeyPrefix, key);
+        return slot ? [slot.ownerId] : [];
+      }),
+  );
+  if (retainedOwners.has(ownSlot.ownerId)) return true;
+  // Never prune a still-valid tail just to make room for another tab. The
+  // bounded owner window fails closed for the new tab instead.
+  return retainedOwners.size < MAX_SM_OWNER_SLOTS;
+}
+
+function smMarkerExpired(marker: PersistedSmConsumedMarker): boolean {
+  const ageMs = Date.now() - marker.savedAt;
+  return ageMs < -SM_SAVED_AT_FUTURE_SKEW_MS || ageMs > DEFAULT_SM_MAX_RESUME_SECONDS * 1000;
 }
 
 function randomClaimId(): string {
@@ -665,6 +778,12 @@ function isOwnerHandoff(value: unknown): value is OwnerHandoff {
     typeof candidate.instanceId === "string" &&
     typeof candidate.expiresAt === "number"
   );
+}
+
+function isPersistedSmConsumedMarker(value: unknown): value is PersistedSmConsumedMarker {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.marker === "string" && Number.isFinite(candidate.savedAt);
 }
 
 function isU32(value: unknown): value is number {
