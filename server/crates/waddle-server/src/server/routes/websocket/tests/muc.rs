@@ -1366,6 +1366,34 @@ async fn managed_internal_server_error_denial_emits_admission_telemetry() {
     );
 }
 
+use std::time::Duration as StdDuration;
+
+/// Poll until at least one span named `name` has been exported, or the
+/// deadline elapses; returns whatever was exported at that point.
+///
+/// Needed because a span exports on close, and the join paths under test
+/// leave background work holding the dispatch span open. On a
+/// `current_thread` runtime that work only advances while the test
+/// awaits, so a straight read after the call under test races it.
+async fn await_exported_spans(
+    spans: &waddle_xmpp::telemetry::test_support::SpanTestGuard,
+    name: &str,
+    within: StdDuration,
+) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let matching: Vec<_> = spans
+            .exported()
+            .into_iter()
+            .filter(|span| span.name == name)
+            .collect();
+        if !matching.is_empty() || tokio::time::Instant::now() >= deadline {
+            return matching;
+        }
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn managed_internal_admission_failure_exports_error_dispatch_span() {
     let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -1417,23 +1445,26 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
         "malformed identity must fail closed: {denied:?}"
     );
 
-    // The span assertions below have failed in CI twice while the frame
-    // assertion above passed, and have never reproduced locally
-    // (including under CI's exact `--workspace --all-features --lib
-    // --tests` nextest command). Take ONE snapshot and assert against
-    // it: `attribute_of`/`status_of` each force-flush and re-read, so
-    // asserting through them after building a debug string would compare
-    // a different snapshot than the one printed. Dumping the snapshot
-    // lets the next occurrence distinguish the candidates instead of
-    // just reporting `None` — no dispatch span exported at all (held
-    // open by a stray span clone), one present without the attribute
-    // (the stamp landed on another span), or several same-named spans
-    // where only a later one carries it.
-    let dispatch_spans: Vec<_> = spans
-        .exported()
-        .into_iter()
-        .filter(|span| span.name == "xmpp.stanza.dispatch")
-        .collect();
+    // Wait for the dispatch span to actually close before reading it.
+    //
+    // This assertion failed intermittently in CI with an EMPTY exported
+    // set (`exported xmpp.stanza.dispatch spans: []`), never locally.
+    // The reason is structural, not timing luck: the join path leaves
+    // background work holding the span open, and on a `current_thread`
+    // runtime that work can only progress while the test awaits — and
+    // there is no await between the join returning and this read. On an
+    // idle machine the work happens to finish during the awaits inside
+    // the join; under CI contention it does not, so the span is still
+    // open and `tracing-opentelemetry` has nothing to export yet
+    // (a span exports on close, and `exported()` already force-flushes,
+    // so flushing harder cannot help).
+    //
+    // Polling yields the runtime so that work can finish, with a bounded
+    // deadline. This does not weaken the assertion: it still requires
+    // the attribute to be present, and on timeout it reports the empty
+    // set rather than passing.
+    let dispatch_spans =
+        await_exported_spans(&spans, "xmpp.stanza.dispatch", StdDuration::from_secs(5)).await;
     let rendered = dispatch_spans
         .iter()
         .map(|span| {
