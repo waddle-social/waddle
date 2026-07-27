@@ -29,6 +29,12 @@ pub(crate) async fn event_dispatch_loop(
 }
 
 pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, event: ClientEvent) {
+    if dispatch_stream_management_callback(&event, |telemetry| {
+        emit_stream_management_callback(inner, telemetry);
+    }) {
+        return;
+    }
+
     match event {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_)) => {
             // Snapshot both callbacks BEFORE invoking either; a JS handler
@@ -154,6 +160,51 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
         // the JS callback, so they are intentionally consumed here.
         ClientEvent::PubsubItemsRetracted(_) | ClientEvent::PubsubAttachmentSummary(_) => {}
         _ => {}
+    }
+}
+
+fn dispatch_stream_management_callback(
+    event: &ClientEvent,
+    emit: impl FnOnce(JsStreamManagementTelemetry),
+) -> bool {
+    if matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    ) {
+        emit(JsStreamManagementTelemetry::Failed);
+        return true;
+    }
+    false
+}
+
+pub(crate) fn emit_stream_management_callback(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    event: JsStreamManagementTelemetry,
+) {
+    let callback = inner.borrow().on_stream_management.clone();
+    if let (Some(callback), Ok(value)) = (callback, to_js_value(&event)) {
+        let _ = callback.call1(&JsValue::NULL, &value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_stream_management_event_invokes_one_closed_callback_payload() {
+        let event = ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed,
+        ));
+        let mut payloads = Vec::new();
+
+        assert!(dispatch_stream_management_callback(&event, |payload| {
+            payloads.push(serde_json::to_value(payload).expect("serializable telemetry"));
+        }));
+
+        assert_eq!(payloads, vec![serde_json::json!({ "kind": "failed" })]);
     }
 }
 

@@ -65,7 +65,8 @@ export type StreamManagementTelemetry =
   | { kind: "ack-validated"; progress: boolean }
   | { kind: "ack-retry"; attempt: number }
   | { kind: "ack-request-timed-out" }
-  | { kind: "progress-timed-out" };
+  | { kind: "progress-timed-out" }
+  | { kind: "failed" };
 
 type CatchupOutcome = "completed" | "aborted" | "failed";
 

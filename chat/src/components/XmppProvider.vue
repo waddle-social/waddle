@@ -7,6 +7,7 @@ import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
 import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
 import { installXmppPagehideLifecycle } from "@/lib/xmpp/pagehide-lifecycle";
 import { suspendCallForPageHide } from "@/lib/calls/call-controls";
+import { reportXmppPageLifecycleFailure } from "@/lib/telemetry";
 import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
 import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
 import CallOverlay from "@/components/calls/CallOverlay.vue";
@@ -75,6 +76,7 @@ onMounted(() => {
       window,
       () => connectionStore.client,
       suspendCallForPageHide,
+      reportXmppPageLifecycleFailure,
     );
   }
   void bootstrap();

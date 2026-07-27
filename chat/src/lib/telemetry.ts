@@ -64,7 +64,9 @@ type StreamManagementTelemetryPayload =
   | { kind: "ack-validated"; progress: boolean }
   | { kind: "ack-retry"; attempt: number }
   | { kind: "ack-request-timed-out" }
-  | { kind: "progress-timed-out" };
+  | { kind: "progress-timed-out" }
+  | { kind: "failed" }
+  | { kind: "lifecycle-failed"; operation: "prepare-xmpp" | "resume-xmpp" | "suspend-call" };
 
 /** Errors we classify coarsely so Tempo filters stay useful. */
 export type ErrorKind =
@@ -1528,11 +1530,22 @@ export function reportStreamManagement(event: StreamManagementTelemetryPayload):
     case "ack-retry":
       attributes.attempt = String(Math.min(10, Math.max(0, Math.floor(event.attempt))));
       break;
+    case "lifecycle-failed":
+      attributes.operation = event.operation;
+      break;
     case "ack-request-timed-out":
     case "progress-timed-out":
+    case "failed":
       break;
   }
   faro?.api.pushEvent("chat.xmpp.stream_management", attributes);
+}
+
+/** Records the closed page-lifecycle failure projection used by XmppProvider. */
+export function reportXmppPageLifecycleFailure(failure: {
+  operation: "prepare-xmpp" | "resume-xmpp" | "suspend-call";
+}): void {
+  reportStreamManagement({ kind: "lifecycle-failed", operation: failure.operation });
 }
 
 /**

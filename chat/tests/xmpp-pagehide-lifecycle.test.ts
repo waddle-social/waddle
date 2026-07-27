@@ -1,6 +1,12 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { installXmppPagehideLifecycle } from "../src/lib/xmpp/pagehide-lifecycle";
 import { BrowserXmppClient } from "../src/lib/xmpp/client";
+import {
+  __setFaroForTesting,
+  reportXmppPageLifecycleFailure,
+} from "../src/lib/telemetry";
+
+afterEach(() => __setFaroForTesting(null));
 
 class LifecycleTarget {
   private readonly listeners = new Map<string, Set<EventListener>>();
@@ -143,6 +149,50 @@ describe("XMPP page lifecycle", () => {
     target.dispatch("pagehide", false);
     expect(reportFailure).toHaveBeenCalledWith({ operation: "prepare-xmpp" });
     expect(suspendCall).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
+  test("forwards every lifecycle failure once through the production Faro reporter", () => {
+    const target = new LifecycleTarget();
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          events.push({ name, attributes });
+        },
+      },
+    } as never);
+    const reportFailure = (failure: { operation: "prepare-xmpp" | "resume-xmpp" | "suspend-call" }) => {
+      reportXmppPageLifecycleFailure(failure);
+      throw new Error("collector unavailable after recording");
+    };
+    const dispose = installXmppPagehideLifecycle(
+      target as unknown as Window,
+      () => ({
+        prepareForPageHide: () => { throw new Error("prepare failed"); },
+        resumeAfterPageShow: () => { throw new Error("resume failed"); },
+      }),
+      () => { throw new Error("suspend failed"); },
+      reportFailure,
+    );
+
+    target.dispatch("pagehide", false);
+    target.dispatch("pageshow", true);
+
+    expect(events).toEqual([
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "lifecycle-failed", operation: "prepare-xmpp" },
+      },
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "lifecycle-failed", operation: "suspend-call" },
+      },
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "lifecycle-failed", operation: "resume-xmpp" },
+      },
+    ]);
     dispose();
   });
 

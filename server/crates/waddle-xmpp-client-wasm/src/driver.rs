@@ -2,17 +2,18 @@ use super::*;
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
-enum JsStreamManagementTelemetry {
+pub(crate) enum JsStreamManagementTelemetry {
     AckRequested { reason: JsSmAckRequestReason },
     AckValidated { progress: bool },
     AckRetry { attempt: u8 },
     AckRequestTimedOut,
     ProgressTimedOut,
+    Failed,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum JsSmAckRequestReason {
+pub(crate) enum JsSmAckRequestReason {
     OutboundStanza,
     ResumedUnackedTail,
     PeerRequest,
@@ -44,6 +45,7 @@ mod telemetry_tests {
             serde_json::to_value(JsStreamManagementTelemetry::AckValidated { progress: false })
                 .unwrap();
         let timeout = serde_json::to_value(JsStreamManagementTelemetry::ProgressTimedOut).unwrap();
+        let failed = serde_json::to_value(JsStreamManagementTelemetry::Failed).unwrap();
 
         assert_eq!(
             pagehide,
@@ -54,6 +56,7 @@ mod telemetry_tests {
             serde_json::json!({ "kind": "ack-validated", "progress": false })
         );
         assert_eq!(timeout, serde_json::json!({ "kind": "progress-timed-out" }));
+        assert_eq!(failed, serde_json::json!({ "kind": "failed" }));
     }
 }
 
@@ -717,10 +720,7 @@ impl WasmDriverTask {
     }
 
     fn emit_stream_management_telemetry(&self, event: JsStreamManagementTelemetry) {
-        let callback = self.inner.borrow().on_stream_management.clone();
-        if let (Some(callback), Ok(value)) = (callback, to_js_value(&event)) {
-            let _ = callback.call1(&JsValue::NULL, &value);
-        }
+        emit_stream_management_callback(&self.inner, event);
     }
 
     fn publish_resume_state_snapshot(&self) {

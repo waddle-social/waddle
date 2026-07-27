@@ -378,11 +378,41 @@ function ownerInstanceId(ownerId: string): string {
 
 function copiedLiveOwnerNeedsRotation(ownerId: string, instanceId: string): boolean {
   const lease = readOwnerLease(ownerLeaseKey(ownerId));
-  if (!lease || lease.instanceId === instanceId || Date.now() - lease.updatedAt > OWNER_LEASE_TTL_MS) {
+  if (
+    !lease
+    || lease.ownerId !== ownerId
+    || lease.instanceId === instanceId
+    || Date.now() - lease.updatedAt > OWNER_LEASE_TTL_MS
+  ) {
     return false;
   }
   const handoff = readOwnerHandoff(ownerHandoffKey(ownerId));
-  return !handoff || handoff.expiresAt <= Date.now();
+  return !isSameTabReloadHandoff(ownerId, lease, handoff);
+}
+
+/**
+ * sessionStorage is copied when a tab is duplicated, so a fresh document can
+ * inherit an owner's identifier. A pagehide handoff is only safe to honour
+ * for a confirmed reload of the same document: the handoff must still be
+ * live and must have been produced by the lease holder that is being
+ * replaced. Navigation, history restores, prerender activation, and missing
+ * timing data all rotate so they cannot consume another tab's SM tail.
+ */
+function isSameTabReloadHandoff(
+  ownerId: string,
+  lease: OwnerLease,
+  handoff: OwnerHandoff | null,
+): boolean {
+  return handoff?.ownerId === ownerId
+    && handoff.instanceId === lease.instanceId
+    && handoff.expiresAt > Date.now()
+    && navigationWasReload();
+}
+
+function navigationWasReload(): boolean {
+  if (typeof performance === "undefined") return false;
+  const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+  return navigation?.type === "reload";
 }
 
 function claimOwnerLease(owner: ResumeOwner): void {

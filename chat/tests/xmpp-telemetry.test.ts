@@ -388,6 +388,22 @@ describe("telemetry module no-op behaviour", () => {
     expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
   });
 
+  test("stream-management failures emit one closed outcome with no sensitive attributes", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportStreamManagement({ kind: "failed" });
+    reportStreamManagement({ kind: "lifecycle-failed", operation: "prepare-xmpp" });
+
+    expect(stub.events).toEqual([
+      { name: "chat.xmpp.stream_management", attributes: { kind: "failed" } },
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "lifecycle-failed", operation: "prepare-xmpp" },
+      },
+    ]);
+  });
+
   test("queue-depth measurements are deduped per kind until the reading changes (#1443)", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
@@ -1139,6 +1155,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.events.emitSafe("streamManagement", { kind: "ack-retry", attempt: 99 });
     internal.events.emitSafe("streamManagement", { kind: "ack-request-timed-out" });
     internal.events.emitSafe("streamManagement", { kind: "progress-timed-out" });
+    internal.events.emitSafe("streamManagement", { kind: "failed" });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toContain("chat.xmpp.message.acked");
@@ -1162,6 +1179,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
         { name: "chat.xmpp.stream_management", attributes: { kind: "ack-retry", attempt: "10" } },
         { name: "chat.xmpp.stream_management", attributes: { kind: "ack-request-timed-out" } },
         { name: "chat.xmpp.stream_management", attributes: { kind: "progress-timed-out" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "failed" } },
       ]);
   });
 
