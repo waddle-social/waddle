@@ -78,12 +78,15 @@ type PersistedAutoJoinBlock = RoomAutoJoinBlock;
 interface PersistedSmEnvelope extends PersistedSmResumeState {
   savedAt: number;
   ownerId?: string;
+  ownerInstanceId?: string;
   claimId?: string;
 }
 
 type PersistedSmConsumedMarker = {
   marker: string;
   savedAt: number;
+  ownerId?: string;
+  ownerInstanceId?: string;
 };
 
 type ResumeOwner = {
@@ -116,9 +119,34 @@ const OWNER_HEARTBEAT_MS = 15_000;
 const OWNER_HANDOFF_TTL_MS = OWNER_LEASE_TTL_MS;
 const MAX_SM_OWNER_SLOTS = 64;
 const liveOwnerInstances = new Map<string, string>();
-const liveOwnerHeartbeats = new Set<string>();
+
+type ResumeOwnerTimerDriver = {
+  setInterval: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;
+  clearInterval: (timer: ReturnType<typeof setInterval>) => void;
+};
+
+export type ResumePersistenceOptions = {
+  /** Test seam: production uses the browser timer functions. */
+  ownerTimerDriver?: ResumeOwnerTimerDriver;
+};
+
+type OwnerHeartbeatRegistration = {
+  ownerId: string;
+  instanceId: string;
+  timer: ReturnType<typeof setInterval>;
+  refCount: number;
+  timerDriver: ResumeOwnerTimerDriver;
+};
+
+const liveOwnerHeartbeats = new Map<string, OwnerHeartbeatRegistration>();
+const browserTimerDriver: ResumeOwnerTimerDriver = {
+  setInterval: (callback, delayMs) => setInterval(callback, delayMs),
+  clearInterval: (timer) => clearInterval(timer),
+};
 
 export interface ResumePersistence {
+  /** Release this client owner's lease heartbeat. Idempotent. */
+  dispose(): void;
   loadCatchup(): PersistedReconnectCatchup | null;
   saveCatchup(snapshot: PersistedReconnectCatchup): void;
   clearCatchup(): void;
@@ -137,6 +165,7 @@ export interface ResumePersistence {
 
 /** No-op persistence — used in tests / non-browser contexts. */
 export const nullResumePersistence: ResumePersistence = {
+  dispose: () => undefined,
   loadCatchup: () => null,
   saveCatchup: () => undefined,
   clearCatchup: () => undefined,
@@ -153,8 +182,18 @@ export const nullResumePersistence: ResumePersistence = {
   clearAutoJoinBlocks: () => undefined,
 };
 
-export function createLocalStorageResumePersistence(accountKey: string, ownerId?: string): ResumePersistence {
-  const owner = ownerId ? explicitResumeOwner(ownerId) : resumeOwner();
+export function createLocalStorageResumePersistence(
+  accountKey: string,
+  ownerId?: string,
+  options: ResumePersistenceOptions = {},
+): ResumePersistence {
+  const owner = ownerId ? explicitResumeOwner(ownerId) : resumeOwner(accountKey);
+  const releaseOwnerHeartbeat = retainOwnerHeartbeat(
+    accountKey,
+    owner,
+    options.ownerTimerDriver ?? browserTimerDriver,
+  );
+  let disposed = false;
   // Length-prefix the account segment so prefix enumeration cannot make
   // `alice@example.com` consume `alice@example.com.evil` shards.
   const catchupKeyPrefix = `${CATCHUP_PREFIX}.${accountKey.length}:${accountKey}`;
@@ -167,16 +206,25 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
   const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
 
   return {
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      releaseOwnerHeartbeat();
+    },
     loadCatchup() {
+      if (disposed) return null;
       return readCatchupShards(catchupKeyPrefix);
     },
     saveCatchup(snapshot) {
+      if (disposed) return;
       writeJson(catchupKey, snapshot, "catchup");
     },
     clearCatchup() {
+      if (disposed) return;
       removeKeysWithPrefix(`${catchupKeyPrefix}.`, "catchup");
     },
     loadSm() {
+      if (disposed) return null;
       gcSmOwnerSlots(smAccountKeyPrefix);
       // A consume tombstone means responsibility may already have moved. Do
       // not even expose its resource to a fresh connection before the later
@@ -205,10 +253,12 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       };
     },
     consumeSm() {
+      if (disposed) return null;
       gcSmOwnerSlots(smAccountKeyPrefix);
-      return consumeSmEnvelope(smKey, owner.ownerId);
+      return consumeSmEnvelope(smKey, owner);
     },
     saveSm(state) {
+      if (disposed) return;
       gcSmOwnerSlots(smAccountKeyPrefix);
       if (!canPersistSmOwnerSlot(smAccountKeyPrefix, smKey)) {
         reportError("storage.quota", new Error("SM owner-slot retention is full"), {
@@ -218,22 +268,31 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
         });
         return;
       }
-      const envelope: PersistedSmEnvelope = { ...state, savedAt: Date.now(), ownerId: owner.ownerId };
+      const envelope: PersistedSmEnvelope = {
+        ...state,
+        savedAt: Date.now(),
+        ownerId: owner.ownerId,
+        ownerInstanceId: owner.instanceId,
+      };
       removeKey(`${smKey}.consumed`, "sm-consumed");
       writeJson(smKey, envelope, "sm");
     },
     clearSm() {
-      removeKey(smKey, "sm");
-      removeKey(`${smKey}.consumed`, "sm-consumed");
+      if (disposed) return;
+      removeSmEnvelopeIfOwned(smKey, owner);
+      removeSmConsumedMarkerIfOwned(`${smKey}.consumed`, owner);
     },
     preparePagehideHandoff() {
-      markOwnerHandoff(owner);
+      if (disposed) return;
+      markOwnerHandoff(accountKey, owner);
     },
     loadJoinedRooms() {
+      if (disposed) return [];
       const stored = readJson<string[]>(joinedRoomsKey, isStringArray, "joined-rooms") ?? [];
       return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
     },
     saveJoinedRooms(roomJids) {
+      if (disposed) return;
       writeJson(
         joinedRoomsKey,
         [...new Set(roomJids.map(normalizeRoomJid).filter(Boolean))],
@@ -241,9 +300,11 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       );
     },
     clearJoinedRooms() {
+      if (disposed) return;
       removeKey(joinedRoomsKey, "joined-rooms");
     },
     loadAutoJoinBlocks() {
+      if (disposed) return [];
       const stored = readJson<PersistedAutoJoinBlock[]>(
         autoJoinBlocksKey,
         isPersistedAutoJoinBlockArray,
@@ -270,6 +331,7 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       return [...normalized.values()];
     },
     saveAutoJoinBlocks(blocks) {
+      if (disposed) return;
       writeJson(
         autoJoinBlocksKey,
         blocks.map((block) => ({
@@ -289,12 +351,13 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       );
     },
     clearAutoJoinBlocks() {
+      if (disposed) return;
       removeKey(autoJoinBlocksKey, "auto-join-blocks");
     },
   };
 }
 
-function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState | null {
+function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeState | null {
   const s = storage();
   if (!s) return null;
   const consumedKey = `${key}.consumed`;
@@ -308,7 +371,7 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
       s.removeItem(key);
       return null;
     }
-    if (parsed.ownerId !== ownerId) return null;
+    if (parsed.ownerId !== owner.ownerId) return null;
     if (parsed.claimId) return null;
     if (smConsumedMarkerMatches(s.getItem(consumedKey), consumedMarker)) {
       s.removeItem(key);
@@ -328,7 +391,12 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
       return null;
     }
 
-    s.setItem(consumedKey, JSON.stringify({ marker: consumedMarker, savedAt: Date.now() }));
+    s.setItem(consumedKey, JSON.stringify({
+      marker: consumedMarker,
+      savedAt: Date.now(),
+      ownerId: owner.ownerId,
+      ownerInstanceId: owner.instanceId,
+    }));
     s.removeItem(key);
     const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = claimed;
     return {
@@ -456,49 +524,47 @@ function explicitResumeOwner(ownerId: string): ResumeOwner {
   };
 }
 
-function resumeOwner(): ResumeOwner {
+function resumeOwner(accountKey: string): ResumeOwner {
   const s = sessionStorageForOwner();
   if (!s) {
     const ownerId = randomClaimId();
-    return { ownerId, instanceId: ownerInstanceId(ownerId), explicit: false };
+    return { ownerId, instanceId: ownerInstanceId(accountKey, ownerId), explicit: false };
   }
   const key = `${SM_PREFIX}.owner`;
   try {
     const inheritedOwnerId = s.getItem(key);
     let ownerId = inheritedOwnerId || randomClaimId();
-    let instanceId = ownerInstanceId(ownerId);
-    if (inheritedOwnerId && copiedLiveOwnerNeedsRotation(ownerId, instanceId)) {
+    let instanceId = ownerInstanceId(accountKey, ownerId);
+    if (inheritedOwnerId && copiedLiveOwnerNeedsRotation(accountKey, ownerId, instanceId)) {
       ownerId = randomClaimId();
-      instanceId = ownerInstanceId(ownerId);
+      instanceId = ownerInstanceId(accountKey, ownerId);
     }
     s.setItem(key, ownerId);
-    const owner: ResumeOwner = { ownerId, instanceId, explicit: false };
-    claimOwnerLease(owner);
-    startOwnerHeartbeat(owner);
-    return owner;
+    return { ownerId, instanceId, explicit: false };
   } catch {
     const ownerId = randomClaimId();
-    return { ownerId, instanceId: ownerInstanceId(ownerId), explicit: false };
+    return { ownerId, instanceId: ownerInstanceId(accountKey, ownerId), explicit: false };
   }
 }
 
-function ownerInstanceId(ownerId: string): string {
-  const current = liveOwnerInstances.get(ownerId);
+function ownerInstanceId(accountKey: string, ownerId: string): string {
+  const key = ownerRegistryKey(accountKey, ownerId);
+  const current = liveOwnerInstances.get(key);
   if (current) return current;
   const next = randomClaimId();
-  liveOwnerInstances.set(ownerId, next);
+  liveOwnerInstances.set(key, next);
   return next;
 }
 
-function copiedLiveOwnerNeedsRotation(ownerId: string, instanceId: string): boolean {
-  const lease = readOwnerLease(ownerLeaseKey(ownerId));
+function copiedLiveOwnerNeedsRotation(accountKey: string, ownerId: string, instanceId: string): boolean {
+  const lease = readOwnerLease(ownerLeaseKey(accountKey, ownerId));
   // A second factory in this live JS document shares the current owner; it is
   // not a copied sessionStorage identity. Every new document must instead
   // prove the complete reload handoff below before retaining the old owner.
   if (lease?.instanceId === instanceId) {
     return false;
   }
-  const handoff = readOwnerHandoff(ownerHandoffKey(ownerId));
+  const handoff = readOwnerHandoff(ownerHandoffKey(accountKey, ownerId));
   return !isConfirmedSameTabReloadHandoff(ownerId, lease, handoff);
 }
 
@@ -532,38 +598,94 @@ function navigationWasReload(): boolean {
   return navigation?.type === "reload";
 }
 
-function claimOwnerLease(owner: ResumeOwner): void {
+function claimOwnerLease(accountKey: string, owner: ResumeOwner): void {
   if (owner.explicit) return;
-  writeJson(ownerLeaseKey(owner.ownerId), {
+  writeJson(ownerLeaseKey(accountKey, owner.ownerId), {
     ownerId: owner.ownerId,
     instanceId: owner.instanceId,
     updatedAt: Date.now(),
   }, "owner-lease");
-  removeKey(ownerHandoffKey(owner.ownerId), "owner-handoff");
+  removeKey(ownerHandoffKey(accountKey, owner.ownerId), "owner-handoff");
 }
 
-function startOwnerHeartbeat(owner: ResumeOwner): void {
-  if (owner.explicit || liveOwnerHeartbeats.has(owner.ownerId)) return;
-  if (typeof document === "undefined") return;
-  liveOwnerHeartbeats.add(owner.ownerId);
-  const timer = setInterval(() => claimOwnerLease(owner), OWNER_HEARTBEAT_MS);
-  (timer as { unref?: () => void }).unref?.();
+function retainOwnerHeartbeat(
+  accountKey: string,
+  owner: ResumeOwner,
+  timerDriver: ResumeOwnerTimerDriver,
+): () => void {
+  if (owner.explicit) {
+    return () => undefined;
+  }
+  if (typeof document === "undefined" && timerDriver === browserTimerDriver) {
+    return () => releaseOwnerInstance(accountKey, owner);
+  }
+  const key = ownerRegistrationKey(accountKey, owner);
+  const existing = liveOwnerHeartbeats.get(key);
+  if (existing) {
+    existing.refCount += 1;
+    return () => releaseOwnerHeartbeat(accountKey, owner, existing);
+  }
+  claimOwnerLease(accountKey, owner);
+  const registration: OwnerHeartbeatRegistration = {
+    ownerId: owner.ownerId,
+    instanceId: owner.instanceId,
+    timer: timerDriver.setInterval(() => {
+      if (liveOwnerHeartbeats.get(key) !== registration) return;
+      claimOwnerLease(accountKey, owner);
+    }, OWNER_HEARTBEAT_MS),
+    refCount: 1,
+    timerDriver,
+  };
+  (registration.timer as { unref?: () => void }).unref?.();
+  liveOwnerHeartbeats.set(key, registration);
+  return () => releaseOwnerHeartbeat(accountKey, owner, registration);
 }
 
-function markOwnerHandoff(owner: ResumeOwner): void {
-  writeJson(ownerHandoffKey(owner.ownerId), {
+function releaseOwnerHeartbeat(
+  accountKey: string,
+  owner: ResumeOwner,
+  registration: OwnerHeartbeatRegistration,
+): void {
+  const key = ownerRegistrationKey(accountKey, owner);
+  if (liveOwnerHeartbeats.get(key) !== registration) return;
+  registration.refCount -= 1;
+  if (registration.refCount > 0) return;
+  registration.timerDriver.clearInterval(registration.timer);
+  liveOwnerHeartbeats.delete(key);
+  releaseOwnerInstance(accountKey, owner);
+  removeOwnerLeaseIfOwned(accountKey, owner);
+  removeOwnerHandoffIfOwned(accountKey, owner);
+}
+
+function releaseOwnerInstance(accountKey: string, owner: ResumeOwner): void {
+  const ownerKey = ownerRegistryKey(accountKey, owner.ownerId);
+  if (liveOwnerInstances.get(ownerKey) === owner.instanceId) {
+    liveOwnerInstances.delete(ownerKey);
+  }
+}
+
+function markOwnerHandoff(accountKey: string, owner: ResumeOwner): void {
+  writeJson(ownerHandoffKey(accountKey, owner.ownerId), {
     ownerId: owner.ownerId,
     instanceId: owner.instanceId,
     expiresAt: Date.now() + OWNER_HANDOFF_TTL_MS,
   }, "owner-handoff");
 }
 
-function ownerLeaseKey(ownerId: string): string {
-  return `${OWNER_LEASE_PREFIX}.${ownerId}`;
+function ownerRegistryKey(accountKey: string, ownerId: string): string {
+  return `${accountKey.length}:${accountKey}.${ownerId.length}:${ownerId}`;
 }
 
-function ownerHandoffKey(ownerId: string): string {
-  return `${OWNER_HANDOFF_PREFIX}.${ownerId}`;
+function ownerRegistrationKey(accountKey: string, owner: ResumeOwner): string {
+  return `${ownerRegistryKey(accountKey, owner.ownerId)}.${owner.instanceId.length}:${owner.instanceId}`;
+}
+
+function ownerLeaseKey(accountKey: string, ownerId: string): string {
+  return `${OWNER_LEASE_PREFIX}.${ownerRegistryKey(accountKey, ownerId)}`;
+}
+
+function ownerHandoffKey(accountKey: string, ownerId: string): string {
+  return `${OWNER_HANDOFF_PREFIX}.${ownerRegistryKey(accountKey, ownerId)}`;
 }
 
 function readOwnerLease(key: string): OwnerLease | null {
@@ -572,6 +694,75 @@ function readOwnerLease(key: string): OwnerLease | null {
 
 function readOwnerHandoff(key: string): OwnerHandoff | null {
   return readJson<OwnerHandoff>(key, isOwnerHandoff, "owner-handoff");
+}
+
+function removeOwnerLeaseIfOwned(accountKey: string, owner: ResumeOwner): void {
+  removeJsonIfOwned(
+    ownerLeaseKey(accountKey, owner.ownerId),
+    isOwnerLease,
+    owner,
+    "owner-lease",
+  );
+}
+
+function removeOwnerHandoffIfOwned(accountKey: string, owner: ResumeOwner): void {
+  removeJsonIfOwned(
+    ownerHandoffKey(accountKey, owner.ownerId),
+    isOwnerHandoff,
+    owner,
+    "owner-handoff",
+  );
+}
+
+function removeSmEnvelopeIfOwned(key: string, owner: ResumeOwner): void {
+  removeJsonIfOwned(key, isPersistedSmEnvelope, owner, "sm");
+}
+
+function removeSmConsumedMarkerIfOwned(key: string, owner: ResumeOwner): void {
+  removeJsonIfOwned(key, isPersistedSmConsumedMarker, owner, "sm-consumed");
+}
+
+function removeJsonIfOwned<T extends { ownerId?: string; instanceId?: string; ownerInstanceId?: string }>(
+  key: string,
+  validate: (value: unknown) => value is T,
+  owner: ResumeOwner,
+  kind: string,
+): void {
+  const s = storage();
+  if (!s) return;
+  try {
+    const raw = s.getItem(key);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!validate(parsed) || parsed.ownerId !== owner.ownerId) return;
+    const instanceId = "ownerInstanceId" in (parsed as object)
+      ? (parsed as { ownerInstanceId?: unknown }).ownerInstanceId
+      : (parsed as { instanceId?: unknown }).instanceId;
+    if (instanceId !== owner.instanceId) return;
+    // localStorage operations are synchronous, but re-read before deletion so a
+    // re-entrant storage implementation cannot let a stale owner erase a
+    // replacement's lease, handoff, or SM tail.
+    if (s.getItem(key) === raw) s.removeItem(key);
+  } catch (err) {
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: `resume-persistence compare-delete failed (${kind})`,
+      storage_area: kind,
+    });
+  }
+}
+
+/** Test-only visibility for proving owner timers and in-memory slots drain. */
+export function resumeOwnerLifecycleSnapshotForTests(): {
+  registrations: number;
+  activeTimers: number;
+  ownerInstances: number;
+} {
+  return {
+    registrations: liveOwnerHeartbeats.size,
+    activeTimers: liveOwnerHeartbeats.size,
+    ownerInstances: liveOwnerInstances.size,
+  };
 }
 
 function smEnvelopeMarker(raw: string): string {
@@ -783,7 +974,10 @@ function isOwnerHandoff(value: unknown): value is OwnerHandoff {
 function isPersistedSmConsumedMarker(value: unknown): value is PersistedSmConsumedMarker {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
-  return typeof candidate.marker === "string" && Number.isFinite(candidate.savedAt);
+  return typeof candidate.marker === "string"
+    && Number.isFinite(candidate.savedAt)
+    && (candidate.ownerId === undefined || typeof candidate.ownerId === "string")
+    && (candidate.ownerInstanceId === undefined || typeof candidate.ownerInstanceId === "string");
 }
 
 function isU32(value: unknown): value is number {
@@ -815,6 +1009,7 @@ function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
     && (candidate.unhandledOutboundEntries === undefined || isPersistedUnhandledOutboundEntries(candidate.unhandledOutboundEntries))
     && (candidate.resource === undefined || typeof candidate.resource === "string")
     && (candidate.ownerId === undefined || typeof candidate.ownerId === "string")
+    && (candidate.ownerInstanceId === undefined || typeof candidate.ownerInstanceId === "string")
     && (candidate.claimId === undefined || typeof candidate.claimId === "string")
     && Number.isFinite(candidate.savedAt)
   );

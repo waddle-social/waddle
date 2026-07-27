@@ -1774,6 +1774,7 @@ describe("client send readiness", () => {
   test("session-ready rejoins retained rooms restored from refresh persistence", async () => {
     const roomJid = "muted@muc.example.com";
     const persistence: ResumePersistence = {
+      dispose: () => undefined,
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,

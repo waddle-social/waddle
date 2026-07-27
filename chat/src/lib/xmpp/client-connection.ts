@@ -278,24 +278,34 @@ type ResumeStateSource = {
 export class ResumeStateStore {
   private stateValue: XmppResumeState | null = null;
   private handleValue: XmppResumeStateHandle | null = null;
+  private disposed = false;
 
   constructor(private readonly persistence: ResumePersistence) {}
 
   get state(): XmppResumeState | null {
-    return this.stateValue;
+    return this.disposed ? null : this.stateValue;
   }
 
   get handle(): XmppResumeStateHandle | null {
-    return this.handleValue;
+    return this.disposed ? null : this.handleValue;
   }
 
   /** Hydrate the SM state persisted by a prior tab session (one-shot). */
   consumePersisted(): XmppResumeState | null {
+    if (this.disposed) return null;
     this.stateValue = this.persistence.consumeSm();
     return this.stateValue;
   }
 
   setHandle(handle: XmppResumeStateHandle | null | undefined): void {
+    if (this.disposed) {
+      if (handle) {
+        try {
+          handle.free();
+        } catch {}
+      }
+      return;
+    }
     if (this.handleValue && this.handleValue !== handle) {
       try {
         this.handleValue.free();
@@ -306,12 +316,14 @@ export class ResumeStateStore {
 
   /** Drop the in-memory POD state and its persisted copy; the handle is untouched. */
   discardState(): void {
+    if (this.disposed) return;
     this.stateValue = null;
     this.persistence.clearSm();
   }
 
   /** Full teardown: state, handle, persisted SM slot, and retained-room list. */
   clearAll(): void {
+    if (this.disposed) return;
     this.stateValue = null;
     this.setHandle(null);
     this.persistence.clearSm();
@@ -328,6 +340,7 @@ export class ResumeStateStore {
    * tab cannot claim this owner's persisted resource.
    */
   captureFromDisconnect(source: ResumeStateSource, resource: string): XmppResumeState | null {
+    if (this.disposed) return null;
     this.setHandle(source.get_resume_state_handle?.() ?? null);
     const resumeState = source.get_resume_state?.() ?? null;
     this.stateValue = resumeState ? { ...resumeState, resource } : null;
@@ -339,6 +352,7 @@ export class ResumeStateStore {
     resource: string,
     persistJoinedRooms: () => void,
   ): void {
+    if (this.disposed) return;
     const state = liveState ?? this.stateValue;
     this.persistence.preparePagehideHandoff();
     if (state) {
@@ -353,6 +367,26 @@ export class ResumeStateStore {
       this.persistence.saveSm(snapshot);
     }
     persistJoinedRooms();
+  }
+
+  /**
+   * Terminal owner release. This deliberately leaves the durable SM tail
+   * alone: a caller that intentionally clears a session does so through
+   * `clearAll()` first, while a stale/replaced client must never erase the
+   * replacement's resumable stream.
+   */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stateValue = null;
+    const handle = this.handleValue;
+    this.handleValue = null;
+    if (handle) {
+      try {
+        handle.free();
+      } catch {}
+    }
+    this.persistence.dispose();
   }
 }
 

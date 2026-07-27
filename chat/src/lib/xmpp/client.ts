@@ -449,6 +449,9 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
+  /** Terminal lifecycle latch. A disposed client is never reconnectable. */
+  private disposed = false;
+  private disposePromise: Promise<void> | null = null;
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
@@ -698,7 +701,7 @@ export class BrowserXmppClient {
   get bareJid(): string { return this.session.jid; }
 
   private isCurrentXmpp(xmpp: XmppClientInstance): boolean {
-    return this.xmpp === xmpp && !this.destroying;
+    return this.xmpp === xmpp && !this.destroying && !this.disposed;
   }
 
   private rejectRoomJoinWaiters(error: Error): void {
@@ -943,6 +946,7 @@ export class BrowserXmppClient {
   }
 
   persistResumeStateForPageHide(): void {
+    if (this.disposed) return;
     this.resume.persistForPageHide(
       this.xmpp?.get_resume_state?.() ?? null,
       this.resource,
@@ -956,6 +960,7 @@ export class BrowserXmppClient {
    * cannot await a network round trip.
    */
   prepareForPageHide(): void {
+    if (this.disposed) return;
     let acknowledgementUnavailable = false;
     try {
       // `pagehide` must never await I/O. This admission-only call cannot wait
@@ -979,7 +984,7 @@ export class BrowserXmppClient {
 
   /** A BFCache restore retains this client; reconnect only if it lost its wire. */
   resumeAfterPageShow(): void {
-    if (!this.destroying && !this.connected) {
+    if (!this.disposed && !this.destroying && !this.connected) {
       void this.connect().catch(() => undefined);
     }
   }
@@ -1012,7 +1017,7 @@ export class BrowserXmppClient {
     // timeout tore this one down) while the module load was pending.
     // Abort before creating a handle — the current attempt owns the
     // connection now.
-    if (epoch !== this.connectEpoch || this.destroying) return;
+    if (epoch !== this.connectEpoch || this.destroying || this.disposed) return;
     const createConfig = () => new mod.WaddleConfig(
       websocketUrl,
       this.session.jid,
@@ -1072,6 +1077,7 @@ export class BrowserXmppClient {
    * implicitly by constructing a new client.
    */
   async connect(): Promise<void> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     if (this.xmpp && this.connected) return;
     // Join an in-flight attempt BEFORE the terminal/exhausted gate:
     // during the scheduler's FINAL attempt the timer is already null
@@ -1105,6 +1111,7 @@ export class BrowserXmppClient {
    * (#1164). Internal/background callers must use `connect()` instead.
    */
   private connectWithFreshBudget(): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error("XMPP client is disposed"));
     this.reconnect.resetAttempts();
     this.inTerminalErrorState = false;
     this.terminalDisconnectDetail = null;
@@ -1118,6 +1125,7 @@ export class BrowserXmppClient {
   }
 
   private async connectInternal(): Promise<void> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
     this.destroying = false;
@@ -1190,7 +1198,12 @@ export class BrowserXmppClient {
     return this.connectPromise;
   }
 
-  async disconnect() {
+  async disconnect(): Promise<void> {
+    if (this.disposed) return;
+    return this.disconnectInternal();
+  }
+
+  private async disconnectInternal(): Promise<void> {
     this.destroying = true;
     this.outboundQueue.dispose();
     this.roomDiscoveryGeneration += 1;
@@ -1265,6 +1278,24 @@ export class BrowserXmppClient {
     }
     await xmpp?.disconnect?.();
     this.emitStatus({ state: "offline", detail: "Disconnected" });
+  }
+
+  /**
+   * Terminal client teardown for logout, replacement, and provider unmount.
+   * `disconnect()` deliberately remains reusable for callers that reconnect
+   * the same BrowserXmppClient; only a disposed owner releases its durable
+   * lease heartbeat.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposed = true;
+    // Release the durable owner synchronously. Transport teardown below can
+    // wait indefinitely on a stalled call, room leave, or socket close; it
+    // must never keep this terminal owner's lease or resumable tail alive.
+    this.clearResumeState();
+    this.resume.dispose();
+    this.disposePromise = this.disconnectInternal();
+    return this.disposePromise;
   }
 
   private roomJidForChannel(channelId: string): string {
@@ -1602,7 +1633,7 @@ export class BrowserXmppClient {
   }
 
   private canUseConnectedSession(): boolean {
-    return !!this.xmpp && this.connected && !this.destroying && !browserOffline();
+    return !!this.xmpp && this.connected && !this.destroying && !this.disposed && !browserOffline();
   }
 
   private roomIsReady(roomJid: string): boolean {
@@ -1611,6 +1642,7 @@ export class BrowserXmppClient {
 
   private enqueueReason(): string {
     if (browserOffline()) return "offline";
+    if (this.disposed) return "disposed";
     if (this.destroying) return "destroying";
     if (!this.xmpp) return "no-client";
     if (!this.connected) return "reconnecting";
@@ -1685,12 +1717,13 @@ export class BrowserXmppClient {
   private async requireJoinedRoom(spaceId: string, channelId: string): Promise<{ xmpp: XmppClientInstance; roomJid: string }> {
     const roomJid = this.roomJidForChannel(channelId);
     await this.switchRoom(spaceId, channelId);
-    if (!this.xmpp || !this.connected || this.destroying || this.currentRoom !== roomJid) throw new Error(`Room is not ready: ${roomJid}`);
+    if (!this.xmpp || !this.connected || this.destroying || this.disposed || this.currentRoom !== roomJid) throw new Error(`Room is not ready: ${roomJid}`);
     return { xmpp: this.xmpp, roomJid };
   }
 
   /** Send a queued DM through the current session (OfflineSendQueue drain callback). */
   private sendQueuedDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): Promise<string | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
     return this.compatSendDirectMessage(xmpp, peerJid, body, opts);
@@ -1698,6 +1731,7 @@ export class BrowserXmppClient {
 
   /** Send a queued room message through the current session (OfflineSendQueue drain callback). */
   private sendQueuedRoomMessage(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): Promise<string | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
     return this.compatSendGroupMessage(xmpp, roomJid, body, opts);
@@ -1712,6 +1746,7 @@ export class BrowserXmppClient {
   }
 
   async sendGroupMessage(spaceId: string, channelId: string, body: string, opts: SendGroupMessageOptions = {}): Promise<OutboundSendResult | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     const hasFiles = !!opts.files?.length;
     const hasThreadMetadata = !!opts.threadId?.trim();
     const hasForumMetadata = !!opts.threadCreate?.title?.trim() || !!opts.threadReply?.threadId?.trim();
@@ -1756,6 +1791,7 @@ export class BrowserXmppClient {
   }
 
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     if (!body.trim() && !opts.files?.length) return null;
     const explicitScope = typeof opts.mucPm === "boolean"
       ? opts.mucPm ? "muc-occupant" : "account"

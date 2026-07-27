@@ -495,6 +495,7 @@ function createRecordingPersistence() {
   let saved: XmppResumeState | null = null;
   const calls: string[] = [];
   const persistence: ResumePersistence = {
+    dispose: () => undefined,
     loadCatchup: () => null,
     saveCatchup: () => undefined,
     clearCatchup: () => undefined,

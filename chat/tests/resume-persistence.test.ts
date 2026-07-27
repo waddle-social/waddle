@@ -19,6 +19,7 @@ import type { WaddleSession } from "../src/lib/server-auth";
 import {
   createLocalStorageResumePersistence,
   nullResumePersistence,
+  resumeOwnerLifecycleSnapshotForTests,
   type PersistedReconnectCatchup,
   type PersistedSmResumeState,
   type ResumePersistence,
@@ -104,13 +105,25 @@ function seedCopiedOwnerHandoff(
   createLocalStorageResumePersistence("alice@example.com", ownerId).saveSm(state);
   window.sessionStorage.setItem("waddle.chat.sm-resume.owner", ownerId);
   window.localStorage.setItem(
-    `waddle.chat.sm-resume.owner-lease.${ownerId}`,
+    ownerLeaseKey("alice@example.com", ownerId),
     JSON.stringify({ ownerId, instanceId: "previous-page", updatedAt: Date.now() }),
   );
   window.localStorage.setItem(
-    `waddle.chat.sm-resume.owner-handoff.${ownerId}`,
+    ownerHandoffKey("alice@example.com", ownerId),
     JSON.stringify({ ownerId, instanceId: handoffInstanceId, expiresAt: Date.now() + 45_000 }),
   );
+}
+
+function ownerRegistryKey(accountKey: string, ownerId: string): string {
+  return `${accountKey.length}:${accountKey}.${ownerId.length}:${ownerId}`;
+}
+
+function ownerLeaseKey(accountKey: string, ownerId: string): string {
+  return `waddle.chat.sm-resume.owner-lease.${ownerRegistryKey(accountKey, ownerId)}`;
+}
+
+function ownerHandoffKey(accountKey: string, ownerId: string): string {
+  return `waddle.chat.sm-resume.owner-handoff.${ownerRegistryKey(accountKey, ownerId)}`;
 }
 
 function smOwnerKey(accountKey: string, ownerId: string): string {
@@ -119,6 +132,31 @@ function smOwnerKey(accountKey: string, ownerId: string): string {
 
 function smConsumedKey(accountKey: string, ownerId: string): string {
   return `${smOwnerKey(accountKey, ownerId)}.consumed`;
+}
+
+function ownerTimerHarness() {
+  const callbacks = new Map<number, () => void>();
+  let nextId = 0;
+  return {
+    driver: {
+      setInterval: (callback: () => void) => {
+        const id = ++nextId;
+        callbacks.set(id, callback);
+        return id as unknown as ReturnType<typeof setInterval>;
+      },
+      clearInterval: (timer: ReturnType<typeof setInterval>) => {
+        callbacks.delete(timer as unknown as number);
+      },
+    },
+    activeCount: () => callbacks.size,
+    callbacks: () => [...callbacks.values()],
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
 }
 
 /** In-memory persistence for tests — same shape as the real adapter
@@ -134,6 +172,7 @@ function inMemoryPersistence(): ResumePersistence & {
   let joinedRooms: string[] = [];
   let smClears = 0;
   return {
+    dispose: () => undefined,
     loadCatchup: () => catchup,
     saveCatchup: (snapshot) => { catchup = snapshot; },
     clearCatchup: () => { catchup = null; },
@@ -467,6 +506,158 @@ describe("malformed persisted SM snapshots", () => {
 });
 
 describe("createLocalStorageResumePersistence — localStorage adapter", () => {
+  test("ref-counts owner heartbeats and drains all live ownership on terminal disposal", () => {
+    const timers = ownerTimerHarness();
+    const baseline = resumeOwnerLifecycleSnapshotForTests();
+    const first = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    const second = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual({
+      registrations: baseline.registrations + 1,
+      activeTimers: baseline.activeTimers + 1,
+      ownerInstances: baseline.ownerInstances + 1,
+    });
+
+    first.dispose();
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests().registrations).toBe(baseline.registrations + 1);
+
+    second.dispose();
+    expect(timers.activeCount()).toBe(0);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+  });
+
+  test("a disposed owner cannot mutate persistence, even if a captured heartbeat ticks", () => {
+    const timers = ownerTimerHarness();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    const capturedTick = timers.callbacks()[0];
+    persistence.saveSm({ previd: "tail", inboundH: 1, outboundH: 2 });
+    persistence.dispose();
+    const afterDispose = [...Array(window.localStorage.length)].map((_, index) => [
+      window.localStorage.key(index),
+      window.localStorage.getItem(window.localStorage.key(index) ?? ""),
+    ]);
+
+    capturedTick?.();
+    persistence.saveSm({ previd: "new-tail", inboundH: 3, outboundH: 4 });
+    persistence.saveCatchup({ dmLastSeen: [], roomLastSeen: [] });
+    persistence.clearSm();
+    persistence.clearCatchup();
+    persistence.clearJoinedRooms();
+    persistence.preparePagehideHandoff();
+
+    expect(persistence.loadSm()).toBeNull();
+    expect(persistence.consumeSm()).toBeNull();
+    expect(persistence.loadCatchup()).toBeNull();
+    expect(persistence.loadJoinedRooms()).toEqual([]);
+    expect([...Array(window.localStorage.length)].map((_, index) => [
+      window.localStorage.key(index),
+      window.localStorage.getItem(window.localStorage.key(index) ?? ""),
+    ])).toEqual(afterDispose);
+  });
+
+  test("a stale disposed owner cannot remove a replacement lease, handoff, or SM tail", () => {
+    const firstTimers = ownerTimerHarness();
+    const first = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: firstTimers.driver,
+    });
+    const ownerId = window.sessionStorage.getItem("waddle.chat.sm-resume.owner")!;
+    const leaseKey = ownerLeaseKey("alice@example.com", ownerId);
+    const handoffKey = ownerHandoffKey("alice@example.com", ownerId);
+    const tailKey = smOwnerKey("alice@example.com", ownerId);
+    const replacementInstanceId = "replacement-generation";
+    window.localStorage.setItem(leaseKey, JSON.stringify({
+      ownerId,
+      instanceId: replacementInstanceId,
+      updatedAt: Date.now(),
+    }));
+    window.localStorage.setItem(handoffKey, JSON.stringify({
+      ownerId,
+      instanceId: replacementInstanceId,
+      expiresAt: Date.now() + 45_000,
+    }));
+    window.localStorage.setItem(tailKey, JSON.stringify({
+      previd: "replacement-tail",
+      inboundH: 5,
+      outboundH: 6,
+      savedAt: Date.now(),
+      ownerId,
+      ownerInstanceId: replacementInstanceId,
+    }));
+    const expectedLease = window.localStorage.getItem(leaseKey);
+    const expectedHandoff = window.localStorage.getItem(handoffKey);
+    const expectedTail = window.localStorage.getItem(tailKey);
+
+    first.dispose();
+
+    expect(window.localStorage.getItem(leaseKey)).toBe(expectedLease);
+    expect(window.localStorage.getItem(handoffKey)).toBe(expectedHandoff);
+    expect(window.localStorage.getItem(tailKey)).toBe(expectedTail);
+  });
+
+  test("only terminal BrowserXmppClient disposal releases the persistence owner exactly once", async () => {
+    const persistence = inMemoryPersistence();
+    let disposeCalls = 0;
+    persistence.dispose = () => { disposeCalls += 1; };
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+
+    await client.disconnect();
+    expect(disposeCalls).toBe(0);
+    await client.dispose();
+    await client.dispose();
+
+    expect(disposeCalls).toBe(1);
+    await expect(client.connect()).rejects.toThrow("XMPP client is disposed");
+    await expect(client.sendDirectMessage("bob@example.com", "after disposal")).rejects.toThrow("XMPP client is disposed");
+  });
+
+  test("terminal disposal releases ownership before a stalled socket can repersist pagehide state", async () => {
+    const timers = ownerTimerHarness();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const socketClose = deferred<void>();
+    let acknowledgementRequests = 0;
+    (client as unknown as {
+      xmpp: {
+        disconnect: () => Promise<void>;
+        get_resume_state: () => PersistedSmResumeState;
+        try_request_stream_management_ack_for_pagehide: () => "accepted";
+      };
+    }).xmpp = {
+      disconnect: () => socketClose.promise,
+      get_resume_state: () => ({ previd: "must-not-persist", inboundH: 1, outboundH: 1 }),
+      try_request_stream_management_ack_for_pagehide: () => {
+        acknowledgementRequests += 1;
+        return "accepted";
+      },
+    };
+
+    const disposing = client.dispose();
+    client.prepareForPageHide();
+
+    expect(timers.activeCount()).toBe(0);
+    expect(acknowledgementRequests).toBe(0);
+    expect(persistence.loadSm()).toBeNull();
+
+    socketClose.resolve();
+    await disposing;
+  });
+
   test("round-trips a catchup snapshot through localStorage", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
     const snapshot: PersistedReconnectCatchup = {
@@ -557,11 +748,11 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     createLocalStorageResumePersistence(account, ownerA).saveSm(aState);
     window.sessionStorage.setItem("waddle.chat.sm-resume.owner", ownerA);
     window.localStorage.setItem(
-      `waddle.chat.sm-resume.owner-lease.${ownerA}`,
+      ownerLeaseKey(account, ownerA),
       JSON.stringify({ ownerId: ownerA, instanceId: "before-reload", updatedAt: Date.now() }),
     );
     window.localStorage.setItem(
-      `waddle.chat.sm-resume.owner-handoff.${ownerA}`,
+      ownerHandoffKey(account, ownerA),
       JSON.stringify({ ownerId: ownerA, instanceId: "before-reload", expiresAt: Date.now() + 45_000 }),
     );
 
@@ -767,7 +958,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     createLocalStorageResumePersistence("alice@example.com", copiedOwner).saveSm(state);
     window.sessionStorage.setItem("waddle.chat.sm-resume.owner", copiedOwner);
     window.localStorage.setItem(
-      `waddle.chat.sm-resume.owner-lease.${copiedOwner}`,
+      ownerLeaseKey("alice@example.com", copiedOwner),
       JSON.stringify({
         ownerId: copiedOwner,
         instanceId: "original-live-tab",
@@ -859,7 +1050,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       const ownerId = `reload-${scenario}-lease-owner`;
       const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
       seedCopiedOwnerHandoff(ownerId, state);
-      const leaseKey = `waddle.chat.sm-resume.owner-lease.${ownerId}`;
+      const leaseKey = ownerLeaseKey("alice@example.com", ownerId);
       if (scenario === "missing") {
         window.localStorage.removeItem(leaseKey);
       } else if (scenario === "expired") {

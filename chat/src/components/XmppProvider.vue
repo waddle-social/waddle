@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted } from "vue";
 import { useSessionAuth } from "@/auth/session";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
+import { createXmppBootstrapCoordinator } from "@/lib/xmpp/bootstrap-coordinator";
 import { connectionStore } from "@/lib/connection-store";
 import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
 import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
@@ -19,6 +20,10 @@ const props = defineProps<{
 
 const auth = useSessionAuth(props.serverBaseUrl);
 let disposePageLifecycle: (() => void) | null = null;
+const bootstrapCoordinator = createXmppBootstrapCoordinator(
+  () => connectionStore.client,
+  (client) => { connectionStore.client = client; },
+);
 
 function syncStoreFromAuth() {
   connectionStore.appState = auth.appState.value;
@@ -29,24 +34,37 @@ function syncStoreFromAuth() {
 }
 
 async function bootstrap() {
+  const generation = bootstrapCoordinator.begin();
   await auth.bootstrap();
+  if (!bootstrapCoordinator.isCurrent(generation)) return;
   syncStoreFromAuth();
 
   if (auth.appState.value === "ready" && auth.session.value) {
-    const client = new BrowserXmppClient(auth.session.value);
-    // Wire Faro telemetry hooks before any handlers are set — the
-    // primary setStatusHandler below is unaffected, but the telemetry
-    // `onStatus` hook fires alongside it. Safe to install even when
-    // Faro isn't initialized; `@/lib/telemetry` no-ops until bootstrap.
-    installInstrumentation(client);
-    // The status handler is owned here — XmppProvider is persisted across
-    // route changes (transition:persist), so there is exactly one writer to
-    // $xmppStatus for the lifetime of the client. Transient consumers
-    // (useChannelMessages, connection-notice) read the store via useStore.
-    client.setStatusHandler((status) => {
-      $xmppStatus.set(status);
+    await bootstrapCoordinator.replace(generation, () => {
+      const client = new BrowserXmppClient(auth.session.value!);
+      // Wire Faro telemetry hooks before any handlers are set — the
+      // primary setStatusHandler below is unaffected, but the telemetry
+      // `onStatus` hook fires alongside it. Safe to install even when
+      // Faro isn't initialized; `@/lib/telemetry` no-ops until bootstrap.
+      installInstrumentation(client);
+      // The status handler is owned here — XmppProvider is persisted across
+      // route changes (transition:persist), so there is exactly one writer to
+      // $xmppStatus for the lifetime of the client. Transient consumers
+      // (useChannelMessages, connection-notice) read the store via useStore.
+      client.setStatusHandler((status) => {
+        if (connectionStore.client !== client) return;
+        $xmppStatus.set(status);
+      });
+      return client;
     });
-    connectionStore.client = client;
+    return;
+  }
+
+  // A refreshed auth bootstrap can revoke or expire a previously-ready
+  // session without unmounting this provider. Never leave that old socket or
+  // its status handler alive after publishing the non-ready auth state.
+  if (bootstrapCoordinator.detachIfCurrent(generation)) {
+    $xmppStatus.set(OFFLINE_SNAPSHOT);
   }
 }
 
@@ -61,8 +79,9 @@ connectionStore.fetchProviders = async (serverUrl: string) => {
 };
 
 connectionStore.logout = async () => {
-  connectionStore.client?.disconnect().catch(() => undefined);
-  connectionStore.client = null;
+  // Logical ownership releases before the first await in `dispose`; retain
+  // best-effort physical close without letting a stalled socket delay logout.
+  bootstrapCoordinator.detach();
   $xmppStatus.set(OFFLINE_SNAPSHOT);
   await auth.logout();
   syncStoreFromAuth();
@@ -83,10 +102,9 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  bootstrapCoordinator.detach();
   disposePageLifecycle?.();
   disposePageLifecycle = null;
-  connectionStore.client?.disconnect().catch(() => undefined);
-  connectionStore.client = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);
 });
 </script>
