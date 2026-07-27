@@ -1,7 +1,6 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.prefs.QueuedOutboundMessage
@@ -37,9 +36,9 @@ internal class OutboundMessenger(
         extras: MessageSendExtras? = null,
     ): SendResult = sendMutex.withLock {
         val clientStanzaId = newClientStanzaId()
-        val owner = activeSession.ownBareJid
-            ?: runCatching { sessionPrefs.ownerBareJid.first() }.getOrNull()
+        val lease = activeSession.captureOwnerLease()
             ?: return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        val owner = lease.ownerBareJid
         val queued = QueuedOutboundMessage(
             ownerBareJid = owner,
             conversationJid = conversationJid,
@@ -57,6 +56,10 @@ internal class OutboundMessenger(
             markup = extras?.markup.orEmpty(),
             sticker = extras?.sticker,
         )
+        // Validate the captured account attempt immediately before writing
+        // durable state. A generation is required because a same-account
+        // relogin would otherwise pass a bare-JID-only check.
+        if (!activeSession.isCurrent(lease)) return@withLock SendResult(WaddleSendMessageOutcome.Error)
         val persisted = try {
             outboundQueue.enqueue(queued)
         } catch (cancellation: CancellationException) {
@@ -68,7 +71,22 @@ internal class OutboundMessenger(
             return@withLock SendResult(WaddleSendMessageOutcome.Error)
         }
 
-        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId, extras)
+        // A logout/relogin can race the DataStore suspend point. Remove only
+        // the row this stale attempt created; never touch a later owner's
+        // durable queue, and never invoke its transport.
+        if (!activeSession.isCurrent(lease)) {
+            outboundQueue.remove(owner, clientStanzaId)
+            return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        }
+
+        // sendMessage validates the lease immediately before transport
+        // selection and explicitly reports a stale no-transport outcome.
+        val attempt = sendMessage(lease, conversationJid, isGroupchat, body, clientStanzaId, extras)
+        if (attempt is ActiveSession.LeaseSendResult.Stale) {
+            outboundQueue.remove(owner, clientStanzaId)
+            return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        }
+        val outcome = (attempt as ActiveSession.LeaseSendResult.Attempted).outcome
         when (outcome) {
             is WaddleSendMessageOutcome.Sent,
             WaddleSendMessageOutcome.NotConnected,
@@ -91,17 +109,34 @@ internal class OutboundMessenger(
      */
     suspend fun drainOutboundQueue() {
         sendMutex.withLock {
-            val owner = activeSession.ownBareJid ?: return@withLock
+            val lease = activeSession.captureOwnerLease() ?: return@withLock
+            val owner = lease.ownerBareJid
             outboundQueue.drain(
                 ownerBareJid = owner,
                 send = { queued ->
-                    sendMessage(
+                    if (!activeSession.isCurrent(lease)) {
+                        outboundQueue.remove(owner, queued.clientStanzaId)
+                        return@drain WaddleSendMessageOutcome.NotConnected
+                    }
+                    val attempt = sendMessage(
+                        lease = lease,
                         conversationJid = queued.conversationJid,
                         isGroupchat = queued.isGroupchat,
                         body = queued.body,
                         stanzaId = queued.clientStanzaId,
                         extras = queued.sendExtras(),
                     )
+                    if (attempt is ActiveSession.LeaseSendResult.Stale) {
+                        outboundQueue.remove(owner, queued.clientStanzaId)
+                        return@drain WaddleSendMessageOutcome.NotConnected
+                    }
+                    val outcome = (attempt as ActiveSession.LeaseSendResult.Attempted).outcome
+                    if (!activeSession.isCurrent(lease)) {
+                        outboundQueue.remove(owner, queued.clientStanzaId)
+                        WaddleSendMessageOutcome.NotConnected
+                    } else {
+                        outcome
+                    }
                 },
                 onDropped = { queued, outcome ->
                     reportDroppedQueuedMessage(queued, outcome::class.simpleName ?: DROP_REASON_UNKNOWN)
@@ -117,25 +152,28 @@ internal class OutboundMessenger(
     }
 
     private suspend fun sendMessage(
+        lease: ActiveSession.OwnerLease,
         conversationJid: String,
         isGroupchat: Boolean,
         body: String,
         stanzaId: String,
         extras: MessageSendExtras? = null,
-    ): WaddleSendMessageOutcome {
+    ): ActiveSession.LeaseSendResult {
         val (finalBody, options) = preparedSend(stanzaId, body, extras)
-        val outcome = activeSession.send { client ->
+        val attempt = activeSession.sendIfCurrent(lease) { client ->
             if (isGroupchat) {
                 client.sendGroupchatMessage(conversationJid, finalBody, options)
             } else {
                 client.sendChatMessage(conversationJid, finalBody, options)
             }
         }
+        if (attempt is ActiveSession.LeaseSendResult.Stale) return attempt
+        val outcome = (attempt as ActiveSession.LeaseSendResult.Attempted).outcome
         // A DM send has no reflection: insert the local echo so peer
         // mutations (reactions, markers) can resolve their target and
         // the sender can edit/retract the fresh message (see ownDmEcho).
         if (!isGroupchat && outcome is WaddleSendMessageOutcome.Sent) {
-            activeSession.ownBareJid?.let { own ->
+            lease.takeIf(activeSession::isCurrent)?.ownerBareJid?.let { own ->
                 stores.timelineStore.onLiveMessage(
                     ownDmEcho(
                         ownJid = own,
@@ -148,9 +186,9 @@ internal class OutboundMessenger(
             }
         }
         return if (outcome is WaddleSendMessageOutcome.Sent) {
-            WaddleSendMessageOutcome.Sent(stanzaId)
+            ActiveSession.LeaseSendResult.Attempted(WaddleSendMessageOutcome.Sent(stanzaId))
         } else {
-            outcome
+            ActiveSession.LeaseSendResult.Attempted(outcome)
         }
     }
 

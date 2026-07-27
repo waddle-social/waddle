@@ -350,6 +350,49 @@ describe("client send readiness", () => {
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 
+  test("a synchronous MUC SM ack settles the live claim before the host returns", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const xmpp = {
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => {
+        (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck(opts.stanza_id!);
+        return opts.stanza_id;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await client.sendGroupMessage("w1", "c1", "ack in host", { id: "room-sync-ack" });
+
+    expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
+    expect((client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } }).outboundQueue.inflightQueuedIds)
+      .not.toContain("room-sync-ack");
+  });
+
+  test("MUC live-send null and mismatch results roll back the exact pre-host claim", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const xmpp = {
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) =>
+        opts.stanza_id === "room-mismatch" ? "different-id" : null),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await client.sendGroupMessage("w1", "c1", "null", { id: "room-null" });
+    await client.sendGroupMessage("w1", "c1", "mismatch", { id: "room-mismatch" });
+
+    const internal = client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } };
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("room-null");
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("room-mismatch");
+    expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id).sort())
+      .toEqual(["room-mismatch", "room-null"]);
+  });
+
   test("room send rejects typed WASM failures instead of returning a null sending id", async () => {
     const xmpp = { send_groupchat_message: mock(async () => ({ kind: "not-connected" })) };
     const client = new BrowserXmppClient(session());
@@ -1867,6 +1910,47 @@ describe("client send readiness", () => {
 
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+  });
+
+  test("a synchronous DM SM ack settles the live claim before the host returns", async () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
+        (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck(opts.stanza_id!);
+        return opts.stanza_id;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    await client.sendDirectMessage("bob@example.com", "ack in host", { id: "dm-sync-ack" });
+
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+    expect((client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } }).outboundQueue.inflightQueuedIds)
+      .not.toContain("dm-sync-ack");
+  });
+
+  test("DM live-send failures roll back the exact pre-host claim", async () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
+        if (opts.stanza_id === "dm-throw") throw new Error("socket fell away");
+        return opts.stanza_id === "dm-mismatch" ? "different-id" : null;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    await client.sendDirectMessage("bob@example.com", "null", { id: "dm-null" });
+    await client.sendDirectMessage("bob@example.com", "mismatch", { id: "dm-mismatch" });
+    await expect(client.sendDirectMessage("bob@example.com", "throw", { id: "dm-throw" })).rejects.toThrow("socket fell away");
+
+    const internal = client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } };
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("dm-null");
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("dm-mismatch");
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("dm-throw");
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id).sort())
+      .toEqual(["dm-mismatch", "dm-null", "dm-throw"]);
   });
 
   test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {

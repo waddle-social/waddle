@@ -14,6 +14,28 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
  * clear-on-teardown fields are race-free.
  */
 internal class ActiveSession {
+    /** Result of a generation-fenced message send attempt. */
+    sealed interface LeaseSendResult {
+        /** The lease was stale before a transport could be selected. */
+        data object Stale : LeaseSendResult
+
+        /** The current attempt selected its transport and produced [outcome]. */
+        data class Attempted(
+            val outcome: WaddleSendMessageOutcome,
+        ) : LeaseSendResult
+    }
+
+    /**
+     * Immutable authority to mutate or use one account attempt. Capturing
+     * the bare owner alone is insufficient: logout followed by a login as
+     * the same account must still fence work that was parked by the old
+     * attempt.
+     */
+    data class OwnerLease(
+        val ownerBareJid: String,
+        val generation: Long,
+    )
+
     /**
      * The client of the attempt that reached `SessionReady`, while that
      * attempt is alive — the target of the UI passthroughs.
@@ -41,6 +63,15 @@ internal class ActiveSession {
     fun advanceGeneration() {
         generation += 1
     }
+
+    /** Capture the current account authority for a durable operation. */
+    fun captureOwnerLease(): OwnerLease? = ownBareJid?.let { owner ->
+        OwnerLease(ownerBareJid = owner, generation = generation)
+    }
+
+    /** True only while [lease] still names this exact account attempt. */
+    fun isCurrent(lease: OwnerLease): Boolean =
+        ownBareJid == lease.ownerBareJid && generation == lease.generation
 
     /**
      * The attempt's FULL JID (account bare JID + bound resource) —
@@ -109,6 +140,19 @@ internal class ActiveSession {
         } catch (_: Throwable) {
             WaddleSendMessageOutcome.TransportError
         }
+    }
+
+    /**
+     * Lease-fenced message-send shape. The validation occurs immediately
+     * before selecting the live transport, so work parked before logout or
+     * a same-account relogin cannot write on the new session's behalf.
+     */
+    suspend fun sendIfCurrent(
+        lease: OwnerLease,
+        op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
+    ): LeaseSendResult {
+        if (!isCurrent(lease)) return LeaseSendResult.Stale
+        return LeaseSendResult.Attempted(send(op))
     }
 
     /** Nullable fetch shape: `null` when no session is ready or the call threw. */

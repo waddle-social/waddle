@@ -179,6 +179,9 @@ class XmppSessionManager(
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
+        // Fence parked outbound and post-ack work before any teardown can
+        // suspend. This also invalidates a same-account relogin attempt.
+        activeSession.advanceGeneration()
         // Best-effort call teardown BEFORE the stream closes (web
         // client.ts disconnect parity): the peer must get the
         // retract/reject/terminate + XEP-0353 <finish/> bookend instead
@@ -198,7 +201,6 @@ class XmppSessionManager(
             }
         }
         cancelSessionScope()
-        activeSession.advanceGeneration()
         activeSession.ownBareJid = null
         activeSession.ownFullJid = null
         clearSessionState()

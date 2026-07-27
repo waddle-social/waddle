@@ -445,6 +445,24 @@ export class OfflineSendQueue {
   }
 
   /**
+   * Claim a persisted live send before handing it to a WASM host.
+   *
+   * The host is permitted to synchronously dispatch the matching SM ack.
+   * Claiming (and starting telemetry) first means that ack clears the exact
+   * durable row. Callers must either leave this claim alone after a matching
+   * result or roll it back when no matching send was accepted.
+   */
+  beginLiveAttempt(id: string, kind: "room" | "dm"): void {
+    this.markInflight(id);
+    this.notePendingSend(id, kind);
+  }
+
+  /** Undo a live-send claim when the host did not accept its exact id. */
+  rollbackLiveAttempt(id: string): void {
+    this.rollbackAttempt(id, this.generation);
+  }
+
+  /**
    * Fresh session: ordinary pre-resume writes will never be acknowledged.
    *
    * A failed XEP-0198 resume is also followed by a fresh bind, but its

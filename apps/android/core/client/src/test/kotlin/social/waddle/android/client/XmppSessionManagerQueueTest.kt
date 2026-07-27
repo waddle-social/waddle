@@ -7,8 +7,11 @@ import app.cash.turbine.test
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -35,6 +38,34 @@ class XmppSessionManagerQueueTest {
         override suspend fun updateData(
             transform: suspend (t: Preferences) -> Preferences,
         ): Preferences = throw IOException("disk full")
+    }
+
+    /**
+     * Stops exactly one DataStore update after it commits the outbound row
+     * but before it returns to the caller. This lets the test force logout
+     * through the post-persistence lease check deterministically.
+     */
+    private class BlockingPreferencesDataStore : DataStore<Preferences> {
+        private val mutex = Mutex()
+        private val state = MutableStateFlow<Preferences>(emptyPreferences())
+        val enqueueBlocked = CompletableDeferred<Unit>()
+        val releaseEnqueue = CompletableDeferred<Unit>()
+        var blockNextUpdate = false
+
+        override val data = state
+
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences,
+        ): Preferences = mutex.withLock {
+            val next = transform(state.value)
+            state.value = next
+            if (blockNextUpdate) {
+                blockNextUpdate = false
+                enqueueBlocked.complete(Unit)
+                releaseEnqueue.await()
+            }
+            next
+        }
     }
 
     private class Harness(
@@ -278,6 +309,79 @@ class XmppSessionManagerQueueTest {
         assertTrue("no client transport was created or called", harness.factory.clients.isEmpty())
 
         runCatching { harness.manager.logout() }
+    }
+
+    @Test
+    fun `blocked enqueue is fenced across logout and same-account relogin`() = runTest {
+        val store = BlockingPreferencesDataStore()
+        val harness = Harness(this, SessionPrefs(store))
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        val oldClient = harness.factory.clients.single()
+
+        store.blockNextUpdate = true
+        val staleSend = async {
+            harness.manager.sendChatMessage("alice@waddle.test", "must not cross logout")
+        }
+        store.enqueueBlocked.await()
+
+        // logout advances the generation before waiting on the blocked
+        // DataStore clear. The parked enqueue may finish, but its exact
+        // owner/id is removed and it is never handed to the old transport.
+        val logout = async { harness.manager.logout() }
+        runCurrent()
+        store.releaseEnqueue.complete(Unit)
+        runCurrent()
+
+        assertEquals(WaddleSendMessageOutcome.Error, staleSend.await().outcome)
+        logout.await()
+        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+        assertTrue("stale intent never reaches the pre-logout transport", oldClient.sendCalls.isEmpty())
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertTrue(
+            "same-account relogin is a new generation and cannot replay stale work",
+            harness.factory.clients.last().sendCalls.isEmpty(),
+        )
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `queue cleanup is scoped to the exact owner and stanza id`() = runTest {
+        val harness = Harness(this)
+        harness.prefs.updateOutboundQueue {
+            listOf(
+                QueuedOutboundMessage(
+                    ownerBareJid = "alice@waddle.test",
+                    conversationJid = "peer@waddle.test",
+                    isGroupchat = false,
+                    body = "alice only",
+                    clientStanzaId = "shared-id",
+                    enqueuedAtMillis = 0L,
+                ),
+                QueuedOutboundMessage(
+                    ownerBareJid = "bob@waddle.test",
+                    conversationJid = "peer@waddle.test",
+                    isGroupchat = false,
+                    body = "bob survives",
+                    clientStanzaId = "shared-id",
+                    enqueuedAtMillis = 0L,
+                ),
+            )
+        }
+
+        OutboundQueue(harness.prefs).remove("alice@waddle.test", "shared-id")
+
+        assertEquals(
+            listOf("bob@waddle.test" to "shared-id"),
+            harness.prefs.outboundQueue.first().map { it.ownerBareJid to it.clientStanzaId },
+        )
     }
 
     @Test
