@@ -338,17 +338,7 @@ async fn relay_muji_to_room_owner(
             *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
         )]
     };
-    let retry_later = || {
-        // `record_sfu_token_denial` already records the call-setup
-        // attempted/failed pair via `setup_failure_reason`, so this
-        // must NOT also call `record_call_setup_rejected` — doing both
-        // double-counted every relay failure in exactly the #1452 SLI
-        // this path exists to feed.
-        super::super::super::call_signaling_telemetry::record_sfu_token_denial(
-            room_jid,
-            &full_jid.to_bare(),
-            waddle_xmpp::telemetry::attributes::SfuDenialReason::InternalError,
-        );
+    let relay_error_frames = || {
         vec![build_iq_error_xml_typed(
             reply.id,
             reply.response_from,
@@ -358,6 +348,36 @@ async fn relay_muji_to_room_owner(
                  please retry",
             ),
         )]
+    };
+    // The owner was definitely never reached, so this attempt ended
+    // here and nowhere else: record it, once, as a relay failure.
+    //
+    // NOT as an SFU token denial — the membership gate did not reject
+    // this request, it never ran. Routing relay outages into
+    // `sfu_token.denied` / `membership_check_failed` would make a
+    // clustering incident read as a permissions problem.
+    let relay_failed = || {
+        waddle_xmpp::telemetry::call::record_call_setup_rejected(
+            waddle_xmpp::telemetry::attributes::CallSetupFailureReason::OwnerUnreachable,
+        );
+        relay_error_frames()
+    };
+    // The owner MAY have executed this already and recorded its own
+    // terminal outcome (`setup.ok`, or a failure of its own). Counting
+    // a failure here too would let one client attempt appear as both
+    // succeeded and failed, breaking the exactly-one-terminal-outcome
+    // property `setup.ok / setup.attempted` depends on. An uncounted
+    // ambiguous attempt is the honest treatment of "we don't know";
+    // the log carries the diagnosis.
+    let relay_uncertain = |reason: &'static str| {
+        tracing::warn!(
+            room = %room_jid,
+            user = %full_jid.to_bare(),
+            reason,
+            "Muji relay outcome is uncertain; the room owner may or may not have \
+             executed this request, so no call-setup outcome is recorded for it"
+        );
+        relay_error_frames()
     };
 
     // The relay's envelope validation requires a bare `to` naming the
@@ -432,9 +452,11 @@ async fn relay_muji_to_room_owner(
         // would otherwise return `Some(vec![])`, which the caller
         // treats as terminal — the client's IQ would get no result and
         // no error, and the call would silently never start.
+        // `Delivered` with no frames (`QueuedDetached`) means the owner
+        // took it — outcome unknown to us, and its own.
         MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
             unrelayable_after_relay_failure("delivered_without_replies");
-            unrelayable(&retry_later)
+            unrelayable(&|| relay_uncertain("delivered_without_replies"))
         }
         // No node owns the room (or this one does, with no actor): the
         // local fallback for a terminate genuinely IS a no-op, because
@@ -442,22 +464,28 @@ async fn relay_muji_to_room_owner(
         MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
             unrelayable(&deny)
         }
+        // Definitely not delivered: the attempt ended here.
         MucProxyRouteDecision::Attempted(
-            OrderedRelayMucProxyOutcome::Unavailable
-            | OrderedRelayMucProxyOutcome::Dropped
-            | OrderedRelayMucProxyOutcome::MaybeCommitted
-            | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+            OrderedRelayMucProxyOutcome::Unavailable | OrderedRelayMucProxyOutcome::Dropped,
         ) => {
             unrelayable_after_relay_failure("relay_delivery_failed");
-            unrelayable(&retry_later)
+            unrelayable(&relay_failed)
+        }
+        // Ambiguous by construction — the owner may have committed it.
+        MucProxyRouteDecision::Attempted(
+            OrderedRelayMucProxyOutcome::MaybeCommitted
+            | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+        ) => {
+            unrelayable_after_relay_failure("relay_maybe_committed");
+            unrelayable(&|| relay_uncertain("relay_maybe_committed"))
         }
         MucProxyRouteDecision::RoomClaimUnavailable => {
             unrelayable_after_relay_failure("room_claim_unavailable");
-            unrelayable(&retry_later)
+            unrelayable(&relay_failed)
         }
         MucProxyRouteDecision::OriginUnavailable => {
             unrelayable_after_relay_failure("origin_unavailable");
-            unrelayable(&retry_later)
+            unrelayable(&relay_failed)
         }
     }
 }
@@ -540,6 +568,29 @@ mod tests {
     use xmpp_parsers::iq::Iq;
     use xmpp_parsers::jingle::{Action, Jingle, SessionId};
 
+    fn muji_initiate_iq(room: &str) -> Iq {
+        let jingle = Jingle::new(Action::SessionInitiate, SessionId("i-sid".into()));
+        let mut elem: xmpp_parsers::minidom::Element = jingle.into();
+        elem.append_child(
+            Muji {
+                room: Some(room.parse().expect("valid room jid")),
+                preparing: false,
+                contents: vec![MujiContent::new(
+                    "audio",
+                    Creator::Initiator,
+                    MediaKind::Audio,
+                )],
+            }
+            .to_element(),
+        );
+        Iq::Set {
+            from: Some("alice@example.com/web".parse().expect("valid full jid")),
+            to: Some("calls.example.com".parse().expect("valid mixer jid")),
+            id: "init-1".into(),
+            payload: elem,
+        }
+    }
+
     fn muji_terminate_iq(room: &str) -> Iq {
         let jingle = Jingle::new(Action::SessionTerminate, SessionId("t-sid".into()));
         let mut elem: xmpp_parsers::minidom::Element = jingle.into();
@@ -561,6 +612,59 @@ mod tests {
             id: "term-1".into(),
             payload: elem,
         }
+    }
+
+    /// #1445: a relay failure is not a membership decision. Routing it
+    /// through the SFU token-denial counter classified it as
+    /// `membership_check_failed`, which would make a clustering
+    /// incident read as a permissions problem on the very dashboards
+    /// used to diagnose it. It must land in its own bucket, and must
+    /// not touch `sfu_token.denied` at all — the gate never ran.
+    #[tokio::test(flavor = "current_thread")]
+    async fn definite_relay_failure_is_attributed_to_the_owner_not_the_membership_gate() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let alice: jid::FullJid = "alice@example.com/web".parse().unwrap();
+        let room: jid::BareJid = "general@muc.example.com".parse().unwrap();
+        let mut carbons = false;
+        let mut roster = false;
+        let mut blocklist = false;
+        let conn_state = super::IqConnState {
+            carbons_enabled: &mut carbons,
+            roster_interested: &mut roster,
+            blocklist_interested: &mut blocklist,
+            registry_owner: None,
+            state_machine: None,
+            ordered_relay_origin: None,
+        };
+
+        // An INITIATE (not a terminate — those fall back silently) for
+        // a room with no relay substrate: a definite, terminal failure.
+        let outcome = super::relay_muji_to_room_owner(
+            &state,
+            &conn_state,
+            &alice,
+            &muji_initiate_iq("general@muc.example.com"),
+            &room,
+            super::IqReplyAddressing {
+                id: "init-1",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await;
+        assert!(matches!(outcome, super::MujiRelayOutcome::Frames(_)));
+
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "waddle.call.setup.failed",
+                    &[("reason", "membership_check_failed")]
+                )
+                .unwrap_or(0),
+            0,
+            "a relay failure must not be blamed on the membership check"
+        );
     }
 
     /// #1445: a cross-node hangup falls back to local execution when

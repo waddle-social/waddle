@@ -536,12 +536,19 @@ pub enum CallSetupFailureReason {
     /// lookup or room-actor ask error) before the SFU was ever
     /// contacted.
     MembershipCheckFailed,
+    /// The room is owned by another node and that node could not be
+    /// reached, so the request never got as far as an authorization
+    /// decision (#1445). Distinct from `MembershipCheckFailed`: the
+    /// membership gate did not fail, it never ran. Keeping relay
+    /// outages out of the membership bucket is what stops a clustering
+    /// incident from reading as a permissions problem.
+    OwnerUnreachable,
 }
 
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -551,6 +558,7 @@ impl CallSetupFailureReason {
         Self::FederationUnsupported,
         Self::TokenMintFailed,
         Self::MembershipCheckFailed,
+        Self::OwnerUnreachable,
     ];
 }
 
@@ -570,6 +578,7 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::FederationUnsupported => "federation_unsupported",
             Self::TokenMintFailed => "token_mint_failed",
             Self::MembershipCheckFailed => "membership_check_failed",
+            Self::OwnerUnreachable => "owner_unreachable",
         }
     }
 }

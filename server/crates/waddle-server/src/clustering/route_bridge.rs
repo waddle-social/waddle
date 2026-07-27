@@ -4284,7 +4284,7 @@ async fn deliver_reserved_muji_iq(
         tracing::warn!(
             room = %room_jid,
             timeout_ms = ORDERED_RECEIVER_DELIVERY_TIMEOUT.as_millis(),
-            "ordered relay: Muji session-initiate execution timed out"
+            "ordered relay: Muji Jingle execution timed out"
         );
         OrderedRelayNackReason::MaybeCommitted
     })?

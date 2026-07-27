@@ -211,7 +211,26 @@ pub(super) async fn verify_muji_jingle_request(
             // they did before: the caller only relays when some other
             // node actually owns the room.
             Ok(None) => GateOutcome::RoomNotLocal { room_jid },
-            Err(_) => allow_ungated(),
+            // A lookup error (registry timeout, actor state lost,
+            // ownership reconciliation in flight) is NOT evidence that
+            // the room is local. Executing here on that basis is the
+            // phantom-participant bug again: the registration lives on
+            // the owner, and a local teardown would never clear it.
+            //
+            // On the client's own replica, report locality so the
+            // caller at least attempts to reach the owner — and if the
+            // relay cannot resolve one either, its terminate fallback
+            // degrades to exactly the local execution this arm used to
+            // do unconditionally, now with a WARN rather than in
+            // silence.
+            //
+            // On the owner replaying a relayed terminate there is no
+            // further node to try, so stay permissive: a teardown must
+            // always run somewhere.
+            Err(_) => match invocation {
+                GateInvocation::ClientOrigin => GateOutcome::RoomNotLocal { room_jid },
+                GateInvocation::RelayedReplay => allow_ungated(),
+            },
         };
     }
     if !matches!(jingle.action, Action::SessionInitiate) {
