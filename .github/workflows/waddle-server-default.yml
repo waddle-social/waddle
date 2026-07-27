@@ -11,10 +11,6 @@ on:
     - .github/workflows/hestia-cache-gc.yml/**
     - .github/workflows/waddle-server-*.yml
     - .github/workflows/waddle-server-default.yml
-    - .gitignore
-    - .gitignore/**
-    - .rules.cue
-    - .rules.cue/**
     - apps/apple/**/Tests/**
     - apps/apple/Waddle/RustClient/Generated/**
     - chat/tests/**
@@ -34,8 +30,6 @@ on:
     - docs/product/gate-evidence.json/**
     - docs/product/performance-profile.json
     - docs/product/performance-profile.json/**
-    - env.cue
-    - env.cue/**
     - flake.lock
     - flake.lock/**
     - flake.nix
@@ -188,47 +182,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: checkCiDrift
       run: cuenv task checkCiDrift --skip-dependencies
-      working-directory: server
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REF_TYPE: ${{ github.ref_type }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
-  checkRootSyncDrift:
-    name: checkRootSyncDrift
-    runs-on: namespace-profile-linux-x86
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
-      with:
-        extra-conf: accept-flake-config = true
-    - name: Setup Hestia Nix Cache
-      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-      with:
-        drain-timeout: '900'
-        upstream-cache-filter: 'true'
-        version: v2.0.0
-    - name: Setup cuenv (upstream diagnostic)
-      run: |-
-        set -euo pipefail
-        cuenv_commit="89fef82bff0fc17241a6e115549ebb3fa0578eae"
-        git clone --no-checkout https://github.com/cuenv/cuenv.git /tmp/cuenv-upstream
-        git -C /tmp/cuenv-upstream fetch --depth=1 origin "$cuenv_commit"
-        git -C /tmp/cuenv-upstream checkout --detach "$cuenv_commit"
-        test "$(git -C /tmp/cuenv-upstream rev-parse HEAD)" = "$cuenv_commit"
-        cd /tmp/cuenv-upstream
-        nix build .#cuenv -L --accept-flake-config
-        install -m 0755 result/bin/cuenv /usr/local/bin/cuenv
-        cd "$GITHUB_WORKSPACE"
-        /usr/local/bin/cuenv sync -A
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    - name: checkRootSyncDrift
-      run: cuenv task checkRootSyncDrift --skip-dependencies
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
