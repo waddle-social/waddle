@@ -304,6 +304,31 @@ async fn relay_muji_to_room_owner(
             MujiRelayOutcome::Frames(frames())
         }
     };
+    // A terminate that falls back to local execution because the relay
+    // was *unavailable* is NOT the benign no-op the unclaimed-room case
+    // is, and must not be silent. Locally there is nothing registered
+    // to clear (the initiate registered on the owner), yet
+    // `unregister_call_participant` still fires `RemoveParticipant`, so
+    // the user's media does stop — while the OWNER keeps the registry
+    // entry and never runs the Muji-presence clear. That phantom
+    // suppresses `DeleteRoom` and keeps the room's "in call" state lit
+    // for every other occupant until the reconcile sweep catches it.
+    // The telemetry-bearing error builders are deliberately skipped for
+    // a terminate, so without this line the whole situation is
+    // invisible. Convergence is still owed to the durable control plane
+    // in #1449.
+    let unrelayable_after_relay_failure = |reason: &'static str| {
+        if is_terminate {
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                reason,
+                "Muji session-terminate could not be relayed to the room owner; \
+                 executing locally — the owner may hold a phantom call participant \
+                 until reconciliation"
+            );
+        }
+    };
 
     let deny = || {
         vec![build_iq_error_xml_typed(
@@ -350,8 +375,10 @@ async fn relay_muji_to_room_owner(
                     state.deps.auth_state.xmpp_domain.as_str(),
                 )
     });
-    let room_is_local =
-        room_jid.domain().as_str() == format!("muc.{}", state.deps.auth_state.xmpp_domain.as_str());
+    let room_is_local = waddle_xmpp::protocol::handlers::jingle::room_is_on_local_muc_service(
+        room_jid,
+        state.deps.auth_state.xmpp_domain.as_str(),
+    );
     if !addressed_to_mixer || !room_is_local {
         return unrelayable(&deny);
     }
@@ -406,8 +433,12 @@ async fn relay_muji_to_room_owner(
         // treats as terminal — the client's IQ would get no result and
         // no error, and the call would silently never start.
         MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
+            unrelayable_after_relay_failure("delivered_without_replies");
             unrelayable(&retry_later)
         }
+        // No node owns the room (or this one does, with no actor): the
+        // local fallback for a terminate genuinely IS a no-op, because
+        // there is no owner holding a registration to strand.
         MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
             unrelayable(&deny)
         }
@@ -416,9 +447,18 @@ async fn relay_muji_to_room_owner(
             | OrderedRelayMucProxyOutcome::Dropped
             | OrderedRelayMucProxyOutcome::MaybeCommitted
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-        )
-        | MucProxyRouteDecision::RoomClaimUnavailable
-        | MucProxyRouteDecision::OriginUnavailable => unrelayable(&retry_later),
+        ) => {
+            unrelayable_after_relay_failure("relay_delivery_failed");
+            unrelayable(&retry_later)
+        }
+        MucProxyRouteDecision::RoomClaimUnavailable => {
+            unrelayable_after_relay_failure("room_claim_unavailable");
+            unrelayable(&retry_later)
+        }
+        MucProxyRouteDecision::OriginUnavailable => {
+            unrelayable_after_relay_failure("origin_unavailable");
+            unrelayable(&retry_later)
+        }
     }
 }
 

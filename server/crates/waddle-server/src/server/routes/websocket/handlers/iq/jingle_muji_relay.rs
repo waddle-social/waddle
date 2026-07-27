@@ -75,7 +75,15 @@ pub(crate) async fn handle_relayed_muji_initiate(
         // Terminate is never membership-gated, so executing it with no
         // derived capabilities is exactly what the local path does.
         GateOutcome::RoomNotLocal { room_jid } if is_terminate => {
-            let _ = room_jid;
+            // Worth a line: "we were relayed a Muji IQ for a room we
+            // hold the claim for, yet no actor lives here" is the most
+            // diagnostic state this whole path can be in.
+            tracing::debug!(
+                room = %room_jid,
+                user = %sender.to_bare(),
+                "relayed Muji terminate arrived after the room actor was gone; \
+                 executing the teardown anyway"
+            );
             None
         }
         // An initiate, though, genuinely cannot proceed: the requester
