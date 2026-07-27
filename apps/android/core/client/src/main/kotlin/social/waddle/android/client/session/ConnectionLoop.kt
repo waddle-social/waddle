@@ -177,7 +177,7 @@ internal class ConnectionLoop(
         // Native FFI clients deliberately start fresh streams: the web-only
         // typed SM persistence path owns resumable browser sessions, while
         // Android catch-up is durable and idempotent.
-        onReady(attemptScope, client, session, freshStream = true)
+        onReady(attemptScope, client, session, true)
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
