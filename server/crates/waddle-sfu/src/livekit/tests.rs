@@ -278,14 +278,23 @@ impl RecordingAdmin {
     fn release_list(&self) {
         let gate = self.list_gate.lock().expect("recording lock").clone();
         if let Some(gate) = gate {
-            gate.notify_waiters();
+            // `notify_one`, not `notify_waiters`: the latter drops the
+            // signal when no waiter is registered yet, and both signals
+            // in this handshake are one-shot events whose ordering
+            // against the other task's registration is not guaranteed
+            // on a multi-threaded runtime. A stored permit makes them
+            // ordering-independent.
+            gate.notify_one();
         }
     }
 
     /// Wait until a parked `room_occupancy` call has actually been
     /// entered, so the test's registration lands mid-probe rather than
     /// racing the spawn.
-    /// Panics if the probe never starts. Swallowing that timeout made
+    ///
+    /// Both sides of the handshake use `notify_one` so neither signal
+    /// can be lost to a registration race. Panics if the probe never
+    /// starts. Swallowing that timeout made
     /// the post-probe-registry test vacuous: `release_list` would
     /// notify before the probe installed its waiter, the teardown would
     /// stay parked forever, and the assertion that no `DeleteRoom`
@@ -380,7 +389,7 @@ impl LiveKitAdmin for RecordingAdmin {
             if let Some(gate) = gate {
                 let waiter = gate.notified();
                 if let Some(entered) = self.list_entered.lock().expect("recording lock").clone() {
-                    entered.notify_waiters();
+                    entered.notify_one();
                 }
                 waiter.await;
             }
