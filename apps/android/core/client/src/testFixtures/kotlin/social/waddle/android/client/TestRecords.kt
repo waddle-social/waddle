@@ -24,9 +24,7 @@ import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddlePresenceHat
 import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleSharedFile
-import social.waddle.client.ffi.WaddleSmResumeState
 import social.waddle.client.ffi.WaddleTune
-import social.waddle.client.ffi.WaddleUnhandledOutboundEntry
 import social.waddle.client.ffi.WaddleVCard4
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
@@ -336,21 +334,4 @@ fun testInboxResult(
     unread = unread,
     allUnread = allUnread,
     conversations = conversations,
-)
-
-fun testResumeState(
-    previd: String = "prev-1",
-    inboundH: UInt = 5u,
-    outboundH: UInt = 7u,
-): WaddleSmResumeState = WaddleSmResumeState(
-    previd = previd,
-    inboundH = inboundH,
-    outboundH = outboundH,
-    maxResumeSeconds = 300u,
-    unhandledOutboundEntries = listOf(
-        WaddleUnhandledOutboundEntry(
-            xml = "<message/>",
-            sentAt = "2026-07-26T12:34:56.789Z",
-        ),
-    ),
 )

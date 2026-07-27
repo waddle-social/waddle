@@ -9,16 +9,11 @@ import social.waddle.android.client.ResumeCursorTracker
 import social.waddle.android.client.nowRfc3339
 import social.waddle.android.client.persistQuietly
 import social.waddle.android.client.prefs.SessionPrefs
-import social.waddle.android.client.prefs.SmResumeSnapshot
-import social.waddle.android.client.prefs.toSnapshot
-import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
- * Persists the XEP-0198 resume snapshot and the per-conversation
- * catch-up cursors behind conflated channels: [queueResumeSnapshot]
- * arrives on Rust threads and never blocks, [recordCursor] never blocks
- * the event fan-out, and the session-scoped persister loops coalesce
- * bursts into single DataStore writes. Re-armed per login via [start].
+ * Persists per-conversation catch-up cursors behind a conflated channel.
+ * [recordCursor] never blocks event fan-out and the session-scoped persister
+ * coalesces bursts into single DataStore writes. Re-armed per login via [start].
  */
 internal class ResumePersistence(
     private val sessionPrefs: SessionPrefs,
@@ -26,24 +21,14 @@ internal class ResumePersistence(
     /** In-memory newest-seen cursors ranking the bounded DM catch-up. */
     val cursorTracker = ResumeCursorTracker()
 
-    @Volatile
-    private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
-
     /** Conflated "cursors changed" ticks; the persister coalesces bursts. */
     @Volatile
-    private var cursorWrites: Channel<Unit> = Channel(Channel.CONFLATED)
+    private var cursorWrites = Channel<Unit>(Channel.CONFLATED)
 
     /** Fresh channels + persister loops on [scope], once per login. */
     fun start(scope: CoroutineScope) {
-        resumeSnapshots = Channel(Channel.CONFLATED)
         cursorWrites = Channel(Channel.CONFLATED)
-        scope.launch { persistResumeSnapshots(resumeSnapshots) }
         scope.launch { persistResumeCursors(cursorWrites) }
-    }
-
-    /** Called from Rust threads via the bridge: never blocks. */
-    fun queueResumeSnapshot(state: WaddleSmResumeState?) {
-        resumeSnapshots.trySend(ResumeUpdate(state?.toSnapshot()))
     }
 
     /**
@@ -68,18 +53,9 @@ internal class ResumePersistence(
         cursorTracker.clear()
     }
 
-    private suspend fun persistResumeSnapshots(updates: ReceiveChannel<ResumeUpdate>) {
-        for (update in updates) {
-            persistQuietly { sessionPrefs.setSmResume(update.snapshot) }
-        }
-    }
-
     private suspend fun persistResumeCursors(writes: ReceiveChannel<Unit>) {
         while (writes.receiveCatching().isSuccess) {
             persistQuietly { sessionPrefs.setResumeCursors(cursorTracker.snapshot()) }
         }
     }
-
-    /** Wrapper so a conflated channel can carry a `null` (= clear) update. */
-    private data class ResumeUpdate(val snapshot: SmResumeSnapshot?)
 }

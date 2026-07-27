@@ -23,11 +23,10 @@
  *
  * `withSpan` below is for work that isn't a fetch — e.g. the XMPP
  * connect handshake over WebSocket, outbound message bookkeeping —
- * so we still get client-side timing and failure attribution. The
- * browser WebSocket API does not allow custom headers on the upgrade
- * request, so `xmpp.connect` propagates its W3C `traceparent` through the
- * sanctioned WebSocket query parameter. Any `fetch` issued inside a
- * `withSpan` callback is likewise propagated through normal headers.
+ * so we still get client-side timing and failure attribution. Browsers
+ * cannot attach headers to a WebSocket upgrade, and XMPP transports no
+ * tracing context in its URL; any `fetch` issued inside a `withSpan`
+ * callback is propagated through normal HTTP headers.
  */
 import {
   initializeFaro,
@@ -148,7 +147,6 @@ const SENSITIVE_ERROR_CONTEXT_KEYS = new Set([
   "key",
   "storagekey",
 ]);
-const TRACEPARENT_PATTERN = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 const XMPP_RESOURCE_PATTERN = /^web-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type SpanAttributeValue = string | number;
@@ -784,9 +782,7 @@ function scrubUrl(value: string | undefined, trustedOrigins: Set<string>): strin
     if (isSensitiveSpanUrl(url)) return UNKNOWN_FILE_TRANSFER_URL;
     if (!isTrustedSpanOrigin(url, trustedOrigins)) return scrubExternalUrl();
     url.pathname = scrubUrlPath(url.pathname);
-    const traceparent = sanitizedTraceparent(url.searchParams.get("traceparent"));
     url.search = "";
-    if (traceparent) url.searchParams.set("traceparent", traceparent);
     url.hash = "";
     return url.toString();
   } catch {
@@ -800,18 +796,6 @@ function isTrustedSpanOrigin(url: URL, trustedOrigins: Set<string>): boolean {
   const httpEquivalent = new URL(url.origin);
   httpEquivalent.protocol = url.protocol === "wss:" ? "https:" : "http:";
   return trustedOrigins.has(httpEquivalent.origin);
-}
-
-function sanitizedTraceparent(value: string | null): string | undefined {
-  if (!value) return undefined;
-  const normalized = value.toLowerCase();
-  return isValidTraceparent(normalized) ? normalized : undefined;
-}
-
-function isValidTraceparent(value: string): boolean {
-  if (!TRACEPARENT_PATTERN.test(value)) return false;
-  const [, traceId, spanId] = value.split("-");
-  return !/^0{32}$/.test(traceId ?? "") && !/^0{16}$/.test(spanId ?? "");
 }
 
 function currentPageHref(): string {
@@ -887,74 +871,6 @@ export function setXmppResourceForTelemetry(resource: string): void {
       xmpp_resource: resource,
     },
   });
-}
-
-/**
- * Append the active Faro/OpenTelemetry span as W3C trace context to a WebSocket
- * upgrade URL. Browsers cannot set upgrade headers, so the sanctioned query
- * parameter is the only cross-stack propagation channel available here.
- */
-export function websocketUrlWithTraceparent(value: string): string {
-  const activeSpanContext = trace.getSpan(context.active())?.spanContext();
-  if (activeSpanContext && validSpanContext(activeSpanContext)) {
-    return websocketUrlWithSpanContext(value, activeSpanContext);
-  }
-  if (typeof globalThis.crypto?.getRandomValues !== "function") return value;
-  const spanContext = randomSpanContext();
-  return websocketUrlWithSpanContext(value, spanContext);
-}
-
-function validSpanContext(spanContext: { traceId: string; spanId: string; traceFlags: number }): boolean {
-  return isValidTraceparent(traceparentFromSpanContext(spanContext));
-}
-
-function randomSpanContext(): { traceId: string; spanId: string; traceFlags: number } {
-  return {
-    traceId: randomNonZeroHex(16),
-    spanId: randomNonZeroHex(8),
-    traceFlags: 0,
-  };
-}
-
-function randomNonZeroHex(byteLength: number): string {
-  let value = "";
-  do {
-    value = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(byteLength)), (byte) =>
-      byte.toString(16).padStart(2, "0")
-    ).join("");
-  } while (/^0+$/.test(value));
-  return value;
-}
-
-function traceparentFromSpanContext(
-  spanContext: { traceId: string; spanId: string; traceFlags: number },
-): string {
-  return `00-${spanContext.traceId}-${spanContext.spanId}-${(spanContext.traceFlags & 0xff)
-    .toString(16)
-    .padStart(2, "0")}`;
-}
-
-function websocketUrlWithSpanContext(
-  value: string,
-  spanContext: { traceId: string; spanId: string; traceFlags: number },
-): string {
-  const traceparent = traceparentFromSpanContext(spanContext);
-  if (!isValidTraceparent(traceparent)) return value;
-  try {
-    const url = new URL(value);
-    url.searchParams.set("traceparent", traceparent);
-    return url.toString();
-  } catch {
-    return value;
-  }
-}
-
-/** For tests only — exercise positive WebSocket trace injection deterministically. */
-export function __websocketUrlWithTraceparentForTesting(
-  value: string,
-  spanContext: { traceId: string; spanId: string; traceFlags: number },
-): string {
-  return websocketUrlWithSpanContext(value, spanContext);
 }
 
 /** For tests only — exercise the final transport guard without calling Grafana. */

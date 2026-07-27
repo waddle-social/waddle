@@ -1,7 +1,4 @@
-import {
-  websocketUrlWithTraceparent,
-  withSpan,
-} from "@/lib/telemetry";
+import { withSpan } from "@/lib/telemetry";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
@@ -1011,7 +1008,7 @@ export class BrowserXmppClient {
 
   private async doConnect(): Promise<void> {
     const epoch = ++this.connectEpoch;
-    const websocketUrl = websocketUrlWithTraceparent(this.session.xmpp_websocket_url);
+    const websocketUrl = this.session.xmpp_websocket_url;
     const mod = await this.loadModule();
     // Stale continuation: a newer connect attempt started (or the
     // timeout tore this one down) while the module load was pending.

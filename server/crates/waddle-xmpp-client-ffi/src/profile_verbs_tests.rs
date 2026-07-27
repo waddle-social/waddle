@@ -45,7 +45,6 @@ fn offline_client() -> Arc<WaddleClient> {
             jid: "alice@waddle.test".to_string(),
             access_token: "token".to_string(),
             resource: "test".to_string(),
-            resume_state: None,
         },
         listener: Arc::new(Box::new(NullListener) as Box<dyn WaddleEventListener>),
         handle: tokio::sync::Mutex::new(None),

@@ -80,7 +80,7 @@ pub use room_admin::{
 };
 pub use types::*;
 
-use convert::{dispatch_event, resume_state_from_ffi};
+use convert::dispatch_event;
 use waddle_xmpp_client::{
     messaging::SessionId, AccessToken, ClientConfig, ClientHandle, ConnectionConfig,
     OAuthBearerConfig, WebSocketConfig,
@@ -166,7 +166,7 @@ impl WaddleClient {
             }
         };
 
-        let mut client_config =
+        let client_config =
             match ClientConfig::new(ConnectionConfig::new(domain), transport, auth) {
                 Ok(c) => c,
                 Err(e) => {
@@ -174,24 +174,6 @@ impl WaddleClient {
                     return;
                 }
             };
-
-        // XEP-0198: seed the runtime with the persisted resume snapshot
-        // so it attempts <resume/> before resource binding, exactly as
-        // the wasm client threads it through StoredConfig.
-        if let Some(resume) = self.config.resume_state.clone() {
-            match resume_state_from_ffi(resume) {
-                Ok(state) => client_config.session.stream_management.resume_state = Some(state),
-                Err(e) => {
-                    // Persisted SM state is optional acceleration data. Fail
-                    // closed to a fresh stream while notifying Android to
-                    // clear only its snapshot; durable outbound queue
-                    // ownership remains outside this record.
-                    self.listener
-                        .on_event(WaddleClientEvent::ResumeStateChanged { state: None });
-                    self.emit_error(format!("Invalid resume state discarded: {e}"));
-                }
-            }
-        }
 
         let xmpp_client = match XmppClient::new(client_config) {
             Ok(c) => c,

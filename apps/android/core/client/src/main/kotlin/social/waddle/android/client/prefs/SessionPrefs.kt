@@ -8,14 +8,13 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 import social.waddle.android.client.calls.MucCallSessionCache
 import kotlin.random.Random
 
 /**
  * Session-scoped persistence (`session.preferences_pb`), mirroring the
- * web localStorage keys: `waddle.chat.session`, `waddle.chat.sm-resume`,
- * `waddle.chat.joined-rooms`, `waddle.chat.last-seen`,
+ * web localStorage keys: `waddle.chat.session`, `waddle.chat.joined-rooms`,
+ * `waddle.chat.last-seen`,
  * `waddle.chat.outbound-queue`, `waddle.chat.resume-cursors`.
  */
 class SessionPrefs(
@@ -32,10 +31,6 @@ class SessionPrefs(
     val serverUrl: Flow<String?> = dataStore.data.map { it[KEY_SERVER_URL] }
     val sessionId: Flow<String?> = dataStore.data.map { it[KEY_SESSION_ID] }
     val joinedRooms: Flow<Set<String>> = dataStore.data.map { it[KEY_JOINED_ROOMS] ?: emptySet() }
-
-    val smResume: Flow<SmResumeSnapshot?> = dataStore.data.map { prefs ->
-        prefs[KEY_SM_RESUME]?.let(::decodeSmResume)
-    }
 
     val lastSeen: Flow<Map<String, String>> = dataStore.data.map { prefs ->
         prefs[KEY_LAST_SEEN]?.let { stored ->
@@ -71,17 +66,6 @@ class SessionPrefs(
 
     suspend fun setSessionId(sessionId: String) {
         dataStore.edit { it[KEY_SESSION_ID] = sessionId }
-    }
-
-    /** `null` clears the snapshot (explicit disconnect / resume rejected). */
-    suspend fun setSmResume(snapshot: SmResumeSnapshot?) {
-        dataStore.edit { prefs ->
-            if (snapshot == null) {
-                prefs.remove(KEY_SM_RESUME)
-            } else {
-                prefs[KEY_SM_RESUME] = json.encodeToString(snapshot)
-            }
-        }
     }
 
     suspend fun setJoinedRooms(rooms: Set<String>) {
@@ -129,18 +113,6 @@ class SessionPrefs(
         runCatching { json.decodeFromString<List<QueuedOutboundMessage>>(stored) }.getOrNull()
 
     /**
-     * Older snapshots carried an untyped XML queue under this key.  A counter
-     * snapshot without its matching typed tail is unsafe to resume, so reject
-     * the whole persisted state at the JSON boundary rather than migrating it.
-     */
-    private fun decodeSmResume(stored: String): SmResumeSnapshot? {
-        val objectValue = runCatching { json.parseToJsonElement(stored).jsonObject }.getOrNull()
-            ?: return null
-        if (LEGACY_QUEUED_STANZAS_XML_KEY in objectValue) return null
-        return runCatching { json.decodeFromString<SmResumeSnapshot>(stored) }.getOrNull()
-    }
-
-    /**
      * Stable-per-install 8-hex suffix for the XMPP resource
      * (`waddle-android-<suffix>`); generated once, atomically, and kept
      * across [clear] so reinstalls — not logouts — rotate the resource.
@@ -173,7 +145,6 @@ class SessionPrefs(
         val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_SESSION_ID = stringPreferencesKey("session_id")
         val KEY_OWNER_BARE_JID = stringPreferencesKey("owner_bare_jid")
-        val KEY_SM_RESUME = stringPreferencesKey("sm_resume")
         val KEY_JOINED_ROOMS = stringSetPreferencesKey("joined_rooms")
         val KEY_LAST_SEEN = stringPreferencesKey("last_seen")
         val KEY_OUTBOUND_QUEUE = stringPreferencesKey("outbound_queue")
@@ -182,6 +153,5 @@ class SessionPrefs(
 
         const val RESOURCE_SUFFIX_LENGTH = 8
         const val HEX_ALPHABET = "0123456789abcdef"
-        const val LEGACY_QUEUED_STANZAS_XML_KEY = "queuedStanzasXml"
     }
 }

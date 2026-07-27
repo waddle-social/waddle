@@ -276,36 +276,6 @@ class XmppSessionManagerTest {
     }
 
     @Test
-    fun `resume snapshots persist and feed the next attempt`() = runTest {
-        val harness = Harness(this)
-        harness.manager.login(testSessionInfo())
-        runCurrent()
-
-        harness.factory.emit(WaddleClientEvent.Connected)
-        runCurrent()
-
-        val state = testResumeState()
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(state))
-        runCurrent()
-        assertEquals(state.toSnapshot(), harness.prefs.smResume.first())
-
-        harness.factory.emit(WaddleClientEvent.Disconnected)
-        runCurrent()
-        advanceTimeBy(1_000L)
-        runCurrent()
-
-        val resumed = harness.factory.configs.last().resumeState
-        assertNotNull("second attempt must carry the persisted snapshot", resumed)
-        assertEquals("prev-1", resumed?.previd)
-
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(null))
-        runCurrent()
-        assertEquals(null, harness.prefs.smResume.first())
-
-        harness.manager.logout()
-    }
-
-    @Test
     fun `connect timeout burns the attempt`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())

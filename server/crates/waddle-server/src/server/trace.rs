@@ -7,7 +7,7 @@ use axum::{
     middleware::Next,
     response::Response as AxumResponse,
 };
-use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::HeaderExtractor;
 use tower_http::trace::{DefaultOnResponse, OnResponse};
 use tracing::{field, info_span, Level, Span};
@@ -158,90 +158,12 @@ fn matched_route_template(request: &Request<Body>) -> Option<&'static str> {
         .find(|template| *template == matched)
 }
 
-/// Parse a W3C `traceparent` value carried as a WebSocket-upgrade
-/// **query parameter** (#1326 phase A). The browser `WebSocket` API
-/// cannot set headers, so the chat client appends
-/// `?traceparent=00-<trace-id>-<span-id>-<flags>` to the upgrade URL;
-/// the resulting remote `SpanContext` becomes an OTel span **link**
-/// on the connection-scoped span (links, not parenting — the
-/// connection outlives the browser's connect span).
-///
-/// Strictly parsed W3C trace parent supplied by the browser. Version `00`
-/// must have exactly four fields; future versions retain the version-00 field
-/// lengths and may append opaque extension fields. Keeping this typed until
-/// the OpenTelemetry boundary prevents raw query strings from flowing through
-/// connection state or tracing call sites.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ClientTraceParent {
-    trace_id: TraceId,
-    parent_id: SpanId,
-    flags: TraceFlags,
-}
-
-impl ClientTraceParent {
-    pub(crate) fn trace_id(self) -> TraceId {
-        self.trace_id
-    }
-
-    pub(crate) fn remote_span_context(self) -> SpanContext {
-        SpanContext::new(
-            self.trace_id,
-            self.parent_id,
-            self.flags,
-            true,
-            TraceState::default(),
-        )
-    }
-}
-
-/// Returns `None` for absent, malformed, version `ff`, uppercase, short, or
-/// all-zero ids. Invalid client input is deliberately ignored rather than
-/// affecting the WebSocket upgrade response.
-pub(crate) fn client_trace_parent_from_query(query: Option<&str>) -> Option<ClientTraceParent> {
-    let traceparent = query?
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("traceparent="))?;
-    let mut parts = traceparent.split('-');
-    let version = parts.next()?;
-    let trace_id_field = parts.next()?;
-    let parent_id_field = parts.next()?;
-    let flags_field = parts.next()?;
-    let has_extension = parts.next().is_some();
-    if !is_lower_hex(version, 2)
-        || version == "ff"
-        || (version == "00" && has_extension)
-        || !is_lower_hex(trace_id_field, 32)
-        || !is_lower_hex(parent_id_field, 16)
-        || !is_lower_hex(flags_field, 2)
-    {
-        return None;
-    }
-    let trace_id = TraceId::from_hex(trace_id_field).ok()?;
-    let parent_id = SpanId::from_hex(parent_id_field).ok()?;
-    let flags = u8::from_str_radix(flags_field, 16).ok()?;
-    if trace_id == TraceId::INVALID || parent_id == SpanId::INVALID {
-        return None;
-    }
-    Some(ClientTraceParent {
-        trace_id,
-        parent_id,
-        flags: TraceFlags::new(flags),
-    })
-}
-
-fn is_lower_hex(value: &str, expected_len: usize) -> bool {
-    value.len() == expected_len
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 /// The `uri` span field, with every credential-bearing part removed
 /// (#1439).
 ///
 /// Query strings are dropped for **all** routes, not allowlisted ones:
 /// observed production spans carried `/api/auth/session?session_id=<live
-/// session credential>` and `/ws?traceparent=…`, and any new endpoint
+/// session credential>`, and any new endpoint
 /// would leak by default under a per-route redaction list. `http.route`
 /// already carries the bounded template, so the query adds no queryable
 /// signal.
@@ -616,93 +538,6 @@ mod tests {
             redacted_request_uri(&uri),
             "/api/calendar/community/:token/events.ics",
         );
-    }
-
-    #[test]
-    fn traceparent_query_parses_to_typed_remote_parent() {
-        let parent = client_trace_parent_from_query(Some(
-            "protocol=xmpp&traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
-        ))
-        .expect("valid traceparent must parse");
-        let context = parent.remote_span_context();
-        assert_eq!(
-            context.trace_id().to_string(),
-            "0af7651916cd43dd8448eb211c80319c"
-        );
-        assert_eq!(context.span_id().to_string(), "b7ad6b7169203331");
-        assert!(context.is_remote());
-        assert!(context.is_sampled());
-    }
-
-    #[test]
-    fn malformed_or_zero_traceparent_is_rejected() {
-        for query in [
-            None,
-            Some(""),
-            Some("traceparent="),
-            Some("traceparent=nonsense"),
-            Some("traceparent=00-00000000000000000000000000000000-b7ad6b7169203331-01"),
-            Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01"),
-            // Non-hex / uppercase bytes are rejected outright.
-            Some("traceparent=zz-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
-            Some("traceparent=0F-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
-            Some("traceparent=00-0AF7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
-            Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-B7ad6b7169203331-01"),
-            Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0A"),
-            // Flags must be exactly two hex digits.
-            Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0"),
-        ] {
-            assert!(
-                client_trace_parent_from_query(query).is_none(),
-                "must reject {query:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn higher_traceparent_version_is_accepted() {
-        assert!(client_trace_parent_from_query(Some(
-            "traceparent=01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-        ))
-        .is_some());
-    }
-
-    #[test]
-    fn traceparent_version_ff_is_rejected() {
-        assert!(client_trace_parent_from_query(Some(
-            "traceparent=ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-        ))
-        .is_none());
-    }
-
-    #[test]
-    fn version_zero_traceparent_with_extras_is_rejected() {
-        assert!(client_trace_parent_from_query(Some(
-            "traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra"
-        ))
-        .is_none());
-    }
-
-    #[test]
-    fn higher_version_traceparent_with_extras_is_accepted() {
-        for query in [
-            "traceparent=02-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-vendor-field",
-            "traceparent=02-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-",
-            "traceparent=02-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01--opaque",
-        ] {
-            assert!(client_trace_parent_from_query(Some(query)).is_some());
-        }
-    }
-
-    #[test]
-    fn short_traceparent_fields_are_rejected() {
-        for query in [
-            "traceparent=00-af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
-            "traceparent=00-0af7651916cd43dd8448eb211c80319c-7ad6b7169203331-01",
-            "traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-1",
-        ] {
-            assert!(client_trace_parent_from_query(Some(query)).is_none());
-        }
     }
 
     #[test]

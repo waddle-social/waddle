@@ -2,14 +2,11 @@ package social.waddle.android.client
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.client.ffi.WaddleClientEvent
-import social.waddle.client.ffi.WaddleSmResumeState
 
 class XmppEventBridgeTest {
-    private val resumeUpdates = mutableListOf<WaddleSmResumeState?>()
-    private val bridge = XmppEventBridge { resumeUpdates += it }
+    private val bridge = XmppEventBridge()
 
     private fun received(): XmppEvent? = bridge.events.tryReceive().getOrNull()
 
@@ -48,17 +45,5 @@ class XmppEventBridgeTest {
         assertEquals(XmppEvent.Disconnected, received())
 
         assertNull("channel should be drained", received())
-        assertTrue("resume callback must not fire for other events", resumeUpdates.isEmpty())
-    }
-
-    @Test
-    fun `resume state changes go to the callback not the channel`() {
-        val state = testResumeState()
-
-        bridge.onEvent(WaddleClientEvent.ResumeStateChanged(state))
-        bridge.onEvent(WaddleClientEvent.ResumeStateChanged(null))
-
-        assertEquals(listOf<WaddleSmResumeState?>(state, null), resumeUpdates)
-        assertNull("resume updates must not enter the event channel", received())
     }
 }

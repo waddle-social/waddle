@@ -15,7 +15,6 @@ import {
   __scrubXhrSpanUrlForTesting,
   __sanitizeFaroTransportItemForTesting,
   __setFaroForTesting,
-  __websocketUrlWithTraceparentForTesting,
   initTelemetry,
   markSensitiveUrlForTelemetry,
   reportCallAudioProcessing,
@@ -34,7 +33,6 @@ import {
   reportStatusChange,
   reportStreamManagement,
   setXmppResourceForTelemetry,
-  websocketUrlWithTraceparent,
 } from "../src/lib/telemetry";
 import {
   adoptCallCorrelationId,
@@ -534,42 +532,16 @@ describe("telemetry module no-op behaviour", () => {
     expect(stub.sessions.at(-1)?.attributes?.xmpp_resource).toBe(resource);
   });
 
-  test("passes a valid traceparent while dropping session-bearing query values", () => {
+  test("drops all WebSocket query values from telemetry span URLs", () => {
     const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
     expect(__scrubSpanUrlForTesting(
       `wss://xmpp.example/ws?session_id=secret&traceparent=${traceparent}`,
       ["https://xmpp.example"],
-    )).toBe(`wss://xmpp.example/:route?traceparent=${traceparent}`);
+    )).toBe("wss://xmpp.example/:route");
   });
 
-  test("generates valid random trace context when there is no active span", () => {
-    const result = new URL(
-      websocketUrlWithTraceparent("wss://xmpp.example/ws?transport=websocket"),
-    );
-
-    expect(result.searchParams.get("transport")).toBe("websocket");
-    expect(result.searchParams.get("traceparent"))
-      .toMatch(/^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-00$/);
-  });
-
-  test("leaves the WebSocket URL unchanged when Web Crypto is unavailable", () => {
-    const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
-    const value = "wss://xmpp.example/ws?transport=websocket";
-    Object.defineProperty(globalThis, "crypto", {
-      configurable: true,
-      value: undefined,
-    });
-
-    try {
-      expect(websocketUrlWithTraceparent(value)).toBe(value);
-    } finally {
-      if (original) Object.defineProperty(globalThis, "crypto", original);
-      else Reflect.deleteProperty(globalThis, "crypto");
-    }
-  });
-
-  test("passes a well-formed traceparent into the XMPP WebSocket configuration", async () => {
+  test("passes the unmodified XMPP WebSocket URL into the configuration", async () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
     let configuredUrl = "";
@@ -601,33 +573,11 @@ describe("telemetry module no-op behaviour", () => {
 
     const configured = new URL(configuredUrl);
     expect(configured.searchParams.get("session_id")).toBe("secret");
-    expect(configured.searchParams.get("traceparent"))
-      .toMatch(/^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-00$/);
+    expect(configured.searchParams.get("traceparent")).toBeNull();
 
     await client.disconnect();
     await pendingConnect.catch(() => undefined);
     state.reconnect.clearTimer();
-  });
-
-  test("appends the active trace context without dropping existing WebSocket query values", () => {
-    expect(__websocketUrlWithTraceparentForTesting(
-      "wss://xmpp.example/ws?transport=websocket",
-      {
-        traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
-        spanId: "00f067aa0ba902b7",
-        traceFlags: 1,
-      },
-    )).toBe(
-      "wss://xmpp.example/ws?transport=websocket&traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-    );
-  });
-
-  test("drops W3C-invalid all-zero trace identifiers", () => {
-    const zeroTraceparent = "00-00000000000000000000000000000000-0000000000000000-01";
-    expect(__scrubSpanUrlForTesting(
-      `wss://xmpp.example/ws?traceparent=${zeroTraceparent}`,
-      ["https://xmpp.example"],
-    )).toBe("wss://xmpp.example/:route");
   });
 
   test("reportError drops identifier-bearing context fields", () => {

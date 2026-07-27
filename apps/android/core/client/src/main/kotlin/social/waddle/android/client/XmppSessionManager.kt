@@ -89,7 +89,7 @@ class XmppSessionManager(
 
     private val resume = ResumePersistence(sessionPrefs)
 
-    private val activeSession = ActiveSession(resume::queueResumeSnapshot)
+    private val activeSession = ActiveSession()
 
     private val readState: ReadStateCoordinator =
         ReadStateCoordinator(activeSession, stores, userPrefs) { event ->

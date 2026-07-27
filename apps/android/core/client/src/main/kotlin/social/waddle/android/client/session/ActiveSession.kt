@@ -5,7 +5,6 @@ import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEventBridge
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleSendMessageOutcome
-import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
  * Shared per-attempt session state: which FFI client (if any) is live,
@@ -14,9 +13,7 @@ import social.waddle.client.ffi.WaddleSmResumeState
  * loop is sequential), so plain volatile set-on-ready /
  * clear-on-teardown fields are race-free.
  */
-internal class ActiveSession(
-    private val onResumeState: (WaddleSmResumeState?) -> Unit,
-) {
+internal class ActiveSession {
     /**
      * The client of the attempt that reached `SessionReady`, while that
      * attempt is alive — the target of the UI passthroughs.
@@ -70,7 +67,7 @@ internal class ActiveSession(
 
     /** Fresh bridge for a new attempt (the FFI client is one-shot). */
     fun beginAttempt(): XmppEventBridge {
-        val attemptBridge = XmppEventBridge(onResumeState)
+        val attemptBridge = XmppEventBridge()
         bridge = attemptBridge
         return attemptBridge
     }

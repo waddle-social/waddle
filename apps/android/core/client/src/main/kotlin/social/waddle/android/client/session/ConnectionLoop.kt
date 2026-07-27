@@ -31,15 +31,13 @@ import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppEventRouter
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.SessionPrefs
-import social.waddle.android.client.prefs.toFfi
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleSaslCondition
 
 /**
- * The supervised reconnect loop: each attempt builds a fresh
- * `WaddleConfig` (with the persisted XEP-0198 resume snapshot), a fresh
- * bridge, and a fresh client from the injected [ClientFactory], then
+ * The supervised reconnect loop: each attempt builds a fresh `WaddleConfig`,
+ * bridge, and client from the injected [ClientFactory], then
  * waits up to the connect budget for `SessionReady`. Failed attempts
  * back off via [ReconnectPolicy]; credential-shaped SASL failures are
  * terminal and reported via [onTerminalAuthFailure].
@@ -59,13 +57,6 @@ internal class ConnectionLoop(
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
     private val retryRequests = Channel<Unit>(Channel.CONFLATED)
-
-    /**
-     * Set on the first `SessionReady` since process start — half of the
-     * fresh-stream heuristic in [consumeEvents].
-     */
-    @Volatile
-    private var hadReadySessionThisProcess = false
 
     /** Logout: the loop is cancelled; publish `Idle` for the UI. */
     fun resetToIdle() {
@@ -131,7 +122,6 @@ internal class ConnectionLoop(
         // (initiator/responder attributes, tie-break comparand).
         activeSession.ownFullJid = "${config.jid}/${config.resource}"
         val client = clientFactory.create(config, bridge)
-        val hadResumeSnapshot = config.resumeState != null
         try {
             return coroutineScope {
                 val connector = async {
@@ -145,7 +135,7 @@ internal class ConnectionLoop(
                     }
                 }
                 val consumer = async {
-                    consumeEvents(bridge.events, client, session, this, hadResumeSnapshot)
+                    consumeEvents(bridge.events, client, session, this)
                 }
                 val end = select<AttemptEnd?> {
                     consumer.onAwait { it }
@@ -175,7 +165,6 @@ internal class ConnectionLoop(
         client: WaddleClientInterface,
         session: WaddleSessionInfo,
         attemptScope: CoroutineScope,
-        hadResumeSnapshot: Boolean,
     ): AttemptEnd {
         val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(events) }
         when (readiness) {
@@ -184,20 +173,11 @@ internal class ConnectionLoop(
             Readiness.READY -> Unit
         }
         activeSession.onReady(client)
-        // Fresh-stream heuristic: the FFI does not report whether the
-        // XEP-0198 <resume/> was accepted, so treat the stream as fresh
-        // when (a) no resume snapshot was presented (definitely a new
-        // stream) or (b) this is the first `SessionReady` of the process
-        // (a snapshot that survived process death may resume, but
-        // catching up is cheap and dedupe collapses the overlap). Known
-        // gap, accepted: a mid-process resume that the server REJECTS
-        // looks resumed here and skips catch-up until the next fresh
-        // session; the open screen still refetches via its own
-        // SessionReady hook.
-        val freshStream = !hadResumeSnapshot || !hadReadySessionThisProcess
-        hadReadySessionThisProcess = true
         _state.value = ConnectionState.Ready
-        onReady(attemptScope, client, session, freshStream)
+        // Native FFI clients deliberately start fresh streams: the web-only
+        // typed SM persistence path owns resumable browser sessions, while
+        // Android catch-up is durable and idempotent.
+        onReady(attemptScope, client, session, freshStream = true)
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
@@ -236,7 +216,6 @@ internal class ConnectionLoop(
         jid = session.jid,
         accessToken = session.sessionId,
         resource = RESOURCE_PREFIX + sessionPrefs.resourceSuffix(),
-        resumeState = sessionPrefs.smResume.first()?.toFfi(),
     )
 
     /** Park in `Offline` until connectivity exists. */
