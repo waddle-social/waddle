@@ -48,8 +48,7 @@ internal class ConnectionLoop(
     private val sessionPrefs: SessionPrefs,
     private val activeSession: ActiveSession,
     private val router: XmppEventRouter,
-    private val onReady: SessionReadyListener,
-    private val onTerminalAuthFailure: suspend () -> Unit,
+    private val callbacks: ConnectionLoopCallbacks,
     private val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
 ) {
@@ -87,7 +86,7 @@ internal class ConnectionLoop(
             when (end) {
                 AttemptEnd.AUTH_FAILED -> {
                     _state.value = ConnectionState.AuthFailed
-                    onTerminalAuthFailure()
+                    callbacks.onTerminalAuthFailure()
                     return
                 }
                 AttemptEnd.DROPPED_AFTER_READY -> attempt = 0
@@ -177,13 +176,13 @@ internal class ConnectionLoop(
         // Native FFI clients deliberately start fresh streams: the web-only
         // typed SM persistence path owns resumable browser sessions, while
         // Android catch-up is durable and idempotent.
-        onReady(attemptScope, client, session, true)
+        callbacks.onReady(attemptScope, client, session, true)
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
         // treating those as terminal would sign the user out mid-session.
         for (event in events) {
-            router.dispatch(event)
+            dispatch(event)
             if (event is XmppEvent.Disconnected) return AttemptEnd.DROPPED_AFTER_READY
         }
         return AttemptEnd.DROPPED_AFTER_READY
@@ -191,7 +190,7 @@ internal class ConnectionLoop(
 
     private suspend fun awaitReadiness(events: ReceiveChannel<XmppEvent>): Readiness {
         for (event in events) {
-            router.dispatch(event)
+            dispatch(event)
             when (event) {
                 is XmppEvent.SessionReady -> return Readiness.READY
                 // Typed SASL failure from the FFI: the ONLY terminal auth
@@ -209,6 +208,14 @@ internal class ConnectionLoop(
             }
         }
         return Readiness.CLOSED
+    }
+
+    /** Durable queue acknowledgement must complete before UI fan-out. */
+    private suspend fun dispatch(event: XmppEvent) {
+        if (event is XmppEvent.DeliveryAcked) {
+            callbacks.onDeliveryAcked(event.stanzaId)
+        }
+        router.dispatch(event)
     }
 
     private suspend fun buildConfig(session: WaddleSessionInfo): WaddleConfig = WaddleConfig(
@@ -292,3 +299,10 @@ internal typealias SessionReadyListener = (
     session: WaddleSessionInfo,
     freshStream: Boolean,
 ) -> Unit
+
+/** Typed lifecycle callbacks kept together as one constructor dependency. */
+internal class ConnectionLoopCallbacks(
+    val onReady: SessionReadyListener,
+    val onDeliveryAcked: suspend (String) -> Unit,
+    val onTerminalAuthFailure: suspend () -> Unit,
+)

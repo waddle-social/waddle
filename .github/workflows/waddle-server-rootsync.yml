@@ -64,8 +64,26 @@ jobs:
         drain-timeout: '900'
         upstream-cache-filter: 'true'
         version: v2.0.0
-    - name: 'Build cuenv PR #475'
-      run: "\tset -euo pipefail\n\tsource_dir=\"$(mktemp -d)\"\n\ttrap 'rm -rf \"$source_dir\"' EXIT\n\tgit -C \"$source_dir\" init -q\n\tgit -C \"$source_dir\" remote add origin https://github.com/cuenv/cuenv.git\n\tgit -C \"$source_dir\" fetch --depth=1 origin 89fef82bff0fc17241a6e115549ebb3fa0578eae\n\tgit -C \"$source_dir\" checkout --detach FETCH_HEAD\n\ttest \"$(git -C \"$source_dir\" rev-parse HEAD)\" = \"89fef82bff0fc17241a6e115549ebb3fa0578eae\"\n\tsource /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh\n\tcd \"$source_dir\"\n\tnix build .#cuenv -L --accept-flake-config\n\tinstall -m 0755 result/bin/cuenv /usr/local/bin/cuenv\n\t/usr/local/bin/cuenv sync -A"
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.55.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: checkRootSyncDrift
       run: cuenv task checkRootSyncDrift --skip-dependencies
       working-directory: server

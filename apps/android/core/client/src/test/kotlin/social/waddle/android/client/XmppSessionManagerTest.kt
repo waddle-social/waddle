@@ -14,7 +14,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
-import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleSaslCondition
@@ -407,12 +406,10 @@ class XmppSessionManagerTest {
         client.sendOutcome = WaddleSendMessageOutcome.Sent("stanza-42")
 
         val roomSend = harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hello room")
-        assertEquals(WaddleSendMessageOutcome.Sent("stanza-42"), roomSend.outcome)
-        assertEquals("live sends never queue", false, roomSend.queued)
-        assertEquals(
-            WaddleSendMessageOutcome.Sent("stanza-42"),
-            harness.manager.sendChatMessage("alice@waddle.test", "hello dm").outcome,
-        )
+        val dmSend = harness.manager.sendChatMessage("alice@waddle.test", "hello dm")
+        assertEquals(WaddleSendMessageOutcome.Sent(roomSend.queuedId!!), roomSend.outcome)
+        assertEquals(WaddleSendMessageOutcome.Sent(dmSend.queuedId!!), dmSend.outcome)
+        assertTrue("live sends remain durable until SM acknowledgement", roomSend.queued && dmSend.queued)
         assertEquals(
             listOf("general@muc.waddle.test" to "hello room", "alice@waddle.test" to "hello dm"),
             client.sendCalls,
@@ -420,6 +417,10 @@ class XmppSessionManagerTest {
         assertTrue(
             "manager-generated stanza id rides the send options",
             client.sendOptions.all { it?.stanzaId != null },
+        )
+        assertEquals(
+            listOf(roomSend.queuedId, dmSend.queuedId),
+            harness.prefs.outboundQueue.first().map { it.clientStanzaId },
         )
 
         // The attempt died → the passthrough must stop targeting the client.

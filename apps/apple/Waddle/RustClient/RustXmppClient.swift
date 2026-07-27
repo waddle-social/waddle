@@ -370,11 +370,6 @@ private final class _EventListener: WaddleEventListener {
             // Terminal for the presented token — surfaced through the
             // existing error path; AppModel classifies and re-authenticates.
             onError(description: "SASL authentication failed: \(condition)")
-        case let .resumeStateChanged(state):
-            // The Apple client does not persist XEP-0198 resume state yet;
-            // it reconnects with a fresh stream (`WaddleConfig.resumeState`
-            // stays nil in `AppModel+Xmpp.swift`).
-            logger.debug("RustXmppClient: resume snapshot \(state == nil ? "cleared" : "updated")")
         case let .error(description):
             onError(description: description)
         }

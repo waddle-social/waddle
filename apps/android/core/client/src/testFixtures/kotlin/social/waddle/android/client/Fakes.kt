@@ -454,13 +454,49 @@ class FakeExtensionCommandVerbs {
     }
 }
 
+/** Concurrency-safe recorder and outcome controls for message sends. */
+class FakeMessageSends {
+    val calls = CopyOnWriteArrayList<Pair<String, String>>()
+    val options = CopyOnWriteArrayList<WaddleSendOptions?>()
+    val outcomes = ConcurrentLinkedDeque<WaddleSendMessageOutcome>()
+
+    @Volatile
+    var outcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("sent-1")
+
+    @Volatile
+    var stall: CompletableDeferred<Unit>? = null
+
+    suspend fun send(
+        targetJid: String,
+        body: String,
+        sendOptions: WaddleSendOptions?,
+    ): WaddleSendMessageOutcome {
+        calls += targetJid to body
+        options += sendOptions
+        stall?.await()
+        return outcomes.pollFirst() ?: outcome
+    }
+}
+
+val FakeWaddleClient.sendCalls: CopyOnWriteArrayList<Pair<String, String>> get() = messageSends.calls
+val FakeWaddleClient.sendOptions: CopyOnWriteArrayList<WaddleSendOptions?> get() = messageSends.options
+val FakeWaddleClient.sendOutcomes: ConcurrentLinkedDeque<WaddleSendMessageOutcome> get() = messageSends.outcomes
+var FakeWaddleClient.sendOutcome: WaddleSendMessageOutcome
+    get() = messageSends.outcome
+    set(value) {
+        messageSends.outcome = value
+    }
+var FakeWaddleClient.sendMessageStall: CompletableDeferred<Unit>?
+    get() = messageSends.stall
+    set(value) {
+        messageSends.stall = value
+    }
+
 /**
  * Connect/disconnect no-op; everything unused by the manager rejects.
  * Recorders are concurrency-safe: instrumentation tests poll them from
  * the test thread while the session manager mutates them on its own
- * dispatcher. Cohesive verb families live in sliced-out fakes
- * ([FakeStickerVerbs], [FakeNotifyVerbs],
- * [FakeExtensionCommandVerbs]) that this class delegates to.
+ * dispatcher. Cohesive verb families live in sliced-out fakes.
  */
 class FakeWaddleClient : WaddleClientInterface {
     @Volatile
@@ -482,17 +518,7 @@ class FakeWaddleClient : WaddleClientInterface {
     var mamPage: WaddleMamPage =
         WaddleMamPage(messages = emptyList(), firstId = null, lastId = null, isComplete = true)
 
-    /** Recorded (recipientJid, body) sends and the canned outcome. */
-    val sendCalls = CopyOnWriteArrayList<Pair<String, String>>()
-
-    @Volatile
-    var sendOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("sent-1")
-
-    /** Options captured per send (the manager passes the stanza id here). */
-    val sendOptions = CopyOnWriteArrayList<WaddleSendOptions?>()
-
-    /** Per-call outcome overrides consumed before [sendOutcome]. */
-    val sendOutcomes = ConcurrentLinkedDeque<WaddleSendMessageOutcome>()
+    val messageSends = FakeMessageSends()
 
     override suspend fun connect() {
         connectCalls += 1
@@ -909,21 +935,13 @@ class FakeWaddleClient : WaddleClientInterface {
         peerJid: String,
         body: String,
         options: WaddleSendOptions?,
-    ): WaddleSendMessageOutcome {
-        sendCalls += peerJid to body
-        sendOptions += options
-        return sendOutcomes.pollFirst() ?: sendOutcome
-    }
+    ): WaddleSendMessageOutcome = messageSends.send(peerJid, body, options)
 
     override suspend fun sendGroupchatMessage(
         roomJid: String,
         body: String,
         options: WaddleSendOptions?,
-    ): WaddleSendMessageOutcome {
-        sendCalls += roomJid to body
-        sendOptions += options
-        return sendOutcomes.pollFirst() ?: sendOutcome
-    }
+    ): WaddleSendMessageOutcome = messageSends.send(roomJid, body, options)
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
 
     /** Recorded (conversation, targetId, emojis) reaction sends. */

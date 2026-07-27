@@ -8,52 +8,47 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /**
- * Persisted outbound send queue (web `waddle.chat.outbound-queue`
- * parity): sends that failed because no live session existed are kept in
- * [SessionPrefs] and replayed, in enqueue order, on the next
- * `SessionReady` — so a message typed while offline survives process
- * death instead of being lost.
+ * Persisted outbound intent queue. Every chat/groupchat send enters this
+ * queue before the FFI transport is called and remains until the matching
+ * XEP-0198 acknowledgement transfers responsibility to the server.
  */
 class OutboundQueue(
     private val sessionPrefs: SessionPrefs,
     private val capacity: Int = DEFAULT_CAPACITY,
 ) {
     /**
-     * Persist [message]; a replay of an id already in the queue replaces
-     * the old entry. At [capacity] the OLDEST entry is evicted and
-     * returned so the caller can surface the drop.
+     * Atomically persist [message]. Accepted rows are never evicted: a new
+     * row at [capacity] is rejected without changing the existing queue.
+     * Re-inserting the same owned identity is idempotent.
      */
-    suspend fun enqueue(message: QueuedOutboundMessage): QueuedOutboundMessage? {
-        var evicted: QueuedOutboundMessage? = null
+    suspend fun enqueue(message: QueuedOutboundMessage): EnqueueResult {
+        var result = EnqueueResult.ACCEPTED
         sessionPrefs.updateOutboundQueue { current ->
-            val withoutReplaced = current.filterNot { it.clientStanzaId == message.clientStanzaId }
-            if (withoutReplaced.size >= capacity) {
-                evicted = withoutReplaced.first()
-                withoutReplaced.drop(1) + message
-            } else {
-                withoutReplaced + message
+            when {
+                current.any { it.sameIdentityAs(message) } -> current
+                current.size >= capacity -> {
+                    result = EnqueueResult.FULL
+                    current
+                }
+                else -> current + message
             }
         }
-        return evicted
+        return result
     }
 
     /**
-     * Replay the queue head-first through [send]. Per-message outcomes:
-     * - `Sent` → remove (the real MUC echo / XEP-0198 ack flows
-     *   normally; nothing is faked here).
+     * Replay one queue snapshot head-first through [send]. Per-message outcomes:
+     * - `Sent` → keep until the matching XEP-0198 acknowledgement.
      * - `NotConnected` / `TransportError` → keep and STOP: the session
      *   is gone again, the remainder retries on the next `SessionReady`.
      * - anything else (`InvalidRecipient`, `InvalidOptions`,
-     *   `StanzaError`, `Error`) → drop and report via [onDropped]: the
+     *   `StanzaError`, `Error`) → remove and report via [onDropped]: the
      *   session was live and rejected this exact payload, so replaying
      *   it can only fail the same way forever.
      *
-     * No lock is held across [send] (an FFI call): each iteration
-     * re-reads the persisted head, so concurrent enqueues interleave
-     * safely. Removal after a successful send is non-cancellable to
-     * shrink the send-then-cancelled window in which a replay could
-     * double-send (the id-stable replay is collapsed by timeline dedupe
-     * anyway).
+     * A snapshot means each retained row is attempted at most once per
+     * fresh ready session. Before each send the durable row is rechecked,
+     * so an acknowledgement racing the drain prevents a stale replay.
      */
     suspend fun drain(
         ownerBareJid: String,
@@ -65,19 +60,26 @@ class OutboundQueue(
         // draining — replaying it here would misdeliver it under the
         // current account.
         pruneForeign(ownerBareJid)
-        while (true) {
-            val head = sessionPrefs.outboundQueue.first().firstOrNull() ?: return
-            when (val outcome = send(head)) {
-                is WaddleSendMessageOutcome.Sent -> remove(head.clientStanzaId)
+        val snapshot = sessionPrefs.outboundQueue.first()
+            .filter { it.ownerBareJid == ownerBareJid }
+        for (message in snapshot) {
+            if (!contains(ownerBareJid, message.clientStanzaId)) continue
+            when (val outcome = send(message)) {
+                is WaddleSendMessageOutcome.Sent -> Unit
                 WaddleSendMessageOutcome.NotConnected,
                 WaddleSendMessageOutcome.TransportError,
                 -> return
                 else -> {
-                    remove(head.clientStanzaId)
-                    onDropped(head, outcome)
+                    remove(ownerBareJid, message.clientStanzaId)
+                    onDropped(message, outcome)
                 }
             }
         }
+    }
+
+    /** Delete the exact row owned by [ownerBareJid] after its SM ack. */
+    suspend fun acknowledge(ownerBareJid: String, clientStanzaId: String) {
+        remove(ownerBareJid, clientStanzaId)
     }
 
     private suspend fun pruneForeign(ownerBareJid: String) {
@@ -88,17 +90,32 @@ class OutboundQueue(
         }
     }
 
-    private suspend fun remove(clientStanzaId: String) {
+    suspend fun remove(ownerBareJid: String, clientStanzaId: String) {
         withContext(NonCancellable) {
             sessionPrefs.updateOutboundQueue { current ->
-                current.filterNot { it.clientStanzaId == clientStanzaId }
+                current.filterNot {
+                    it.ownerBareJid == ownerBareJid && it.clientStanzaId == clientStanzaId
+                }
             }
         }
     }
 
+    private suspend fun contains(ownerBareJid: String, clientStanzaId: String): Boolean =
+        sessionPrefs.outboundQueue.first().any {
+            it.ownerBareJid == ownerBareJid && it.clientStanzaId == clientStanzaId
+        }
+
+    private fun QueuedOutboundMessage.sameIdentityAs(other: QueuedOutboundMessage): Boolean =
+        ownerBareJid == other.ownerBareJid && clientStanzaId == other.clientStanzaId
+
+    enum class EnqueueResult {
+        ACCEPTED,
+        FULL,
+    }
+
     companion object {
         /**
-         * Drop-oldest bound on the persisted queue: high enough for any
+         * Reject-new bound on the persisted queue: high enough for any
          * realistic offline burst, low enough to keep the DataStore blob
          * (and the replay storm on reconnect) small.
          */

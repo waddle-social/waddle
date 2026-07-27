@@ -51,36 +51,6 @@ let _gitopsWaddleServerInputs = [
 ]
 let _deploymentInputs = ["deployment.cue"]
 
-// Keep the namespace-pinned installer separate so the root-sync pipeline can
-// replace the release binary setup with the exact upstream atomic-sync fix.
-let _NamespaceNix = wc.#Nix
-
-let _CuenvPr475RootSync = schema.#Contributor & {
-	id: "cuenv"
-	when: taskLabels: ["cuenv-pr475-root-sync"]
-	tasks: [{
-		id:        "cuenv.setup"
-		label:     "Build cuenv PR #475"
-		priority:  10
-		dependsOn: ["nix.install"]
-		script: #"""
-			set -euo pipefail
-			source_dir="$(mktemp -d)"
-			trap 'rm -rf "$source_dir"' EXIT
-			git -C "$source_dir" init -q
-			git -C "$source_dir" remote add origin https://github.com/cuenv/cuenv.git
-			git -C "$source_dir" fetch --depth=1 origin 89fef82bff0fc17241a6e115549ebb3fa0578eae
-			git -C "$source_dir" checkout --detach FETCH_HEAD
-			test "$(git -C "$source_dir" rev-parse HEAD)" = "89fef82bff0fc17241a6e115549ebb3fa0578eae"
-			source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-			cd "$source_dir"
-			nix build .#cuenv -L --accept-flake-config
-			install -m 0755 result/bin/cuenv /usr/local/bin/cuenv
-			/usr/local/bin/cuenv sync -A
-		"""#
-	}]
-}
-
 schema.#Project & {
 	name: "waddle-server"
 
@@ -93,10 +63,9 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		_NamespaceNix,
-		_CuenvPr475RootSync,
-		c.#CuenvRelease,
+		wc.#Nix,
 		wc.#Hestia,
+		c.#CuenvRelease,
 		c.#OnePassword,
 		schema.#Contributor & {
 			id: "flakehub"
@@ -270,7 +239,6 @@ schema.#Project & {
 		}
 
 		checkRootSyncDrift: schema.#Task & {
-			labels: ["cuenv-pr475-root-sync"]
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail

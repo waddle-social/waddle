@@ -49,10 +49,9 @@ data class EncryptedFileRef(
 )
 
 /**
- * One persisted outbound send awaiting replay, stored as a JSON list in
- * [SessionPrefs] (the Android analog of web localStorage
- * `waddle.chat.outbound-queue`). Survives process death; replayed in
- * enqueue order on the next `SessionReady`.
+ * One persisted outbound intent awaiting a matching XEP-0198 ack, stored
+ * as a typed JSON list in [SessionPrefs]. It survives process death and
+ * is replayed in enqueue order on the next fresh `SessionReady`.
  */
 @Serializable
 data class QueuedOutboundMessage(

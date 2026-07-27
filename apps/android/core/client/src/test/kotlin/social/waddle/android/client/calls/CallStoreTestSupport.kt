@@ -62,7 +62,7 @@ internal class Fixture(
     ownFullJid: (() -> String?)? = null,
 ) {
     val client = FakeWaddleClient()
-    val activeSession = ActiveSession { }
+    val activeSession = ActiveSession()
     val sessionCache = MucCallSessionCache(InMemoryPreferencesDataStore())
     val store: CallStore
 
