@@ -551,6 +551,12 @@ export class WaddleClient {
     subscribe_to_presence(peer_jid: string): Promise<any>;
     supports_mds_publish_options(): Promise<any>;
     /**
+     * Pagehide-only, nonblocking XEP-0198 acknowledgement admission.  This
+     * does not await capacity, a driver turn, or a socket write; callers get
+     * only the closed queue outcome and must persist immediately afterwards.
+     */
+    try_request_stream_management_ack_for_pagehide(): string;
+    /**
      * Publish a 1:1 DM unpin request.
      */
     unpin_direct_message(peer_jid: string, target_stanza_id: string): Promise<any>;

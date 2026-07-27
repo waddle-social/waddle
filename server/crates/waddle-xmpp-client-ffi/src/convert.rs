@@ -700,7 +700,7 @@ pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
         unhandled_outbound_entries: state
             .unhandled_outbound_entries()
             .map(|entry| WaddleUnhandledOutboundEntry {
-                xml: String::from(entry.stanza()),
+                xml: String::from(entry.stanza_for_persistence()),
                 sent_at: entry
                     .sent_at()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -725,7 +725,8 @@ pub(super) fn resume_state_from_ffi(state: WaddleSmResumeState) -> Result<SmResu
             let sent_at = chrono::DateTime::parse_from_rfc3339(&entry.sent_at)
                 .map_err(|err| format!("invalid resume stanza timestamp: {err}"))?
                 .with_timezone(&chrono::Utc);
-            Ok(UnhandledOutboundEntry::new(stanza, sent_at))
+            UnhandledOutboundEntry::try_new(stanza, sent_at)
+                .map_err(|err| format!("invalid persisted resume stanza: {err}"))
         })
         .collect::<Result<Vec<_>, String>>()?;
     SmResumeState::from_unhandled_outbound_entries(
@@ -2445,6 +2446,81 @@ mod tests {
             err.contains("invalid resume stanza timestamp"),
             "err: {err}"
         );
+    }
+
+    #[test]
+    fn resume_state_from_ffi_accepts_countable_client_stanzas_in_order() {
+        let state = WaddleSmResumeState {
+            previd: "prev-stream".to_string(),
+            inbound_h: 4,
+            outbound_h: 7,
+            max_resume_seconds: Some(300),
+            unhandled_outbound_entries: vec![
+                WaddleUnhandledOutboundEntry {
+                    xml: "<message xmlns='jabber:client' id='message-1'><body>one</body></message>".to_string(),
+                    sent_at: "2026-07-27T12:00:00.000Z".to_string(),
+                },
+                WaddleUnhandledOutboundEntry {
+                    xml: "<presence xmlns='jabber:client'><show>away</show></presence>".to_string(),
+                    sent_at: "2026-07-27T12:00:01.000Z".to_string(),
+                },
+                WaddleUnhandledOutboundEntry {
+                    xml: "<iq xmlns='jabber:client' id='iq-1' type='get'><query xmlns='jabber:iq:version'/></iq>".to_string(),
+                    sent_at: "2026-07-27T12:00:02.000Z".to_string(),
+                },
+            ],
+        };
+
+        let restored = resume_state_from_ffi(state).expect("countable stanzas restore");
+        assert_eq!(restored.max_resume_seconds(), Some(300));
+        assert_eq!(
+            restored
+                .unhandled_outbound_entries()
+                .map(|entry| entry.stanza_for_persistence().name())
+                .collect::<Vec<_>>(),
+            vec!["message", "presence", "iq"],
+        );
+        assert_eq!(
+            restored
+                .unhandled_outbound_entries()
+                .map(|entry| entry
+                    .sent_at()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                .collect::<Vec<_>>(),
+            vec![
+                "2026-07-27T12:00:00.000Z",
+                "2026-07-27T12:00:01.000Z",
+                "2026-07-27T12:00:02.000Z",
+            ],
+        );
+    }
+
+    #[test]
+    fn resume_state_from_ffi_rejects_controls_and_non_client_stanzas() {
+        for xml in [
+            "<r xmlns='urn:xmpp:sm:3'/>",
+            "<a xmlns='urn:xmpp:sm:3' h='1'/>",
+            "<enable xmlns='urn:xmpp:sm:3'/>",
+            "<resumed xmlns='urn:xmpp:sm:3' h='1' previd='old'/>",
+            "<foo xmlns='jabber:client'/>",
+            "<message xmlns='urn:example:not-client'/>",
+        ] {
+            let err = resume_state_from_ffi(WaddleSmResumeState {
+                previd: "prev-stream".to_string(),
+                inbound_h: 0,
+                outbound_h: 1,
+                max_resume_seconds: None,
+                unhandled_outbound_entries: vec![WaddleUnhandledOutboundEntry {
+                    xml: xml.to_string(),
+                    sent_at: "2026-07-27T12:00:00.000Z".to_string(),
+                }],
+            })
+            .expect_err("non-countable persisted XML must not reach replay");
+            assert!(
+                err.contains("invalid persisted resume stanza"),
+                "{xml}: {err}"
+            );
+        }
     }
 
     /// In-test listener that captures every dispatched event in

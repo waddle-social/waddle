@@ -2,12 +2,14 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use minidom::Element;
+use xmpp_parsers::{iq::Iq, message::Message, presence::Presence};
 
 use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
 use crate::state::StreamId;
 
 pub const NS_SM: &str = "urn:xmpp:sm:3";
+const NS_CLIENT: &str = "jabber:client";
 const NS_DELAY: &str = "urn:xmpp:delay";
 const NS_STANZA_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 const ACK_RETRY_DELAYS_MS: [i64; 5] = [250, 500, 1_000, 2_000, 5_000];
@@ -50,6 +52,53 @@ pub enum SmInboundControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidSmInboundControl;
 
+/// The structural error returned when durable XEP-0198 state does not contain
+/// a countable client stanza.
+///
+/// XEP-0198 control elements are stream-level commands, not stanzas, and
+/// therefore must never enter the replay queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidPersistedSmStanza;
+
+impl std::fmt::Display for InvalidPersistedSmStanza {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("persisted SM entry is not a valid countable jabber:client stanza")
+    }
+}
+
+impl std::error::Error for InvalidPersistedSmStanza {}
+
+/// A countable client stanza retained without reserializing its extension
+/// payloads.
+///
+/// The typed `xmpp_parsers` parse below validates the root stanza.  The
+/// original element is retained so extension payload ordering and opaque
+/// extension contents survive an XEP-0198 replay exactly as sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CountableReplayStanza {
+    element: Element,
+}
+
+impl TryFrom<Element> for CountableReplayStanza {
+    type Error = InvalidPersistedSmStanza;
+
+    fn try_from(element: Element) -> Result<Self, Self::Error> {
+        if element.ns() != NS_CLIENT {
+            return Err(InvalidPersistedSmStanza);
+        }
+
+        let parsed = match element.name() {
+            "message" => Message::try_from(element.clone()).map(|_| ()),
+            "presence" => Presence::try_from(element.clone()).map(|_| ()),
+            "iq" => Iq::try_from(element.clone()).map(|_| ()),
+            _ => return Err(InvalidPersistedSmStanza),
+        };
+        parsed.map_err(|_| InvalidPersistedSmStanza)?;
+
+        Ok(Self { element })
+    }
+}
+
 /// A sender-owned outbound stanza retained for XEP-0198 resumption.
 ///
 /// The core deliberately keeps the parsed stanza, its stable message identity,
@@ -57,22 +106,31 @@ pub struct InvalidSmInboundControl;
 /// storage boundary and parse it exactly once when restoring this entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnhandledOutboundEntry {
-    element: Element,
+    stanza: CountableReplayStanza,
     message_stanza_id: Option<StanzaId>,
     sent_at: DateTime<Utc>,
 }
 
 impl UnhandledOutboundEntry {
-    pub fn new(element: Element, sent_at: DateTime<Utc>) -> Self {
-        Self {
-            message_stanza_id: message_delivery_stanza_id(&element),
-            element,
+    /// Construct a replay entry at the persistence boundary.
+    ///
+    /// The XML parser has already produced one [`Element`]; this converts it
+    /// once into a validated countable stanza before it can reach SM replay.
+    pub fn try_new(
+        element: Element,
+        sent_at: DateTime<Utc>,
+    ) -> Result<Self, InvalidPersistedSmStanza> {
+        let stanza = CountableReplayStanza::try_from(element)?;
+        Ok(Self {
+            message_stanza_id: message_delivery_stanza_id(&stanza.element),
+            stanza,
             sent_at,
-        }
+        })
     }
 
-    pub fn stanza(&self) -> &Element {
-        &self.element
+    /// Expose the retained XML only for the literal persistence I/O boundary.
+    pub fn stanza_for_persistence(&self) -> &Element {
+        &self.stanza.element
     }
 
     pub fn sent_at(&self) -> DateTime<Utc> {
@@ -261,11 +319,15 @@ impl SmState {
             return false;
         }
 
-        self.record_sent(1);
-        self.outbound_queue.push_back(UnhandledOutboundEntry::new(
+        let Ok(entry) = UnhandledOutboundEntry::try_new(
             element.clone(),
             existing_delay_stamp(element).unwrap_or(now),
-        ));
+        ) else {
+            return false;
+        };
+
+        self.record_sent(1);
+        self.outbound_queue.push_back(entry);
         self.arm_acknowledgement_clock(now)
     }
 
@@ -440,7 +502,7 @@ impl SmState {
         let replay: Vec<Element> = self
             .outbound_queue
             .iter()
-            .map(|queued| queued.element.clone())
+            .map(|queued| queued.stanza.element.clone())
             .collect();
         self.replay_in_flight.extend(replay.iter().cloned());
         replay
@@ -679,12 +741,12 @@ fn is_standard_stanza_error_condition(name: &str) -> bool {
 
 impl UnhandledOutboundEntry {
     fn element_for_fallback_retry(&self) -> Element {
-        if self.element.name() != "message" {
-            return self.element.clone();
+        if self.stanza.element.name() != "message" {
+            return self.stanza.element.clone();
         }
 
         let stamp = self.sent_at.to_rfc3339_opts(SecondsFormat::Millis, true);
-        let mut element = self.element.clone();
+        let mut element = self.stanza.element.clone();
         // XEP-0203 delay is a record of the original delivery time. A
         // persisted stanza can contain a stale, malformed, offset, or
         // duplicated delay, so always replace every delay child with one
@@ -1205,7 +1267,7 @@ mod tests {
             "previous-stream",
             4,
             9,
-            [UnhandledOutboundEntry::new(stanza.clone(), sent_at)],
+            [UnhandledOutboundEntry::try_new(stanza.clone(), sent_at).expect("countable stanza")],
         )
         .expect("resume state");
 
@@ -1213,7 +1275,7 @@ mod tests {
         assert_eq!(
             resume_state
                 .unhandled_outbound_entries()
-                .map(UnhandledOutboundEntry::stanza)
+                .map(UnhandledOutboundEntry::stanza_for_persistence)
                 .collect::<Vec<_>>(),
             vec![&stanza],
         );
@@ -1234,7 +1296,7 @@ mod tests {
             "previous-stream",
             3,
             9,
-            [UnhandledOutboundEntry::new(message, now)],
+            [UnhandledOutboundEntry::try_new(message, now).expect("countable stanza")],
         )
         .unwrap();
         let mut state = SmState::from_resume_state(&resume);

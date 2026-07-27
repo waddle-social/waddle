@@ -351,9 +351,10 @@ function resumeOwner(): ResumeOwner {
   }
   const key = `${SM_PREFIX}.owner`;
   try {
-    let ownerId = s.getItem(key) || randomClaimId();
+    const inheritedOwnerId = s.getItem(key);
+    let ownerId = inheritedOwnerId || randomClaimId();
     let instanceId = ownerInstanceId(ownerId);
-    if (copiedLiveOwnerNeedsRotation(ownerId, instanceId)) {
+    if (inheritedOwnerId && copiedLiveOwnerNeedsRotation(ownerId, instanceId)) {
       ownerId = randomClaimId();
       instanceId = ownerInstanceId(ownerId);
     }
@@ -378,16 +379,14 @@ function ownerInstanceId(ownerId: string): string {
 
 function copiedLiveOwnerNeedsRotation(ownerId: string, instanceId: string): boolean {
   const lease = readOwnerLease(ownerLeaseKey(ownerId));
-  if (
-    !lease
-    || lease.ownerId !== ownerId
-    || lease.instanceId === instanceId
-    || Date.now() - lease.updatedAt > OWNER_LEASE_TTL_MS
-  ) {
+  // A second factory in this live JS document shares the current owner; it is
+  // not a copied sessionStorage identity. Every new document must instead
+  // prove the complete reload handoff below before retaining the old owner.
+  if (lease?.instanceId === instanceId) {
     return false;
   }
   const handoff = readOwnerHandoff(ownerHandoffKey(ownerId));
-  return !isSameTabReloadHandoff(ownerId, lease, handoff);
+  return !isConfirmedSameTabReloadHandoff(ownerId, lease, handoff);
 }
 
 /**
@@ -398,14 +397,19 @@ function copiedLiveOwnerNeedsRotation(ownerId: string, instanceId: string): bool
  * replaced. Navigation, history restores, prerender activation, and missing
  * timing data all rotate so they cannot consume another tab's SM tail.
  */
-function isSameTabReloadHandoff(
+function isConfirmedSameTabReloadHandoff(
   ownerId: string,
-  lease: OwnerLease,
+  lease: OwnerLease | null,
   handoff: OwnerHandoff | null,
 ): boolean {
-  return handoff?.ownerId === ownerId
+  const now = Date.now();
+  return !!lease
+    && lease.ownerId === ownerId
+    && lease.updatedAt <= now
+    && now - lease.updatedAt <= OWNER_LEASE_TTL_MS
+    && handoff?.ownerId === ownerId
     && handoff.instanceId === lease.instanceId
-    && handoff.expiresAt > Date.now()
+    && handoff.expiresAt > now
     && navigationWasReload();
 }
 

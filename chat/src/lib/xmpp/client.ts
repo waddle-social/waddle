@@ -355,6 +355,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
   request_stream_management_ack?: () => Promise<void>;
+  try_request_stream_management_ack_for_pagehide?: () => "accepted" | "full" | "closed";
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
@@ -955,12 +956,25 @@ export class BrowserXmppClient {
    * cannot await a network round trip.
    */
   prepareForPageHide(): void {
+    let acknowledgementUnavailable = false;
     try {
-      // `pagehide` must never await I/O. Queue the runtime-owned typed
-      // XEP-0198 command first, then immediately take the synchronous snapshot.
-      void this.xmpp?.request_stream_management_ack?.().catch(() => undefined);
-    } catch {}
-    this.persistResumeStateForPageHide();
+      // `pagehide` must never await I/O. This admission-only call cannot wait
+      // for channel capacity, a driver turn, or a socket write; it preserves
+      // FIFO by appending only when the existing command lane has capacity.
+      if (this.xmpp) {
+        acknowledgementUnavailable = this.xmpp.try_request_stream_management_ack_for_pagehide?.() !== "accepted";
+      }
+    } catch {
+      acknowledgementUnavailable = true;
+    } finally {
+      this.persistResumeStateForPageHide();
+    }
+    if (acknowledgementUnavailable) {
+      // The page-lifecycle owner maps this local failure to its closed
+      // `prepare-xmpp` telemetry operation; no raw queue or stream state leaves
+      // the client boundary.
+      throw new Error("XMPP pagehide acknowledgement was unavailable");
+    }
   }
 
   /** A BFCache restore retains this client; reconnect only if it lost its wire. */

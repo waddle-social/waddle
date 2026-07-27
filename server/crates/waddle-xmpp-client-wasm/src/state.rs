@@ -140,7 +140,7 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
         let unhandled_outbound_entries = value
             .unhandled_outbound_entries()
             .filter_map(|entry| {
-                element_to_xml_string(entry.stanza())
+                element_to_xml_string(entry.stanza_for_persistence())
                     .ok()
                     .map(|xml| JsUnhandledOutboundEntry {
                         xml,
@@ -175,19 +175,26 @@ fn resume_entries_from_js(
         .map_err(|err| js_error(format!("invalid resume entries: {err}")))?;
     entries
         .into_iter()
-        .map(|entry| {
-            let stanza = entry
-                .xml
-                .parse::<Element>()
-                .map_err(|err| js_error(format!("invalid resume stanza XML: {err}")))?;
-            let sent_at = chrono::DateTime::parse_from_rfc3339(&entry.sent_at)
-                .map_err(|err| js_error(format!("invalid resume stanza timestamp: {err}")))?
-                .with_timezone(&chrono::Utc);
-            Ok(waddle_xmpp_client::UnhandledOutboundEntry::new(
-                stanza, sent_at,
-            ))
-        })
-        .collect()
+        .map(resume_entry_from_persisted_js)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(js_error)
+}
+
+/// Rebuild one persisted entry at the browser persistence boundary.  The
+/// shared core constructor validates the countable `jabber:client` root and
+/// keeps the original element for later replay.
+fn resume_entry_from_persisted_js(
+    entry: JsUnhandledOutboundEntry,
+) -> Result<waddle_xmpp_client::UnhandledOutboundEntry, String> {
+    let stanza = entry
+        .xml
+        .parse::<Element>()
+        .map_err(|err| format!("invalid resume stanza XML: {err}"))?;
+    let sent_at = chrono::DateTime::parse_from_rfc3339(&entry.sent_at)
+        .map_err(|err| format!("invalid resume stanza timestamp: {err}"))?
+        .with_timezone(&chrono::Utc);
+    waddle_xmpp_client::UnhandledOutboundEntry::try_new(stanza, sent_at)
+        .map_err(|err| format!("invalid persisted resume stanza: {err}"))
 }
 
 #[wasm_bindgen]
@@ -342,4 +349,72 @@ pub(crate) struct WasmDriverTask {
     pub(crate) sm_clock_timer: Option<i32>,
     pub(crate) sm_clock_callback: Option<Closure<dyn FnMut()>>,
     pub(crate) sm_clock_rx: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn persisted_entry(xml: &str, sent_at: &str) -> JsUnhandledOutboundEntry {
+        JsUnhandledOutboundEntry {
+            xml: xml.to_owned(),
+            sent_at: sent_at.to_owned(),
+        }
+    }
+
+    #[test]
+    fn persisted_resume_entries_accept_countable_client_stanzas_in_order() {
+        let sent_at = "2026-07-27T12:00:00.000Z";
+        let entries = [
+            persisted_entry("<message xmlns='jabber:client' id='m-1'><body>one</body></message>", sent_at),
+            persisted_entry("<presence xmlns='jabber:client'><show>away</show></presence>", "2026-07-27T12:00:01.000Z"),
+            persisted_entry("<iq xmlns='jabber:client' id='iq-1' type='get'><query xmlns='jabber:iq:version'/></iq>", "2026-07-27T12:00:02.000Z"),
+        ];
+
+        let restored = entries
+            .into_iter()
+            .map(resume_entry_from_persisted_js)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("countable client stanzas restore");
+
+        assert_eq!(
+            restored
+                .iter()
+                .map(|entry| entry.stanza_for_persistence().name())
+                .collect::<Vec<_>>(),
+            vec!["message", "presence", "iq"],
+        );
+        assert_eq!(
+            restored
+                .iter()
+                .map(|entry| entry
+                    .sent_at()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                .collect::<Vec<_>>(),
+            vec![
+                "2026-07-27T12:00:00.000Z",
+                "2026-07-27T12:00:01.000Z",
+                "2026-07-27T12:00:02.000Z",
+            ],
+        );
+    }
+
+    #[test]
+    fn persisted_resume_entries_reject_controls_non_client_roots_and_malformed_xml() {
+        for xml in [
+            "<r xmlns='urn:xmpp:sm:3'/>",
+            "<a xmlns='urn:xmpp:sm:3' h='1'/>",
+            "<enable xmlns='urn:xmpp:sm:3'/>",
+            "<resumed xmlns='urn:xmpp:sm:3' h='1' previd='old'/>",
+            "<foo xmlns='jabber:client'/>",
+            "<message xmlns='urn:example:other'/>",
+            "<message",
+        ] {
+            assert!(
+                resume_entry_from_persisted_js(persisted_entry(xml, "2026-07-27T12:00:00.000Z"))
+                    .is_err(),
+                "{xml} must not enter the XEP-0198 replay queue",
+            );
+        }
+    }
 }

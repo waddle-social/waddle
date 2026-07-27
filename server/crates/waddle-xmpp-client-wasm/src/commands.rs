@@ -276,20 +276,6 @@ pub(crate) async fn cancel_iq_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
-pub(crate) async fn request_stream_management_ack_command(
-    inner: Rc<RefCell<WaddleClientInner>>,
-) -> Result<(), JsValue> {
-    let mut cmd_tx = command_sender(&inner)?;
-    let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::RequestStreamManagementAck { responder })
-        .await
-        .map_err(|_| js_error("client is disconnected"))?;
-    rx.await
-        .map_err(|_| js_error("client is disconnected"))?
-        .map_err(|err| js_error(err.to_string()))
-}
-
 /// Variant of [`send_iq_command`] that surfaces RFC 6120 §8.3 stanza
 /// errors as a typed [`waddle_xmpp_client::StanzaError`] on the Rust
 /// side instead of rejecting the Promise. Transport / disconnect
@@ -502,5 +488,30 @@ mod tests {
             futures::future::ready(()),
         ));
         assert!(matches!(outcome, IqReplyWait::DeadlineExpired));
+    }
+
+    #[test]
+    fn pagehide_ack_try_enqueue_is_nonblocking_and_reports_capacity_or_closure() {
+        let (mut sender, receiver) = mpsc::channel(1);
+        let mut accepted = 0;
+        loop {
+            match try_enqueue_pagehide_sm_ack(&mut sender) {
+                PagehideSmAckEnqueueOutcome::Accepted => accepted += 1,
+                PagehideSmAckEnqueueOutcome::Full => break,
+                PagehideSmAckEnqueueOutcome::Closed => {
+                    panic!("live receiver cannot close the command lane")
+                }
+            }
+        }
+        assert!(
+            accepted > 0,
+            "a live bounded lane accepts at least one command"
+        );
+
+        drop(receiver);
+        assert_eq!(
+            try_enqueue_pagehide_sm_ack(&mut sender),
+            PagehideSmAckEnqueueOutcome::Closed,
+        );
     }
 }

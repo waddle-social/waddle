@@ -36,7 +36,7 @@ class LifecycleTarget {
 }
 
 describe("XMPP page lifecycle", () => {
-  test("pagehide requests the runtime acknowledgement before its synchronous snapshot", () => {
+  test("pagehide synchronously admits the runtime acknowledgement before its snapshot", () => {
     const client = new BrowserXmppClient({
       username: "alice",
       jid: "alice@example.com/desktop",
@@ -45,9 +45,9 @@ describe("XMPP page lifecycle", () => {
     });
     const order: string[] = [];
     (client as unknown as { xmpp: unknown }).xmpp = {
-      request_stream_management_ack: () => {
+      try_request_stream_management_ack_for_pagehide: () => {
         order.push("request-ack");
-        return Promise.resolve();
+        return "accepted";
       },
     };
     (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = () => {
@@ -59,7 +59,7 @@ describe("XMPP page lifecycle", () => {
     expect(order).toEqual(["request-ack", "persist"]);
   });
 
-  test("pagehide persists when the best-effort acknowledgement command throws", () => {
+  test("pagehide persists before surfacing a closed acknowledgement admission failure", () => {
     const client = new BrowserXmppClient({
       username: "alice",
       jid: "alice@example.com/desktop",
@@ -68,13 +68,39 @@ describe("XMPP page lifecycle", () => {
     });
     const persist = mock(() => undefined);
     (client as unknown as { xmpp: unknown }).xmpp = {
-      request_stream_management_ack: () => { throw new Error("closed"); },
+      try_request_stream_management_ack_for_pagehide: () => "full",
     };
     (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = persist;
 
-    client.prepareForPageHide();
+    expect(() => client.prepareForPageHide()).toThrow("XMPP pagehide acknowledgement was unavailable");
 
     expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  test("pagehide admission failure reports only the closed prepare-xmpp operation", () => {
+    const target = new LifecycleTarget();
+    const failures: unknown[] = [];
+    const client = new BrowserXmppClient({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      session_id: "token",
+      xmpp_websocket_url: "wss://example.com/ws",
+    });
+    (client as unknown as { xmpp: unknown }).xmpp = {
+      try_request_stream_management_ack_for_pagehide: () => "closed",
+    };
+    (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = () => undefined;
+
+    const dispose = installXmppPagehideLifecycle(
+      target as unknown as Window,
+      () => client,
+      () => undefined,
+      (failure) => failures.push(failure),
+    );
+    target.dispatch("pagehide", true);
+    dispose();
+
+    expect(failures).toEqual([{ operation: "prepare-xmpp" }]);
   });
 
   test("stale WASM stream-management callbacks cannot report into the current generation", () => {

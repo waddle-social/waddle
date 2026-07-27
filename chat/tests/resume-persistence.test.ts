@@ -621,6 +621,55 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     }
   });
 
+  test("history, prerender, and unknown copied-owner navigations never consume the handoff", () => {
+    for (const type of ["navigate", "back_forward", "prerender", "unknown", null]) {
+      const ownerId = `copied-owner-${type ?? "unavailable"}`;
+      const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
+      seedCopiedOwnerHandoff(ownerId, state);
+      const restoreNavigation = installNavigationTiming(type);
+      try {
+        const copiedDocument = createLocalStorageResumePersistence("alice@example.com");
+        expect(copiedDocument.loadSm()).toBeNull();
+        expect(copiedDocument.consumeSm()).toBeNull();
+        expect(createLocalStorageResumePersistence("alice@example.com", ownerId).consumeSm()).toEqual(state);
+      } finally {
+        restoreNavigation();
+      }
+    }
+  });
+
+  test("reload rotates copied ownership without a current matching lease", () => {
+    for (const scenario of ["missing", "expired", "mismatched"] as const) {
+      const ownerId = `reload-${scenario}-lease-owner`;
+      const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
+      seedCopiedOwnerHandoff(ownerId, state);
+      const leaseKey = `waddle.chat.sm-resume.owner-lease.${ownerId}`;
+      if (scenario === "missing") {
+        window.localStorage.removeItem(leaseKey);
+      } else if (scenario === "expired") {
+        window.localStorage.setItem(
+          leaseKey,
+          JSON.stringify({ ownerId, instanceId: "previous-page", updatedAt: Date.now() - 45_001 }),
+        );
+      } else {
+        window.localStorage.setItem(
+          leaseKey,
+          JSON.stringify({ ownerId: "another-owner", instanceId: "previous-page", updatedAt: Date.now() }),
+        );
+      }
+
+      const restoreNavigation = installNavigationTiming("reload");
+      try {
+        const copiedDocument = createLocalStorageResumePersistence("alice@example.com");
+        expect(copiedDocument.loadSm()).toBeNull();
+        expect(copiedDocument.consumeSm()).toBeNull();
+        expect(createLocalStorageResumePersistence("alice@example.com", ownerId).consumeSm()).toEqual(state);
+      } finally {
+        restoreNavigation();
+      }
+    }
+  });
+
   test("a reload rejects a handoff that does not belong to the active lease", () => {
     const ownerId = "mismatched-handoff-owner";
     const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
