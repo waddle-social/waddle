@@ -169,9 +169,17 @@ schema.#Project & {
 					  '{text: $text, tags: ["deploy", "waddle"], time: $time}')"
 					retry_deadline="$(( SECONDS + 45 ))"
 					for attempt in 1 2 3 4 5; do
+					  remaining="$(( retry_deadline - SECONDS ))"
+					  if [ "${remaining}" -le 0 ]; then
+					    break
+					  fi
+					  max_time=15
+					  if [ "${remaining}" -lt "${max_time}" ]; then
+					    max_time="${remaining}"
+					  fi
 					  : > "${annotation_response}"
 					  curl_rc=0
-					  annotation_status="$(curl -sS --connect-timeout 5 --max-time 15 \
+					  annotation_status="$(curl -sS --connect-timeout 5 --max-time "${max_time}" \
 					      -o "${annotation_response}" -w '%{http_code}' \
 					      -X POST "${grafana_url}/api/annotations" \
 					      -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
@@ -204,10 +212,18 @@ schema.#Project & {
 					        ;;
 					    esac
 					  fi
-					  if [ "${attempt}" -ge 5 ] || [ "${SECONDS}" -ge "${retry_deadline}" ]; then
+					  if [ "${attempt}" -ge 5 ]; then
 					    break
 					  fi
-					  sleep "$(( 1 << attempt ))"
+					  backoff="$(( 1 << attempt ))"
+					  remaining="$(( retry_deadline - SECONDS ))"
+					  if [ "${remaining}" -le 0 ]; then
+					    break
+					  fi
+					  if [ "${backoff}" -gt "${remaining}" ]; then
+					    backoff="${remaining}"
+					  fi
+					  sleep "${backoff}"
 					done
 					echo "::warning title=Grafana deploy annotation skipped::Grafana unavailable after ${attempt} attempts; no deploy marker for ${revision}."
 					exit 0
