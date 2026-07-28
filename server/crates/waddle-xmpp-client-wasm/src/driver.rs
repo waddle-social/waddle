@@ -261,8 +261,13 @@ impl WasmDriverTask {
         inner: Rc<RefCell<WaddleClientInner>>,
     ) -> DriverResult<Self> {
         let (sm_clock_tx, sm_clock_rx) = mpsc::channel(1);
-        Ok(Self {
+        let core = Rc::new(RefCell::new(WasmDriverCore {
             runtime: XmppRuntime::new(config)?,
+            web_socket: ws.web_socket().clone(),
+        }));
+        inner.borrow_mut().driver_core = Some(core.clone());
+        Ok(Self {
+            core,
             ws,
             cmd_rx,
             event_tx,
@@ -281,7 +286,12 @@ impl WasmDriverTask {
     }
 
     async fn run(&mut self) {
-        match self.runtime.queue_request(ClientRequest::Connect) {
+        let connect = self
+            .core
+            .borrow_mut()
+            .runtime
+            .queue_request(ClientRequest::Connect);
+        match connect {
             Ok(events) => {
                 self.publish_resume_state_snapshot();
                 for event in events {
@@ -315,7 +325,7 @@ impl WasmDriverTask {
                 tick = sm_clock_fut => match tick {
                     Some(generation) if self.sm_clock_schedule.accepts_wakeup(
                         generation,
-                        self.runtime.acknowledgement_clock_pending(),
+                        self.core.borrow().runtime.acknowledgement_clock_pending(),
                     ) => self.poll_stream_management_clock().await,
                     Some(_) => true,
                     None => true,
@@ -377,10 +387,12 @@ impl WasmDriverTask {
     }
 
     async fn poll_stream_management_clock(&mut self) -> bool {
-        for event in self
+        let events = self
+            .core
+            .borrow_mut()
             .runtime
-            .poll_stream_management_clock(chrono::Utc::now())
-        {
+            .poll_stream_management_clock(chrono::Utc::now());
+        for event in events {
             if !self.handle_client_event(event).await {
                 return false;
             }
@@ -400,10 +412,8 @@ impl WasmDriverTask {
     /// particular, a valid no-progress `<a/>` clears retry state but retains
     /// the progress deadline, whereas a fully acknowledged tail removes both.
     fn sync_sm_clock_timer(&mut self) -> DriverResult<()> {
-        match self
-            .sm_clock_schedule
-            .sync(self.runtime.acknowledgement_clock_pending())
-        {
+        let pending = self.core.borrow().runtime.acknowledgement_clock_pending();
+        match self.sm_clock_schedule.sync(pending) {
             SmClockTimerTransition::Noop => Ok(()),
             SmClockTimerTransition::Arm { generation } => self.arm_sm_clock_timer(generation),
             SmClockTimerTransition::Clear => {
@@ -455,7 +465,7 @@ impl WasmDriverTask {
     async fn handle_command(&mut self, cmd: Option<WasmCommand>) -> bool {
         match cmd {
             Some(WasmCommand::SendStanza { stanza, responder }) => {
-                if !self.runtime.can_send_app_stanza() {
+                if !self.core.borrow().runtime.can_send_app_stanza() {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::Stanza { stanza, responder });
                     return true;
@@ -464,7 +474,7 @@ impl WasmDriverTask {
                 self.send_stanza_command(stanza, responder).await
             }
             Some(WasmCommand::SendIq { stanza, responder }) => {
-                if !self.runtime.can_send_app_stanza() {
+                if !self.core.borrow().runtime.can_send_app_stanza() {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::Iq { stanza, responder });
                     return true;
@@ -477,7 +487,7 @@ impl WasmDriverTask {
                 query_id,
                 responder,
             }) => {
-                if !self.runtime.can_send_app_stanza() {
+                if !self.core.borrow().runtime.can_send_app_stanza() {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::MamQuery {
                             stanza,
@@ -495,7 +505,9 @@ impl WasmDriverTask {
                 query_id,
                 responder,
             }) => {
-                if !self.runtime.can_send_app_stanza() || !self.pending_inbox_queries.is_empty() {
+                if !self.core.borrow().runtime.can_send_app_stanza()
+                    || !self.pending_inbox_queries.is_empty()
+                {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::InboxQuery {
                             stanza,
@@ -524,7 +536,7 @@ impl WasmDriverTask {
                 keep_running
             }
             Some(WasmCommand::RequestStreamManagementAck { responder }) => {
-                let events = self.runtime.request_stream_management_ack();
+                let events = self.core.borrow().runtime.request_stream_management_ack();
                 let mut result = Ok(());
                 for event in events {
                     if !self.handle_client_event(event).await {
@@ -666,7 +678,7 @@ impl WasmDriverTask {
     }
 
     async fn flush_deferred_commands(&mut self) -> bool {
-        if !self.runtime.can_send_app_stanza() {
+        if !self.core.borrow().runtime.can_send_app_stanza() {
             return true;
         }
 
@@ -719,7 +731,8 @@ impl WasmDriverTask {
     }
 
     async fn apply_transport_event(&mut self, event: TransportEvent) -> bool {
-        let events = match self.runtime.apply_transport_event(event) {
+        let result = self.core.borrow_mut().runtime.apply_transport_event(event);
+        let events = match result {
             Ok(events) => events,
             Err(err) => {
                 self.emit_error(err.to_string()).await;
@@ -758,7 +771,11 @@ impl WasmDriverTask {
     }
 
     async fn apply_sent_event(&mut self, event: TransportEvent) -> DriverResult<()> {
-        let events = self.runtime.apply_transport_event(event)?;
+        let events = self
+            .core
+            .borrow_mut()
+            .runtime
+            .apply_transport_event(event)?;
         self.publish_resume_state_snapshot();
         for event in events {
             if let Some(follow_up) = self.dispatch_client_event(event).await {
@@ -936,12 +953,14 @@ impl WasmDriverTask {
     async fn send_transport_message(&mut self, message: TransportMessage) -> DriverResult<()> {
         let sent_event = TransportEvent::MessageSent(message.clone());
         let frame = waddle_xmpp_client::encode_message(&message)?;
-        self.ws
-            .send(&frame)
+        self.core
+            .borrow()
+            .web_socket
+            .send_with_str(&frame)
             .map_err(|_| ClientError::TransportClosed)?;
 
         if matches!(message, TransportMessage::Close(_)) {
-            let _ = self.ws.close();
+            let _ = self.core.borrow().web_socket.close();
         }
 
         self.apply_sent_event(sent_event).await?;
@@ -971,7 +990,11 @@ impl WasmDriverTask {
     }
 
     fn publish_resume_state_snapshot(&self) {
-        publish_resume_state_snapshot(&self.inner, &self.runtime, self.explicit_disconnect);
+        publish_resume_state_snapshot(
+            &self.inner,
+            &self.core.borrow().runtime,
+            self.explicit_disconnect,
+        );
     }
 
     async fn finish(&mut self) {

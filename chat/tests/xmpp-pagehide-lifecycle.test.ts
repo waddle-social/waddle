@@ -36,7 +36,7 @@ class LifecycleTarget {
 }
 
 describe("XMPP page lifecycle", () => {
-  test("pagehide synchronously admits the runtime acknowledgement before its snapshot", () => {
+  test("pagehide synchronously writes the runtime acknowledgement before its snapshot", () => {
     const client = new BrowserXmppClient({
       username: "alice",
       jid: "alice@example.com/desktop",
@@ -59,7 +59,7 @@ describe("XMPP page lifecycle", () => {
     expect(order).toEqual(["request-ack", "persist"]);
   });
 
-  test("pagehide persists before surfacing a closed acknowledgement admission failure", () => {
+  test("pagehide treats an already-pending acknowledgement as success and still persists", () => {
     const client = new BrowserXmppClient({
       username: "alice",
       jid: "alice@example.com/desktop",
@@ -72,7 +72,7 @@ describe("XMPP page lifecycle", () => {
     };
     (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = persist;
 
-    expect(() => client.prepareForPageHide()).toThrow("XMPP pagehide acknowledgement was unavailable");
+    expect(() => client.prepareForPageHide()).not.toThrow();
 
     expect(persist).toHaveBeenCalledTimes(1);
   });
@@ -87,7 +87,7 @@ describe("XMPP page lifecycle", () => {
       xmpp_websocket_url: "wss://example.com/ws",
     });
     (client as unknown as { xmpp: unknown }).xmpp = {
-      try_request_stream_management_ack_for_pagehide: () => 2,
+      try_request_stream_management_ack_for_pagehide: () => 3,
     };
     (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = () => undefined;
 

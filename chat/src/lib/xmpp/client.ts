@@ -316,7 +316,8 @@ type PagehideSmAckEnqueueOutcome = import("@waddle/xmpp-client-wasm").PagehideSm
 
 // wasm-bindgen exports this C-style enum as stable numeric discriminants. Keep
 // the browser boundary typed without importing the WASM module before init.
-const PAGEHIDE_SM_ACK_ACCEPTED: PagehideSmAckEnqueueOutcome = 0;
+const PAGEHIDE_SM_ACK_SENT: PagehideSmAckEnqueueOutcome = 0;
+const PAGEHIDE_SM_ACK_ALREADY_PENDING: PagehideSmAckEnqueueOutcome = 1;
 
 
 /** Per-event handler signatures for the legacy emitter surface some
@@ -965,12 +966,13 @@ export class BrowserXmppClient {
     if (this.disposed) return;
     let acknowledgementUnavailable = false;
     try {
-      // `pagehide` must never await I/O. This admission-only call cannot wait
-      // for channel capacity, a driver turn, or a socket write; it preserves
-      // FIFO by appending only when the existing command lane has capacity.
+      // `pagehide` must never await I/O. The WASM owner synchronously writes
+      // the typed `<r/>` itself (or reports the already-pending request) before
+      // returning; persistence still runs for every outcome.
       if (this.xmpp) {
-        acknowledgementUnavailable = this.xmpp.try_request_stream_management_ack_for_pagehide?.()
-          !== PAGEHIDE_SM_ACK_ACCEPTED;
+        const outcome = this.xmpp.try_request_stream_management_ack_for_pagehide?.();
+        acknowledgementUnavailable = outcome !== PAGEHIDE_SM_ACK_SENT
+          && outcome !== PAGEHIDE_SM_ACK_ALREADY_PENDING;
       }
     } catch {
       acknowledgementUnavailable = true;

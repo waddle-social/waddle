@@ -27,6 +27,15 @@ pub enum RuntimeStatus {
     Active,
 }
 
+/// A typed decision for a host that must write a pagehide `<r/>`
+/// synchronously. The runtime does not mutate acknowledgement state until
+/// [`XmppRuntime::commit_pagehide_ack_written`] confirms the transport write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagehideAckRequest {
+    Ready,
+    AlreadyPending,
+}
+
 /// Stateful request/session coordinator for the client runtime boundary.
 #[derive(Debug)]
 pub struct XmppRuntime {
@@ -264,6 +273,26 @@ impl XmppRuntime {
                 },
             )),
         ]
+    }
+
+    /// Decide whether pagehide should write an acknowledgement request. This
+    /// is deliberately separate from the post-write state transition: a
+    /// browser can freeze or reject `WebSocket.send` immediately afterwards.
+    pub fn prepare_pagehide_ack(&self) -> PagehideAckRequest {
+        if !self.sm_state.enabled
+            || self.sm_state.acknowledgement_request_outstanding()
+            || !self.sm_state.has_unhandled_outbound_stanzas()
+        {
+            PagehideAckRequest::AlreadyPending
+        } else {
+            PagehideAckRequest::Ready
+        }
+    }
+
+    /// Commit a pagehide acknowledgement request only after its exact typed
+    /// `<r/>` frame has synchronously reached the WebSocket API.
+    pub fn commit_pagehide_ack_written(&mut self, now: DateTime<Utc>) -> bool {
+        self.sm_state.arm_acknowledgement_clock(now)
     }
 
     fn resolved_event(&self, pending: PendingRequest) -> ClientEvent {

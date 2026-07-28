@@ -352,6 +352,19 @@ impl SmState {
         true
     }
 
+    /// Whether a previously written `<r/>` still awaits any valid `<a/>`.
+    /// Hosts use this to avoid producing a duplicate request during a
+    /// synchronous lifecycle boundary.
+    pub fn acknowledgement_request_outstanding(&self) -> bool {
+        self.ack_request_outstanding
+    }
+
+    /// Whether this active stream owns countable stanzas that still need a
+    /// peer acknowledgement.
+    pub fn has_unhandled_outbound_stanzas(&self) -> bool {
+        !self.outbound_queue.is_empty()
+    }
+
     /// Start a fresh inbound SM sequence after receiving `<enabled/>`.
     ///
     /// XEP-0198 §5: the received-stanza counter is "set to zero and

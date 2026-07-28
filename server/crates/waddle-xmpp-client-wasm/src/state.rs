@@ -237,6 +237,10 @@ pub struct WaddleClient {
 pub(crate) struct WaddleClientInner {
     pub(crate) config: StoredConfig,
     pub(crate) cmd_tx: Option<mpsc::Sender<WasmCommand>>,
+    /// The one browser-owner core. The async driver and synchronous pagehide
+    /// path must both borrow this exact runtime/socket pair; neither may
+    /// manufacture a second transport owner.
+    pub(crate) driver_core: Option<Rc<RefCell<WasmDriverCore>>>,
     pub(crate) on_message: Option<Function>,
     pub(crate) on_presence: Option<Function>,
     pub(crate) on_connected: Option<Function>,
@@ -254,6 +258,14 @@ pub(crate) struct WaddleClientInner {
     pub(crate) on_call: Option<Function>,
     pub(crate) on_stream_management: Option<Function>,
     pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
+}
+
+/// State that is exclusively owned by the browser's active XMPP connection.
+/// The task keeps transport event subscriptions separately, while all typed
+/// runtime decisions and physical writes pass through this core.
+pub(crate) struct WasmDriverCore {
+    pub(crate) runtime: XmppRuntime,
+    pub(crate) web_socket: web_sys::WebSocket,
 }
 
 pub(crate) enum WasmCommand {
@@ -365,7 +377,7 @@ pub(crate) struct PendingInboxQuery {
 }
 
 pub(crate) struct WasmDriverTask {
-    pub(crate) runtime: XmppRuntime,
+    pub(crate) core: Rc<RefCell<WasmDriverCore>>,
     pub(crate) ws: WasmWebSocket,
     pub(crate) cmd_rx: mpsc::Receiver<WasmCommand>,
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,

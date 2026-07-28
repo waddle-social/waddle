@@ -88,6 +88,30 @@ fn runtime_pagehide_ack_request_uses_the_typed_sm_builder() {
 }
 
 #[test]
+fn runtime_pagehide_ack_commits_only_after_the_socket_write() {
+    let mut config = config();
+    config.session.stream_management.resume_state =
+        Some(resume_state_with_sent_messages(["unacked-pagehide"]));
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    runtime.sm_state.enabled = true;
+    let now = Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap();
+
+    assert_eq!(runtime.prepare_pagehide_ack(), PagehideAckRequest::Ready);
+    assert_eq!(
+        runtime.prepare_pagehide_ack(),
+        PagehideAckRequest::Ready,
+        "a failed browser write must not leave a false outstanding request"
+    );
+
+    assert!(runtime.commit_pagehide_ack_written(now));
+    assert_eq!(
+        runtime.prepare_pagehide_ack(),
+        PagehideAckRequest::AlreadyPending,
+        "only the successful write commits the duplicate-suppression edge"
+    );
+}
+
+#[test]
 fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;

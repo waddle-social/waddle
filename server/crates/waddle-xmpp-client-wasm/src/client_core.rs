@@ -8,6 +8,7 @@ impl WaddleClient {
             inner: Rc::new(RefCell::new(WaddleClientInner {
                 config: StoredConfig::from(&config),
                 cmd_tx: None,
+                driver_core: None,
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
