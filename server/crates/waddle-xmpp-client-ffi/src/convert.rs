@@ -30,8 +30,8 @@ use crate::{
     WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePackSticker,
     WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
     WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
-    WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType, WaddleStanzaId,
-    WaddleStickerHash, WaddleStickerPack,
+    WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
+    WaddleStickerPack,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────

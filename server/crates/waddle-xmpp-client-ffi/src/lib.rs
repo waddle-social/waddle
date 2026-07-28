@@ -166,14 +166,14 @@ impl WaddleClient {
             }
         };
 
-        let client_config =
-            match ClientConfig::new(ConnectionConfig::new(domain), transport, auth) {
-                Ok(c) => c,
-                Err(e) => {
-                    self.emit_error(format!("Invalid client config: {e}"));
-                    return;
-                }
-            };
+        let client_config = match ClientConfig::new(ConnectionConfig::new(domain), transport, auth)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                self.emit_error(format!("Invalid client config: {e}"));
+                return;
+            }
+        };
 
         let xmpp_client = match XmppClient::new(client_config) {
             Ok(c) => c,
