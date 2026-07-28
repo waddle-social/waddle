@@ -143,8 +143,10 @@ schema.#Project & {
 		// (408/429/5xx, e.g. a cold-starting Cloud instance, plus
 		// retryable curl transport failures) are retried briefly and then
 		// tolerated with a run-level warning. Misconfiguration — other
-		// 4xx responses, DNS failures, malformed URLs, TLS cert errors —
-		// still fails the task. Retrying the POST can leave duplicate
+		// 4xx responses, DNS failures, malformed URLs, cert verification
+		// errors — still fails the task (TLS handshake drops, curl 35,
+		// are retried since they are usually mid-handshake network
+		// failures). Retrying the POST can leave duplicate
 		// markers if Grafana committed before an edge error; acceptable
 		// for telemetry.
 		deployAnnotation: schema.#Task & {
@@ -174,7 +176,7 @@ schema.#Project & {
 					      --data-binary "${annotation_payload}")" || curl_rc=$?
 					  if [ "${curl_rc}" -ne 0 ]; then
 					    case "${curl_rc}" in
-					      7 | 28 | 35 | 52 | 56)
+					      7 | 16 | 18 | 28 | 35 | 52 | 55 | 56 | 92)
 					        echo "Grafana annotation attempt ${attempt} hit transient curl error ${curl_rc}." >&2
 					        ;;
 					      *)
