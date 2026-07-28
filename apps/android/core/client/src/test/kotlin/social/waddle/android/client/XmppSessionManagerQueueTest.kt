@@ -43,8 +43,9 @@ class XmppSessionManagerQueueTest {
 
     /**
      * Stops exactly one DataStore update after it commits the outbound row
-     * but before it returns to the caller. This lets the test force logout
-     * through the post-persistence lease check deterministically.
+     * but before it returns to the caller. This lets the test prove that
+     * logout waits for the generation-fenced durable write before it clears
+     * persistence and admits a same-account successor.
      */
     private class BlockingPreferencesDataStore : DataStore<Preferences> {
         private val mutex = Mutex()
@@ -363,25 +364,26 @@ class XmppSessionManagerQueueTest {
         }
         store.enqueueBlocked.await()
 
-        // logout advances the generation before waiting on the blocked
-        // DataStore clear. The parked enqueue may finish, but its exact
-        // owner/id is removed and it is never handed to the old transport.
+        // The narrow generation fence owns the durable update, so logout
+        // cannot clear and make a successor drain while this old owner is
+        // still parked in DataStore.
         val logout = async { harness.manager.logout() }
         runCurrent()
+        assertFalse("logout waits for the fenced durable enqueue", logout.isCompleted)
         store.releaseEnqueue.complete(Unit)
         runCurrent()
 
-        assertEquals(WaddleSendMessageOutcome.Error, staleSend.await().outcome)
         logout.await()
-        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
-        assertTrue("stale intent never reaches the pre-logout transport", oldClient.sendCalls.isEmpty())
-
         harness.manager.login(testSessionInfo())
         runCurrent()
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
+        assertEquals(WaddleSendMessageOutcome.Error, staleSend.await().outcome)
+        runCurrent()
+        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+        assertTrue("stale intent never reaches the pre-logout transport", oldClient.sendCalls.isEmpty())
         assertTrue(
-            "same-account relogin is a new generation and cannot replay stale work",
+            "same-account relogin cannot drain the stale old-session enqueue",
             harness.factory.clients.last().sendCalls.isEmpty(),
         )
 

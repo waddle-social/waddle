@@ -302,6 +302,20 @@ internal class ActiveSession {
         true
     }
 
+    /**
+     * Run a durable owner-scoped effect and retain its typed result while the
+     * transport fence proves the exact generation. This lets a caller order
+     * one persistence transaction with logout revocation without retaining a
+     * live transport or waiting on broader lifecycle work.
+     */
+    suspend fun <T> runIfCurrentResult(
+        lease: OwnerLease,
+        action: suspend () -> T,
+    ): LeaseInvocation<T> = transportFence.withLock {
+        if (!isCurrent(lease)) return@withLock LeaseInvocation.Stale
+        LeaseInvocation.Completed(action())
+    }
+
     /** Fenced readiness probe for control flow that must not retain a client. */
     suspend fun hasActiveClient(): Boolean = invoke { true } is Invocation.Completed
 

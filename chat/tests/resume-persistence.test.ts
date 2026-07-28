@@ -833,6 +833,53 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(persistence.loadSm()).toEqual(state);
   });
 
+  test("localStorage consume preserves a nonresumable fresh-stream tail for config application", () => {
+    const owner = "fresh-stream-owner";
+    const writer = createLocalStorageResumePersistence("alice@example.com", owner);
+    const state: PersistedSmResumeState = {
+      previd: "declined-sm-stream",
+      resumable: false,
+      inboundH: 0,
+      outboundH: 0,
+      unhandledOutboundEntries: [
+        {
+          xml: "<message xmlns='jabber:client' id='message-retry'><origin-id xmlns='urn:xmpp:sid:0' id='message-origin'/><delay xmlns='urn:xmpp:delay' stamp='2026-07-28T10:11:12.000Z'/></message>",
+          sentAt: "2026-07-28T10:11:12.000Z",
+        },
+        {
+          xml: "<presence xmlns='jabber:client' id='presence-retry'><delay xmlns='urn:xmpp:delay' stamp='2026-07-28T10:11:12.000Z'/></presence>",
+          sentAt: "2026-07-28T10:11:12.000Z",
+        },
+      ],
+    };
+    writer.saveSm(state);
+    const reader = createLocalStorageResumePersistence("alice@example.com", owner);
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const config = {
+      with_fresh_stream_retry_state_entries: (...args: unknown[]) => {
+        calls.push({ method: "fresh-stream", args });
+      },
+      with_resume_state_entries: (...args: unknown[]) => {
+        calls.push({ method: "resume", args });
+      },
+    };
+
+    try {
+      expect(reader.loadSm()).toEqual(state);
+      const consumed = reader.consumeSm();
+      expect(consumed).toEqual(state);
+      applyResumeStateToWasmConfig(config, consumed!);
+      expect(calls).toEqual([{
+        method: "fresh-stream",
+        args: [state.previd, state.inboundH, state.outboundH, state.unhandledOutboundEntries],
+      }]);
+      expect(reader.consumeSm()).toBeNull();
+    } finally {
+      reader.dispose();
+      writer.dispose();
+    }
+  });
+
   test("fails closed for a legacy nonempty stanza snapshot", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com", "legacy-owner");
     window.localStorage.setItem(smOwnerKey("alice@example.com", "legacy-owner"), JSON.stringify({

@@ -56,12 +56,19 @@ internal class OutboundMessenger(
             markup = extras?.markup.orEmpty(),
             sticker = extras?.sticker,
         )
-        // Validate the captured account attempt immediately before writing
-        // durable state. A generation is required because a same-account
-        // relogin would otherwise pass a bare-JID-only check.
-        if (!activeSession.isCurrent(lease)) return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        // The durable write is linearized with logout revocation. Holding the
+        // narrow transport fence through this one DataStore update prevents a
+        // stale attempt from committing after logout has cleared persistence
+        // and before a same-account successor starts draining its queue.
         val persisted = try {
-            outboundQueue.enqueue(queued)
+            when (val result = activeSession.runIfCurrentResult(lease) {
+                outboundQueue.enqueue(queued)
+            }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return@withLock SendResult(WaddleSendMessageOutcome.Error)
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {

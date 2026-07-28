@@ -265,9 +265,10 @@ export function createLocalStorageResumePersistence(
       }
       if (envelope.ownerId !== owner.ownerId) return null;
       if (envelope.claimId) return null;
-      const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = envelope;
+      const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = envelope;
       return {
         previd,
+        ...(resumable !== undefined ? { resumable } : {}),
         inboundH,
         outboundH,
         ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
@@ -421,9 +422,10 @@ function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeSt
       ownerInstanceId: owner.instanceId,
     }));
     s.removeItem(key);
-    const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = claimed;
+    const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = claimed;
     return {
       previd,
+      ...(resumable !== undefined ? { resumable } : {}),
       inboundH,
       outboundH,
       ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
@@ -1110,6 +1112,7 @@ function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
   }
   return (
     typeof candidate.previd === "string"
+    && (candidate.resumable === undefined || typeof candidate.resumable === "boolean")
     && isU32(candidate.inboundH)
     && isU32(candidate.outboundH)
     && (candidate.maxResumeSeconds === undefined || isPositiveU32(candidate.maxResumeSeconds))
