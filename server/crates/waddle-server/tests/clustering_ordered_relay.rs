@@ -1125,3 +1125,105 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
         })
     ));
 }
+
+fn muji_payload() -> OrderedRelayPayload {
+    use waddle_xmpp::xep::xep0167::MediaKind;
+    use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+    let muji = Muji {
+        room: Some(room_jid()),
+        preparing: false,
+        contents: vec![MujiContent::new(
+            "audio",
+            Creator::Initiator,
+            MediaKind::Audio,
+        )],
+    };
+    let jingle = xmpp_parsers::jingle::Jingle::new(
+        xmpp_parsers::jingle::Action::SessionInitiate,
+        xmpp_parsers::jingle::SessionId("muji-sid-1".into()),
+    );
+    let mut payload: xmpp_parsers::minidom::Element = jingle.into();
+    payload.append_child(muji.to_element());
+    let stanza = RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
+        xmpp_parsers::iq::Iq::Set {
+            from: Some(jid::Jid::from_str("romeo@example.test/home").expect("full jid")),
+            to: Some(jid::Jid::from_str("calls.example.test").expect("mixer jid")),
+            id: "muji-iq-1".into(),
+            payload,
+        },
+    )));
+    OrderedRelayPayload::MucProxy {
+        room_jid: room_jid(),
+        kind: OrderedRelayMucProxyKind::MujiJingleIq,
+        stanza,
+    }
+}
+
+/// #1597: the receiver enforces the kind→lane binding. A Muji payload
+/// on the MUC stanza lane, or an ordinary MUC payload on the Muji
+/// signaling lane, is an envelope-consistency failure — sender and
+/// receiver can never disagree about which lane a kind orders on. The
+/// valid envelope is accepted first to prove the mismatch cases fail
+/// on the lane alone.
+#[test]
+fn receiver_enforces_room_lane_kind_binding() {
+    let valid_muji = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: muji_room_channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: room_claim(),
+        payload: muji_payload(),
+        origin_proof: None,
+    };
+    let muji_on_muc_lane = RemoteStanzaEnvelope {
+        channel: room_channel(),
+        ..valid_muji.clone()
+    };
+    let groupchat_on_muji_lane = RemoteStanzaEnvelope {
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            stanza: groupchat_stanza_to("room@example.test"),
+        },
+        ..valid_muji.clone()
+    };
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(
+        matches!(
+            receive(&mut receiver, valid_muji),
+            OrderedRelayReply::Ack(OrderedRelayAck { .. })
+        ),
+        "a Muji envelope on the Muji signaling lane must validate"
+    );
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(
+        matches!(
+            receive(&mut receiver, muji_on_muc_lane),
+            OrderedRelayReply::Nack(OrderedRelayNack {
+                reason: OrderedRelayNackReason::ParseFailure,
+                ..
+            })
+        ),
+        "a Muji payload must be rejected on the MUC stanza lane"
+    );
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(
+        matches!(
+            receive(&mut receiver, groupchat_on_muji_lane),
+            OrderedRelayReply::Nack(OrderedRelayNack {
+                reason: OrderedRelayNackReason::ParseFailure,
+                ..
+            })
+        ),
+        "ordinary MUC payloads must be rejected on the Muji signaling lane"
+    );
+}
