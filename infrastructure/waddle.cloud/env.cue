@@ -139,6 +139,18 @@ schema.#Project & {
 		// annotation. Flux reconciliation is asynchronous, so this marks the
 		// rollout handoff rather than claiming the pods are already ready.
 		// Sequenced after both pushes so a failed push never gets a marker.
+		// The annotation is best-effort telemetry: transient errors
+		// (408/429/5xx, e.g. a cold-starting Cloud instance, plus
+		// retryable curl transport failures) are retried briefly and then
+		// tolerated with a run-level warning. Misconfiguration — other
+		// 4xx responses, DNS failures, malformed URLs, cert verification
+		// errors — still fails the task (TLS handshake drops, curl 35,
+		// are retried since they are usually mid-handshake network
+		// failures). A hard deadline caps total retry wall time so the
+		// job cannot linger inside the workflow's cancel-in-progress
+		// window. Retrying the POST can duplicate markers — classically
+		// when --max-time aborts client-side after Grafana already
+		// committed the annotation; acceptable for telemetry.
 		deployAnnotation: schema.#Task & {
 			dependsOn: [helmPush, gitopsPush]
 			command: "bash"
@@ -151,24 +163,70 @@ schema.#Project & {
 					timestamp_ms="$(( $(date +%s) * 1000 ))"
 					annotation_response="$(mktemp)"
 					trap 'rm -f "${annotation_response}"' EXIT
-					annotation_status="$(jq -n \
+					annotation_payload="$(jq -n \
 					  --arg text "waddle infra deploy ${revision}" \
 					  --argjson time "${timestamp_ms}" \
-					  '{text: $text, tags: ["deploy", "waddle"], time: $time}' \
-					  | curl -sS -o "${annotation_response}" -w '%{http_code}' \
+					  '{text: $text, tags: ["deploy", "waddle"], time: $time}')"
+					retry_deadline="$(( SECONDS + 45 ))"
+					for attempt in 1 2 3 4 5; do
+					  remaining="$(( retry_deadline - SECONDS ))"
+					  if [ "${remaining}" -le 0 ]; then
+					    break
+					  fi
+					  max_time=15
+					  if [ "${remaining}" -lt "${max_time}" ]; then
+					    max_time="${remaining}"
+					  fi
+					  : > "${annotation_response}"
+					  curl_rc=0
+					  annotation_status="$(curl -sS --connect-timeout 5 --max-time "${max_time}" \
+					      -o "${annotation_response}" -w '%{http_code}' \
 					      -X POST "${grafana_url}/api/annotations" \
 					      -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
 					      -H 'Content-Type: application/json' \
-					      --data-binary @-)"
-					case "${annotation_status}" in
-					  2??) ;;
-					  *)
-					    echo "Grafana annotation creation failed with HTTP ${annotation_status}:" >&2
-					    cat "${annotation_response}" >&2
-					    exit 1
-					    ;;
-					esac
-					echo "Grafana deploy annotation posted for ${revision}."
+					      --data-binary "${annotation_payload}")" || curl_rc=$?
+					  if [ "${curl_rc}" -ne 0 ]; then
+					    case "${curl_rc}" in
+					      7 | 16 | 18 | 28 | 35 | 52 | 55 | 56 | 92)
+					        echo "Grafana annotation attempt ${attempt} hit transient curl error ${curl_rc}." >&2
+					        ;;
+					      *)
+					        echo "Grafana annotation request failed with curl exit ${curl_rc}; check GRAFANA_CLOUD_URL." >&2
+					        exit 1
+					        ;;
+					    esac
+					  else
+					    case "${annotation_status}" in
+					      2??)
+					        echo "Grafana deploy annotation posted for ${revision}."
+					        exit 0
+					        ;;
+					      408 | 429 | 5??)
+					        echo "Grafana annotation attempt ${attempt} got HTTP ${annotation_status}:" >&2
+					        cat "${annotation_response}" >&2
+					        ;;
+					      *)
+					        echo "Grafana annotation creation failed with HTTP ${annotation_status}:" >&2
+					        cat "${annotation_response}" >&2
+					        exit 1
+					        ;;
+					    esac
+					  fi
+					  if [ "${attempt}" -ge 5 ]; then
+					    break
+					  fi
+					  backoff="$(( 1 << attempt ))"
+					  remaining="$(( retry_deadline - SECONDS ))"
+					  if [ "${remaining}" -le 0 ]; then
+					    break
+					  fi
+					  if [ "${backoff}" -gt "${remaining}" ]; then
+					    backoff="${remaining}"
+					  fi
+					  sleep "${backoff}"
+					done
+					echo "::warning title=Grafana deploy annotation skipped::Grafana unavailable after ${attempt} attempts; no deploy marker for ${revision}."
+					exit 0
 				"""#]
 			inputs: ["gitops/**", "charts/**", "env.cue"]
 		}
