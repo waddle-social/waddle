@@ -9,9 +9,12 @@
 
 ## Clustering wire format
 
-- **Bump the ordered-relay remote message id on every envelope format
-  change (#1597).** Any change to `RemoteStanzaEnvelope` or anything it
-  contains — payload variants, recipient/lane shapes, claim fields —
+- **Bump the ordered-relay remote message id on every wire format
+  change (#1597).** Any change to `RemoteStanzaEnvelope` **or to the
+  reply types** (`OrderedRelayReply`, `OrderedRelayAck`,
+  `OrderedRelayNack`, `OrderedRelayNackReason`, and anything they
+  contain) — payload variants, recipient/lane shapes, claim fields,
+  NACK reasons —
   MUST bump the version suffix in
   `#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.vN")]`
   (`clustering/relay.rs`). An old peer then fails the ask with
@@ -20,8 +23,12 @@
   old id makes the old peer fail mid-decode with `DeserializeMessage`,
   which is indistinguishable from a reply-decode failure after a
   committed effect and poisons the shared ordered channel for the whole
-  mixed-version window. The bump is what makes rolling deploys safe; a
-  PR that changes the envelope without bumping the id must be rejected.
+  mixed-version window. Reply types are covered for the same reason in
+  the other direction: a reply-only format change lets a mixed-version
+  receiver commit the delivery and then fail the sender's reply decode
+  — the same maybe-committed hazard. The bump is what makes rolling
+  deploys safe; a PR that changes any of these types without bumping
+  the id must be rejected.
 
 ## Telemetry
 
