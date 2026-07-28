@@ -27,24 +27,18 @@ spec:
     clustering:
       enabled: true
       enrolledKeyCount: 4
-    # TEMPORARY — one final hard cutover for the #1597 release, revert
-    # right after it is deployed.
-    #
-    # #1597 moves Muji IQs onto their own ordered-relay side-band lane
-    # (RoomSideBand). During a mixed-version window an old-binary
-    # sender still puts Muji on the shared room lane, which the new
-    # receiver rejects — diverting the OLD sender's shared lane and
-    # silently dropping that user's chat in the room (the exact #1445
-    # failure). One last Recreate deploy removes that window. Once
-    # every replica runs the side-band lane, mixed-version relay
-    # poisoning is bounded to the new feature's own lane, and rolling
-    # deploys become safe for future relay variants too.
-    #
-    # Revert to RollingUpdate (maxSurge 1 / maxUnavailable 0) once this
-    # release is out — Recreate is a regression against the ADR-0017
-    # Phase 4 move away from it, not a new steady state.
+    # ADR-0017 Phase 4 zero-downtime deploys (#971). The #1445 and
+    # #1597 releases each pinned Recreate as a one-off hard cutover for
+    # a relay wire-format change the previous image could not decode.
+    # #1597 gave such payloads their own ordered-relay side-band lane,
+    # so a mixed-version window during a rolling deploy now bounds any
+    # relay poisoning to the side-band lane instead of user chat —
+    # future relay variants need no cutover.
     updateStrategy:
-      type: Recreate
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
