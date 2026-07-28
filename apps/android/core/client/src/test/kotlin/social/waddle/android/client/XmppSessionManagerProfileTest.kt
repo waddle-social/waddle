@@ -13,6 +13,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.session.ActiveSession
+import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMood
 import social.waddle.client.ffi.WaddlePepProfile
@@ -226,24 +228,38 @@ class XmppSessionManagerProfileTest {
     }
 
     @Test
-    fun `a publish ack that lands after a same-account relogin is dropped`() = runTest {
-        val harness = Harness(this)
-        harness.loginReady(this)
-        harness.client.profileVerbDelayMillis = 1_000L
+    fun `a parked profile write cannot use or mutate a different-account successor`() = runTest {
+        val activeSession = ActiveSession()
+        val stores = SessionStores()
+        val verbs = ProfileVerbs(activeSession, stores)
+        val retiredClient = FakeWaddleClient()
+        val successorClient = FakeWaddleClient()
 
-        // The publish is in flight when the account signs out and
-        // signs back IN AS THE SAME account: a bare-JID owner gate
-        // would falsely pass here, the generation gate must not.
-        val pending = async { harness.manager.setMood("happy", null) }
-        runCurrent()
-        harness.manager.logout()
-        harness.loginReady(this)
+        activeSession.advanceGeneration()
+        activeSession.activateOwner(own)
+        val parkedLease = checkNotNull(activeSession.captureOwnerLease())
+        val retiredAttempt = checkNotNull(activeSession.beginAttempt())
+        assertTrue(activeSession.publishReady(retiredAttempt, retiredClient, "$own/phone") {})
 
-        advanceTimeBy(1_001L)
-        runCurrent()
-        assertEquals(VerbResult.Ok, pending.await())
-        assertNull(harness.manager.profileStore.selfMood.value)
-        harness.manager.logout()
+        // Model an old optimistic value that logout clears while this write
+        // is parked. A same- or different-account successor must see neither
+        // the old wire call nor its stale rollback.
+        stores.profileStore.setSelfVcard(testVcard4(fullName = "Old Draft"))
+        activeSession.revokeOutboundAuthority()
+        stores.clear()
+        val successor = "alice@waddle.test"
+        activeSession.activateOwner(successor)
+        val successorAttempt = checkNotNull(activeSession.beginAttempt())
+        assertTrue(activeSession.publishReady(successorAttempt, successorClient, "$successor/tablet") {})
+        stores.profileStore.setSelfVcard(testVcard4(fullName = "Alice Profile"))
+
+        assertEquals(
+            VerbResult.NotConnected,
+            verbs.publishProfileWithLease(parkedLease, testVcard4(fullName = "Retired Draft")),
+        )
+        assertTrue(retiredClient.profileVerbs.isEmpty())
+        assertTrue(successorClient.profileVerbs.isEmpty())
+        assertEquals("Alice Profile", stores.profileStore.selfVcard.value?.fullName)
     }
 
     @Test
