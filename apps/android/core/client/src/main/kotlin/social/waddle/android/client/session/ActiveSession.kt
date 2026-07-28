@@ -128,6 +128,19 @@ internal class ActiveSession {
         advanceGenerationLocked()
     }
 
+    /**
+     * Atomically invalidate [lease] only when it is still the account
+     * attempt currently authorized by this session. Terminal authentication
+     * handling uses this instead of a check followed by [advanceGeneration]:
+     * a same-account relogin must not let a delayed old failure retire the
+     * successor between those two operations.
+     */
+    suspend fun advanceGenerationIfCurrent(lease: OwnerLease): Boolean = transportFence.withLock {
+        if (outboundOwner != lease) return@withLock false
+        advanceGenerationLocked()
+        true
+    }
+
     /** Publish a new account's authority after login has finished clearing old state. */
     suspend fun activateOwner(ownerBareJid: String) = transportFence.withLock {
         ownBareJid = ownerBareJid

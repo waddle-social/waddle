@@ -67,7 +67,7 @@ internal class ConnectionLoop(
         retryRequests.trySend(Unit)
     }
 
-    suspend fun run(session: WaddleSessionInfo) {
+    suspend fun run(session: WaddleSessionInfo, sessionScope: CoroutineScope) {
         var attempt = 0
         while (currentCoroutineContext().isActive) {
             waitUntilOnline()
@@ -84,9 +84,9 @@ internal class ConnectionLoop(
                 AttemptEnd.CONNECT_FAILED
             }
             when (end) {
-                AttemptEnd.AUTH_FAILED -> {
+                is AttemptEnd.AuthFailed -> {
                     _state.value = ConnectionState.AuthFailed
-                    callbacks.onTerminalAuthFailure()
+                    callbacks.onTerminalAuthFailure(end.lease, sessionScope)
                     return
                 }
                 AttemptEnd.DROPPED_AFTER_READY -> attempt = 0
@@ -171,7 +171,7 @@ internal class ConnectionLoop(
         val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(events) }
         when (readiness) {
             null, Readiness.CLOSED -> return AttemptEnd.CONNECT_FAILED
-            Readiness.AUTH_FAILED -> return AttemptEnd.AUTH_FAILED
+            Readiness.AUTH_FAILED -> return AttemptEnd.AuthFailed(attempt.lease)
             Readiness.READY -> Unit
         }
         if (!activeSession.publishReady(
@@ -286,7 +286,12 @@ internal class ConnectionLoop(
             else -> false
         }
 
-    private enum class AttemptEnd { AUTH_FAILED, CONNECT_FAILED, DROPPED_AFTER_READY }
+    /** The terminal result retains the exact pre-ready attempt authority. */
+    private sealed interface AttemptEnd {
+        data class AuthFailed(val lease: ActiveSession.OwnerLease) : AttemptEnd
+        data object CONNECT_FAILED : AttemptEnd
+        data object DROPPED_AFTER_READY : AttemptEnd
+    }
 
     private enum class Readiness { READY, AUTH_FAILED, CLOSED }
 
@@ -314,5 +319,11 @@ internal typealias SessionReadyListener = (
 internal class ConnectionLoopCallbacks(
     val onReady: SessionReadyListener,
     val onDeliveryAcked: suspend (String) -> Unit,
-    val onTerminalAuthFailure: suspend () -> Unit,
+    /**
+     * Carries both the failing attempt's immutable lease and the exact
+     * manager scope that launched this loop. The receiver must validate both
+     * before touching lifecycle state: a cancelled old loop can report after
+     * a same-account or different-account successor has been installed.
+     */
+    val onTerminalAuthFailure: (ActiveSession.OwnerLease, CoroutineScope) -> Unit,
 )

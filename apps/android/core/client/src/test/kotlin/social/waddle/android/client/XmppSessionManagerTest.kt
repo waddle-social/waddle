@@ -1,7 +1,9 @@
 package social.waddle.android.client
 
 import app.cash.turbine.test
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -9,6 +11,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -22,7 +25,10 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XmppSessionManagerTest {
-    private class Harness(testScope: TestScope) {
+    private class Harness(
+        testScope: TestScope,
+        beforeTerminalAuthCommit: suspend () -> Unit = {},
+    ) {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
@@ -33,6 +39,7 @@ class XmppSessionManagerTest {
             userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
+            beforeTerminalAuthCommit = beforeTerminalAuthCommit,
         )
     }
 
@@ -170,6 +177,12 @@ class XmppSessionManagerTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
+        // Prove the terminal owner still receives the full cleanup, not just
+        // an app-state transition: this pre-ready intent is in both the
+        // store and session persistence when the terminal SASL failure lands.
+        harness.manager.joinRoom("general@muc.waddle.test", "icepuma")
+        assertEquals(setOf("general@muc.waddle.test"), harness.manager.roomStore.joinedRooms.value)
+
         harness.factory.emit(
             WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED),
         )
@@ -178,7 +191,57 @@ class XmppSessionManagerTest {
         assertEquals(ConnectionState.AuthFailed, harness.manager.connectionState.value)
         assertEquals(WaddleAppState.SignedOut, harness.manager.appState.value)
         assertEquals("session id cleared on auth failure", null, harness.prefs.sessionId.first())
+        assertEquals("owner cleared on auth failure", null, harness.prefs.ownerBareJid.first())
+        assertEquals("session stores cleared on auth failure", emptySet<String>(), harness.manager.roomStore.joinedRooms.value)
         assertEquals("no retry after auth failure", 1, harness.factory.clients.size)
+    }
+
+    @Test
+    fun `stale terminal auth completion leaves a relogged successor untouched`() = runTest {
+        val terminalEntered = CompletableDeferred<Unit>()
+        val releaseTerminal = CompletableDeferred<Unit>()
+        val harness = Harness(this) {
+            terminalEntered.complete(Unit)
+            // The terminal worker is intentionally manager-owned. Keeping the
+            // test gate non-cancellable models an old completion that resumes
+            // after login cancelled its original connection-loop scope.
+            withContext(NonCancellable) { releaseTerminal.await() }
+        }
+        val oldSession = testSessionInfo(sessionId = "old-session")
+        val successor = testSessionInfo(
+            sessionId = "successor-session",
+            username = "snowowl",
+            jid = "snowowl@waddle.test",
+        )
+
+        harness.manager.login(oldSession)
+        runCurrent()
+        harness.factory.emit(
+            WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED),
+        )
+        runCurrent()
+        terminalEntered.await()
+
+        // The successor is installed while the old terminal handler is
+        // parked before its lifecycle CAS. Login joins only the old loop;
+        // the manager-owned terminal worker remains to exercise the exact
+        // stale-completion path when released below.
+        harness.manager.login(successor)
+        runCurrent()
+        assertEquals(WaddleAppState.Ready, harness.manager.appState.value)
+        assertEquals("successor-session", harness.prefs.sessionId.first())
+        assertEquals("snowowl@waddle.test", harness.prefs.ownerBareJid.first())
+        assertEquals(2, harness.factory.clients.size)
+
+        releaseTerminal.complete(Unit)
+        runCurrent()
+
+        assertEquals("stale failure must not sign out the successor", WaddleAppState.Ready, harness.manager.appState.value)
+        assertEquals("successor persistence survives stale failure", "successor-session", harness.prefs.sessionId.first())
+        assertEquals("successor owner survives stale failure", "snowowl@waddle.test", harness.prefs.ownerBareJid.first())
+        assertEquals("stale failure must not cancel successor callbacks", 2, harness.factory.clients.size)
+
+        harness.manager.logout()
     }
 
     @Test
