@@ -493,16 +493,22 @@ async fn slow_force_detach_does_not_delay_a_concurrent_relay_ping() {
     registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
 
     // Simulate a slow/wedged connection: receive the force-detach
-    // request but wait well past when the concurrent ping below must
-    // already have resolved before acking.
-    const ACK_DELAY: Duration = Duration::from_secs(3);
+    // request, signal that the resume-steal handler has provably
+    // reached its blocking wait, then hold the ack until the test
+    // releases it. Explicit synchronization instead of sleeps: the
+    // `started` gate proves the handler is in-flight before the ping
+    // is issued, and the `release` gate keeps the ack pending for
+    // exactly as long as the measurement needs.
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let entry = registry.get_entry(&jid).expect("entry was just registered");
     let mut force_detach_rx = entry
         .take_force_detach_rx()
         .expect("receiver is available exactly once");
     tokio::spawn(async move {
         if let Some(request) = force_detach_rx.recv().await {
-            tokio::time::sleep(ACK_DELAY).await;
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
             let _ = request.ack.send(ForceDetachOutcome::Detached);
         }
     });
@@ -536,32 +542,32 @@ async fn slow_force_detach_does_not_delay_a_concurrent_relay_ping() {
                 .await
         }
     });
-    // Give the spawned ask a moment to actually reach the actor and
-    // start executing: before the fix under test, the handler would
-    // still be blocked inline on the (3s) force-detach ack at this
-    // point; after the fix, `ctx.spawn` has already returned and the
-    // mailbox is free again, well within this margin.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the resume-steal handler has provably reached its
+    // force-detach wait: `started_rx` fires only after the registry
+    // delivered the force-detach request, so the ask is genuinely
+    // in-flight and blocked — not merely constructed-but-unpolled.
+    tokio::time::timeout(Duration::from_secs(5), started_rx)
+        .await
+        .expect("resume-steal handler must reach its force-detach wait")
+        .expect("force-detach receiver task must signal it started");
 
-    let ping_started = std::time::Instant::now();
+    // The ack gate is still closed here, so the resume-steal ask is
+    // still pending by construction while the ping is measured.
     let ping_result =
         tokio::time::timeout(Duration::from_millis(500), actor_ref.ask(RelayPing)).await;
-    let ping_elapsed = ping_started.elapsed();
-
     assert!(
         ping_result.is_ok(),
-        "RelayPing must resolve well within 500ms even while a slow \
-         RelayResumeSteal ack is still pending"
-    );
-    assert!(
-        ping_elapsed < ACK_DELAY,
-        "ping took {ping_elapsed:?}, which is not plausibly faster than the \
-         {ACK_DELAY:?} force-detach ack delay — the mailbox was likely blocked"
+        "RelayPing must resolve well within 500ms while the \
+         RelayResumeSteal force-detach ack is provably still pending"
     );
 
-    // Let the still-pending resume-steal ask complete so the test
-    // doesn't leak the background task; confirms the eventual reply is
-    // still correct once the slow ack lands.
+    // Release the ack only now that the ping assertion is done, then
+    // let the resume-steal ask complete so the test doesn't leak the
+    // background task; confirms the eventual reply is still correct
+    // once the ack lands.
+    release_tx
+        .send(())
+        .expect("force-detach task is still waiting on the release gate");
     let resume_steal_reply = resume_steal_handle
         .await
         .expect("resume-steal task did not panic")
