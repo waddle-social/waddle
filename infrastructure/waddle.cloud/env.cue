@@ -146,9 +146,11 @@ schema.#Project & {
 		// 4xx responses, DNS failures, malformed URLs, cert verification
 		// errors — still fails the task (TLS handshake drops, curl 35,
 		// are retried since they are usually mid-handshake network
-		// failures). Retrying the POST can leave duplicate
-		// markers if Grafana committed before an edge error; acceptable
-		// for telemetry.
+		// failures). A hard deadline caps total retry wall time so the
+		// job cannot linger inside the workflow's cancel-in-progress
+		// window. Retrying the POST can duplicate markers — classically
+		// when --max-time aborts client-side after Grafana already
+		// committed the annotation; acceptable for telemetry.
 		deployAnnotation: schema.#Task & {
 			dependsOn: [helmPush, gitopsPush]
 			command: "bash"
@@ -165,6 +167,7 @@ schema.#Project & {
 					  --arg text "waddle infra deploy ${revision}" \
 					  --argjson time "${timestamp_ms}" \
 					  '{text: $text, tags: ["deploy", "waddle"], time: $time}')"
+					retry_deadline="$(( SECONDS + 45 ))"
 					for attempt in 1 2 3 4 5; do
 					  : > "${annotation_response}"
 					  curl_rc=0
@@ -201,11 +204,12 @@ schema.#Project & {
 					        ;;
 					    esac
 					  fi
-					  if [ "${attempt}" -lt 5 ]; then
-					    sleep "$(( 1 << attempt ))"
+					  if [ "${attempt}" -ge 5 ] || [ "${SECONDS}" -ge "${retry_deadline}" ]; then
+					    break
 					  fi
+					  sleep "$(( 1 << attempt ))"
 					done
-					echo "::warning title=Grafana deploy annotation skipped::Grafana unavailable after 5 attempts; no deploy marker for ${revision}."
+					echo "::warning title=Grafana deploy annotation skipped::Grafana unavailable after ${attempt} attempts; no deploy marker for ${revision}."
 					exit 0
 				"""#]
 			inputs: ["gitops/**", "charts/**", "env.cue"]
