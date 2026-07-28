@@ -20,10 +20,38 @@ internal class CallTeardown(
 ) {
     suspend fun hangUp(reason: WaddleJingleReason) {
         val connection = signaling.captureActiveConnection() ?: return
-        hangUpWith(connection, ownFullJid(), reason)
+        hangUpWithCurrent(connection, ownFullJid(), reason)
     }
 
-    suspend fun hangUpWith(sender: CallConnection, ownJid: String?, reason: WaddleJingleReason) {
+    /** Logout-only: the retired transport is intentionally not a [CallConnection]. */
+    suspend fun hangUpWith(sender: LogoutCallTeardown, ownJid: String?) {
+        var current: CallState? = null
+        synchronized(stateLock) {
+            callbacks.cancelTimers()
+            current = state.value
+            state.value = CallState.Idle
+        }
+        when (val claimed = current ?: return) {
+            is CallState.Active -> if (claimed.kind == CallKind.MUC) {
+                muc.teardownActiveForLogout(claimed, sender, ownJid)
+            } else {
+                terminateActiveForLogout(claimed, sender)
+            }
+            is CallState.MucPending -> muc.teardownPendingForLogout(claimed, sender)
+            is CallState.Outgoing ->
+                if (!sender.retractForLogout(bareJid(claimed.to), claimed.sid)) callbacks.reportError("call retract failed")
+            is CallState.Incoming -> if (claimed.accepting) {
+                if (!sender.cancelAcceptingCallForLogout(claimed.from, claimed.sid)) {
+                    callbacks.reportError("call finish failed")
+                }
+            } else if (!sender.rejectForLogout(claimed.from, claimed.sid)) {
+                callbacks.reportError("call reject failed")
+            }
+            else -> Unit
+        }
+    }
+
+    private suspend fun hangUpWithCurrent(sender: CallConnection, ownJid: String?, reason: WaddleJingleReason) {
         var current: CallState? = null
         if (!sender.applyIfCurrent {
                 synchronized(stateLock) {
@@ -34,14 +62,13 @@ internal class CallTeardown(
                     state.value = CallState.Idle
                 }
             }) return
-        val claimed = current ?: return
-        when (claimed) {
+        when (val claimed = current ?: return) {
             is CallState.Active -> if (claimed.kind == CallKind.MUC) {
-                muc.teardownActiveWith(claimed, sender, ownJid)
+                muc.teardownActiveWithCurrent(claimed, sender, ownJid)
             } else {
                 terminateActive(claimed, reason, sender)
             }
-            is CallState.MucPending -> muc.teardownPendingWith(claimed, sender)
+            is CallState.MucPending -> muc.teardownPendingWithCurrent(claimed, sender)
             is CallState.Outgoing ->
                 if (!sender.retract(bareJid(claimed.to), claimed.sid)) callbacks.reportError("call retract failed")
             is CallState.Incoming -> if (claimed.accepting) {
@@ -73,7 +100,7 @@ internal class CallTeardown(
                 }
             }) return
         val claimed = current ?: return
-        if (claimed.kind == CallKind.MUC) muc.teardownActiveWith(claimed, connection, null) else terminateActive(claimed, reason, connection)
+        if (claimed.kind == CallKind.MUC) muc.teardownActiveWithCurrent(claimed, connection, null) else terminateActive(claimed, reason, connection)
     }
 
     fun dismiss() {
@@ -92,6 +119,15 @@ internal class CallTeardown(
             return
         }
         if (!sender.finish(current.peer, current.sid)) callbacks.reportError("call finish failed")
+    }
+
+    private suspend fun terminateActiveForLogout(current: CallState.Active, sender: LogoutCallTeardown) {
+        val outcome = sender.terminateCallForLogout(current.peer, current.sid)
+        if (outcome == WaddleCallSessionTerminateOutcome.ERROR) {
+            callbacks.reportError("call session terminate failed")
+            return
+        }
+        if (!sender.finishTerminatedCallForLogout(current.peer, current.sid)) callbacks.reportError("call finish failed")
     }
 }
 

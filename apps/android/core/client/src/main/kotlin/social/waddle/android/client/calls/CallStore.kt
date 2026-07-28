@@ -283,10 +283,9 @@ class CallStore internal constructor(
 
     /** Internal logout path; ordinary UI callers cannot select a retired transport. */
     internal suspend fun hangUpWith(
-        sender: CallConnection,
+        sender: LogoutCallTeardown,
         ownJid: String?,
-        reason: WaddleJingleReason = WaddleJingleReason.SUCCESS,
-    ) = teardown.hangUpWith(sender, ownJid, reason)
+    ) = teardown.hangUpWith(sender, ownJid)
 
     /**
      * Scoped teardown for NON-user callers (the media controller): acts

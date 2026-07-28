@@ -153,17 +153,27 @@ class MucCallEngine internal constructor(
      */
     suspend fun teardownActive(current: CallState.Active) {
         val connection = current.connection ?: return
-        teardownActiveWith(current, connection, ownFullJid())
+        teardownActiveWithCurrent(current, connection, ownFullJid())
     }
 
-    /** Internal logout path with a captured call-only sender. */
-    internal suspend fun teardownActiveWith(
+    /** Normal teardown keeps its lease-pinned signaling capability. */
+    internal suspend fun teardownActiveWithCurrent(
         current: CallState.Active,
         teardownSignaling: CallConnection,
         teardownOwnFullJid: String?,
     ) {
         current.selfNick?.let { nick -> leavePresence(current.peer, nick, teardownOwnFullJid, teardownSignaling) }
         terminate(current.peer, current.sid, teardownOwnFullJid, teardownSignaling)
+    }
+
+    /** Logout accepts only the retired teardown capability. */
+    internal suspend fun teardownActiveForLogout(
+        current: CallState.Active,
+        teardownSignaling: LogoutCallTeardown,
+        teardownOwnFullJid: String?,
+    ) {
+        current.selfNick?.let { nick -> leavePresenceForLogout(current.peer, nick, teardownOwnFullJid, teardownSignaling) }
+        terminateForLogout(current.peer, current.sid, teardownOwnFullJid, teardownSignaling)
     }
 
     /**
@@ -193,11 +203,11 @@ class MucCallEngine internal constructor(
     /** Teardown for an abandoned setup whose slot the caller already cleared. */
     suspend fun teardownPending(current: CallState.MucPending) {
         val connection = current.connection ?: return
-        teardownPendingWith(current, connection)
+        teardownPendingWithCurrent(current, connection)
     }
 
-    /** Internal logout path with a captured call-only sender. */
-    internal suspend fun teardownPendingWith(
+    /** Normal teardown keeps its lease-pinned signaling capability. */
+    internal suspend fun teardownPendingWithCurrent(
         current: CallState.MucPending,
         teardownSignaling: CallConnection,
     ) {
@@ -206,6 +216,19 @@ class MucCallEngine internal constructor(
         leavePresence(current.roomJid, current.selfNick, current.selfFullJid, teardownSignaling)
         if (current.activePresencePublished) {
             terminate(current.roomJid, current.sid, current.selfFullJid, teardownSignaling)
+        }
+    }
+
+    /** Logout accepts only the retired teardown capability. */
+    internal suspend fun teardownPendingForLogout(
+        current: CallState.MucPending,
+        teardownSignaling: LogoutCallTeardown,
+    ) {
+        presence.cancelPreparationWaiters(current.roomJid, current.selfNick)
+        cancelPendingAccept(current.sid)
+        leavePresenceForLogout(current.roomJid, current.selfNick, current.selfFullJid, teardownSignaling)
+        if (current.activePresencePublished) {
+            terminateForLogout(current.roomJid, current.sid, current.selfFullJid, teardownSignaling)
         }
     }
 
@@ -654,10 +677,28 @@ class MucCallEngine internal constructor(
         selfNick: String,
         selfFullJid: String?,
         teardownSignaling: CallConnection,
+    ) = leavePresenceWithSender(room, selfNick, selfFullJid) { update ->
+        teardownSignaling.updateMujiPresence(update)
+    }
+
+    private suspend fun leavePresenceForLogout(
+        room: String,
+        selfNick: String,
+        selfFullJid: String?,
+        teardownSignaling: LogoutCallTeardown,
+    ) = leavePresenceWithSender(room, selfNick, selfFullJid) {
+        teardownSignaling.leaveMujiForLogout(room, selfNick)
+    }
+
+    private suspend fun leavePresenceWithSender(
+        room: String,
+        selfNick: String,
+        selfFullJid: String?,
+        sendLeave: suspend (MujiPresenceUpdate) -> Boolean,
     ) {
         val cleared = presenceSendMutex.withLock {
             if (slotHoldsMucRoom(room)) return
-            teardownSignaling.updateMujiPresence(
+            sendLeave(
                 MujiPresenceUpdate(
                     roomJid = room, nick = selfNick,
                     active = false, preparing = false, video = false,
@@ -687,8 +728,26 @@ class MucCallEngine internal constructor(
         sid: String,
         selfFullJid: String?,
         teardownSignaling: CallConnection,
+    ) = terminateWithSender(room, sid, selfFullJid) {
+        teardownSignaling.mujiSessionTerminate(room, sid)
+    }
+
+    private suspend fun terminateForLogout(
+        room: String,
+        sid: String,
+        selfFullJid: String?,
+        teardownSignaling: LogoutCallTeardown,
+    ) = terminateWithSender(room, sid, selfFullJid) {
+        teardownSignaling.terminateMujiForLogout(room, sid)
+    }
+
+    private suspend fun terminateWithSender(
+        room: String,
+        sid: String,
+        selfFullJid: String?,
+        sendTerminate: suspend () -> Boolean,
     ) {
-        if (teardownSignaling.mujiSessionTerminate(room, sid)) {
+        if (sendTerminate()) {
             sessionCache.forget(room, selfFullJid, sid)
         } else {
             store.reportCallError("muji session terminate failed")

@@ -9,6 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.calls.ClientCallSignaling
+import social.waddle.android.client.calls.LogoutCallTeardown
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleSendMessageOutcome
@@ -224,6 +225,34 @@ class ActiveSessionGatewayTest {
         assertFalse(connection.mujiSessionInitiate("room@muc.waddle.test", "carol@waddle.test/device", "parked-muji", false))
         assertTrue(oldClient.callVerbs.isEmpty())
         assertTrue(successor.callVerbs.isEmpty())
+    }
+
+    @Test
+    fun `retired logout capability exposes cleanup verbs but no normal signaling verbs`() = runTest {
+        val active = readySession()
+        val client = FakeWaddleClient()
+        publishReady(active, client)
+
+        val retired = checkNotNull(active.revokeOutboundAuthority())
+        val teardown: LogoutCallTeardown = ClientCallSignaling.forRetiredConnection(retired)
+
+        assertTrue(teardown.retractForLogout("bob@waddle.test", "logout-call"))
+        assertTrue(RecordedCallVerb.Retract("bob@waddle.test", "logout-call") in client.callVerbs)
+        assertEquals(
+            setOf(
+                "retractForLogout",
+                "rejectForLogout",
+                "cancelAcceptingCallForLogout",
+                "terminateCallForLogout",
+                "finishTerminatedCallForLogout",
+                "leaveMujiForLogout",
+                "terminateMujiForLogout",
+            ),
+            LogoutCallTeardown::class.java.methods
+                .filter { it.declaringClass != Any::class.java }
+                .map { it.name }
+                .toSet(),
+        )
     }
 
     private suspend fun readySession(): ActiveSession {
