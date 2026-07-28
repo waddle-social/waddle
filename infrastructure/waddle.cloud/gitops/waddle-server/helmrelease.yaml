@@ -39,10 +39,9 @@ spec:
     # replica gets UnknownMessage but still runs its OLD code, which
     # diverts the shared MUC channel. Recreate closes that window.
     #
-    # Flip to RollingUpdate (maxSurge 1 / maxUnavailable 0) as the
-    # immediate follow-up once the #1597 server release is deployed —
-    # Recreate is a regression against ADR-0017 Phase 4, not a steady
-    # state.
+    # Flip to RollingUpdate (maxSurge 1 / maxUnavailable 0) once the
+    # #1597 server release is deployed — tracked as #1601. Recreate is
+    # a regression against ADR-0017 Phase 4, not a steady state.
     updateStrategy:
       type: Recreate
     image:
