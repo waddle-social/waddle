@@ -12,7 +12,9 @@ pub(crate) async fn event_dispatch_loop(
             }
             DriverEvent::Error(description) => emit_error_callback(&inner, &description),
             DriverEvent::Disconnected => {
-                inner.borrow_mut().cmd_tx = None;
+                // The driver clears its lane with pointer identity before
+                // emitting this callback. Do not clear here: a delayed old
+                // disconnect must never detach a newly connected generation.
                 // Clone the callback before invoking it so a JS handler that
                 // synchronously re-enters the WaddleClient via a `send_*`
                 // method (which takes `borrow_mut`) does not panic on an

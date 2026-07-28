@@ -236,7 +236,12 @@ pub struct WaddleClient {
 
 pub(crate) struct WaddleClientInner {
     pub(crate) config: StoredConfig,
-    pub(crate) cmd_tx: Option<mpsc::Sender<WasmCommand>>,
+    /// The sole admission lane for commands submitted by browser callers.
+    ///
+    /// Unlike an async channel receiver, the lane is also visible to the
+    /// synchronous pagehide path. That makes an accepted command's order
+    /// observable to both the async driver and the last-chance `<r/>` write.
+    pub(crate) command_lane: Option<Rc<RefCell<WasmCommandLane>>>,
     /// The one browser-owner core. The async driver and synchronous pagehide
     /// path must both borrow this exact runtime/socket pair; neither may
     /// manufacture a second transport owner.
@@ -299,6 +304,114 @@ pub(crate) enum WasmCommand {
     },
 }
 
+/// Browser command admission is bounded exactly like the former `mpsc(64)`,
+/// but the ready FIFO is shared with pagehide. Senders beyond capacity wait
+/// *outside* the admitted FIFO; a cancelled waiter is never promoted, so a
+/// dropped Promise cannot manufacture an outbound stanza.
+pub(crate) struct WasmCommandLane {
+    ready: VecDeque<WasmCommand>,
+    waiting: VecDeque<WaitingWasmCommand>,
+    pagehide_completions: VecDeque<PagehideCommandCompletion>,
+    wake_tx: mpsc::Sender<()>,
+    closed: bool,
+}
+
+struct WaitingWasmCommand {
+    command: WasmCommand,
+    admitted: oneshot::Sender<()>,
+}
+
+pub(crate) const WASM_COMMAND_CAPACITY: usize = 64;
+
+impl WasmCommandLane {
+    pub(crate) fn new(wake_tx: mpsc::Sender<()>) -> Self {
+        Self {
+            ready: VecDeque::with_capacity(WASM_COMMAND_CAPACITY),
+            waiting: VecDeque::new(),
+            pagehide_completions: VecDeque::new(),
+            wake_tx,
+            closed: false,
+        }
+    }
+
+    /// Admit immediately when there is no older waiter; otherwise preserve
+    /// FIFO by waiting until the driver (or pagehide) frees capacity.
+    pub(crate) fn enqueue(
+        &mut self,
+        command: WasmCommand,
+    ) -> Result<Option<oneshot::Receiver<()>>, ()> {
+        if self.closed {
+            drop(command);
+            return Err(());
+        }
+        if self.waiting.is_empty() && self.ready.len() < WASM_COMMAND_CAPACITY {
+            self.ready.push_back(command);
+            self.wake();
+            return Ok(None);
+        }
+
+        let (admitted, receiver) = oneshot::channel();
+        self.waiting
+            .push_back(WaitingWasmCommand { command, admitted });
+        Ok(Some(receiver))
+    }
+
+    pub(crate) fn pop_ready(&mut self) -> Option<WasmCommand> {
+        let command = self.ready.pop_front();
+        if command.is_some() {
+            self.promote_waiters();
+        }
+        command
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    pub(crate) fn push_pagehide_completion(&mut self, completion: PagehideCommandCompletion) {
+        self.pagehide_completions.push_back(completion);
+        self.wake();
+    }
+
+    pub(crate) fn pop_pagehide_completion(&mut self) -> Option<PagehideCommandCompletion> {
+        self.pagehide_completions.pop_front()
+    }
+
+    pub(crate) fn close(&mut self) -> Vec<WasmCommand> {
+        self.closed = true;
+        let mut commands = std::mem::take(&mut self.ready);
+        while let Some(waiting) = self.waiting.pop_front() {
+            // A waiter has not been admitted, so it must not be executed.
+            drop(waiting.command);
+        }
+        commands.shrink_to_fit();
+        commands.into_iter().collect()
+    }
+
+    fn promote_waiters(&mut self) {
+        while self.ready.len() < WASM_COMMAND_CAPACITY {
+            let Some(waiting) = self.waiting.pop_front() else {
+                break;
+            };
+            // Promotion is the linearization point. If the browser-side
+            // Promise was cancelled while waiting, retain neither its command
+            // nor a phantom queue slot.
+            if waiting.admitted.send(()).is_ok() {
+                self.ready.push_back(waiting.command);
+            }
+        }
+        if !self.ready.is_empty() {
+            self.wake();
+        }
+    }
+
+    fn wake(&mut self) {
+        // A full one-slot wake channel already means the driver will inspect
+        // the shared FIFO. Dropping this duplicate wake cannot drop a command.
+        let _ = self.wake_tx.try_send(());
+    }
+}
+
 pub(crate) enum DeferredWasmCommand {
     Stanza {
         stanza: Element,
@@ -320,12 +433,122 @@ pub(crate) enum DeferredWasmCommand {
     },
 }
 
+/// A pagehide write is completed synchronously, but the browser's JS Promise
+/// callbacks and query routing stay on the regular async driver turn. Keeping
+/// this explicit record prevents a raw write from being replayed by that turn.
+pub(crate) enum PagehideCommandCompletion {
+    Stanza {
+        responder: oneshot::Sender<DriverResult<()>>,
+        result: DriverResult<()>,
+    },
+    Iq {
+        stanza: Element,
+        responder: oneshot::Sender<DriverResult<Element>>,
+        result: DriverResult<()>,
+    },
+    MamQuery {
+        stanza: Element,
+        query_id: String,
+        responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
+        result: DriverResult<()>,
+    },
+    InboxQuery {
+        stanza: Element,
+        query_id: String,
+        responder: oneshot::Sender<DriverResult<InboxPage>>,
+        result: DriverResult<()>,
+    },
+    Deferred(DeferredWasmCommand),
+    CancelIq {
+        id: String,
+        responder: oneshot::Sender<DriverResult<()>>,
+    },
+    Disconnect {
+        responder: oneshot::Sender<DriverResult<()>>,
+        result: DriverResult<()>,
+    },
+    StreamManagementAck {
+        responder: oneshot::Sender<DriverResult<()>>,
+        result: DriverResult<()>,
+    },
+    Event(ClientEvent),
+}
+
 impl DeferredWasmCommand {
     pub(crate) fn raw_iq_id(&self) -> Option<&str> {
         match self {
             Self::Iq { stanza, .. } => stanza.attr("id"),
             Self::Stanza { .. } | Self::MamQuery { .. } | Self::InboxQuery { .. } => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod command_lane_tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    fn command(id: &str) -> WasmCommand {
+        let (responder, _receiver) = oneshot::channel();
+        WasmCommand::CancelIq {
+            id: id.to_owned(),
+            responder,
+        }
+    }
+
+    fn command_id(command: WasmCommand) -> String {
+        match command {
+            WasmCommand::CancelIq { id, .. } => id,
+            _ => panic!("test lane contains only cancellation commands"),
+        }
+    }
+
+    #[test]
+    fn command_lane_keeps_all_admitted_commands_fifo_and_promotes_waiters() {
+        let (wake_tx, _wake_rx) = mpsc::channel(1);
+        let mut lane = WasmCommandLane::new(wake_tx);
+        for id in 0..WASM_COMMAND_CAPACITY {
+            assert!(matches!(lane.enqueue(command(&id.to_string())), Ok(None)));
+        }
+        let waiter = match lane.enqueue(command("after-capacity")) {
+            Ok(Some(waiter)) => waiter,
+            Ok(None) => panic!("the 65th command must wait"),
+            Err(_) => panic!("live lane must accept a waiter"),
+        };
+
+        assert_eq!(command_id(lane.pop_ready().expect("first command")), "0");
+        block_on(waiter).expect("the promoted command was admitted");
+        for id in 1..WASM_COMMAND_CAPACITY {
+            assert_eq!(
+                command_id(lane.pop_ready().expect("queued command")),
+                id.to_string()
+            );
+        }
+        assert_eq!(
+            command_id(lane.pop_ready().expect("promoted command")),
+            "after-capacity"
+        );
+    }
+
+    #[test]
+    fn command_lane_never_promotes_a_cancelled_waiter_or_accepts_after_close() {
+        let (wake_tx, _wake_rx) = mpsc::channel(1);
+        let mut lane = WasmCommandLane::new(wake_tx);
+        for id in 0..WASM_COMMAND_CAPACITY {
+            assert!(matches!(lane.enqueue(command(&id.to_string())), Ok(None)));
+        }
+        let cancelled = match lane.enqueue(command("cancelled")) {
+            Ok(Some(waiter)) => waiter,
+            Ok(None) => panic!("capacity must make this command wait"),
+            Err(_) => panic!("live lane must accept a waiter"),
+        };
+        drop(cancelled);
+        let _ = lane.pop_ready();
+        while lane.pop_ready().is_some() {}
+        assert!(lane.pop_ready().is_none());
+
+        drop(lane.close());
+        assert!(lane.enqueue(command("closed")).is_err());
     }
 }
 
@@ -379,7 +602,8 @@ pub(crate) struct PendingInboxQuery {
 pub(crate) struct WasmDriverTask {
     pub(crate) core: Rc<RefCell<WasmDriverCore>>,
     pub(crate) ws: WasmWebSocket,
-    pub(crate) cmd_rx: mpsc::Receiver<WasmCommand>,
+    pub(crate) command_lane: Rc<RefCell<WasmCommandLane>>,
+    pub(crate) command_wake_rx: mpsc::Receiver<()>,
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,
     pub(crate) inner: Rc<RefCell<WaddleClientInner>>,
     pub(crate) pending_iqs:

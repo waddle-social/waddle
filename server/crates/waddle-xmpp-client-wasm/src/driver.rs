@@ -236,11 +236,19 @@ mod sm_clock_timer_schedule_tests {
 pub(crate) async fn driver_loop(
     config: ClientConfig,
     ws: WasmWebSocket,
-    cmd_rx: mpsc::Receiver<WasmCommand>,
+    command_wake_rx: mpsc::Receiver<()>,
     event_tx: mpsc::Sender<DriverEvent>,
     inner: Rc<RefCell<WaddleClientInner>>,
+    command_lane: Rc<RefCell<WasmCommandLane>>,
 ) {
-    let mut task = match WasmDriverTask::new(config, ws, cmd_rx, event_tx.clone(), inner) {
+    let mut task = match WasmDriverTask::new(
+        config,
+        ws,
+        command_wake_rx,
+        event_tx.clone(),
+        inner,
+        command_lane,
+    ) {
         Ok(task) => task,
         Err(err) => {
             let mut event_tx = event_tx;
@@ -256,9 +264,10 @@ impl WasmDriverTask {
     fn new(
         config: ClientConfig,
         ws: WasmWebSocket,
-        cmd_rx: mpsc::Receiver<WasmCommand>,
+        command_wake_rx: mpsc::Receiver<()>,
         event_tx: mpsc::Sender<DriverEvent>,
         inner: Rc<RefCell<WaddleClientInner>>,
+        command_lane: Rc<RefCell<WasmCommandLane>>,
     ) -> DriverResult<Self> {
         let (sm_clock_tx, sm_clock_rx) = mpsc::channel(1);
         let core = Rc::new(RefCell::new(WasmDriverCore {
@@ -269,7 +278,8 @@ impl WasmDriverTask {
         Ok(Self {
             core,
             ws,
-            cmd_rx,
+            command_lane,
+            command_wake_rx,
             event_tx,
             inner,
             pending_iqs: HashMap::new(),
@@ -315,13 +325,13 @@ impl WasmDriverTask {
 
         loop {
             let ws_event_fut = self.ws.rx.next().fuse();
-            let cmd_fut = self.cmd_rx.next().fuse();
+            let command_wake_fut = self.command_wake_rx.next().fuse();
             let sm_clock_fut = self.sm_clock_rx.next().fuse();
-            pin_mut!(ws_event_fut, cmd_fut, sm_clock_fut);
+            pin_mut!(ws_event_fut, command_wake_fut, sm_clock_fut);
 
             let keep_running = select! {
                 ws_event = ws_event_fut => self.handle_wasm_transport_event(ws_event).await,
-                cmd = cmd_fut => self.handle_command(cmd).await,
+                wake = command_wake_fut => self.handle_command_wakeup(wake).await,
                 tick = sm_clock_fut => match tick {
                     Some(generation) if self.sm_clock_schedule.accepts_wakeup(
                         generation,
@@ -462,9 +472,139 @@ impl WasmDriverTask {
         self.sm_clock_callback.take();
     }
 
-    async fn handle_command(&mut self, cmd: Option<WasmCommand>) -> bool {
+    async fn handle_command_wakeup(&mut self, wake: Option<()>) -> bool {
+        // The wake channel carries only a coalesced hint. The shared FIFO is
+        // authoritative, so a full wake channel cannot lose a command and a
+        // stale wake merely finds an empty queue.
+        if wake.is_none() {
+            return true;
+        }
+        if !self.handle_pagehide_completions().await {
+            return false;
+        }
+        loop {
+            let command = { self.command_lane.borrow_mut().pop_ready() };
+            let Some(command) = command else {
+                break;
+            };
+            if !self.handle_command(command).await {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn handle_pagehide_completions(&mut self) -> bool {
+        loop {
+            let completion = { self.command_lane.borrow_mut().pop_pagehide_completion() };
+            let Some(completion) = completion else {
+                return true;
+            };
+            match completion {
+                PagehideCommandCompletion::Stanza { responder, result } => {
+                    let _ = responder.send(result);
+                }
+                PagehideCommandCompletion::Iq {
+                    stanza,
+                    responder,
+                    result,
+                } => match result {
+                    Ok(()) => match stanza.attr("id") {
+                        Some(id) => {
+                            self.pending_iqs.insert(id.to_owned(), responder);
+                        }
+                        None => {
+                            let _ = responder.send(Err(ClientError::Disconnected));
+                            return false;
+                        }
+                    },
+                    Err(err) => {
+                        let _ = responder.send(Err(err));
+                        return false;
+                    }
+                },
+                PagehideCommandCompletion::MamQuery {
+                    stanza,
+                    query_id,
+                    responder,
+                    result,
+                } => match result {
+                    Ok(()) => match stanza.attr("id") {
+                        Some(id) => {
+                            self.pending_mam_queries
+                                .insert(id.to_owned(), PendingMamQuery::new(&query_id, responder));
+                        }
+                        None => {
+                            let _ = responder.send(Err(ClientError::Disconnected));
+                            return false;
+                        }
+                    },
+                    Err(err) => {
+                        let _ = responder.send(Err(err));
+                        return false;
+                    }
+                },
+                PagehideCommandCompletion::InboxQuery {
+                    stanza,
+                    query_id,
+                    responder,
+                    result,
+                } => match result {
+                    Ok(()) => match stanza.attr("id") {
+                        Some(id) => {
+                            self.pending_inbox_queries.insert(
+                                id.to_owned(),
+                                PendingInboxQuery {
+                                    query_id,
+                                    entries: Vec::new(),
+                                    responder,
+                                },
+                            );
+                        }
+                        None => {
+                            let _ = responder.send(Err(ClientError::Disconnected));
+                            return false;
+                        }
+                    },
+                    Err(err) => {
+                        let _ = responder.send(Err(err));
+                        return false;
+                    }
+                },
+                PagehideCommandCompletion::Deferred(command) => {
+                    self.deferred_commands.push_back(command);
+                }
+                PagehideCommandCompletion::CancelIq { id, responder } => {
+                    self.cancel_iq_command(&id);
+                    let _ = responder.send(Ok(()));
+                }
+                PagehideCommandCompletion::Disconnect { responder, result } => {
+                    self.explicit_disconnect = result.is_ok();
+                    let keep_running = result.is_ok();
+                    let _ = responder.send(result);
+                    if !keep_running {
+                        return false;
+                    }
+                }
+                PagehideCommandCompletion::StreamManagementAck { responder, result } => {
+                    let keep_running = result.is_ok();
+                    let _ = responder.send(result);
+                    if !keep_running {
+                        return false;
+                    }
+                }
+                PagehideCommandCompletion::Event(event) => {
+                    if !self.handle_client_event(event).await {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, cmd: WasmCommand) -> bool {
         match cmd {
-            Some(WasmCommand::SendStanza { stanza, responder }) => {
+            WasmCommand::SendStanza { stanza, responder } => {
                 if !self.core.borrow().runtime.can_send_app_stanza() {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::Stanza { stanza, responder });
@@ -473,7 +613,7 @@ impl WasmDriverTask {
 
                 self.send_stanza_command(stanza, responder).await
             }
-            Some(WasmCommand::SendIq { stanza, responder }) => {
+            WasmCommand::SendIq { stanza, responder } => {
                 if !self.core.borrow().runtime.can_send_app_stanza() {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::Iq { stanza, responder });
@@ -482,11 +622,11 @@ impl WasmDriverTask {
 
                 self.send_iq_command(stanza, responder).await
             }
-            Some(WasmCommand::SendMamQuery {
+            WasmCommand::SendMamQuery {
                 stanza,
                 query_id,
                 responder,
-            }) => {
+            } => {
                 if !self.core.borrow().runtime.can_send_app_stanza() {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::MamQuery {
@@ -500,11 +640,11 @@ impl WasmDriverTask {
                 self.send_mam_query_command(stanza, query_id, responder)
                     .await
             }
-            Some(WasmCommand::SendInboxQuery {
+            WasmCommand::SendInboxQuery {
                 stanza,
                 query_id,
                 responder,
-            }) => {
+            } => {
                 if !self.core.borrow().runtime.can_send_app_stanza()
                     || !self.pending_inbox_queries.is_empty()
                 {
@@ -520,12 +660,12 @@ impl WasmDriverTask {
                 self.send_inbox_query_command(stanza, query_id, responder)
                     .await
             }
-            Some(WasmCommand::CancelIq { id, responder }) => {
+            WasmCommand::CancelIq { id, responder } => {
                 self.cancel_iq_command(&id);
                 let _ = responder.send(Ok(()));
                 true
             }
-            Some(WasmCommand::Disconnect { responder }) => {
+            WasmCommand::Disconnect { responder } => {
                 self.explicit_disconnect = true;
                 self.publish_resume_state_snapshot();
                 let result = self
@@ -535,7 +675,7 @@ impl WasmDriverTask {
                 let _ = responder.send(result);
                 keep_running
             }
-            Some(WasmCommand::RequestStreamManagementAck { responder }) => {
+            WasmCommand::RequestStreamManagementAck { responder } => {
                 let events = self.core.borrow().runtime.request_stream_management_ack();
                 let mut result = Ok(());
                 for event in events {
@@ -553,7 +693,6 @@ impl WasmDriverTask {
                 let _ = responder.send(result);
                 keep_running
             }
-            None => false,
         }
     }
 
@@ -998,6 +1137,18 @@ impl WasmDriverTask {
     }
 
     async fn finish(&mut self) {
+        // Close admission before emitting terminal callbacks so a re-entrant
+        // browser handler cannot enqueue work onto a driver that is draining.
+        drop(self.command_lane.borrow_mut().close());
+        if self
+            .inner
+            .borrow()
+            .command_lane
+            .as_ref()
+            .is_some_and(|active| Rc::ptr_eq(active, &self.command_lane))
+        {
+            self.inner.borrow_mut().command_lane = None;
+        }
         self.sm_clock_schedule.clear();
         self.clear_sm_clock_timer();
         self.publish_resume_state_snapshot();
@@ -1167,7 +1318,8 @@ mod tests {
                 resource: "web".to_string(),
                 resume_state: None,
             },
-            cmd_tx: None,
+            command_lane: None,
+            driver_core: None,
             on_message: None,
             on_presence: None,
             on_connected: None,

@@ -7,7 +7,7 @@ impl WaddleClient {
         WaddleClient {
             inner: Rc::new(RefCell::new(WaddleClientInner {
                 config: StoredConfig::from(&config),
-                cmd_tx: None,
+                command_lane: None,
                 driver_core: None,
                 on_message: None,
                 on_presence: None,
@@ -126,7 +126,7 @@ impl WaddleClient {
     pub fn connect(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            if inner.borrow().cmd_tx.is_some() {
+            if inner.borrow().command_lane.is_some() {
                 return Err(js_error("client is already connected"));
             }
 
@@ -134,13 +134,21 @@ impl WaddleClient {
             let config = build_client_config(&stored)?;
             let ws = WasmWebSocket::connect(config.transport.endpoint.as_str())
                 .map_err(|err| js_error(format!("failed to open websocket: {:?}", err)))?;
-            let (cmd_tx, cmd_rx) = mpsc::channel(64);
+            let (wake_tx, wake_rx) = mpsc::channel(1);
+            let command_lane = Rc::new(RefCell::new(WasmCommandLane::new(wake_tx)));
             let (event_tx, event_rx) = mpsc::channel(256);
 
-            inner.borrow_mut().cmd_tx = Some(cmd_tx);
+            inner.borrow_mut().command_lane = Some(command_lane.clone());
 
             spawn_local(event_dispatch_loop(inner.clone(), event_rx));
-            spawn_local(driver_loop(config, ws, cmd_rx, event_tx, inner.clone()));
+            spawn_local(driver_loop(
+                config,
+                ws,
+                wake_rx,
+                event_tx,
+                inner.clone(),
+                command_lane,
+            ));
 
             Ok(JsValue::UNDEFINED)
         })
