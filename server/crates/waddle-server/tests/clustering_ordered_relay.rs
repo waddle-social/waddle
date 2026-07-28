@@ -7,8 +7,8 @@ use waddle_server::clustering::ordered_relay::{
     OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDiversion,
     OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims, OrderedRelayMucProxyKind,
     OrderedRelayNack, OrderedRelayNackReason, OrderedRelayOrigin, OrderedRelayPayload,
-    OrderedRelayRecipient, OrderedRelayReply, OrderedRelayReservation, OrderedRelaySenderState,
-    OrderedRelaySequence, OriginInboundSequence, RemoteStanzaEnvelope,
+    OrderedRelayRecipient, OrderedRelayReply, OrderedRelayReservation, OrderedRelayRoomLane,
+    OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence, RemoteStanzaEnvelope,
 };
 use waddle_server::clustering::NodeId;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
@@ -41,7 +41,21 @@ fn room_jid() -> jid::BareJid {
 fn room_channel() -> OrderedRelayChannel {
     OrderedRelayChannel {
         origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
-        recipient: OrderedRelayRecipient::Room(room_jid()),
+        recipient: OrderedRelayRecipient::Room {
+            room: room_jid(),
+            lane: OrderedRelayRoomLane::MucStanza,
+        },
+        target_epoch: ClaimEpoch(11),
+    }
+}
+
+fn muji_room_channel() -> OrderedRelayChannel {
+    OrderedRelayChannel {
+        origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
+        recipient: OrderedRelayRecipient::Room {
+            room: room_jid(),
+            lane: OrderedRelayRoomLane::MujiSignaling,
+        },
         target_epoch: ClaimEpoch(11),
     }
 }
@@ -854,6 +868,68 @@ fn sender_sticky_diversion_short_circuits_later_envelopes_for_channel() {
     );
 
     assert_eq!(result.expect_err("diverted"), diversion);
+}
+
+/// #1597: Muji signaling rides its own room lane. A sticky diversion on
+/// one lane must not stop the same room's other lane — a poisoned Muji
+/// lane cannot take ordinary MUC join/leave/groupchat traffic with it,
+/// and vice versa.
+#[test]
+fn diverted_room_lane_leaves_the_other_lane_flowing() {
+    let mut state = OrderedRelaySenderState::default();
+    state.divert(OrderedRelayDiversion {
+        channel: muji_room_channel(),
+        reason: OrderedRelayDiversionReason::Unreachable,
+    });
+
+    state
+        .next_envelope(
+            origin_node(),
+            muji_room_channel(),
+            inbound(1),
+            claims_for_target(room_claim()),
+            OrderedRelayPayload::MucProxy {
+                room_jid: room_jid(),
+                kind: OrderedRelayMucProxyKind::MujiJingleIq,
+                stanza: iq_stanza_to("calls.example.test"),
+            },
+        )
+        .expect_err("the diverted Muji lane must stay diverted");
+
+    let muc_envelope = state
+        .next_envelope(
+            origin_node(),
+            room_channel(),
+            inbound(2),
+            claims_for_target(room_claim()),
+            OrderedRelayPayload::MucProxy {
+                room_jid: room_jid(),
+                kind: OrderedRelayMucProxyKind::GroupchatMessage,
+                stanza: groupchat_stanza_to("room@example.test"),
+            },
+        )
+        .expect("the MUC stanza lane must keep flowing");
+    assert_eq!(muc_envelope.sequence, OrderedRelaySequence::FIRST);
+
+    let mut state = OrderedRelaySenderState::default();
+    state.divert(OrderedRelayDiversion {
+        channel: room_channel(),
+        reason: OrderedRelayDiversionReason::Unreachable,
+    });
+    let muji_envelope = state
+        .next_envelope(
+            origin_node(),
+            muji_room_channel(),
+            inbound(3),
+            claims_for_target(room_claim()),
+            OrderedRelayPayload::MucProxy {
+                room_jid: room_jid(),
+                kind: OrderedRelayMucProxyKind::MujiJingleIq,
+                stanza: iq_stanza_to("calls.example.test"),
+            },
+        )
+        .expect("a diverted MUC lane must not stop Muji signaling");
+    assert_eq!(muji_envelope.sequence, OrderedRelaySequence::FIRST);
 }
 
 #[test]
