@@ -19,6 +19,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import social.waddle.android.TestAppGraph
+import social.waddle.android.client.sendCalls
 import social.waddle.android.client.testMessage
 import social.waddle.android.feature.dm.DmViewModel
 

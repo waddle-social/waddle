@@ -17,6 +17,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import social.waddle.android.TestAppGraph
+import social.waddle.android.client.sendCalls
+import social.waddle.android.client.sendOptions
 import social.waddle.android.client.testPresence
 import social.waddle.android.feature.channel.ChannelViewModel
 import social.waddle.client.ffi.WaddleMucRole
