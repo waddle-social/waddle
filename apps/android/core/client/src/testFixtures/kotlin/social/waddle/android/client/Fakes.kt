@@ -501,12 +501,318 @@ var FakeWaddleClient.sendMessageStall: CompletableDeferred<Unit>?
     }
 
 /**
+ * Focused room, moderation, administration, and room-adjacent conversation
+ * fake. Keeping these knobs separate keeps [FakeWaddleClient] small enough to
+ * be a useful session-manager test double rather than a second client API.
+ */
+abstract class FakeRoomAndAdminClient : WaddleClientInterface {
+    /** Recorded (roomJid, targetStanzaId, reason) XEP-0425 moderations. */
+    val moderationCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
+
+    @Volatile
+    var moderationResult = true
+
+    override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean {
+        moderationCalls += Triple(roomJid, targetStanzaId, reason)
+        return moderationResult
+    }
+
+    /**
+     * Canned §9.5 member lists per affiliation tier; a tier mapped to
+     * `null` (or [memberListFailure] set) throws, mirroring per-tier
+     * `forbidden` responses.
+     */
+    @Volatile
+    var roomMembersByTier: Map<WaddleMucAffiliation, List<WaddleRoomMemberEntry>> = emptyMap()
+
+    @Volatile
+    var memberListFailure: Throwable? = null
+
+    /** Recorded (roomJid, affiliation) member-list queries. */
+    val listMembersCalls = CopyOnWriteArrayList<Pair<String, WaddleMucAffiliation>>()
+
+    override suspend fun listRoomMembers(
+        roomJid: String,
+        affiliation: WaddleMucAffiliation,
+    ): List<WaddleRoomMemberEntry> {
+        listMembersCalls += roomJid to affiliation
+        memberListFailure?.let { throw it }
+        return roomMembersByTier[affiliation] ?: emptyList()
+    }
+
+    /** Recorded (roomJid, targetJid, affiliation, reason) affiliation sets. */
+    val setAffiliationCalls = CopyOnWriteArrayList<List<Any?>>()
+
+    @Volatile
+    var setAffiliationFailure: Throwable? = null
+
+    override suspend fun setRoomAffiliation(
+        roomJid: String,
+        targetJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String?,
+    ) {
+        setAffiliationCalls += listOf(roomJid, targetJid, affiliation, reason)
+        setAffiliationFailure?.let { throw it }
+    }
+
+    /** Recorded (roomJid, nick, reason) §8.2 kicks. */
+    val kickCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
+
+    @Volatile
+    var kickFailure: Throwable? = null
+
+    override suspend fun kickOccupant(roomJid: String, nick: String, reason: String?) {
+        kickCalls += Triple(roomJid, nick, reason)
+        kickFailure?.let { throw it }
+    }
+
+    /** Canned §10.2 owner config served by [fetchRoomConfig]. */
+    @Volatile
+    var roomConfig: WaddleRoomConfig = WaddleRoomConfig(
+        name = null,
+        description = null,
+        membersOnly = null,
+        publicRoom = null,
+        moderated = null,
+        forum = null,
+        pinPermission = null,
+    )
+
+    @Volatile
+    var fetchRoomConfigFailure: Throwable? = null
+
+    override suspend fun fetchRoomConfig(roomJid: String): WaddleRoomConfig {
+        fetchRoomConfigFailure?.let { throw it }
+        return roomConfig
+    }
+
+    /** Recorded (roomJid, patch) §10.2 config submits. */
+    val submitConfigCalls = CopyOnWriteArrayList<Pair<String, WaddleRoomConfigPatch>>()
+
+    @Volatile
+    var submitConfigFailure: Throwable? = null
+
+    override suspend fun submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) {
+        submitConfigCalls += roomJid to patch
+        submitConfigFailure?.let { throw it }
+    }
+
+    /** Recorded (localpart, nick, patch) §10.1 creations. */
+    val createRoomCalls = CopyOnWriteArrayList<Triple<String, String, WaddleRoomConfigPatch>>()
+
+    @Volatile
+    var createRoomFailure: Throwable? = null
+
+    /** Domain the fake muc service appends to created localparts. */
+    @Volatile
+    var createRoomDomain: String = "muc.waddle.test"
+
+    override suspend fun createRoom(localpart: String, nick: String, patch: WaddleRoomConfigPatch): String {
+        createRoomCalls += Triple(localpart, nick, patch)
+        createRoomFailure?.let { throw it }
+        return "$localpart@$createRoomDomain"
+    }
+
+    /** Recorded (roomJid, reason) §10.9 destroys. */
+    val destroyRoomCalls = CopyOnWriteArrayList<Pair<String, String?>>()
+
+    @Volatile
+    var destroyRoomFailure: Throwable? = null
+
+    override suspend fun destroyRoom(roomJid: String, reason: String?) {
+        destroyRoomCalls += roomJid to reason
+        destroyRoomFailure?.let { throw it }
+    }
+
+    /** Directory fake state: XEP-0055 search + community-admin gate. */
+    val directory = FakeDirectoryState()
+
+    override suspend fun searchUsers(query: String): List<WaddleUserSearchEntry> =
+        directory.searchUsers(query)
+
+    override suspend fun isCommunityOwner(): Boolean = directory.communityOwner
+
+    override suspend fun adminUsersList(
+        prefix: String?,
+        pageSize: UInt?,
+        afterCursor: String?,
+    ): WaddleAdminUsersPage = directory.adminUsersList(prefix, pageSize, afterCursor)
+
+    override suspend fun adminSpacesList(args: WaddleAdminSpacesListArgs): WaddleAdminSpacesListPage = unused()
+    override suspend fun adminSpacesCreate(args: WaddleAdminSpacesCreateArgs): WaddleAdminSpaceRef = unused()
+    override suspend fun adminSpacesUpdate(args: WaddleAdminSpacesUpdateArgs): WaddleAdminSpaceRef = unused()
+    override suspend fun adminSpacesDelete(spaceJid: String, spaceNode: String?) = unused()
+    override suspend fun adminSpacesMembers(args: WaddleAdminSpacesMembersArgs): WaddleAdminSpacesMembersPage =
+        unused()
+
+    override suspend fun adminSpacesSetRole(
+        spaceJid: String,
+        spaceNode: String?,
+        memberJid: String,
+        role: WaddleSpaceRole,
+    ): WaddleAdminSpacesSetRoleResult = unused()
+
+    override suspend fun adminChannelsList(args: WaddleAdminChannelsListArgs): WaddleAdminChannelsListPage =
+        unused()
+
+    override suspend fun adminChannelsCreate(args: WaddleAdminChannelsCreateArgs): WaddleAdminChannelRef =
+        unused()
+
+    override suspend fun adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs): WaddleAdminChannelRef =
+        unused()
+
+    override suspend fun adminChannelsDelete(channelJid: String) = unused()
+    override suspend fun adminChannelsOccupants(
+        args: WaddleAdminChannelsOccupantsArgs,
+    ): social.waddle.client.ffi.WaddleAdminChannelsOccupantsPage = unused()
+
+    override suspend fun adminChannelsAffiliations(
+        args: WaddleAdminChannelsAffiliationsArgs,
+    ): WaddleAdminChannelsAffiliationsPage = unused()
+
+    override suspend fun adminChannelsSetAffiliation(
+        channelJid: String,
+        memberJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String?,
+    ): WaddleAdminChannelsSetAffiliationResult = unused()
+
+    override suspend fun adminChannelsKick(
+        channelJid: String,
+        occupantJid: String,
+        reason: String?,
+    ): WaddleAdminChannelsKickResult = unused()
+
+    /** Recorded (conversation, state, isMuc) typing notifications. */
+    val chatStateCalls = CopyOnWriteArrayList<Triple<String, WaddleChatState, Boolean>>()
+
+    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean {
+        chatStateCalls += Triple(peerJid, state, isMuc)
+        return true
+    }
+
+    /** Recorded (conversation, stanzaId, isMuc) displayed markers. */
+    val displayedCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
+
+    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean {
+        displayedCalls += Triple(peerJid, stanzaId, isMuc)
+        return true
+    }
+
+    /** Recorded (chatJid, stanzaId, stanzaIdBy) MDS publishes. */
+    val mdsPublishCalls = CopyOnWriteArrayList<Triple<String, String, String>>()
+
+    override suspend fun publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String): Boolean {
+        mdsPublishCalls += Triple(chatJid, stanzaId, stanzaIdBy)
+        return true
+    }
+
+    /** Canned XEP-0490 catch-up entries served by [fetchMdsDisplayed]. */
+    @Volatile
+    var mdsEntries: List<WaddleMdsDisplayedEntry> = emptyList()
+
+    @Volatile
+    var mdsSubscribeCalls = 0
+
+    @Volatile
+    var mdsPublishOptionsSupported = true
+
+    override suspend fun fetchMdsDisplayed(): List<WaddleMdsDisplayedEntry> = mdsEntries
+
+    override suspend fun subscribeMdsDisplayed(): Boolean {
+        mdsSubscribeCalls += 1
+        return true
+    }
+
+    override suspend fun supportsMdsPublishOptions(): Boolean = mdsPublishOptionsSupported
+
+    /** XEP-0430 fake verb state: canned page, recorded calls, knobs. */
+    val inbox = FakeInboxState()
+
+    override suspend fun fetchInbox(onlyUnread: Boolean, noMessages: Boolean): WaddleInboxResult =
+        inbox.fetchInbox(onlyUnread, noMessages)
+
+    override suspend fun markInboxRead(partnerJid: String, threadId: String?) =
+        inbox.markInboxRead(partnerJid, threadId)
+
+    /** Canned lookup outcome served by [lookupLinkPreview]; recorded calls. */
+    @Volatile
+    var linkPreviewLookup: WaddleLinkPreviewLookup =
+        WaddleLinkPreviewLookup(status = WaddleLinkPreviewLookupStatus.FAILED, preview = null)
+    val linkPreviewLookupCalls = CopyOnWriteArrayList<Pair<String, String>>()
+
+    override suspend fun lookupLinkPreview(url: String, scopeJid: String): WaddleLinkPreviewLookup {
+        linkPreviewLookupCalls += url to scopeJid
+        return linkPreviewLookup
+    }
+
+    /** XEP-0449 sticker verbs, sliced out into [FakeStickerVerbs]. */
+    val stickers = FakeStickerVerbs()
+
+    override suspend fun fetchStickerPacks(ownerJid: String?): List<WaddleStickerPack> =
+        stickers.fetchAll(ownerJid)
+
+    override suspend fun fetchStickerPack(
+        ownerJid: String,
+        node: String?,
+        packId: String,
+    ): WaddleStickerPack? = stickers.fetchOne(ownerJid, packId)
+
+    override suspend fun publishStickerPack(pack: WaddleStickerPack): String = stickers.publish(pack)
+
+    override suspend fun retractStickerPack(packId: String): Boolean = stickers.retract(packId)
+
+    /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
+    @Volatile
+    var roomPins: List<WaddlePinEntry> = emptyList()
+    val pinCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
+
+    override suspend fun fetchRoomPins(roomJid: String): List<WaddlePinEntry> = roomPins
+
+    override suspend fun pinMessage(roomJid: String, targetStanzaId: String): Boolean {
+        pinCalls += Triple(roomJid, targetStanzaId, true)
+        return true
+    }
+
+    override suspend fun unpinMessage(roomJid: String, targetStanzaId: String): Boolean {
+        pinCalls += Triple(roomJid, targetStanzaId, false)
+        return true
+    }
+
+    /** Canned XEP-0492 bookmark lists served by the fetch verbs. */
+    @Volatile
+    var userBookmarks: List<WaddleBookmarkItem> = emptyList()
+
+    @Volatile
+    var dmBookmarks: List<WaddleDmBookmarkItem> = emptyList()
+
+    @Volatile
+    var fetchUserBookmarksCalls = 0
+
+    @Volatile
+    var fetchDmBookmarksCalls = 0
+
+    override suspend fun fetchUserBookmarks(): List<WaddleBookmarkItem> {
+        fetchUserBookmarksCalls += 1
+        return userBookmarks
+    }
+
+    override suspend fun fetchDmBookmarks(): List<WaddleDmBookmarkItem> {
+        fetchDmBookmarksCalls += 1
+        return dmBookmarks
+    }
+
+    protected fun unused(): Nothing = throw UnsupportedOperationException("not exercised by the session manager")
+}
+
+/**
  * Connect/disconnect no-op; everything unused by the manager rejects.
  * Recorders are concurrency-safe: instrumentation tests poll them from
  * the test thread while the session manager mutates them on its own
  * dispatcher. Cohesive verb families live in sliced-out fakes.
  */
-class FakeWaddleClient : WaddleClientInterface {
+class FakeWaddleClient : FakeRoomAndAdminClient() {
     @Volatile
     var connectCalls = 0
 
@@ -1025,302 +1331,6 @@ class FakeWaddleClient : WaddleClientInterface {
         return retractionResult
     }
 
-    /** Recorded (roomJid, targetStanzaId, reason) XEP-0425 moderations. */
-    val moderationCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
-
-    @Volatile
-    var moderationResult = true
-
-    override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean {
-        moderationCalls += Triple(roomJid, targetStanzaId, reason)
-        return moderationResult
-    }
-
-    /**
-     * Canned §9.5 member lists per affiliation tier; a tier mapped to
-     * `null` (or [memberListFailure] set) throws, mirroring per-tier
-     * `forbidden` responses.
-     */
-    @Volatile
-    var roomMembersByTier: Map<WaddleMucAffiliation, List<WaddleRoomMemberEntry>> = emptyMap()
-
-    @Volatile
-    var memberListFailure: Throwable? = null
-
-    /** Recorded (roomJid, affiliation) member-list queries. */
-    val listMembersCalls = CopyOnWriteArrayList<Pair<String, WaddleMucAffiliation>>()
-
-    override suspend fun listRoomMembers(
-        roomJid: String,
-        affiliation: WaddleMucAffiliation,
-    ): List<WaddleRoomMemberEntry> {
-        listMembersCalls += roomJid to affiliation
-        memberListFailure?.let { throw it }
-        return roomMembersByTier[affiliation] ?: emptyList()
-    }
-
-    /** Recorded (roomJid, targetJid, affiliation, reason) affiliation sets. */
-    val setAffiliationCalls = CopyOnWriteArrayList<List<Any?>>()
-
-    @Volatile
-    var setAffiliationFailure: Throwable? = null
-
-    override suspend fun setRoomAffiliation(
-        roomJid: String,
-        targetJid: String,
-        affiliation: WaddleMucAffiliation,
-        reason: String?,
-    ) {
-        setAffiliationCalls += listOf(roomJid, targetJid, affiliation, reason)
-        setAffiliationFailure?.let { throw it }
-    }
-
-    /** Recorded (roomJid, nick, reason) §8.2 kicks. */
-    val kickCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
-
-    @Volatile
-    var kickFailure: Throwable? = null
-
-    override suspend fun kickOccupant(roomJid: String, nick: String, reason: String?) {
-        kickCalls += Triple(roomJid, nick, reason)
-        kickFailure?.let { throw it }
-    }
-
-    /** Canned §10.2 owner config served by [fetchRoomConfig]. */
-    @Volatile
-    var roomConfig: WaddleRoomConfig = WaddleRoomConfig(
-        name = null,
-        description = null,
-        membersOnly = null,
-        publicRoom = null,
-        moderated = null,
-        forum = null,
-        pinPermission = null,
-    )
-
-    @Volatile
-    var fetchRoomConfigFailure: Throwable? = null
-
-    override suspend fun fetchRoomConfig(roomJid: String): WaddleRoomConfig {
-        fetchRoomConfigFailure?.let { throw it }
-        return roomConfig
-    }
-
-    /** Recorded (roomJid, patch) §10.2 config submits. */
-    val submitConfigCalls = CopyOnWriteArrayList<Pair<String, WaddleRoomConfigPatch>>()
-
-    @Volatile
-    var submitConfigFailure: Throwable? = null
-
-    override suspend fun submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) {
-        submitConfigCalls += roomJid to patch
-        submitConfigFailure?.let { throw it }
-    }
-
-    /** Recorded (localpart, nick, patch) §10.1 creations. */
-    val createRoomCalls = CopyOnWriteArrayList<Triple<String, String, WaddleRoomConfigPatch>>()
-
-    @Volatile
-    var createRoomFailure: Throwable? = null
-
-    /** Domain the fake muc service appends to created localparts. */
-    @Volatile
-    var createRoomDomain: String = "muc.waddle.test"
-
-    override suspend fun createRoom(localpart: String, nick: String, patch: WaddleRoomConfigPatch): String {
-        createRoomCalls += Triple(localpart, nick, patch)
-        createRoomFailure?.let { throw it }
-        return "$localpart@$createRoomDomain"
-    }
-
-    /** Recorded (roomJid, reason) §10.9 destroys. */
-    val destroyRoomCalls = CopyOnWriteArrayList<Pair<String, String?>>()
-
-    @Volatile
-    var destroyRoomFailure: Throwable? = null
-
-    override suspend fun destroyRoom(roomJid: String, reason: String?) {
-        destroyRoomCalls += roomJid to reason
-        destroyRoomFailure?.let { throw it }
-    }
-
-    /** Directory fake state: XEP-0055 search + community-admin gate. */
-    val directory = FakeDirectoryState()
-
-    override suspend fun searchUsers(query: String): List<WaddleUserSearchEntry> =
-        directory.searchUsers(query)
-
-    override suspend fun isCommunityOwner(): Boolean = directory.communityOwner
-
-    override suspend fun adminUsersList(
-        prefix: String?,
-        pageSize: UInt?,
-        afterCursor: String?,
-    ): WaddleAdminUsersPage = directory.adminUsersList(prefix, pageSize, afterCursor)
-
-    override suspend fun adminSpacesList(args: WaddleAdminSpacesListArgs): WaddleAdminSpacesListPage = unused()
-    override suspend fun adminSpacesCreate(args: WaddleAdminSpacesCreateArgs): WaddleAdminSpaceRef = unused()
-    override suspend fun adminSpacesUpdate(args: WaddleAdminSpacesUpdateArgs): WaddleAdminSpaceRef = unused()
-    override suspend fun adminSpacesDelete(spaceJid: String, spaceNode: String?) = unused()
-    override suspend fun adminSpacesMembers(args: WaddleAdminSpacesMembersArgs): WaddleAdminSpacesMembersPage =
-        unused()
-
-    override suspend fun adminSpacesSetRole(
-        spaceJid: String,
-        spaceNode: String?,
-        memberJid: String,
-        role: WaddleSpaceRole,
-    ): WaddleAdminSpacesSetRoleResult = unused()
-
-    override suspend fun adminChannelsList(args: WaddleAdminChannelsListArgs): WaddleAdminChannelsListPage =
-        unused()
-
-    override suspend fun adminChannelsCreate(args: WaddleAdminChannelsCreateArgs): WaddleAdminChannelRef =
-        unused()
-
-    override suspend fun adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs): WaddleAdminChannelRef =
-        unused()
-
-    override suspend fun adminChannelsDelete(channelJid: String) = unused()
-    override suspend fun adminChannelsOccupants(
-        args: WaddleAdminChannelsOccupantsArgs,
-    ): social.waddle.client.ffi.WaddleAdminChannelsOccupantsPage = unused()
-
-    override suspend fun adminChannelsAffiliations(
-        args: WaddleAdminChannelsAffiliationsArgs,
-    ): WaddleAdminChannelsAffiliationsPage = unused()
-
-    override suspend fun adminChannelsSetAffiliation(
-        channelJid: String,
-        memberJid: String,
-        affiliation: WaddleMucAffiliation,
-        reason: String?,
-    ): WaddleAdminChannelsSetAffiliationResult = unused()
-
-    override suspend fun adminChannelsKick(
-        channelJid: String,
-        occupantJid: String,
-        reason: String?,
-    ): WaddleAdminChannelsKickResult = unused()
-
-    /** Recorded (conversation, state, isMuc) typing notifications. */
-    val chatStateCalls = CopyOnWriteArrayList<Triple<String, WaddleChatState, Boolean>>()
-
-    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean {
-        chatStateCalls += Triple(peerJid, state, isMuc)
-        return true
-    }
-
-    /** Recorded (conversation, stanzaId, isMuc) displayed markers. */
-    val displayedCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
-
-    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean {
-        displayedCalls += Triple(peerJid, stanzaId, isMuc)
-        return true
-    }
-
-    /** Recorded (chatJid, stanzaId, stanzaIdBy) MDS publishes. */
-    val mdsPublishCalls = CopyOnWriteArrayList<Triple<String, String, String>>()
-
-    override suspend fun publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String): Boolean {
-        mdsPublishCalls += Triple(chatJid, stanzaId, stanzaIdBy)
-        return true
-    }
-
-    /** Canned XEP-0490 catch-up entries served by [fetchMdsDisplayed]. */
-    @Volatile
-    var mdsEntries: List<WaddleMdsDisplayedEntry> = emptyList()
-
-    @Volatile
-    var mdsSubscribeCalls = 0
-
-    @Volatile
-    var mdsPublishOptionsSupported = true
-
-    override suspend fun fetchMdsDisplayed(): List<WaddleMdsDisplayedEntry> = mdsEntries
-
-    override suspend fun subscribeMdsDisplayed(): Boolean {
-        mdsSubscribeCalls += 1
-        return true
-    }
-
-    override suspend fun supportsMdsPublishOptions(): Boolean = mdsPublishOptionsSupported
-
-    /** XEP-0430 fake verb state: canned page, recorded calls, knobs. */
-    val inbox = FakeInboxState()
-
-    override suspend fun fetchInbox(onlyUnread: Boolean, noMessages: Boolean): WaddleInboxResult =
-        inbox.fetchInbox(onlyUnread, noMessages)
-
-    override suspend fun markInboxRead(partnerJid: String, threadId: String?) =
-        inbox.markInboxRead(partnerJid, threadId)
-
-    /** Canned lookup outcome served by [lookupLinkPreview]; recorded calls. */
-    @Volatile
-    var linkPreviewLookup: WaddleLinkPreviewLookup =
-        WaddleLinkPreviewLookup(status = WaddleLinkPreviewLookupStatus.FAILED, preview = null)
-    val linkPreviewLookupCalls = CopyOnWriteArrayList<Pair<String, String>>()
-
-    override suspend fun lookupLinkPreview(url: String, scopeJid: String): WaddleLinkPreviewLookup {
-        linkPreviewLookupCalls += url to scopeJid
-        return linkPreviewLookup
-    }
-
-    /** XEP-0449 sticker verbs, sliced out into [FakeStickerVerbs]. */
-    val stickers = FakeStickerVerbs()
-
-    override suspend fun fetchStickerPacks(ownerJid: String?): List<WaddleStickerPack> =
-        stickers.fetchAll(ownerJid)
-
-    override suspend fun fetchStickerPack(
-        ownerJid: String,
-        node: String?,
-        packId: String,
-    ): WaddleStickerPack? = stickers.fetchOne(ownerJid, packId)
-
-    override suspend fun publishStickerPack(pack: WaddleStickerPack): String = stickers.publish(pack)
-
-    override suspend fun retractStickerPack(packId: String): Boolean = stickers.retract(packId)
-
-    /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
-    @Volatile
-    var roomPins: List<WaddlePinEntry> = emptyList()
-    val pinCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
-
-    override suspend fun fetchRoomPins(roomJid: String): List<WaddlePinEntry> = roomPins
-
-    override suspend fun pinMessage(roomJid: String, targetStanzaId: String): Boolean {
-        pinCalls += Triple(roomJid, targetStanzaId, true)
-        return true
-    }
-
-    override suspend fun unpinMessage(roomJid: String, targetStanzaId: String): Boolean {
-        pinCalls += Triple(roomJid, targetStanzaId, false)
-        return true
-    }
-
-    /** Canned XEP-0492 bookmark lists served by the fetch verbs. */
-    @Volatile
-    var userBookmarks: List<WaddleBookmarkItem> = emptyList()
-
-    @Volatile
-    var dmBookmarks: List<WaddleDmBookmarkItem> = emptyList()
-
-    @Volatile
-    var fetchUserBookmarksCalls = 0
-
-    @Volatile
-    var fetchDmBookmarksCalls = 0
-
-    override suspend fun fetchUserBookmarks(): List<WaddleBookmarkItem> {
-        fetchUserBookmarksCalls += 1
-        return userBookmarks
-    }
-
-    override suspend fun fetchDmBookmarks(): List<WaddleDmBookmarkItem> {
-        fetchDmBookmarksCalls += 1
-        return dmBookmarks
-    }
 
     /** XEP-0492 notify-mode verbs, sliced out into [FakeNotifyVerbs]. */
     val notify = FakeNotifyVerbs()
@@ -1373,5 +1383,4 @@ class FakeWaddleClient : WaddleClientInterface {
         credentials: WaddlePushDeviceCredentials,
     ): WaddleRegisterDeviceResult? = unused()
 
-    private fun unused(): Nothing = throw UnsupportedOperationException("not exercised by the session manager")
 }
