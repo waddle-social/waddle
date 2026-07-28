@@ -210,9 +210,9 @@ internal class ClientCallSignaling private constructor(
             if (retired != null) {
                 retired.client.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason)
             } else {
-                when (val result = requireNotNull(activeSession).invoke {
-                    it.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason)
-                }) {
+                when (val result = requireNotNull(activeSession).invoke(
+                    { it.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason) },
+                )) {
                     ActiveSession.Invocation.NotConnected -> WaddleCallSessionTerminateOutcome.ERROR
                     is ActiveSession.Invocation.Completed -> result.value
                 }

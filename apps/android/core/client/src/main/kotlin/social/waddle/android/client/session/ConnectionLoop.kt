@@ -135,7 +135,16 @@ internal class ConnectionLoop(
                     }
                 }
                 val consumer = async {
-                    consumeEvents(bridge.events, client, session, attempt, ownFullJid, this)
+                    consumeEvents(
+                        AttemptEventConsumer(
+                            events = bridge.events,
+                            client = client,
+                            session = session,
+                            attempt = attempt,
+                            ownFullJid = ownFullJid,
+                            scope = this,
+                        ),
+                    )
                 }
                 val end = select<AttemptEnd?> {
                     consumer.onAwait { it }
@@ -160,29 +169,31 @@ internal class ConnectionLoop(
      * waits for `SessionReady` under the connect budget; phase 2 keeps
      * fanning events out until the stream ends.
      */
-    private suspend fun consumeEvents(
-        events: ReceiveChannel<XmppEvent>,
-        client: WaddleClientInterface,
-        session: WaddleSessionInfo,
-        attempt: ActiveSession.Attempt,
-        ownFullJid: String,
-        attemptScope: CoroutineScope,
-    ): AttemptEnd {
-        val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(events) }
+    private data class AttemptEventConsumer(
+        val events: ReceiveChannel<XmppEvent>,
+        val client: WaddleClientInterface,
+        val session: WaddleSessionInfo,
+        val attempt: ActiveSession.Attempt,
+        val ownFullJid: String,
+        val scope: CoroutineScope,
+    )
+
+    private suspend fun consumeEvents(consumer: AttemptEventConsumer): AttemptEnd {
+        val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(consumer.events) }
         when (readiness) {
             null, Readiness.CLOSED -> return AttemptEnd.CONNECT_FAILED
-            Readiness.AUTH_FAILED -> return AttemptEnd.AuthFailed(attempt.lease)
+            Readiness.AUTH_FAILED -> return AttemptEnd.AuthFailed(consumer.attempt.lease)
             Readiness.READY -> Unit
         }
-        if (!activeSession.publishReady(
-                attempt = attempt,
-                readyClient = client,
-                readyOwnFullJid = ownFullJid,
-                onPublished = {
-                callbacks.onReady(attemptScope, session, true, attempt.lease)
-                },
-            )
-        ) return AttemptEnd.CONNECT_FAILED
+        val published = activeSession.publishReady(
+            attempt = consumer.attempt,
+            readyClient = consumer.client,
+            readyOwnFullJid = consumer.ownFullJid,
+            onPublished = {
+                callbacks.onReady(consumer.scope, consumer.session, true, consumer.attempt.lease)
+            },
+        )
+        if (!published) return AttemptEnd.CONNECT_FAILED
         _state.value = ConnectionState.Ready
         // Native FFI clients deliberately start fresh streams: the web-only
         // typed SM persistence path owns resumable browser sessions, while
@@ -191,7 +202,7 @@ internal class ConnectionLoop(
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
         // treating those as terminal would sign the user out mid-session.
-        for (event in events) {
+        for (event in consumer.events) {
             dispatch(event)
             if (event is XmppEvent.Disconnected) return AttemptEnd.DROPPED_AFTER_READY
         }

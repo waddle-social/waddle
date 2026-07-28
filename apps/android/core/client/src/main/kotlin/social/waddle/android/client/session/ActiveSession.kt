@@ -28,6 +28,7 @@ internal class ActiveSession {
      * cycle across suspension.
      */
     private val transportFence = Mutex()
+
     /** Result of a generation-fenced message send attempt. */
     sealed interface LeaseSendResult {
         /** The lease was stale before a transport could be selected. */
@@ -92,6 +93,22 @@ internal class ActiveSession {
 
         /** The active attempt owned the transport through this invocation. */
         data class Completed<T>(val value: T) : Invocation<T>
+    }
+
+    /**
+     * Result of an ordinary invocation bound to one exact account attempt.
+     * Unlike [Invocation], this cannot select a replacement client's
+     * transport after a logout/relogin changed the owner lease.
+     */
+    sealed interface LeaseInvocation<out T> {
+        /** The owner changed before a transport could be selected. */
+        data object Stale : LeaseInvocation<Nothing>
+
+        /** The lease remains current but no ready client is available. */
+        data object NotConnected : LeaseInvocation<Nothing>
+
+        /** The lease owned the selected transport until [value] completed. */
+        data class Completed<T>(val value: T) : LeaseInvocation<T>
     }
 
     @Volatile
@@ -246,6 +263,32 @@ internal class ActiveSession {
     ): Invocation<T> = transportFence.withLock {
         val liveClient = client ?: return@withLock Invocation.NotConnected
         Invocation.Completed(op(liveClient))
+    }
+
+    /**
+     * Invoke only while [lease] still names the exact ready account attempt.
+     * The transport fence covers validation, client selection, and the FFI
+     * call, so a stale operation can neither use the retired client nor hop
+     * to a same-account relogin's replacement client.
+     */
+    suspend fun <T> invokeIfCurrent(
+        lease: OwnerLease,
+        op: suspend (WaddleClientInterface) -> T,
+    ): LeaseInvocation<T> = transportFence.withLock {
+        if (!isCurrent(lease)) return@withLock LeaseInvocation.Stale
+        val liveClient = client ?: return@withLock LeaseInvocation.NotConnected
+        LeaseInvocation.Completed(op(liveClient))
+    }
+
+    /**
+     * Apply a synchronous store projection while the same owner lease is
+     * current. Logout waits on this fence before it clears stores, preventing
+     * a completed old read from repopulating a successor's state.
+     */
+    suspend fun applyIfCurrent(lease: OwnerLease, action: () -> Unit): Boolean = transportFence.withLock {
+        if (!isCurrent(lease)) return@withLock false
+        action()
+        true
     }
 
     /** Fenced readiness probe for control flow that must not retain a client. */

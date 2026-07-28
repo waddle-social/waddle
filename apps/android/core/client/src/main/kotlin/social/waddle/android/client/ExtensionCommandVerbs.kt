@@ -39,9 +39,9 @@ internal class ExtensionCommandVerbs(
     private suspend fun runDiscovery(): List<ExtensionCommand> {
         val generation = activeSession.generation
         val commands = try {
-            when (val result = activeSession.invoke { client ->
-                client.discoverExtensionCommands().map { it.toDomain() }
-            }) {
+            when (val result = activeSession.invoke(
+                { client -> client.discoverExtensionCommands().map { it.toDomain() } },
+            )) {
                 ActiveSession.Invocation.NotConnected -> return emptyList()
                 is ActiveSession.Invocation.Completed -> result.value
             }

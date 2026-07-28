@@ -125,6 +125,30 @@ class ActiveSessionGatewayTest {
     }
 
     @Test
+    fun `a profile-read lease cannot use a same-account relogin client`() = runTest {
+        val active = readySession()
+        val oldClient = FakeWaddleClient()
+        oldClient.vcard4 = testVcard4(fullName = "Old profile")
+        publishReady(active, oldClient)
+        val oldLease = checkNotNull(active.captureOwnerLease())
+
+        active.revokeOutboundAuthority()
+        active.advanceGeneration()
+        active.activateOwner("alice@waddle.test")
+        val successor = FakeWaddleClient()
+        successor.vcard4 = testVcard4(fullName = "Successor profile")
+        publishReady(active, successor)
+
+        val result = active.invokeIfCurrent(oldLease) {
+            it.fetchVcard4(oldLease.ownerBareJid)
+        }
+
+        assertEquals(ActiveSession.LeaseInvocation.Stale, result)
+        assertTrue(oldClient.fetchVcard4Calls.isEmpty())
+        assertTrue(successor.fetchVcard4Calls.isEmpty())
+    }
+
+    @Test
     fun `normal call signal is fenced across logout and rejected after revocation`() = runTest {
         val active = readySession()
         val oldClient = FakeWaddleClient()

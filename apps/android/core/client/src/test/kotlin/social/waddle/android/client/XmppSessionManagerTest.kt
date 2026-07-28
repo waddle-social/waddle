@@ -192,7 +192,11 @@ class XmppSessionManagerTest {
         assertEquals(WaddleAppState.SignedOut, harness.manager.appState.value)
         assertEquals("session id cleared on auth failure", null, harness.prefs.sessionId.first())
         assertEquals("owner cleared on auth failure", null, harness.prefs.ownerBareJid.first())
-        assertEquals("session stores cleared on auth failure", emptySet<String>(), harness.manager.roomStore.joinedRooms.value)
+        assertEquals(
+            "session stores cleared on auth failure",
+            emptySet<String>(),
+            harness.manager.roomStore.joinedRooms.value,
+        )
         assertEquals("no retry after auth failure", 1, harness.factory.clients.size)
     }
 
@@ -236,10 +240,26 @@ class XmppSessionManagerTest {
         releaseTerminal.complete(Unit)
         runCurrent()
 
-        assertEquals("stale failure must not sign out the successor", WaddleAppState.Ready, harness.manager.appState.value)
-        assertEquals("successor persistence survives stale failure", "successor-session", harness.prefs.sessionId.first())
-        assertEquals("successor owner survives stale failure", "snowowl@waddle.test", harness.prefs.ownerBareJid.first())
-        assertEquals("stale failure must not cancel successor callbacks", 2, harness.factory.clients.size)
+        assertEquals(
+            "stale failure must not sign out the successor",
+            WaddleAppState.Ready,
+            harness.manager.appState.value,
+        )
+        assertEquals(
+            "successor persistence survives stale failure",
+            "successor-session",
+            harness.prefs.sessionId.first(),
+        )
+        assertEquals(
+            "successor owner survives stale failure",
+            "snowowl@waddle.test",
+            harness.prefs.ownerBareJid.first(),
+        )
+        assertEquals(
+            "stale failure must not cancel successor callbacks",
+            2,
+            harness.factory.clients.size,
+        )
 
         harness.manager.logout()
     }

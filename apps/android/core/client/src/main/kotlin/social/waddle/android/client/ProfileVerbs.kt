@@ -42,28 +42,45 @@ internal class ProfileVerbs(
      * best-effort — an absent PEP node must not fail the load.
      */
     suspend fun loadSelfProfile(): VerbResult {
-        val own = activeSession.ownBareJid ?: return VerbResult.NotReady
-        val generation = activeSession.generation
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        val own = lease.ownerBareJid
         val vcard = try {
-            when (val result = activeSession.invoke { it.fetchVcard4(own) }) {
-                ActiveSession.Invocation.NotConnected -> return VerbResult.NotConnected
-                is ActiveSession.Invocation.Completed -> result.value
+            when (val result = activeSession.invokeIfCurrent(lease) { it.fetchVcard4(own) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return VerbResult.Rejected
         }
-        if (activeSession.generation != generation) return VerbResult.NotConnected
-        stores.profileStore.setSelfVcard(vcard)
-        activeSession.fetch { it.fetchUserPepProfile(own) }
-            ?.takeIf { activeSession.generation == generation }
-            ?.let { stores.profileStore.setSelfStatus(it) }
-        // The PEP fetch above can outlive the session: a stale
-        // coroutine must not issue avatar IQs through the NEXT
-        // session's client for the old account's JID.
-        if (activeSession.generation != generation) return VerbResult.NotConnected
-        fetchAvatar(own)
+        if (!activeSession.applyIfCurrent(lease) { stores.profileStore.setSelfVcard(vcard) }) {
+            return VerbResult.NotConnected
+        }
+        val status = try {
+            when (val result = activeSession.invokeIfCurrent(lease) { it.fetchUserPepProfile(own) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+        if (status != null && !activeSession.applyIfCurrent(lease) {
+                stores.profileStore.setSelfStatus(status)
+            }
+        ) {
+            return VerbResult.NotConnected
+        }
+        // Each follow-up remains bound to the original lease. A completed
+        // old read cannot issue an avatar IQ through a successor client.
+        fetchAvatarForLease(own, lease)
+        if (!activeSession.isCurrent(lease)) return VerbResult.NotConnected
         return VerbResult.Ok
     }
 
@@ -78,19 +95,35 @@ internal class ProfileVerbs(
      * cache, peers included.
      */
     suspend fun fetchAvatar(jid: String, knownId: String? = null): WaddleAvatar? {
+        val lease = activeSession.captureOwnerLease() ?: return null
+        return fetchAvatarForLease(jid, lease, knownId)
+    }
+
+    private suspend fun fetchAvatarForLease(
+        jid: String,
+        lease: ActiveSession.OwnerLease,
+        knownId: String? = null,
+    ): WaddleAvatar? {
         val owner = bareJid(jid)
         if (knownId != null) {
             stores.profileStore.cachedAvatar(owner, knownId)?.let { cached ->
-                stores.profileStore.onAvatar(cached)
-                return cached
+                return if (activeSession.applyIfCurrent(lease) {
+                        stores.profileStore.onAvatar(cached)
+                    }
+                ) {
+                    cached
+                } else {
+                    null
+                }
             }
         }
-        val generation = activeSession.generation
         val knownIds = stores.profileStore.knownAvatarIds(owner)
         val result = try {
-            when (val invocation = activeSession.invoke { it.requestAvatar(owner, knownIds) }) {
-                ActiveSession.Invocation.NotConnected -> return null
-                is ActiveSession.Invocation.Completed -> invocation.value
+            when (val invocation = activeSession.invokeIfCurrent(lease) { it.requestAvatar(owner, knownIds) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return null
+                is ActiveSession.LeaseInvocation.Completed -> invocation.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -103,10 +136,7 @@ internal class ProfileVerbs(
         val avatar = result.avatar
             ?: stores.profileStore.cachedAvatar(owner, result.id)
             ?: return null
-        if (activeSession.generation == generation) {
-            stores.profileStore.onAvatar(avatar)
-        }
-        return avatar
+        return if (activeSession.applyIfCurrent(lease) { stores.profileStore.onAvatar(avatar) }) avatar else null
     }
 
     /**

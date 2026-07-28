@@ -95,11 +95,13 @@ internal class ReadStateCoordinator(
         // The cursor (which dedupes future dispatches) is taken only
         // when every attempted send went through — a thrown/refused
         // dispatch stays retryable on the next timeline change.
-        val dispatched = when (val result = activeSession.invoke { client ->
-            val displayed = dispatchDisplayed(client, conversation, isGroupchat, ids)
-            fireInboxMarkRead(client, conversation, threadId = null)
-            displayed
-        }) {
+        val dispatched = when (val result = activeSession.invoke(
+            { client ->
+                val displayed = dispatchDisplayed(client, conversation, isGroupchat, ids)
+                fireInboxMarkRead(client, conversation, threadId = null)
+                displayed
+            },
+        )) {
             ActiveSession.Invocation.NotConnected -> {
                 // No live session: park the RESOLVED target and replay it on
                 // the next ready (a notification tap during a reconnect gap
@@ -128,9 +130,9 @@ internal class ReadStateCoordinator(
     suspend fun markInboxRead(conversationJid: String, threadId: String? = null) {
         val conversation = bareJid(conversationJid)
         if (threadId == null) stores.unreadStore.clear(conversation)
-        when (activeSession.invoke { client ->
-            fireInboxMarkRead(client, conversation, threadId)
-        }) {
+        when (activeSession.invoke(
+            { client -> fireInboxMarkRead(client, conversation, threadId) },
+        )) {
             ActiveSession.Invocation.NotConnected -> stores.inboxStore.markReadLocally(conversation, threadId)
             is ActiveSession.Invocation.Completed -> Unit
         }

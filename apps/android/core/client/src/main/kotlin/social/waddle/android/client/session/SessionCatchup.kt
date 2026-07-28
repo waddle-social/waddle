@@ -116,12 +116,14 @@ internal class SessionCatchup(
      */
     private suspend fun hydrateNotifySettings() {
         try {
-            when (activeSession.invoke { client ->
-                stores.notifySettingsStore.hydrate(
-                    fetchRoomBookmarks = { client.fetchUserBookmarks() },
-                    fetchDmBookmarks = { client.fetchDmBookmarks() },
-                )
-            }) {
+            when (activeSession.invoke(
+                { client ->
+                    stores.notifySettingsStore.hydrate(
+                        fetchRoomBookmarks = { client.fetchUserBookmarks() },
+                        fetchDmBookmarks = { client.fetchDmBookmarks() },
+                    )
+                },
+            )) {
                 ActiveSession.Invocation.NotConnected -> return
                 is ActiveSession.Invocation.Completed -> Unit
             }

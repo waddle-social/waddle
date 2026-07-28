@@ -411,11 +411,12 @@ class XmppSessionManagerVerbsTest {
             VerbResult.NotReady,
             harness.manager.sendRetraction(room, isGroupchat = true, targetStanzaId = "s1"),
         )
-        // sendCorrection checks the client first: post-logout that is
-        // gone too, so NotConnected wins; its NotReady branch guards the
-        // signed-out-mid-flight race behind a still-live client.
+        // Like the other own-message mutations, sendCorrection resolves
+        // sender identity before transport. Logout clears that authority,
+        // so the public result is NotReady rather than an incidental
+        // NotConnected from the retired client slot.
         assertEquals(
-            VerbResult.NotConnected,
+            VerbResult.NotReady,
             harness.manager.sendCorrection(room, isGroupchat = true, targetId = "s1", newBody = "x"),
         )
     }

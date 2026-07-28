@@ -270,6 +270,7 @@ class XmppSessionManagerProfileTest {
         harness.manager.logout()
     }
 
+
     @Test
     fun `mood and activity verbs record and mirror into the store`() = runTest {
         val harness = Harness(this)

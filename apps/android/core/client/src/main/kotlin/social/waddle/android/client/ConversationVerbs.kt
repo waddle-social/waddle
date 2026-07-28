@@ -101,12 +101,14 @@ internal class ConversationVerbs(
         contentType: String,
     ): WaddleUploadSlot? {
         return try {
-            when (val result = activeSession.invoke { client ->
-                val service = activeSession.uploadService
-                    ?: client.discoverUploadService()?.also { activeSession.uploadService = it }
-                    ?: return@invoke null
-                client.requestUploadSlot(service, filename, sizeBytes, contentType)
-            }) {
+            when (val result = activeSession.invoke(
+                { client ->
+                    val service = activeSession.uploadService
+                        ?: client.discoverUploadService()?.also { activeSession.uploadService = it }
+                        ?: return@invoke null
+                    client.requestUploadSlot(service, filename, sizeBytes, contentType)
+                },
+            )) {
                 ActiveSession.Invocation.NotConnected -> null
                 is ActiveSession.Invocation.Completed -> result.value
             }
@@ -174,9 +176,9 @@ internal class ConversationVerbs(
             sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
         }
         val outcome = try {
-            when (val result = activeSession.invoke {
-                it.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options)
-            }) {
+            when (val result = activeSession.invoke(
+                { it.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options) },
+            )) {
                 ActiveSession.Invocation.NotConnected -> return VerbResult.NotConnected
                 is ActiveSession.Invocation.Completed -> result.value
             }
@@ -294,9 +296,16 @@ internal class ConversationVerbs(
     ): NotifySettingsResult {
         val room = bareJid(roomJid)
         val outcome = try {
-            when (val result = activeSession.invoke {
-                it.setRoomNotificationMode(room, mode, name, stores.notifySettingsStore.richPayloadOptIn(room))
-            }) {
+            when (val result = activeSession.invoke(
+                {
+                    it.setRoomNotificationMode(
+                        room,
+                        mode,
+                        name,
+                        stores.notifySettingsStore.richPayloadOptIn(room),
+                    )
+                },
+            )) {
                 ActiveSession.Invocation.NotConnected -> return NotifySettingsResult.NotConnected
                 is ActiveSession.Invocation.Completed -> result.value
             }
@@ -324,9 +333,9 @@ internal class ConversationVerbs(
     suspend fun setDmNotificationMode(peerJid: String, mode: WaddleNotifyMode): NotifySettingsResult {
         val peer = bareJid(peerJid)
         val outcome = try {
-            when (val result = activeSession.invoke {
-                it.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer))
-            }) {
+            when (val result = activeSession.invoke(
+                { it.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer)) },
+            )) {
                 ActiveSession.Invocation.NotConnected -> return NotifySettingsResult.NotConnected
                 is ActiveSession.Invocation.Completed -> result.value
             }

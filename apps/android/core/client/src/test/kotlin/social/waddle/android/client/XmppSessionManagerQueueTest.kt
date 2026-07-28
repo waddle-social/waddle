@@ -182,7 +182,10 @@ class XmppSessionManagerQueueTest {
         releaseSend.complete(Unit)
         runCurrent()
         assertEquals(id, send.await().queuedId)
-        assertTrue("the queued ack removes the exact row after the send linearizes", harness.prefs.outboundQueue.first().isEmpty())
+        assertTrue(
+            "the queued ack removes the exact row after the send linearizes",
+            harness.prefs.outboundQueue.first().isEmpty(),
+        )
 
         harness.manager.logout()
     }
@@ -207,7 +210,10 @@ class XmppSessionManagerQueueTest {
 
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
-        assertTrue("an ack that linearizes first suppresses stale replay", harness.factory.clients.single().sendCalls.isEmpty())
+        assertTrue(
+            "an ack that linearizes first suppresses stale replay",
+            harness.factory.clients.single().sendCalls.isEmpty(),
+        )
 
         harness.manager.logout()
     }
@@ -399,7 +405,13 @@ class XmppSessionManagerQueueTest {
         activeSession.endAttempt(oldAttempt, oldClient)
         activeSession.activateOwner("icepuma@waddle.test")
         val successorAttempt = checkNotNull(activeSession.beginAttempt())
-        assertTrue(activeSession.publishReady(successorAttempt, successorClient, "icepuma@waddle.test/waddle-android-next") {})
+        assertTrue(
+            activeSession.publishReady(
+                successorAttempt,
+                successorClient,
+                "icepuma@waddle.test/waddle-android-next",
+            ) {},
+        )
 
         val result = activeSession.sendIfCurrent(oldLease) { client ->
             client.sendChatMessage("alice@waddle.test", "must stay fenced", null)
