@@ -115,9 +115,12 @@ fn an_older_decoder_ignores_the_added_trace_field() {
 /// the delivery — where the actor messages happen — outside the root
 /// span, silently restoring the #1438 trace loss, and the
 /// field-recording tests above cannot catch that (the span still
-/// records its fields at creation). Comment lines are skipped; no
-/// parsing beyond that is needed, so string/paren contents cannot
-/// cause false failures.
+/// records its fields at creation). Comment lines are skipped, and
+/// each remaining line is whitespace-normalized before matching so
+/// spellings like `ctx . spawn(...)` or turbofish
+/// `ctx.spawn::<T>(...)` cannot evade the scan; no parsing beyond
+/// that is needed, so string/paren contents cannot cause false
+/// failures.
 #[test]
 fn delegated_relay_replies_go_through_the_dispatch_span_helper() {
     let source = include_str!("../../relay.rs");
@@ -128,7 +131,8 @@ fn delegated_relay_replies_go_through_the_dispatch_span_helper() {
     let direct_spawns = production
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
-        .filter(|line| line.contains("ctx.spawn("))
+        .map(|line| line.split_whitespace().collect::<String>())
+        .filter(|line| line.contains("ctx.spawn(") || line.contains("ctx.spawn::<"))
         .count();
     assert_eq!(
         direct_spawns, 1,
