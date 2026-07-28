@@ -179,7 +179,7 @@ impl XmppRuntime {
                         TransportMessage::Element(replay),
                     )));
                 }
-                if self.sm_state.arm_acknowledgement_clock(chrono::Utc::now()) {
+                if self.sm_state.acknowledgement_clock_pending() {
                     events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                         TransportMessage::Element(
                             crate::stream_management::SmState::build_request_ack(),

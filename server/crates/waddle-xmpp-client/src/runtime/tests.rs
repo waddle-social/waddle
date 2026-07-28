@@ -151,6 +151,47 @@ fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
 }
 
 #[test]
+fn runtime_rearms_the_retry_scheduler_after_a_no_progress_ack() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.enabled = true;
+    runtime.sm_negotiation = SmNegotiationState::Enabled;
+    let now = Utc::now();
+    let message = Element::builder("message", crate::NS_CLIENT).build();
+    assert!(runtime.sm_state.record_sent_stanza_at(&message, now));
+
+    let mut events = Vec::new();
+    runtime
+        .handle_sm_element(&SmState::build_ack(0), &mut events)
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckReceived {
+                h: 0,
+                progressed: false
+            }
+        ))
+    )));
+    assert!(runtime.acknowledgement_clock_pending());
+
+    // The browser/wasm driver only wakes the clock; this typed runtime action
+    // is what it turns into the next `<r/>` write and retry telemetry.
+    let retry = runtime.poll_stream_management_clock(now + Duration::seconds(1));
+    assert!(retry.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+    )));
+    assert!(retry.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRetry { attempt: 1 }
+        ))
+    )));
+}
+
+#[test]
 fn runtime_emits_initial_open_when_transport_opens() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();

@@ -427,6 +427,13 @@ impl SmState {
         // stream into a spurious reconnect thirty seconds later.
         if self.outbound_queue.is_empty() {
             self.cancel_acknowledgement_clock();
+        } else {
+            // A valid acknowledgement proves the peer is live, even when its
+            // handled count has not advanced. Start a fresh request cadence
+            // for the remaining tail, but deliberately leave
+            // `last_ack_progress_at` alone: repeated no-progress `<a/>`s
+            // must not postpone the 30-second h-progress deadline.
+            self.arm_acknowledgement_clock(now);
         }
         acked
     }
@@ -495,11 +502,11 @@ impl SmState {
     /// Whether the host needs to keep driving the XEP-0198 acknowledgement
     /// clock.
     ///
-    /// A valid `<a/>` can clear the retry edge without advancing `h`. In that
-    /// case the retry schedule is no longer pending, but the 30-second
-    /// no-progress deadline is still authoritative. Conversely, a fully
-    /// acknowledged tail cancels both pieces of state. Hosts must use this
-    /// predicate rather than deriving liveness from the outbound queue.
+    /// A valid `<a/>` with an unhandled tail begins a fresh retry cadence
+    /// without advancing `h`; its original 30-second no-progress deadline
+    /// remains authoritative. Conversely, a fully acknowledged tail cancels
+    /// both pieces of state. Hosts must use this predicate rather than
+    /// deriving liveness from the outbound queue.
     pub fn acknowledgement_clock_pending(&self) -> bool {
         self.ack_request_outstanding || self.last_ack_progress_at.is_some()
     }
@@ -748,8 +755,7 @@ fn is_stanza_error_condition(condition: &Element) -> bool {
 fn is_stanza_error_text(text: &Element) -> bool {
     text.attrs().iter().all(|((namespace, name), _)| {
         namespace == &minidom::rxml::Namespace::XML && name.as_str() == "lang"
-    }) && text.nodes().next().is_some()
-        && text.nodes().all(|node| node.as_text().is_some())
+    }) && text.nodes().all(|node| node.as_text().is_some())
 }
 
 fn is_application_specific_stanza_error_condition(condition: &Element) -> bool {
@@ -1026,6 +1032,16 @@ mod tests {
             Ok(SmInboundControl::Failed { h: None })
         );
 
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("failed", NS_SM)
+                    .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                    .append(Element::builder("text", NS_STANZA_ERRORS).build())
+                    .build()
+            ),
+            Ok(SmInboundControl::Failed { h: None })
+        );
+
         let application_condition = Element::builder("retry-after", "urn:waddle:diagnostics")
             .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
             .append("later")
@@ -1124,10 +1140,6 @@ mod tests {
                 .build(),
             Element::builder("failed", NS_SM)
                 .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
-                .append(Element::builder("text", NS_STANZA_ERRORS).build())
-                .build(),
-            Element::builder("failed", NS_SM)
-                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
                 .append(Element::builder("application", "").build())
                 .build(),
             Element::builder("failed", NS_SM)
@@ -1161,17 +1173,27 @@ mod tests {
     }
 
     #[test]
-    fn first_unhandled_stanza_requests_ack_and_no_progress_ack_reopens_edge() {
+    fn no_progress_ack_rearms_the_existing_unhandled_tail() {
         let mut state = SmState::new();
         state.outbound_enabled = true;
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let message = Element::builder("message", "jabber:client")
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "one")
             .build();
 
-        assert!(state.record_sent_stanza(&message));
+        assert!(state.record_sent_stanza_at(&message, now));
         assert!(!state.record_sent_stanza(&message));
-        assert!(state.process_ack(0).is_empty());
-        assert!(state.record_sent_stanza(&message));
+        assert!(state
+            .process_ack_at(0, now + Duration::milliseconds(1))
+            .is_empty());
+
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::milliseconds(250))
+            .is_empty());
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(251)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 1 }]
+        );
     }
 
     #[test]
@@ -1185,8 +1207,8 @@ mod tests {
         assert!(state.record_sent_stanza_at(&message, now));
         assert!(state.acknowledgement_clock_pending());
 
-        // A valid no-progress `<a/>` clears the retry edge, but the original
-        // h-progress deadline must continue to run.
+        // A valid no-progress `<a/>` restarts the `<r/>` retry cadence, but
+        // the original h-progress deadline must continue to run.
         assert!(state
             .process_ack_at(0, now + Duration::milliseconds(1))
             .is_empty());
@@ -1237,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_progress_ack_cancels_request_timer_and_rearms_progress_deadline() {
+    fn repeated_no_progress_acks_restart_retry_cadence_without_moving_deadline() {
         let mut state = SmState::new();
         state.outbound_enabled = true;
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -1247,18 +1269,29 @@ mod tests {
             .process_ack_at(0, now + Duration::milliseconds(100))
             .is_empty());
         assert!(state
-            .poll_acknowledgement_clock(now + Duration::milliseconds(5_000))
-            .is_empty());
-
-        assert!(state.record_sent_stanza_at(&message, now + Duration::seconds(1)));
-        state.process_ack_at(1, now + Duration::seconds(2));
-        assert!(state
-            .poll_acknowledgement_clock(now + Duration::seconds(31))
+            .poll_acknowledgement_clock(now + Duration::milliseconds(349))
             .is_empty());
         assert_eq!(
-            state.poll_acknowledgement_clock(now + Duration::seconds(32)),
-            vec![SmAcknowledgementClockAction::ProgressTimedOut]
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(350)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 1 }]
         );
+
+        assert!(state
+            .process_ack_at(0, now + Duration::milliseconds(400))
+            .is_empty());
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::milliseconds(649))
+            .is_empty());
+        assert_eq!(
+            state.poll_acknowledgement_clock(now + Duration::milliseconds(650)),
+            vec![SmAcknowledgementClockAction::Retry { attempt: 1 }]
+        );
+        assert!(!state
+            .poll_acknowledgement_clock(now + Duration::milliseconds(29_999))
+            .contains(&SmAcknowledgementClockAction::ProgressTimedOut));
+        assert!(state
+            .poll_acknowledgement_clock(now + Duration::milliseconds(30_000))
+            .contains(&SmAcknowledgementClockAction::ProgressTimedOut));
     }
 
     #[test]

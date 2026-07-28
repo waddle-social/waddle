@@ -105,6 +105,18 @@ fn xep0198_failed_accepts_rfc6120_stanza_error_diagnostics_in_order() {
         "XEP-0198 §4.2 reuses the RFC 6120 stanza error group",
     );
 
+    let empty_text = Element::builder("failed", "urn:xmpp:sm:3")
+        .append(
+            Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
+        )
+        .append(Element::builder("text", "urn:ietf:params:xml:ns:xmpp-stanzas").build())
+        .build();
+    assert_eq!(
+        SmState::parse_inbound_control(&empty_text),
+        Ok(SmInboundControl::Failed { h: None }),
+        "the optional RFC 6120 err:text may be schema-valid and empty",
+    );
+
     let out_of_order = Element::builder("failed", "urn:xmpp:sm:3")
         .append(
             Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
