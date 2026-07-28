@@ -89,13 +89,13 @@ class ConversationScreenTest {
     }
 
     @Test
-    fun sendShowsTheOptimisticPendingRow() {
+    fun sendShowsTheDurablyQueuedOptimisticRow() {
         composeRule.onNode(hasSetTextAction()).performTextInput("hi there penguin")
         composeRule.onNodeWithContentDescription("Send").performClick()
-        // The fake outcome id never matches the local echo's identity,
-        // so the pending row stays visible with its sending status.
+        // The durable-first fake `Sent` outcome carries a queued id. Until
+        // XEP-0198 acknowledges it, the optimistic row shows its queued status.
         waitForText("hi there penguin")
-        waitForText("Sending…")
+        waitForText("Queued — sends when connected")
         composeRule.waitUntil(timeoutMillis = 10_000) {
             harness.activeFakeClient().sendCalls.contains(PEER_JID to "hi there penguin")
         }
