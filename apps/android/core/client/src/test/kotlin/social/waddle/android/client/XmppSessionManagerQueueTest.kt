@@ -409,6 +409,47 @@ class XmppSessionManagerQueueTest {
     }
 
     @Test
+    fun `transport use and logout linearize at the active-session fence`() = runTest {
+        val activeSession = ActiveSession()
+        val oldClient = FakeWaddleClient()
+        activeSession.advanceGeneration()
+        activeSession.activateOwner("icepuma@waddle.test")
+        activeSession.onReady(oldClient)
+        val lease = checkNotNull(activeSession.captureOwnerLease())
+
+        // This pause is after the lease check and client selection. The send
+        // now owns the transport fence, so logout cannot retire that client
+        // midway through its FFI call.
+        val sendEntered = CompletableDeferred<Unit>()
+        val releaseSend = CompletableDeferred<Unit>()
+        val send = async {
+            activeSession.sendIfCurrent(lease) { client ->
+                sendEntered.complete(Unit)
+                releaseSend.await()
+                client.sendChatMessage("alice@waddle.test", "send wins", null)
+            }
+        }
+        runCurrent()
+        sendEntered.await()
+        val logout = async { activeSession.revokeOutboundAuthority() }
+        runCurrent()
+        assertFalse("logout waits for an already-authorized send", logout.isCompleted)
+
+        releaseSend.complete(Unit)
+        assertTrue(send.await() is ActiveSession.LeaseSendResult.Attempted)
+        logout.await()
+        assertEquals(listOf("alice@waddle.test" to "send wins"), oldClient.sendCalls)
+
+        // Conversely, once revocation owns the fence, an old lease cannot
+        // select the retired client at all.
+        val afterRevoke = activeSession.sendIfCurrent(lease) { client ->
+            client.sendChatMessage("alice@waddle.test", "logout wins", null)
+        }
+        assertEquals(ActiveSession.LeaseSendResult.Stale, afterRevoke)
+        assertEquals(listOf("alice@waddle.test" to "send wins"), oldClient.sendCalls)
+    }
+
+    @Test
     fun `queue cleanup is scoped to the exact owner and stanza id`() = runTest {
         val harness = Harness(this)
         harness.prefs.updateOutboundQueue {

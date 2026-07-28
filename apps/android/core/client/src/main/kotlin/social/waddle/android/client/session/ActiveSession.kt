@@ -1,6 +1,8 @@
 package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEventBridge
 import social.waddle.client.ffi.WaddleClientInterface
@@ -14,6 +16,18 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
  * clear-on-teardown fields are race-free.
  */
 internal class ActiveSession {
+    /**
+     * The single linearization point for ordinary transport use and logout
+     * revocation.  `sendIfCurrent` holds it through the FFI invocation, so a
+     * send that observed a live lease owns that client until it returns;
+     * logout waits, then retires the client before its call-only teardown.
+     *
+     * Callers may hold `OutboundMessenger.sendMutex` before this fence.  No
+     * code under this fence acquires that mutex or `lifecycleMutex`, and FFI
+     * sends must not synchronously re-enter the manager, avoiding a lock
+     * cycle across suspension.
+     */
+    private val transportFence = Mutex()
     /** Result of a generation-fenced message send attempt. */
     sealed interface LeaseSendResult {
         /** The lease was stale before a transport could be selected. */
@@ -78,10 +92,15 @@ internal class ActiveSession {
     @Volatile
     private var outboundOwner: OwnerLease? = null
 
-    /** Called under the manager's lifecycle mutex on login/sign-out. */
-    fun advanceGeneration() {
+    /** Called under [transportFence] by lifecycle transitions. */
+    private fun advanceGenerationLocked() {
         generation += 1
         outboundOwner = null
+    }
+
+    /** Fence a fresh login or terminal session failure against active sends. */
+    suspend fun advanceGeneration() = transportFence.withLock {
+        advanceGenerationLocked()
     }
 
     /** Publish a new account's authority after login has finished clearing old state. */
@@ -95,9 +114,9 @@ internal class ActiveSession {
      * returned connection is call-teardown-only; it is never reinstalled
      * as the active transport.
      */
-    fun revokeOutboundAuthority(): RetiredCallConnection? {
+    suspend fun revokeOutboundAuthority(): RetiredCallConnection? = transportFence.withLock {
         val retired = client?.let { RetiredCallConnection(it, ownFullJid) }
-        advanceGeneration()
+        advanceGenerationLocked()
         ownBareJid = null
         ownFullJid = null
         client = null
@@ -191,14 +210,14 @@ internal class ActiveSession {
     suspend fun sendIfCurrent(
         lease: OwnerLease,
         op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
-    ): LeaseSendResult {
-        // Capture the attempt's transport before validating its lease.  The
-        // validation fences logout/relogin, while the captured reference
-        // prevents a successor's `onReady` from being re-read and used by a
-        // send that began for its predecessor.
-        val liveClient = client ?: return LeaseSendResult.Attempted(WaddleSendMessageOutcome.NotConnected)
-        if (!isCurrent(lease)) return LeaseSendResult.Stale
-        return try {
+    ): LeaseSendResult = transportFence.withLock {
+        // Capture the attempt's transport before validating its lease. The
+        // fence stays held across `op`: either logout revoked first and this
+        // returns Stale without calling a retired client, or this invocation
+        // owns the selected client and logout waits for its completion.
+        val liveClient = client ?: return@withLock LeaseSendResult.Attempted(WaddleSendMessageOutcome.NotConnected)
+        if (!isCurrent(lease)) return@withLock LeaseSendResult.Stale
+        try {
             LeaseSendResult.Attempted(op(liveClient))
         } catch (cancellation: CancellationException) {
             throw cancellation

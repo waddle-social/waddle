@@ -147,7 +147,17 @@ const liveOwnerHeartbeats = new Map<string, OwnerHeartbeatRegistration>();
  * live registration so a failed older attempt cannot roll back its successor.
  */
 type OwnerHeartbeatAttempt = {
+  /** The attempt that was scheduling when this nested attempt began. */
+  parent: OwnerHeartbeatAttempt | null;
   supersededBy: OwnerHeartbeatAttempt | null;
+  /**
+   * A timer that reached the live-registration CAS.  Merely entering a
+   * nested `setInterval` is not enough: that scheduler may throw before it
+   * installs anything, in which case its still-running parent must retain
+   * the lease it already claimed.
+   */
+  installed: OwnerHeartbeatRegistration | null;
+  phase: "scheduling" | "installed" | "failed" | "superseded";
 };
 
 const pendingOwnerHeartbeatAttempts = new Map<string, OwnerHeartbeatAttempt>();
@@ -642,8 +652,13 @@ function retainOwnerHeartbeat(
     existing.refCount += 1;
     return () => releaseOwnerHeartbeat(accountKey, owner, existing);
   }
-  const priorAttempt = pendingOwnerHeartbeatAttempts.get(key);
-  const attempt: OwnerHeartbeatAttempt = { supersededBy: null };
+  const priorAttempt = pendingOwnerHeartbeatAttempts.get(key) ?? null;
+  const attempt: OwnerHeartbeatAttempt = {
+    parent: priorAttempt,
+    supersededBy: null,
+    installed: null,
+    phase: "scheduling",
+  };
   if (priorAttempt) priorAttempt.supersededBy = attempt;
   pendingOwnerHeartbeatAttempts.set(key, attempt);
   claimOwnerLease(accountKey, owner);
@@ -660,25 +675,35 @@ function retainOwnerHeartbeat(
       timerDriver,
     };
   } catch (error) {
+    attempt.phase = "failed";
     if (pendingOwnerHeartbeatAttempts.get(key) === attempt) {
-      pendingOwnerHeartbeatAttempts.delete(key);
+      // Restore an outer scheduling attempt.  It has already claimed the
+      // owner lease and may still receive a timer from its driver after this
+      // nested scheduler fails.
+      if (attempt.parent?.phase === "scheduling") {
+        pendingOwnerHeartbeatAttempts.set(key, attempt.parent);
+      } else {
+        pendingOwnerHeartbeatAttempts.delete(key);
+      }
     }
     // A scheduler failure may have re-entered and installed a successor for
-    // this same owner before throwing. Only the still-current provisional
-    // attempt is allowed to roll back its lease, owner instance, and session
-    // identity; a superseded attempt must leave its successor untouched.
-    if (attempt.supersededBy === null) {
+    // this same owner before throwing. It may also be a nested attempt whose
+    // parent is still scheduling.  Roll back only when neither can retain the
+    // claimed identity; otherwise a failed nested scheduler would tear down
+    // the outer attempt's lease, session owner, and eventual ref-count.
+    if (!liveInstalledSuccessor(key, attempt) && attempt.parent?.phase !== "scheduling") {
       removeOwnerLeaseIfOwned(accountKey, owner);
       releaseOwnerInstance(accountKey, owner);
       removeStoredOwnerIdIfOwned(owner);
     }
     throw error;
   }
-  if (attempt.supersededBy !== null) {
-    // A re-entrant successor owns the live lease. This older caller did not
-    // retain a reference, so discard only its own timer and make disposal a
-    // no-op.
+  if (liveInstalledSuccessor(key, attempt)) {
+    // A nested attempt reached the exact live-registration CAS. This older
+    // caller retained no reference, so discard only its unregistered timer;
+    // its failure or disposal cannot roll back the successor.
     timerDriver.clearInterval(registration.timer);
+    attempt.phase = "superseded";
     if (pendingOwnerHeartbeatAttempts.get(key) === attempt) {
       pendingOwnerHeartbeatAttempts.delete(key);
     }
@@ -686,10 +711,28 @@ function retainOwnerHeartbeat(
   }
   (registration.timer as { unref?: () => void }).unref?.();
   liveOwnerHeartbeats.set(key, registration);
+  attempt.installed = registration;
+  attempt.phase = "installed";
   if (pendingOwnerHeartbeatAttempts.get(key) === attempt) {
     pendingOwnerHeartbeatAttempts.delete(key);
   }
   return () => releaseOwnerHeartbeat(accountKey, owner, registration);
+}
+
+/**
+ * Returns true only for a nested attempt that completed the exact
+ * live-registration installation and is still live.  A nested scheduler that
+ * merely started (then threw) cannot suppress its outer attempt.
+ */
+function liveInstalledSuccessor(key: string, attempt: OwnerHeartbeatAttempt): boolean {
+  let successor = attempt.supersededBy;
+  while (successor) {
+    if (successor.installed && liveOwnerHeartbeats.get(key) === successor.installed) {
+      return true;
+    }
+    successor = successor.supersededBy;
+  }
+  return false;
 }
 
 function releaseOwnerHeartbeat(

@@ -609,6 +609,61 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
   });
 
+  test("a failed nested scheduler cannot suppress its still-scheduling parent", () => {
+    const baseline = resumeOwnerLifecycleSnapshotForTests();
+    const timers = ownerTimerHarness();
+    let nested = false;
+    const innerFailure = {
+      setInterval: () => { throw new Error("inner scheduler unavailable"); },
+      clearInterval: () => undefined,
+    };
+    const outerDriver = {
+      setInterval: (callback: () => void) => {
+        if (!nested) {
+          nested = true;
+          expect(() => createLocalStorageResumePersistence("alice@example.com", undefined, {
+            ownerTimerDriver: innerFailure,
+          })).toThrow("inner scheduler unavailable");
+        }
+        return timers.driver.setInterval(callback, 0);
+      },
+      clearInterval: timers.driver.clearInterval,
+    };
+
+    const outer = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: outerDriver,
+    });
+    const ownerId = window.sessionStorage.getItem("waddle.chat.sm-resume.owner");
+    expect(ownerId).not.toBeNull();
+    const leaseKey = ownerLeaseKey("alice@example.com", ownerId!);
+    expect(window.localStorage.getItem(leaseKey)).not.toBeNull();
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual({
+      registrations: baseline.registrations + 1,
+      activeTimers: baseline.activeTimers + 1,
+      ownerInstances: baseline.ownerInstances + 1,
+    });
+
+    // The outer registration is real ownership, not a discarded stale
+    // closure: sharing, terminal release, and a fresh acquisition all work.
+    const shared = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    outer.dispose();
+    expect(timers.activeCount()).toBe(1);
+    expect(window.localStorage.getItem(leaseKey)).not.toBeNull();
+    shared.dispose();
+    expect(timers.activeCount()).toBe(0);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+
+    const reacquired = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    expect(timers.activeCount()).toBe(1);
+    reacquired.dispose();
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+  });
+
   test("a disposed owner cannot mutate persistence, even if a captured heartbeat ticks", () => {
     const timers = ownerTimerHarness();
     const persistence = createLocalStorageResumePersistence("alice@example.com", undefined, {
