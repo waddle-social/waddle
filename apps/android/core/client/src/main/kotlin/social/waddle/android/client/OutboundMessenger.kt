@@ -60,20 +60,8 @@ internal class OutboundMessenger(
         // narrow transport fence through this one DataStore update prevents a
         // stale attempt from committing after logout has cleared persistence
         // and before a same-account successor starts draining its queue.
-        val persisted = try {
-            when (val result = activeSession.runIfCurrentResult(lease) {
-                outboundQueue.enqueue(queued)
-            }) {
-                ActiveSession.LeaseInvocation.Stale,
-                ActiveSession.LeaseInvocation.NotConnected,
-                -> return@withLock SendResult(WaddleSendMessageOutcome.Error)
-                is ActiveSession.LeaseInvocation.Completed -> result.value
-            }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            return@withLock SendResult(WaddleSendMessageOutcome.Error)
-        }
+        val persisted = enqueueForCurrentLease(lease, queued)
+            ?: return@withLock SendResult(WaddleSendMessageOutcome.Error)
         if (persisted == OutboundQueue.EnqueueResult.FULL) {
             return@withLock SendResult(WaddleSendMessageOutcome.Error)
         }
@@ -105,6 +93,28 @@ internal class OutboundMessenger(
                 SendResult(outcome)
             }
         }
+    }
+
+    private suspend fun enqueueForCurrentLease(
+        lease: ActiveSession.OwnerLease,
+        queued: QueuedOutboundMessage,
+    ): OutboundQueue.EnqueueResult? = try {
+        when (
+            val result = activeSession.runIfCurrentResult(
+                lease,
+            ) {
+                outboundQueue.enqueue(queued)
+            },
+        ) {
+            ActiveSession.LeaseInvocation.Stale,
+            ActiveSession.LeaseInvocation.NotConnected,
+            -> null
+            is ActiveSession.LeaseInvocation.Completed -> result.value
+        }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        null
     }
 
     /**
