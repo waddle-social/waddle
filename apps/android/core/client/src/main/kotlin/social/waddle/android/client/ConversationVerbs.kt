@@ -102,11 +102,9 @@ internal class ConversationVerbs(
     ): WaddleUploadSlot? {
         return try {
             when (val result = activeSession.invoke { client ->
-                val service = activeSession.uploadService ?: run {
-                    val discovered = client.discoverUploadService()
-                    activeSession.uploadService = discovered
-                    discovered
-                }
+                val service = activeSession.uploadService
+                    ?: client.discoverUploadService()?.also { activeSession.uploadService = it }
+                    ?: return@invoke null
                 client.requestUploadSlot(service, filename, sizeBytes, contentType)
             }) {
                 ActiveSession.Invocation.NotConnected -> null
