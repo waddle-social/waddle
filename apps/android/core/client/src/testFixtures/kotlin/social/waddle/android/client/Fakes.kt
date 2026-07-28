@@ -152,6 +152,14 @@ data class SearchCall(
     val isRoom: Boolean,
 )
 
+/** One recorded XEP-0363 upload-slot request. */
+data class UploadSlotCall(
+    val serviceJid: String,
+    val filename: String,
+    val size: ULong,
+    val contentType: String,
+)
+
 /**
  * One recorded `sendCall*` wire verb, in send order, so call-engine
  * tests can assert exact sequences (e.g. the tie-break branch's
@@ -759,7 +767,23 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun fetchExternalServices(): List<WaddleExternalService> = externalServices
 
-    override suspend fun discoverUploadService(): String? = unused()
+    /** Canned XEP-0363 discovery answer; `null` means no upload service. */
+    @Volatile
+    var discoveredUploadService: String? = null
+
+    @Volatile
+    var discoverUploadServiceCalls = 0
+
+    /** Recorded upload-slot requests; an absent service must leave this empty. */
+    val uploadSlotCalls = CopyOnWriteArrayList<UploadSlotCall>()
+
+    @Volatile
+    var uploadSlotResult: WaddleUploadSlot? = null
+
+    override suspend fun discoverUploadService(): String? {
+        discoverUploadServiceCalls += 1
+        return discoveredUploadService
+    }
 
     override suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage {
         fetchHistoryCalls += Triple(peerJid, maxMessages, beforeId)
@@ -934,7 +958,10 @@ class FakeWaddleClient : WaddleClientInterface {
         filename: String,
         size: ULong,
         contentType: String,
-    ): WaddleUploadSlot? = unused()
+    ): WaddleUploadSlot? {
+        uploadSlotCalls += UploadSlotCall(serviceJid, filename, size, contentType)
+        return uploadSlotResult
+    }
 
     override suspend fun sendChatMessage(
         peerJid: String,

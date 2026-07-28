@@ -353,6 +353,21 @@ class XmppSessionManagerVerbsTest {
     }
 
     @Test
+    fun `missing upload service skips slot requests and is not cached`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+
+        assertNull(harness.manager.requestUploadSlot("photo.jpg", 12u, "image/jpeg"))
+        assertNull(harness.manager.requestUploadSlot("photo.jpg", 12u, "image/jpeg"))
+
+        // A missing service is not a usable cached discovery result: each
+        // request rediscovers it, while no invalid FFI slot call is made.
+        assertEquals(2, harness.client.discoverUploadServiceCalls)
+        assertTrue(harness.client.uploadSlotCalls.isEmpty())
+        harness.manager.logout()
+    }
+
+    @Test
     fun `verbs report not connected before session ready`() = runTest {
         val harness = Harness(this)
         // Login without ever reaching ready: no live client exists.
