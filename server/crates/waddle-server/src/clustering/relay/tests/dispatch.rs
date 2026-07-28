@@ -1,5 +1,4 @@
 use super::*;
-use crate::clustering::claims::NodeLeaseStore;
 use crate::clustering::ordered_relay::{OrderedRelayDiversionReason, OrderedRelaySequence};
 use crate::clustering::route_bridge::OrderedRelayDeliveryServices;
 use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
