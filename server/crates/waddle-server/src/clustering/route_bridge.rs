@@ -4988,6 +4988,15 @@ fn ask_error_maybe_committed(error: &RelayAskError) -> bool {
     )
 }
 
+/// Bound on each receiver-side claim-store read in
+/// [`OrderedRelayDeliveryBridge::reassert_media_grants_local`]. The
+/// executor runs in a delegated relay task that outlives the asker's
+/// webhook timeout, so a stalled control-plane pool would otherwise
+/// keep one pending task alive per LiveKit retry. On elapse the
+/// executor answers `Unavailable` — a retry signal, never an
+/// authorization conclusion.
+const REASSERT_CLAIM_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Owner-side outcome of a #1594 cross-node media-grant re-assert,
 /// executed against THIS node's room map. The relay actor maps these
 /// onto [`super::relay::RelayReassertMediaGrantsReply`] — kept as a
@@ -5047,16 +5056,17 @@ impl OrderedRelayDeliveryBridge {
         // `NoLocalRoomActor` so the asker's retry re-resolves the
         // owner.
         let me = services.node_identity.current();
-        let gate_epoch = match services
-            .claim_store
-            .current_claim(&room_entity(room_jid))
-            .await
+        let gate_epoch = match tokio::time::timeout(
+            REASSERT_CLAIM_READ_TIMEOUT,
+            services.claim_store.current_claim(&room_entity(room_jid)),
+        )
+        .await
         {
-            Ok(Some(snapshot)) if snapshot.owner_lease_fresh && snapshot.owner == me => {
+            Ok(Ok(Some(snapshot))) if snapshot.owner_lease_fresh && snapshot.owner == me => {
                 snapshot.claim_epoch
             }
-            Ok(_) => return LocalMediaGrantReassertion::NoLocalRoomActor,
-            Err(_) => return LocalMediaGrantReassertion::Unavailable,
+            Ok(Ok(_)) => return LocalMediaGrantReassertion::NoLocalRoomActor,
+            Ok(Err(_)) | Err(_) => return LocalMediaGrantReassertion::Unavailable,
         };
         // Derive first, act second: the room-actor ask can take up to
         // its reply timeout, during which the claim can be stolen and
@@ -5073,17 +5083,18 @@ impl OrderedRelayDeliveryBridge {
             VoiceDerivation::LookupFailed => return LocalMediaGrantReassertion::Unavailable,
             VoiceDerivation::Occupant(_) | VoiceDerivation::NotOccupant => {}
         }
-        match services
-            .claim_store
-            .current_claim(&room_entity(room_jid))
-            .await
+        match tokio::time::timeout(
+            REASSERT_CLAIM_READ_TIMEOUT,
+            services.claim_store.current_claim(&room_entity(room_jid)),
+        )
+        .await
         {
-            Ok(Some(snapshot))
+            Ok(Ok(Some(snapshot)))
                 if snapshot.owner_lease_fresh
                     && snapshot.owner == me
                     && snapshot.claim_epoch == gate_epoch => {}
-            Ok(_) => return LocalMediaGrantReassertion::NoLocalRoomActor,
-            Err(_) => return LocalMediaGrantReassertion::Unavailable,
+            Ok(Ok(_)) => return LocalMediaGrantReassertion::NoLocalRoomActor,
+            Ok(Err(_)) | Err(_) => return LocalMediaGrantReassertion::Unavailable,
         }
         let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
             // An SFU-less node cannot push grants — "cannot execute
@@ -5686,6 +5697,126 @@ mod tests {
             recorder.snapshot().is_empty(),
             "an expired lease must never evict"
         );
+    }
+
+    /// #1594: the receiver-side claim reads are bounded. The executor
+    /// runs in a delegated relay task that outlives the asker's
+    /// webhook timeout, so a stalled claim store (pool exhaustion)
+    /// must resolve to `Unavailable` within the read budget instead
+    /// of accumulating one pending task per LiveKit retry.
+    #[tokio::test]
+    async fn reassert_media_grants_local_bounds_a_stalled_claim_store() {
+        use crate::server::routes::websocket::tests::{
+            create_test_websocket_state_with_sfu, RecordingSfu,
+        };
+        use waddle_xmpp::ownership::{ClaimSnapshot, StalePredicate};
+
+        /// `current_claim` never resolves; nothing else is reachable.
+        struct StalledClaimStore;
+
+        #[async_trait::async_trait]
+        impl waddle_xmpp::ownership::ClaimStore for StalledClaimStore {
+            async fn ensure_schema(&self) -> Result<(), ClaimError> {
+                Ok(())
+            }
+            async fn acquire(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn ensure_claimed(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn steal_stale(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _staleness: StalePredicate,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn steal_for_resume(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _witness: waddle_xmpp::ownership::ResumeIdentityProof,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn current_claim(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                std::future::pending().await
+            }
+            async fn current_claim_after_pending_writes(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn fence(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<bool, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn release(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<(), ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn release_many(
+                &self,
+                _entities: &[Entity],
+                _me: &NodeIdentity,
+            ) -> Result<(), ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+        }
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.web_socket_state = Arc::downgrade(&state);
+        services.claim_store = Arc::new(StalledClaimStore);
+        bridge.wire(Arc::new(services));
+
+        let room: jid::BareJid = "gate-stalled@muc.example.com".parse().expect("room jid");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("participant jid");
+        let outcome = tokio::time::timeout(
+            REASSERT_CLAIM_READ_TIMEOUT + Duration::from_secs(3),
+            bridge.reassert_media_grants_local(&room, &alice),
+        )
+        .await
+        .expect("a stalled claim store must not hang the executor");
+
+        assert_eq!(outcome, LocalMediaGrantReassertion::Unavailable);
+        assert!(recorder.update_snapshot().is_empty());
+        assert!(recorder.snapshot().is_empty());
     }
 
     /// #1594 owner-side executor happy path: claim owned by this node

@@ -167,7 +167,16 @@ pub(crate) enum VoiceDerivation {
 }
 
 /// Resolve `full_jid`'s current XEP-0045 voice from THIS process's
-/// room actor. Performs no side effects.
+/// room actor.
+///
+/// Performs no SFU side effects — the state-changing half lives in
+/// [`apply_derived_enforcement`], so the #1594 relayed path can
+/// re-validate its room claim between the two. The failure branches
+/// DO emit their diagnostic WARN here, deliberately: both callers
+/// (the same-node webhook path and the relayed owner-side executor)
+/// need the same error-carrying line, and emitting it once at the
+/// derivation site is what keeps log-based alerting from
+/// double-counting a single transient failure.
 pub(crate) async fn derive_current_voice(
     state: &WebSocketState,
     room_jid: &BareJid,
