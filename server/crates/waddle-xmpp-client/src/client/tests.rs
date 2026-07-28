@@ -15,6 +15,7 @@ use crate::command::XmppCommand;
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::error::ClientError;
 use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent};
+use crate::state::StreamId;
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
 use crate::stream_management::{SmResumeState, NS_SM};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
@@ -37,7 +38,7 @@ fn config() -> ClientConfig {
 fn config_with_resume_state() -> ClientConfig {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("prev-stream", 0, 0).unwrap());
+        Some(SmResumeState::new(StreamId::new("prev-stream"), 0, 0).unwrap());
     config
 }
 
@@ -421,7 +422,7 @@ async fn driver_broadcasts_resume_state_transitions() {
     let state = snapshots[0]
         .clone()
         .expect("resumable snapshot after <enabled/>");
-    assert_eq!(state.previd(), "new-stream");
+    assert_eq!(state.previd().as_str(), "new-stream");
 
     task.handle_command(XmppCommand::Disconnect).await;
 

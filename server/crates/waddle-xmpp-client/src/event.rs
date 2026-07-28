@@ -10,7 +10,7 @@ use crate::pep::PepItem;
 use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
-use crate::state::{SessionBinding, SessionSnapshot};
+use crate::state::{SessionBinding, SessionSnapshot, StreamId};
 use crate::stream_management::SmResumeState;
 use crate::transport::{StreamOpen, TransportEvent, TransportMessage};
 
@@ -105,7 +105,7 @@ pub enum ConnectionEvent {
 /// XEP-0198 stream management lifecycle notifications.
 #[derive(Debug, Clone)]
 pub enum StreamManagementEvent {
-    Enabled { previd: Option<String> },
+    Enabled { previd: Option<StreamId> },
     AckReceived { h: u32, progressed: bool },
     AckRequested { reason: SmAckRequestReason },
     AckRetry { attempt: u8 },

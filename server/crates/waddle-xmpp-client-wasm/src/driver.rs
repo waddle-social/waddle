@@ -1446,9 +1446,13 @@ mod tests {
             access_token: "token".to_string(),
             resource: "web".to_string(),
             resume_state: Some(
-                waddle_xmpp_client::SmResumeState::new("previous-stream", 4, 9)
-                    .map(|state| state.with_max_resume_seconds(Some(300)))
-                    .expect("resume state"),
+                waddle_xmpp_client::SmResumeState::new(
+                    waddle_xmpp_client::StreamId::new("previous-stream"),
+                    4,
+                    9,
+                )
+                .map(|state| state.with_max_resume_seconds(Some(300)))
+                .expect("resume state"),
             ),
         };
         let runtime =
@@ -1458,7 +1462,7 @@ mod tests {
 
         let borrowed = inner.borrow();
         let snapshot = borrowed.resume_state.as_ref().expect("snapshot");
-        assert_eq!(snapshot.previd(), "previous-stream");
+        assert_eq!(snapshot.previd().as_str(), "previous-stream");
         assert_eq!(snapshot.inbound_h(), 4);
         assert_eq!(snapshot.outbound_h(), 9);
         assert_eq!(snapshot.max_resume_seconds(), Some(300));
@@ -1571,7 +1575,12 @@ mod tests {
     fn publish_resume_state_snapshot_clears_on_explicit_disconnect() {
         let inner = test_inner();
         inner.borrow_mut().resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new("previous-stream", 4, 9).expect("resume state"),
+            waddle_xmpp_client::SmResumeState::new(
+                waddle_xmpp_client::StreamId::new("previous-stream"),
+                4,
+                9,
+            )
+            .expect("resume state"),
         );
         let stored = inner.borrow().config.clone();
         let runtime =

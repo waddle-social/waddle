@@ -7,8 +7,8 @@
 use chrono::{TimeZone, Utc};
 use minidom::Element;
 use waddle_xmpp_client::{
-    SmResumeState, UnhandledOutboundEntry,
     stream_management::{InvalidSmInboundControl, SmInboundControl, SmState},
+    SmResumeState, StreamId, UnhandledOutboundEntry,
 };
 
 fn persisted(xml: &str, second: u32) -> UnhandledOutboundEntry {
@@ -28,7 +28,7 @@ fn xep0198_restored_countable_stanzas_replay_in_order_without_losing_extensions(
     let iq =
         "<iq xmlns='jabber:client' id='iq-1' type='get'><query xmlns='jabber:iq:version'/></iq>";
     let resume = SmResumeState::from_unhandled_outbound_entries(
-        "previous-stream",
+        StreamId::new("previous-stream"),
         4,
         7,
         [

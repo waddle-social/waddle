@@ -145,7 +145,7 @@ impl UnhandledOutboundEntry {
 /// In-memory XEP-0198 resume snapshot carried across a reconnect attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmResumeState {
-    previd: String,
+    previd: StreamId,
     inbound_h: u32,
     outbound_h: u32,
     max_resume_seconds: Option<u32>,
@@ -153,9 +153,8 @@ pub struct SmResumeState {
 }
 
 impl SmResumeState {
-    pub fn new(previd: impl Into<String>, inbound_h: u32, outbound_h: u32) -> ClientResult<Self> {
-        let previd = previd.into();
-        if previd.trim().is_empty() {
+    pub fn new(previd: StreamId, inbound_h: u32, outbound_h: u32) -> ClientResult<Self> {
+        if previd.as_str().trim().is_empty() {
             return Err(ClientError::EmptyStanzaId);
         }
 
@@ -174,7 +173,7 @@ impl SmResumeState {
     }
 
     fn from_outbound_queue(
-        previd: impl Into<String>,
+        previd: StreamId,
         inbound_h: u32,
         outbound_h: u32,
         outbound_queue: VecDeque<UnhandledOutboundEntry>,
@@ -185,7 +184,7 @@ impl SmResumeState {
     }
 
     pub fn from_unhandled_outbound_entries(
-        previd: impl Into<String>,
+        previd: StreamId,
         inbound_h: u32,
         outbound_h: u32,
         entries: impl IntoIterator<Item = UnhandledOutboundEntry>,
@@ -194,7 +193,7 @@ impl SmResumeState {
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
 
-    pub fn previd(&self) -> &str {
+    pub fn previd(&self) -> &StreamId {
         &self.previd
     }
 
@@ -242,7 +241,7 @@ pub struct SmState {
     /// Last `h` value acknowledged by the server.
     pub server_h: u32,
     /// Resumption token (`previd`) set after `<enabled/>` or `<resumed/>`.
-    pub previd: Option<String>,
+    pub previd: Option<StreamId>,
     /// Advertised server resumption window in seconds, when the server supplied one.
     pub max_resume_seconds: Option<u32>,
     /// Whether the outbound stanza counter has started for this session.
@@ -281,7 +280,7 @@ impl SmState {
             outbound_count: resume_state.outbound_h(),
             inbound_count: resume_state.inbound_h(),
             server_h: resume_state.outbound_h().wrapping_sub(queue_len),
-            previd: Some(resume_state.previd().to_string()),
+            previd: Some(resume_state.previd().clone()),
             max_resume_seconds: resume_state.max_resume_seconds(),
             outbound_queue: resume_state.outbound_queue.clone(),
             ..Self::default()
@@ -567,9 +566,12 @@ impl SmState {
     }
 
     /// Build `<resume xmlns='urn:xmpp:sm:3' previd='ID' h='N'/>`.
-    pub fn build_resume(previd: &str, h: u32) -> Element {
+    pub fn build_resume(previd: &StreamId, h: u32) -> Element {
         Element::builder("resume", NS_SM)
-            .attr(minidom::rxml::xml_ncname!("previd").to_owned(), previd)
+            .attr(
+                minidom::rxml::xml_ncname!("previd").to_owned(),
+                previd.as_str(),
+            )
             .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
             .build()
     }
@@ -802,7 +804,7 @@ fn is_standard_stanza_error_condition(name: &str) -> bool {
 
 impl UnhandledOutboundEntry {
     fn element_for_fallback_retry(&self) -> Element {
-        if self.stanza.element.name() != "message" {
+        if !matches!(self.stanza.element.name(), "message" | "presence") {
             return self.stanza.element.clone();
         }
 
@@ -1361,7 +1363,7 @@ mod tests {
     fn from_resume_state_restores_prior_server_ack_position() {
         let mut state = SmState::new();
         state.start_outbound();
-        state.previd = Some("previous-stream".to_string());
+        state.previd = Some(StreamId::new("previous-stream"));
         for id in 1..=10 {
             state.record_sent_stanza(
                 &Element::builder("message", "jabber:client")
@@ -1404,7 +1406,7 @@ mod tests {
     fn resume_state_reports_unhandled_outbound_queue_presence() {
         let mut state = SmState::new();
         state.start_outbound();
-        state.previd = Some("previous-stream".to_string());
+        state.previd = Some(StreamId::new("previous-stream"));
         state.record_sent_stanza(
             &Element::builder("message", "jabber:client")
                 .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
@@ -1423,7 +1425,7 @@ mod tests {
     fn unchanged_server_h_replays_a_timed_out_outbound_stanza() {
         let mut state = SmState::new();
         state.start_outbound();
-        state.previd = Some("timed-out-stream".to_string());
+        state.previd = Some(StreamId::new("timed-out-stream"));
         let timed_out = Element::builder("message", "jabber:client")
             .attr(
                 minidom::rxml::xml_ncname!("id").to_owned(),
@@ -1444,7 +1446,7 @@ mod tests {
     #[test]
     fn resume_state_carries_advertised_max_resume_window() {
         let mut state = SmState::new();
-        state.previd = Some("previous-stream".to_string());
+        state.previd = Some(StreamId::new("previous-stream"));
         state.max_resume_seconds = Some(300);
 
         let resume_state = state.resume_state().expect("resume state");
@@ -1464,7 +1466,7 @@ mod tests {
             .expect("timestamp");
 
         let resume_state = SmResumeState::from_unhandled_outbound_entries(
-            "previous-stream",
+            StreamId::new("previous-stream"),
             4,
             9,
             [UnhandledOutboundEntry::try_new(stanza.clone(), sent_at).expect("countable stanza")],
@@ -1493,7 +1495,7 @@ mod tests {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let message = Element::builder("message", "jabber:client").build();
         let resume = SmResumeState::from_unhandled_outbound_entries(
-            "previous-stream",
+            StreamId::new("previous-stream"),
             3,
             9,
             [UnhandledOutboundEntry::try_new(message, now).expect("countable stanza")],

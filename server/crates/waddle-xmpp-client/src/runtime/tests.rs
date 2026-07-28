@@ -666,7 +666,7 @@ fn runtime_bootstraps_auth_bind_and_ready_state() {
 fn runtime_requests_sm_resume_before_resource_binding_when_resume_state_exists() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
 
@@ -709,7 +709,7 @@ fn runtime_requests_sm_resume_before_resource_binding_when_resume_state_exists()
 fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -843,7 +843,7 @@ fn runtime_resumed_unacked_tail_replays_before_requesting_ack_without_recounting
 fn runtime_rejects_resumed_without_required_h() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -882,7 +882,7 @@ fn runtime_rejects_resumed_without_required_h() {
 fn runtime_rejects_resumed_with_mismatched_previd() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -925,7 +925,7 @@ fn runtime_rejects_resumed_with_mismatched_previd() {
 fn runtime_falls_back_to_resource_binding_when_sm_resume_fails_with_diagnostics() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -998,7 +998,7 @@ fn runtime_fresh_sm_session_ack_counts_only_current_session_inbound_stanzas() {
     // the previous session's received-stanza count (7 here).
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -1095,7 +1095,7 @@ fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() 
     // resume rejected with handled-count-too-high.
     let mut first_config = config();
     first_config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(first_config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime

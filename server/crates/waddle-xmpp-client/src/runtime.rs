@@ -449,7 +449,7 @@ impl XmppRuntime {
                     && self.sm_state.previd.is_some()
                 {
                     let resume = SmState::build_resume(
-                        self.sm_state.previd.as_deref().unwrap_or_default(),
+                        self.sm_state.previd.as_ref().expect("checked above"),
                         self.sm_state.inbound_count,
                     );
                     self.bootstrap = BootstrapState::AwaitingResume;

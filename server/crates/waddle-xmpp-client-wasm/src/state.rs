@@ -41,8 +41,12 @@ impl WaddleConfig {
         outbound_h: u32,
     ) -> Result<(), JsValue> {
         self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new(previd, inbound_h, outbound_h)
-                .map_err(|err| js_error(err.to_string()))?,
+            waddle_xmpp_client::SmResumeState::new(
+                waddle_xmpp_client::StreamId::new(previd),
+                inbound_h,
+                outbound_h,
+            )
+            .map_err(|err| js_error(err.to_string()))?,
         );
         Ok(())
     }
@@ -55,9 +59,13 @@ impl WaddleConfig {
         max_resume_seconds: u32,
     ) -> Result<(), JsValue> {
         self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new(previd, inbound_h, outbound_h)
-                .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
-                .map_err(|err| js_error(err.to_string()))?,
+            waddle_xmpp_client::SmResumeState::new(
+                waddle_xmpp_client::StreamId::new(previd),
+                inbound_h,
+                outbound_h,
+            )
+            .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
+            .map_err(|err| js_error(err.to_string()))?,
         );
         Ok(())
     }
@@ -72,7 +80,10 @@ impl WaddleConfig {
         let entries = resume_entries_from_js(entries)?;
         self.resume_state = Some(
             waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
-                previd, inbound_h, outbound_h, entries,
+                waddle_xmpp_client::StreamId::new(previd),
+                inbound_h,
+                outbound_h,
+                entries,
             )
             .map_err(|err| js_error(err.to_string()))?,
         );
@@ -90,7 +101,10 @@ impl WaddleConfig {
         let entries = resume_entries_from_js(entries)?;
         self.resume_state = Some(
             waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
-                previd, inbound_h, outbound_h, entries,
+                waddle_xmpp_client::StreamId::new(previd),
+                inbound_h,
+                outbound_h,
+                entries,
             )
             .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
             .map_err(|err| js_error(err.to_string()))?,
@@ -151,7 +165,7 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
             })
             .collect();
         Self {
-            previd: value.previd().to_string(),
+            previd: value.previd().as_str().to_string(),
             inbound_h: value.inbound_h(),
             outbound_h: value.outbound_h(),
             has_unacked_outbound: value.has_unhandled_outbound_stanzas(),

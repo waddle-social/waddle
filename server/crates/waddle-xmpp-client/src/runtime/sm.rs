@@ -5,7 +5,7 @@ use crate::event::{
     ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamErrorCondition, StreamErrorDetail,
     StreamManagementEvent,
 };
-use crate::state::{SessionBinding, StreamId};
+use crate::state::SessionBinding;
 use crate::transport::{StreamClose, TransportMessage};
 use minidom::Element;
 
@@ -132,7 +132,6 @@ impl XmppRuntime {
                     self.handle_sm_protocol_violation(events);
                     return Ok(());
                 }
-                let previd = previd.map(|previd| previd.as_str().to_string());
                 self.sm_state.previd = previd.clone();
                 self.sm_state.max_resume_seconds = max_resume_seconds;
                 self.sm_state.enabled = true;
@@ -149,7 +148,7 @@ impl XmppRuntime {
             }
             crate::stream_management::SmInboundControl::Resumed { h, previd } => {
                 if !matches!(self.bootstrap, BootstrapState::AwaitingResume)
-                    || self.sm_state.previd.as_deref() != Some(previd.as_str())
+                    || self.sm_state.previd.as_ref() != Some(&previd)
                 {
                     self.handle_sm_protocol_violation(events);
                     return Ok(());
@@ -159,7 +158,7 @@ impl XmppRuntime {
                     return Ok(());
                 }
                 let acked = self.sm_state.process_ack(h);
-                self.sm_state.previd = Some(previd.as_str().to_string());
+                self.sm_state.previd = Some(previd);
                 self.sm_state.enabled = true;
                 self.sm_state.outbound_enabled = true;
                 self.sm_negotiation = SmNegotiationState::Enabled;
@@ -292,7 +291,7 @@ impl XmppRuntime {
             .map_err(|_| ClientError::InvalidBindResponse)?;
         Ok(SessionBinding {
             jid,
-            stream_id: self.sm_state.previd.as_ref().map(StreamId::new),
+            stream_id: self.sm_state.previd.clone(),
             resumable: self.sm_state.previd.is_some(),
         })
     }
