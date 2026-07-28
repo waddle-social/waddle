@@ -7,6 +7,22 @@
 - Never add clippy allows in general, fix the code
 - If something can be a trait, use a trait and plan for extension
 
+## Clustering wire format
+
+- **Bump the ordered-relay remote message id on every envelope format
+  change (#1597).** Any change to `RemoteStanzaEnvelope` or anything it
+  contains — payload variants, recipient/lane shapes, claim fields —
+  MUST bump the version suffix in
+  `#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.vN")]`
+  (`clustering/relay.rs`). An old peer then fails the ask with
+  `UnknownMessage` (provably uncommitted → `UnsupportedEnvelope` NACK:
+  sequence rolled back, channel kept, no sticky diversion). Reusing an
+  old id makes the old peer fail mid-decode with `DeserializeMessage`,
+  which is indistinguishable from a reply-decode failure after a
+  committed effect and poisons the shared ordered channel for the whole
+  mixed-version window. The bump is what makes rolling deploys safe; a
+  PR that changes the envelope without bumping the id must be rejected.
+
 ## Telemetry
 
 - **New metrics go through the create-at-increment macros only**
