@@ -190,6 +190,24 @@ pub(crate) async fn create_test_websocket_state_with_sfu(
     .await
 }
 
+/// [`create_test_websocket_state_with_sfu`] plus caller-supplied
+/// clustering handles — used by the #1594 webhook tests, which need
+/// BOTH an observable SFU (the enforcement side effect) and a claim
+/// store (the cross-node routing decision).
+#[cfg(feature = "clustering")]
+pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
+    sfu: Arc<dyn waddle_sfu::SfuService>,
+    clustering: crate::clustering::ClusteringHandles,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        Some(sfu),
+        Some(clustering),
+        None,
+    )
+    .await
+}
+
 /// Recording fake: captures `(call_id, identity)` separately for each
 /// teardown dispatch — `unregister_call_participant` (the admin-evict
 /// path) into `calls`, `note_participant_left` (the webhook-bridge
@@ -589,7 +607,10 @@ async fn create_test_session(state: &WebSocketState, username: &str) -> Session 
     session
 }
 
-async fn create_test_server_owner_session(state: &WebSocketState, username: &str) -> Session {
+pub(crate) async fn create_test_server_owner_session(
+    state: &WebSocketState,
+    username: &str,
+) -> Session {
     let session = create_test_session(state, username).await;
     state
         .deps

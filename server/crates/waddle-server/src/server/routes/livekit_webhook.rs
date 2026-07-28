@@ -461,9 +461,9 @@ async fn reassert_voice_grants_on_join(
     room_name: &str,
     identity: &str,
 ) -> ReassertOutcome {
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+    if state.deps.protocol.sfu.is_none() {
         return ReassertOutcome::Handled;
-    };
+    }
     let Ok(full_jid) = identity.parse::<FullJid>() else {
         // Permanent: retrying cannot make this parse.
         warn!(
@@ -481,89 +481,179 @@ async fn reassert_voice_grants_on_join(
     let Ok(room_jid) = room_name.parse::<BareJid>() else {
         return ReassertOutcome::Handled;
     };
-    let actor =
-        match crate::server::routes::websocket::get_room_actor_result(state, &room_jid).await {
-            Ok(Some(actor)) => actor,
-            Ok(None) => {
-                // `GetRoom` only consults THIS process's room map, so a
-                // room claimed by another cluster node also answers
-                // `Ok(None)`. Webhooks arrive through one load-balanced
-                // URL across replicas, so this is the common case, NOT
-                // evidence that the participant is unauthorized —
-                // evicting here would eject legitimate occupants from
-                // roughly every join that lands on a non-owning node.
-                // Absence of a local actor means "cannot determine",
-                // which is exactly the `Err` case below.
-                warn!(
-                    room = %room_jid,
-                    user = %full_jid.to_bare(),
-                    "no local room actor on this node; media grants for this join \
-                     will converge on the owning node's reconciliation pass",
-                );
-                return ReassertOutcome::UnenforceableHere;
-            }
-            Err(error) => {
-                // The room lives elsewhere or the lookup failed, so this
-                // node cannot resolve the occupant's role. Deliberately
-                // NOT an eviction — the participant is probably
-                // legitimate and we simply cannot see the room — but a
-                // stale token goes unenforced on this path, so it must
-                // be visible.
-                warn!(
-                    room = %room_jid,
-                    user = %full_jid.to_bare(),
-                    error = %error,
-                    "could not resolve MUC voice on participant join; \
-                     asking LiveKit to retry",
-                );
-                return ReassertOutcome::RetryableFailure;
-            }
-        };
-    match actor
-        .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
-            jid: full_jid.clone(),
-        })
-        .await
-    {
-        Ok(Some(voice)) => {
-            debug!(
-                room = %room_jid,
-                user = %full_jid.to_bare(),
-                "re-asserting SFU media grants from current MUC voice on participant join",
-            );
-            crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_via_sfu(
-                sfu, &room_jid, &full_jid, voice,
-            );
-            ReassertOutcome::Handled
+    use crate::server::routes::websocket::muc_call_sfu::{
+        enforce_current_voice_grants, GrantEnforcement,
+    };
+    match enforce_current_voice_grants(state, &room_jid, &full_jid).await {
+        GrantEnforcement::Applied
+        | GrantEnforcement::EvictedNonOccupant
+        | GrantEnforcement::SfuNotConfigured => ReassertOutcome::Handled,
+        GrantEnforcement::NoLocalRoomActor => {
+            // `GetRoom` only consults THIS process's room map, so a
+            // room claimed by another cluster node also answers
+            // `Ok(None)`. Webhooks arrive through one load-balanced
+            // URL across replicas, so this is the common case, NOT
+            // evidence that the participant is unauthorized —
+            // evicting here would eject legitimate occupants from
+            // roughly every join that lands on a non-owning node.
+            // Absence of a local actor means "cannot determine"
+            // locally; #1594 routes the re-assert to the room's claim
+            // owner instead.
+            reassert_on_claim_owner(state, &room_jid, &full_jid).await
         }
-        Ok(None) => {
-            // A LOCAL room actor answered, so it owns this room and its
-            // occupant set is authoritative: this participant joined the
-            // SFU room while not being an occupant of the MUC.
-            // Occupancy is the precondition for call participation, so
-            // this is a stale-token join and must end. (Contrast the
-            // absent-actor case above, which proves nothing.)
+        GrantEnforcement::LookupFailed => {
+            // The lookup failed transiently, so this node could not
+            // resolve the occupant's role. Deliberately NOT an
+            // eviction — the participant is probably legitimate — but
+            // a stale token goes unenforced on this path, so LiveKit
+            // is asked to retry.
             warn!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
-                "LiveKit participant is not a MUC occupant; evicting from the call",
+                "could not resolve MUC voice on participant join; \
+                 asking LiveKit to retry",
             );
-            crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
-                sfu, &room_jid, &full_jid,
-            );
-            ReassertOutcome::Handled
+            ReassertOutcome::RetryableFailure
+        }
+    }
+}
+
+/// Fallback when the cross-node re-assert cannot even be attempted
+/// (no clustering, room unclaimed, or the claim store is unreadable):
+/// acknowledge the delivery and leave convergence to the owning
+/// node's reconciliation pass, exactly the pre-#1594 behavior.
+fn converge_on_reconcile(room_jid: &BareJid, full_jid: &FullJid) -> ReassertOutcome {
+    warn!(
+        room = %room_jid,
+        user = %full_jid.to_bare(),
+        "no local room actor on this node; media grants for this join \
+         will converge on the owning node's reconciliation pass",
+    );
+    ReassertOutcome::UnenforceableHere
+}
+
+/// #1594: this node has no room actor, so route the re-assert to the
+/// replica holding the room's claim instead of waiting for its
+/// reconciliation tick. Every path that cannot reach a fresh foreign
+/// owner degrades to [`converge_on_reconcile`]; failures where a
+/// LiveKit retry could plausibly land after the cluster settles map
+/// to [`ReassertOutcome::RetryableFailure`].
+#[cfg(feature = "clustering")]
+async fn reassert_on_claim_owner(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+) -> ReassertOutcome {
+    use crate::clustering::relay::{RelayHandle, RelayReassertMediaGrantsReply};
+    use crate::clustering::NodeId;
+    use waddle_xmpp::ownership::{Entity, EntityType};
+
+    let handles = &state.deps.app_state.clustering_claims;
+    let (Some((claim_store, node_identity)), Some(stop_token)) =
+        (handles.claim_pair(), handles.stop_token.clone())
+    else {
+        return converge_on_reconcile(room_jid, full_jid);
+    };
+    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+    let snapshot = match claim_store.current_claim(&entity).await {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            // Unclaimed room: nobody holds an authoritative occupant
+            // set, so there is no owner to ask and nothing a retry
+            // would reach.
+            return converge_on_reconcile(room_jid, full_jid);
         }
         Err(error) => {
             warn!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
                 error = %error,
-                "MUC voice lookup failed on participant join; \
+                "room claim lookup failed on participant join; \
+                 asking LiveKit to retry",
+            );
+            return ReassertOutcome::RetryableFailure;
+        }
+    };
+    if !snapshot.owner_lease_fresh {
+        // The claim's owner stopped renewing its node lease. Relaying
+        // to a possibly-dead node would just time out, and how long
+        // until another node steals the claim is unbounded — don't
+        // burn LiveKit's bounded retries on it.
+        return converge_on_reconcile(room_jid, full_jid);
+    }
+    if snapshot.owner == node_identity.current() {
+        // This node owns the claim but has no actor — a startup or
+        // teardown race. The local reconciliation pass covers it.
+        return converge_on_reconcile(room_jid, full_jid);
+    }
+    let mut relay = RelayHandle::new(
+        NodeId::new(snapshot.owner.node_id.clone()),
+        stop_token.clone(),
+    );
+    match relay
+        .reassert_media_grants(room_jid.clone(), full_jid.clone())
+        .await
+    {
+        Ok(RelayReassertMediaGrantsReply::Applied) => {
+            debug!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                owner = %snapshot.owner.node_id,
+                "media grants re-asserted on the room's claim owner",
+            );
+            ReassertOutcome::Handled
+        }
+        Ok(RelayReassertMediaGrantsReply::NotOccupantEvicted) => {
+            // The owner's actor answered authoritatively and evicted;
+            // its own warn line carries the details.
+            ReassertOutcome::Handled
+        }
+        Ok(RelayReassertMediaGrantsReply::NotOwner) => {
+            // The claim moved between our read and the ask (or the
+            // owner's actor is mid-(re)spawn). A retry re-resolves the
+            // claim and reaches the new owner.
+            warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                owner = %snapshot.owner.node_id,
+                "room claim owner had no local room actor; \
+                 asking LiveKit to retry",
+            );
+            ReassertOutcome::RetryableFailure
+        }
+        Ok(RelayReassertMediaGrantsReply::Unavailable) => {
+            warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                owner = %snapshot.owner.node_id,
+                "room claim owner could not re-assert media grants; \
+                 asking LiveKit to retry",
+            );
+            ReassertOutcome::RetryableFailure
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                owner = %snapshot.owner.node_id,
+                error = %error,
+                "cross-node media grant re-assert failed; \
                  asking LiveKit to retry",
             );
             ReassertOutcome::RetryableFailure
         }
     }
+}
+
+/// Without the `clustering` feature there is no relay to route
+/// through; keep the pre-#1594 acknowledge-and-reconcile behavior.
+#[cfg(not(feature = "clustering"))]
+async fn reassert_on_claim_owner(
+    _state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+) -> ReassertOutcome {
+    converge_on_reconcile(room_jid, full_jid)
 }
 
 async fn process_participant_left_for_identity(
@@ -988,6 +1078,228 @@ mod tests {
         // The oldest entry should now be evicted, so re-observing it
         // returns "fresh".
         assert!(seen.observe(Some("EV_0")));
+    }
+
+    /// Cross-node seam (#1594): the shared enforcement helper must
+    /// distinguish "no actor in this process" from every authoritative
+    /// answer, because the webhook forwards exactly that case to the
+    /// room's claim owner. It must neither push grants nor evict on
+    /// absence — absence is "cannot determine", not authorization
+    /// evidence.
+    #[tokio::test]
+    async fn grant_enforcement_reports_missing_local_room_actor_without_side_effects() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid: BareJid = "claimed-elsewhere@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
+
+        let outcome = crate::server::routes::websocket::muc_call_sfu::enforce_current_voice_grants(
+            state.as_ref(),
+            &room_jid,
+            &full_jid,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            crate::server::routes::websocket::muc_call_sfu::GrantEnforcement::NoLocalRoomActor
+        );
+        assert!(
+            recorder.update_snapshot().is_empty(),
+            "no grants may be pushed without an authoritative occupant answer"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "an absent local actor must never evict"
+        );
+    }
+
+    /// The owner-side executor for a relayed re-assert reuses this
+    /// helper, so it must push the seated occupant's voice-derived
+    /// grants exactly like the same-node webhook path.
+    #[tokio::test]
+    async fn grant_enforcement_pushes_grants_for_seated_occupant() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let session = crate::server::routes::websocket::tests::create_test_server_owner_session(
+            state.as_ref(),
+            "alice",
+        )
+        .await;
+        let room_jid: BareJid = "grants-here@muc.example.com".parse().expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+
+        let outcome = crate::server::routes::websocket::muc_call_sfu::enforce_current_voice_grants(
+            state.as_ref(),
+            &room_jid,
+            &alice,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            crate::server::routes::websocket::muc_call_sfu::GrantEnforcement::Applied
+        );
+        let updates = recorder.update_snapshot();
+        assert_eq!(updates.len(), 1, "exactly one grant push expected");
+        assert_eq!(updates[0].0.as_str(), room_jid.to_string());
+        assert_eq!(updates[0].1.as_livekit_identity(), alice.to_string());
+        assert!(
+            !updates[0].2.is_listen_only(),
+            "a seated occupant with voice must not be downgraded to listen-only"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "occupants are never evicted"
+        );
+    }
+
+    /// A LOCAL actor answering "not an occupant" is authoritative, so
+    /// the shared helper evicts — same contract as the pre-#1594
+    /// webhook path, now also reachable via the relay.
+    #[tokio::test]
+    async fn grant_enforcement_evicts_non_occupant_when_local_actor_is_authoritative() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let session = crate::server::routes::websocket::tests::create_test_server_owner_session(
+            state.as_ref(),
+            "alice",
+        )
+        .await;
+        let room_jid: BareJid = "evictions@muc.example.com".parse().expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+        let bob: FullJid = "bob@example.com/phone".parse().expect("full jid");
+
+        let outcome = crate::server::routes::websocket::muc_call_sfu::enforce_current_voice_grants(
+            state.as_ref(),
+            &room_jid,
+            &bob,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            crate::server::routes::websocket::muc_call_sfu::GrantEnforcement::EvictedNonOccupant
+        );
+        assert!(
+            recorder.update_snapshot().is_empty(),
+            "a non-occupant gets evicted, never granted"
+        );
+        let evictions = recorder.snapshot();
+        assert_eq!(evictions.len(), 1);
+        assert_eq!(evictions[0].1.as_livekit_identity(), bob.to_string());
+    }
+
+    /// #1594 decision tests: what `reassert_voice_grants_on_join` does
+    /// when this node has no room actor, by claim state. The foreign
+    /// fresh-owner happy path needs a second live node and is covered
+    /// by the clustering e2e suite.
+    #[cfg(feature = "clustering")]
+    mod cross_node {
+        use super::*;
+        use crate::clustering::ClusteringHandles;
+        use crate::server::routes::websocket::tests::create_test_websocket_state_with_sfu_and_clustering;
+        use tokio_util::sync::CancellationToken;
+        use waddle_xmpp::ownership::{
+            ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+        };
+
+        fn handles_with(store: Arc<InProcessClaimStore>, me: NodeIdentity) -> ClusteringHandles {
+            ClusteringHandles {
+                claim_store: Some(store),
+                node_identity: Some(SharedNodeIdentity::new(me)),
+                stop_token: Some(CancellationToken::new()),
+                ..ClusteringHandles::default()
+            }
+        }
+
+        /// An unclaimed room has no authoritative occupant set anywhere,
+        /// so there is no owner to ask: acknowledge and leave it to the
+        /// reconciler, exactly the pre-#1594 behavior.
+        #[tokio::test]
+        async fn unclaimed_room_falls_back_to_reconcile() {
+            let recorder = Arc::new(RecordingSfu::default());
+            let me = NodeIdentity::new("node-self", "epoch-1");
+            let state = create_test_websocket_state_with_sfu_and_clustering(
+                recorder.clone(),
+                handles_with(Arc::new(InProcessClaimStore::new()), me),
+            )
+            .await;
+
+            let outcome = reassert_voice_grants_on_join(
+                state.as_ref(),
+                "unclaimed@muc.example.com",
+                "alice@example.com/web",
+            )
+            .await;
+
+            assert_eq!(outcome, ReassertOutcome::UnenforceableHere);
+            assert!(recorder.update_snapshot().is_empty());
+            assert!(
+                recorder.snapshot().is_empty(),
+                "must never evict on absence"
+            );
+        }
+
+        /// A claim owned by THIS node with no local actor is a spawn or
+        /// teardown race; the local reconciliation pass covers it, so
+        /// the delivery is acknowledged rather than bounced to a relay
+        /// ask against ourselves.
+        #[tokio::test]
+        async fn self_owned_claim_without_actor_falls_back_to_reconcile() {
+            let recorder = Arc::new(RecordingSfu::default());
+            let me = NodeIdentity::new("node-self", "epoch-1");
+            let store = Arc::new(InProcessClaimStore::new());
+            let room_jid: BareJid = "self-claimed@muc.example.com".parse().expect("room jid");
+            store
+                .acquire(
+                    &Entity::new(EntityType::RoomActor, room_jid.to_string()),
+                    &me,
+                )
+                .await
+                .expect("acquire room claim");
+            let state = create_test_websocket_state_with_sfu_and_clustering(
+                recorder.clone(),
+                handles_with(store, me),
+            )
+            .await;
+
+            let outcome = reassert_voice_grants_on_join(
+                state.as_ref(),
+                "self-claimed@muc.example.com",
+                "alice@example.com/web",
+            )
+            .await;
+
+            assert_eq!(outcome, ReassertOutcome::UnenforceableHere);
+            assert!(recorder.update_snapshot().is_empty());
+            assert!(
+                recorder.snapshot().is_empty(),
+                "must never evict on absence"
+            );
+        }
     }
 
     #[tokio::test]

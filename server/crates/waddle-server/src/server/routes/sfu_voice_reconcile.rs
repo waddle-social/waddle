@@ -38,12 +38,13 @@ const ROOM_ACTOR_ASK_TIMEOUT: std::time::Duration = waddle_xmpp::muc::ROOM_REGIS
 ///
 /// This is the backstop that makes stale-token enforcement independent
 /// of which replica received a `participant_joined` webhook. The webhook
-/// path is the fast path, and it asks LiveKit to retry when it lands on
-/// a node that cannot resolve the room — but retries are finite and all
-/// of them could miss the owner. Because a room actor is claimed by
-/// exactly one node, iterating locally-claimed rooms covers every room
-/// exactly once across the cluster, with no cross-node request and no
-/// new relay protocol.
+/// path is the fast path: since #1594 a webhook landing on a non-owning
+/// node relays the re-assert to the room's claim owner
+/// (`RelayReassertMediaGrants`), and asks LiveKit to retry on transient
+/// failures — but the relay needs a fresh claim and a reachable owner,
+/// and retries are finite. Because a room actor is claimed by exactly
+/// one node, iterating locally-claimed rooms covers every room exactly
+/// once across the cluster regardless of any of that.
 ///
 /// Whether a room has a call to converge is decided by asking the SFU
 /// itself (`SfuReconciler::live_participants`), NOT by

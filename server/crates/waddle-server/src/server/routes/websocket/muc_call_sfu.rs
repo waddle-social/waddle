@@ -121,6 +121,107 @@ pub(crate) fn converge_voice_changes_via_sfu(
     }
 }
 
+/// What [`enforce_current_voice_grants`] established about one live
+/// SFU participant's authorization, from THIS process's room map.
+///
+/// The distinction between [`Self::NoLocalRoomActor`] and every other
+/// variant is load-bearing for clustering (#1594): only a LOCAL room
+/// actor's answer is authoritative. An absent actor means "the room
+/// may be claimed by another replica", never "not an occupant" —
+/// treating absence as authorization evidence would evict legitimate
+/// occupants from roughly every join that lands on a non-owning node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantEnforcement {
+    /// The occupant's current voice was pushed to the SFU.
+    Applied,
+    /// A local (authoritative) actor answered "not an occupant"; the
+    /// participant was evicted from the call.
+    EvictedNonOccupant,
+    /// No room actor in this process — the claim may live on another
+    /// replica. No side effect was performed.
+    NoLocalRoomActor,
+    /// The registry or actor lookup failed transiently. No side effect
+    /// was performed; retrying may succeed.
+    LookupFailed,
+    /// This deployment has no SFU configured; there is nothing to
+    /// enforce against.
+    SfuNotConfigured,
+}
+
+/// Re-derive `full_jid`'s XEP-0045 voice from THIS process's room
+/// actor and converge their live SFU media grants with it — the
+/// shared enforcement core behind both the same-node
+/// `participant_joined` webhook path and the owner side of the #1594
+/// cross-node relay. Keeping both on one function is deliberate: the
+/// relayed path must not be able to diverge from the local one.
+///
+/// Side effects happen only on an authoritative answer: a seated
+/// occupant gets their voice-derived grants pushed, a confirmed
+/// non-occupant is evicted, and every other outcome performs nothing.
+pub(crate) async fn enforce_current_voice_grants(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+) -> GrantEnforcement {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return GrantEnforcement::SfuNotConfigured;
+    };
+    let actor = match crate::server::routes::websocket::get_room_actor_result(state, room_jid).await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return GrantEnforcement::NoLocalRoomActor,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                error = %error,
+                "could not resolve MUC voice for a live call participant",
+            );
+            return GrantEnforcement::LookupFailed;
+        }
+    };
+    match actor
+        .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
+            jid: full_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(voice)) => {
+            tracing::debug!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "re-asserting SFU media grants from current MUC voice",
+            );
+            apply_voice_grants_via_sfu(sfu, room_jid, full_jid, voice);
+            GrantEnforcement::Applied
+        }
+        Ok(None) => {
+            // A LOCAL room actor answered, so it owns this room and its
+            // occupant set is authoritative: this participant is in the
+            // SFU room while not being an occupant of the MUC.
+            // Occupancy is the precondition for call participation, so
+            // this is a stale-token join and must end. (Contrast the
+            // absent-actor case above, which proves nothing.)
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "LiveKit participant is not a MUC occupant; evicting from the call",
+            );
+            unregister_participant_via_sfu(sfu, room_jid, full_jid);
+            GrantEnforcement::EvictedNonOccupant
+        }
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                error = %error,
+                "MUC voice lookup failed for a live call participant",
+            );
+            GrantEnforcement::LookupFailed
+        }
+    }
+}
+
 /// Push every occupant's current XEP-0045 voice to the SFU after a
 /// room-configuration change flipped `moderated`.
 ///

@@ -4988,6 +4988,66 @@ fn ask_error_maybe_committed(error: &RelayAskError) -> bool {
     )
 }
 
+/// Owner-side outcome of a #1594 cross-node media-grant re-assert,
+/// executed against THIS node's room map. The relay actor maps these
+/// onto [`super::relay::RelayReassertMediaGrantsReply`] — kept as a
+/// separate enum so the bridge (like `ResumeStealBridge`'s
+/// `LocalForcedDetachOutcome`) does not depend on relay wire types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalMediaGrantReassertion {
+    /// A local room actor answered with the occupant's voice and the
+    /// grants were pushed to the SFU.
+    Applied,
+    /// A local room actor answered authoritatively that the
+    /// participant is not an occupant; they were evicted from the call.
+    EvictedNonOccupant,
+    /// No room actor lives in this process — the asker's claim read is
+    /// stale or the actor is mid-(re)spawn. No side effect performed.
+    NoLocalRoomActor,
+    /// This node cannot execute the re-assert right now (services or
+    /// `WebSocketState` unavailable, or the local lookup flaked). No
+    /// authorization conclusion may be drawn from this.
+    Unavailable,
+}
+
+impl OrderedRelayDeliveryBridge {
+    /// Execute a relayed `participant_joined` grant re-assert on this
+    /// node — the receiving side of #1594. Terminal by design: this
+    /// never re-relays, so a stale claim read on the asker cannot
+    /// bounce a webhook around the cluster; a `NoLocalRoomActor`
+    /// answer sends the asker back to LiveKit's retry (which
+    /// re-resolves the claim).
+    ///
+    /// Reuses the exact same enforcement core as the same-node webhook
+    /// path (`muc_call_sfu::enforce_current_voice_grants`), so relayed
+    /// and local enforcement cannot diverge.
+    pub async fn reassert_media_grants_local(
+        &self,
+        room_jid: &jid::BareJid,
+        participant: &jid::FullJid,
+    ) -> LocalMediaGrantReassertion {
+        use crate::server::routes::websocket::muc_call_sfu::{
+            enforce_current_voice_grants, GrantEnforcement,
+        };
+        let Some(services) = self.services.get().cloned() else {
+            return LocalMediaGrantReassertion::Unavailable;
+        };
+        let Some(state) = services.web_socket_state.upgrade() else {
+            return LocalMediaGrantReassertion::Unavailable;
+        };
+        match enforce_current_voice_grants(state.as_ref(), room_jid, participant).await {
+            GrantEnforcement::Applied => LocalMediaGrantReassertion::Applied,
+            GrantEnforcement::EvictedNonOccupant => LocalMediaGrantReassertion::EvictedNonOccupant,
+            GrantEnforcement::NoLocalRoomActor => LocalMediaGrantReassertion::NoLocalRoomActor,
+            // An SFU-less node cannot push grants, and a flaked lookup
+            // proves nothing — both are "cannot execute here".
+            GrantEnforcement::LookupFailed | GrantEnforcement::SfuNotConfigured => {
+                LocalMediaGrantReassertion::Unavailable
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5341,6 +5401,35 @@ mod tests {
             blocking_storage,
             web_socket_state: Weak::new(),
         }
+    }
+
+    /// #1594: the owner-side re-assert executor must degrade to
+    /// `Unavailable` when the bridge is wired but this node's
+    /// `WebSocketState` has been dropped — the asker maps that to a
+    /// LiveKit retry, never to an authorization decision.
+    #[tokio::test]
+    async fn reassert_media_grants_local_without_live_state_is_unavailable() {
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(
+            services_with_claims(
+                origin_identity(),
+                receiver_identity(),
+                receiver_identity(),
+                test_peer_id(),
+            )
+            .await,
+        ));
+
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room jid");
+        let participant: jid::FullJid = "alice@example.com/web".parse().expect("participant jid");
+        let outcome = bridge
+            .reassert_media_grants_local(&room, &participant)
+            .await;
+
+        assert_eq!(outcome, LocalMediaGrantReassertion::Unavailable);
     }
 
     #[tokio::test]
