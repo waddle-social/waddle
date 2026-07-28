@@ -82,17 +82,24 @@ fn xep0198_failed_accepts_only_the_schema_stanza_error_group() {
         .append(
             Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
         )
-        .append(
-            Element::builder("retry-after", "urn:waddle:diagnostics")
-                .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
-                .build(),
-        )
         .build();
 
     assert_eq!(
         SmState::parse_inbound_control(&failed),
         Ok(SmInboundControl::Failed { h: None }),
-        "XEP-0198's schema permits the condition followed by one application condition",
+        "XEP-0198 permits one recognized stanza condition",
+    );
+
+    let application_child = Element::builder("failed", "urn:xmpp:sm:3")
+        .append(
+            Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
+        )
+        .append(Element::builder("retry-after", "urn:waddle:diagnostics").build())
+        .build();
+    assert_eq!(
+        SmState::parse_inbound_control(&application_child),
+        Err(InvalidSmInboundControl),
+        "XEP-0198 failed does not admit an application-defined child",
     );
 
     let text = Element::builder("failed", "urn:xmpp:sm:3")

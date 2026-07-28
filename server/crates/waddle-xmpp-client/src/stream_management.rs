@@ -699,10 +699,10 @@ fn parse_xsd_boolean(value: &str) -> Result<bool, InvalidSmInboundControl> {
 /// Validate the optional `err:stanzaErrorGroup` accepted by XEP-0198
 /// `<failed/>`.
 ///
-/// XEP-0198's schema permits one optional `err:stanzaErrorGroup`. That group
-/// starts with exactly one RFC 6120 stanza condition and can include at most
-/// one non-stanzas application condition. It does not include `err:text`;
-/// `err:text` is a separate extension in the schemas that use it.
+/// XEP-0198's `<failed/>` payload is an optional RFC 6120
+/// `err:stanzaErrorGroup`: either absent, or exactly one recognized stanza
+/// condition. It does not admit application-defined children or `err:text`.
+/// The latter is a separate extension in schemas that explicitly include it.
 fn has_optional_stanza_error_group(element: &Element) -> bool {
     let mut nodes = element.nodes().filter(|node| !is_xml_whitespace_node(node));
     let Some(node) = nodes.next() else {
@@ -716,23 +716,7 @@ fn has_optional_stanza_error_group(element: &Element) -> bool {
         return false;
     }
 
-    let mut saw_application_condition = false;
-    for node in nodes {
-        let Some(child) = node.as_element() else {
-            return false;
-        };
-
-        if child.ns() == NS_STANZA_ERRORS && child.name() == "text" {
-            return false;
-        }
-
-        if saw_application_condition || !is_application_specific_stanza_error_condition(child) {
-            return false;
-        }
-        saw_application_condition = true;
-    }
-
-    true
+    nodes.next().is_none()
 }
 
 fn is_stanza_error_condition(condition: &Element) -> bool {
@@ -744,11 +728,6 @@ fn is_stanza_error_condition(condition: &Element) -> bool {
         } else {
             condition.nodes().next().is_none()
         }
-}
-
-fn is_application_specific_stanza_error_condition(condition: &Element) -> bool {
-    let namespace = condition.ns();
-    !namespace.is_empty() && namespace != NS_STANZA_ERRORS
 }
 
 fn trim_xml_whitespace(value: &str) -> &str {
@@ -1002,20 +981,6 @@ mod tests {
             Ok(SmInboundControl::Failed { h: None })
         );
 
-        let application_condition = Element::builder("retry-after", "urn:waddle:diagnostics")
-            .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
-            .append("later")
-            .build();
-        assert_eq!(
-            SmState::parse_inbound_control(
-                &Element::builder("failed", NS_SM)
-                    .append(Element::builder("service-unavailable", NS_STANZA_ERRORS).build())
-                    .append(application_condition)
-                    .build()
-            ),
-            Ok(SmInboundControl::Failed { h: None })
-        );
-
         let mut redirect = Element::builder("redirect", NS_STANZA_ERRORS).build();
         redirect.append_text_node("xmpp:replacement.example");
         assert_eq!(
@@ -1046,6 +1011,10 @@ mod tests {
             Element::builder("failed", NS_SM)
                 .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
                 .append(Element::builder("service-unavailable", NS_STANZA_ERRORS).build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(Element::builder("retry-after", "urn:waddle:diagnostics").build())
                 .build(),
             Element::builder("failed", NS_SM)
                 .append(
