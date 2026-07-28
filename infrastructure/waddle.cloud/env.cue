@@ -139,6 +139,10 @@ schema.#Project & {
 		// annotation. Flux reconciliation is asynchronous, so this marks the
 		// rollout handoff rather than claiming the pods are already ready.
 		// Sequenced after both pushes so a failed push never gets a marker.
+		// The annotation is best-effort telemetry: transient Grafana errors
+		// (5xx/429, e.g. a cold-starting Cloud instance, or transport
+		// failures) are retried and then tolerated, while 4xx responses
+		// still fail the task because they indicate misconfiguration.
 		deployAnnotation: schema.#Task & {
 			dependsOn: [helmPush, gitopsPush]
 			command: "bash"
@@ -151,24 +155,36 @@ schema.#Project & {
 					timestamp_ms="$(( $(date +%s) * 1000 ))"
 					annotation_response="$(mktemp)"
 					trap 'rm -f "${annotation_response}"' EXIT
-					annotation_status="$(jq -n \
+					annotation_payload="$(jq -n \
 					  --arg text "waddle infra deploy ${revision}" \
 					  --argjson time "${timestamp_ms}" \
-					  '{text: $text, tags: ["deploy", "waddle"], time: $time}' \
-					  | curl -sS -o "${annotation_response}" -w '%{http_code}' \
+					  '{text: $text, tags: ["deploy", "waddle"], time: $time}')"
+					for attempt in 1 2 3 4 5; do
+					  annotation_status="$(curl -sS -o "${annotation_response}" -w '%{http_code}' \
 					      -X POST "${grafana_url}/api/annotations" \
 					      -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
 					      -H 'Content-Type: application/json' \
-					      --data-binary @-)"
-					case "${annotation_status}" in
-					  2??) ;;
-					  *)
-					    echo "Grafana annotation creation failed with HTTP ${annotation_status}:" >&2
-					    cat "${annotation_response}" >&2
-					    exit 1
-					    ;;
-					esac
-					echo "Grafana deploy annotation posted for ${revision}."
+					      --data-binary "${annotation_payload}")" || annotation_status="000"
+					  case "${annotation_status}" in
+					    2??)
+					      echo "Grafana deploy annotation posted for ${revision}."
+					      exit 0
+					      ;;
+					    5?? | 429 | 000)
+					      echo "Grafana annotation attempt ${attempt} got HTTP ${annotation_status}:" >&2
+					      cat "${annotation_response}" >&2 || true
+					      if [ "${attempt}" -lt 5 ]; then
+					        sleep "$(( attempt * 10 ))"
+					      fi
+					      ;;
+					    *)
+					      echo "Grafana annotation creation failed with HTTP ${annotation_status}:" >&2
+					      cat "${annotation_response}" >&2
+					      exit 1
+					      ;;
+					  esac
+					done
+					echo "Grafana annotation still unavailable after 5 attempts; skipping deploy marker for ${revision}." >&2
 				"""#]
 			inputs: ["gitops/**", "charts/**", "env.cue"]
 		}
