@@ -6,7 +6,10 @@
 
 use chrono::{TimeZone, Utc};
 use minidom::Element;
-use waddle_xmpp_client::{stream_management::SmState, SmResumeState, UnhandledOutboundEntry};
+use waddle_xmpp_client::{
+    SmResumeState, UnhandledOutboundEntry,
+    stream_management::{InvalidSmInboundControl, SmInboundControl, SmState},
+};
 
 fn persisted(xml: &str, second: u32) -> UnhandledOutboundEntry {
     UnhandledOutboundEntry::try_new(
@@ -71,4 +74,51 @@ fn xep0198_rejects_stream_controls_and_non_client_roots_from_durable_replay() {
             "{xml} is not a countable XEP-0198 replay stanza",
         );
     }
+}
+
+#[test]
+fn xep0198_failed_accepts_rfc6120_stanza_error_diagnostics_in_order() {
+    let failed = Element::builder("failed", "urn:xmpp:sm:3")
+        .append(
+            Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
+        )
+        .append(
+            Element::builder("text", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                .attr_ns(
+                    minidom::rxml::Namespace::XML,
+                    minidom::rxml::xml_ncname!("lang").to_owned(),
+                    "en",
+                )
+                .append("Resume on a new stream")
+                .build(),
+        )
+        .append(
+            Element::builder("retry-after", "urn:waddle:diagnostics")
+                .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
+                .build(),
+        )
+        .build();
+
+    assert_eq!(
+        SmState::parse_inbound_control(&failed),
+        Ok(SmInboundControl::Failed { h: None }),
+        "XEP-0198 §4.2 reuses the RFC 6120 stanza error group",
+    );
+
+    let out_of_order = Element::builder("failed", "urn:xmpp:sm:3")
+        .append(
+            Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
+        )
+        .append(Element::builder("retry-after", "urn:waddle:diagnostics").build())
+        .append(
+            Element::builder("text", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                .append("late")
+                .build(),
+        )
+        .build();
+    assert_eq!(
+        SmState::parse_inbound_control(&out_of_order),
+        Err(InvalidSmInboundControl),
+        "the RFC 6120 group requires text before an application condition",
+    );
 }

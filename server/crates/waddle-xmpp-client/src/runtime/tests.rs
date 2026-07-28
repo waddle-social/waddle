@@ -922,7 +922,7 @@ fn runtime_rejects_resumed_with_mismatched_previd() {
 }
 
 #[test]
-fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
+fn runtime_falls_back_to_resource_binding_when_sm_resume_fails_with_diagnostics() {
     let mut config = config();
     config.session.stream_management.resume_state =
         Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
@@ -938,6 +938,25 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("failed", crate::stream_management::NS_SM)
                 .attr(minidom::rxml::xml_ncname!("h").to_owned(), "12")
+                .append(
+                    Element::builder("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                        .build(),
+                )
+                .append(
+                    Element::builder("text", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                        .attr_ns(
+                            minidom::rxml::Namespace::XML,
+                            minidom::rxml::xml_ncname!("lang").to_owned(),
+                            "en",
+                        )
+                        .append("The server expired the previous stream")
+                        .build(),
+                )
+                .append(
+                    Element::builder("retry-after", "urn:waddle:diagnostics")
+                        .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
+                        .build(),
+                )
                 .build(),
         )))
         .unwrap();
@@ -958,6 +977,16 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
         ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Element(element)
         )) if element.name() == "iq" && element.get_child("bind", NS_BIND).is_some()
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "error"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
     )));
 }
 

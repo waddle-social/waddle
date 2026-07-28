@@ -643,7 +643,7 @@ impl SmState {
             }
             "failed"
                 if has_only_attributes(element, &["h"])
-                    && has_optional_stanza_error_condition(element) =>
+                    && has_optional_stanza_error_group(element) =>
             {
                 let h = match element.attr("h") {
                     Some(value) => Some(parse_exact_u32(value).ok_or(InvalidSmInboundControl)?),
@@ -687,23 +687,72 @@ fn parse_xsd_boolean(value: &str) -> Result<bool, InvalidSmInboundControl> {
     }
 }
 
-fn has_optional_stanza_error_condition(element: &Element) -> bool {
+/// Validate the optional `err:stanzaErrorGroup` accepted by XEP-0198
+/// `<failed/>`.
+///
+/// XEP-0198 §4.2 deliberately reuses RFC 6120's stanza-error grammar.  Its
+/// condition comes first; a human-readable `err:text` and one opaque
+/// application-specific condition can follow.  The runtime only needs the
+/// typed `Failed` control, but accepting the complete legal group prevents a
+/// conforming peer's diagnostics from being mistaken for a stream violation.
+fn has_optional_stanza_error_group(element: &Element) -> bool {
     let mut nodes = element.nodes().filter(|node| !is_xml_whitespace_node(node));
     let Some(node) = nodes.next() else {
         return true;
     };
-    if nodes.next().is_some() {
-        return false;
-    }
+
     let Some(condition) = node.as_element() else {
         return false;
     };
+    if !is_stanza_error_condition(condition) {
+        return false;
+    }
 
+    let mut saw_text = false;
+    let mut saw_application_condition = false;
+    for node in nodes {
+        let Some(child) = node.as_element() else {
+            return false;
+        };
+
+        if child.ns() == NS_STANZA_ERRORS && child.name() == "text" {
+            if saw_text || saw_application_condition || !is_stanza_error_text(child) {
+                return false;
+            }
+            saw_text = true;
+            continue;
+        }
+
+        if saw_application_condition || !is_application_specific_stanza_error_condition(child) {
+            return false;
+        }
+        saw_application_condition = true;
+    }
+
+    true
+}
+
+fn is_stanza_error_condition(condition: &Element) -> bool {
     condition.ns() == NS_STANZA_ERRORS
-        && condition.children().next().is_none()
         && condition.attrs().is_empty()
         && is_standard_stanza_error_condition(condition.name())
-        && (is_text_stanza_error_condition(condition.name()) || condition.nodes().next().is_none())
+        && if is_text_stanza_error_condition(condition.name()) {
+            condition.nodes().all(|node| node.as_text().is_some())
+        } else {
+            condition.nodes().next().is_none()
+        }
+}
+
+fn is_stanza_error_text(text: &Element) -> bool {
+    text.attrs().iter().all(|((namespace, name), _)| {
+        namespace == &minidom::rxml::Namespace::XML && name.as_str() == "lang"
+    }) && text.nodes().next().is_some()
+        && text.nodes().all(|node| node.as_text().is_some())
+}
+
+fn is_application_specific_stanza_error_condition(condition: &Element) -> bool {
+    let namespace = condition.ns();
+    !namespace.is_empty() && namespace != NS_STANZA_ERRORS
 }
 
 fn trim_xml_whitespace(value: &str) -> &str {
@@ -946,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_inbound_control_only_allows_one_standard_failed_condition() {
+    fn parse_inbound_control_accepts_the_xep0198_stanza_error_group() {
         let condition = Element::builder("item-not-found", NS_STANZA_ERRORS).build();
         let mut valid = Element::builder("failed", NS_SM).build();
         valid.append_text_node("\n  ");
@@ -954,6 +1003,54 @@ mod tests {
         valid.append_text_node("\n");
         assert_eq!(
             SmState::parse_inbound_control(&valid),
+            Ok(SmInboundControl::Failed { h: None })
+        );
+
+        let text = Element::builder("text", NS_STANZA_ERRORS)
+            .attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                "en",
+            )
+            .append("The previous stream no longer exists")
+            .build();
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("failed", NS_SM)
+                    .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                    .append(text)
+                    .build()
+            ),
+            Ok(SmInboundControl::Failed { h: None })
+        );
+
+        let application_condition = Element::builder("retry-after", "urn:waddle:diagnostics")
+            .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
+            .append("later")
+            .build();
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("failed", NS_SM)
+                    .append(Element::builder("service-unavailable", NS_STANZA_ERRORS).build())
+                    .append(application_condition)
+                    .build()
+            ),
+            Ok(SmInboundControl::Failed { h: None })
+        );
+
+        let text = Element::builder("text", NS_STANZA_ERRORS)
+            .append("Retry on a fresh stream")
+            .build();
+        let application_condition =
+            Element::builder("retry-after", "urn:waddle:diagnostics").build();
+        assert_eq!(
+            SmState::parse_inbound_control(
+                &Element::builder("failed", NS_SM)
+                    .append(Element::builder("resource-constraint", NS_STANZA_ERRORS).build())
+                    .append(text)
+                    .append(application_condition)
+                    .build()
+            ),
             Ok(SmInboundControl::Failed { h: None })
         );
 
@@ -983,6 +1080,75 @@ mod tests {
                 .build(),
             Element::builder("failed", NS_SM)
                 .append(Element::builder("custom", NS_STANZA_ERRORS).build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(Element::builder("service-unavailable", NS_STANZA_ERRORS).build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(
+                    Element::builder("text", NS_STANZA_ERRORS)
+                        .append("first")
+                        .build(),
+                )
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(Element::builder("retry-after", "urn:waddle:diagnostics").build())
+                .append(
+                    Element::builder("text", NS_STANZA_ERRORS)
+                        .append("late")
+                        .build(),
+                )
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(
+                    Element::builder("text", NS_STANZA_ERRORS)
+                        .append("one")
+                        .build(),
+                )
+                .append(
+                    Element::builder("text", NS_STANZA_ERRORS)
+                        .append("two")
+                        .build(),
+                )
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(Element::builder("retry-after", "urn:waddle:diagnostics").build())
+                .append(Element::builder("retry-after", "urn:waddle:diagnostics").build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(Element::builder("text", NS_STANZA_ERRORS).build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(Element::builder("application", "").build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("not-an-error", "urn:waddle:diagnostics").build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", "").build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(
+                    Element::builder("item-not-found", NS_STANZA_ERRORS)
+                        .append(Element::builder("detail", "urn:waddle:diagnostics").build())
+                        .build(),
+                )
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(
+                    Element::builder("text", NS_STANZA_ERRORS)
+                        .attr(minidom::rxml::xml_ncname!("lang").to_owned(), "en")
+                        .append("not xml:lang")
+                        .build(),
+                )
                 .build(),
         ] {
             assert_eq!(
