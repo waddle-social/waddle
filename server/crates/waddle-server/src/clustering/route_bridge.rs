@@ -958,7 +958,10 @@ impl OrderedRelayDeliveryBridge {
         };
         let channel = OrderedRelayChannel {
             origin: channel_origin,
-            recipient: OrderedRelayRecipient::Room(room_jid.clone()),
+            recipient: OrderedRelayRecipient::Room {
+                room: room_jid.clone(),
+                lane: kind.room_lane(),
+            },
             target_epoch: target_snapshot.claim_epoch,
         };
         let retry_channel = channel.clone();
@@ -2947,7 +2950,10 @@ impl OrderedRelayDeliveryBridge {
         };
         let channel = OrderedRelayChannel {
             origin: OrderedRelayOrigin::Entity(repair_origin_entity.clone()),
-            recipient: OrderedRelayRecipient::Room(room_jid.clone()),
+            recipient: OrderedRelayRecipient::Room {
+                room: room_jid.clone(),
+                lane: OrderedRelayMucProxyKind::JoinPresence.room_lane(),
+            },
             target_epoch: target_snapshot.claim_epoch,
         };
         let seed = RemoteDeliverySeed {
@@ -3196,7 +3202,7 @@ impl OrderedRelayDeliveryBridge {
                     prepared.is_iq,
                 )
                 .await;
-                self.apply_nack_channel_action(prepared.channel, channel_action)
+                self.apply_nack_channel_action(&prepared.envelope, channel_action)
                     .await;
                 let join_repair_allowed =
                     maybe_committed && !matches!(nack.reason, OrderedRelayNackReason::InFlight);
@@ -3399,13 +3405,21 @@ impl OrderedRelayDeliveryBridge {
 
     async fn apply_nack_channel_action(
         &self,
-        channel: OrderedRelayChannel,
+        envelope: &RemoteStanzaEnvelope,
         action: NackChannelAction,
     ) {
         match action {
-            NackChannelAction::Divert(reason) => self.divert_channel(channel, reason).await,
-            NackChannelAction::Forget => self.forget_channel(&channel).await,
+            NackChannelAction::Divert(reason) => {
+                self.divert_channel(envelope.channel.clone(), reason).await;
+            }
+            NackChannelAction::Forget => self.forget_channel(&envelope.channel).await,
             NackChannelAction::Keep => {}
+            NackChannelAction::Rollback => {
+                self.sender_state
+                    .lock()
+                    .await
+                    .rollback_unseen_envelope(envelope);
+            }
         }
     }
 }
@@ -4204,7 +4218,7 @@ fn relay_payload_target(
         OrderedRelayRecipient::FullJid(_) | OrderedRelayRecipient::BareJid(_) => {
             Err(OrderedRelayNackReason::ParseFailure)
         }
-        OrderedRelayRecipient::Room(_) => Err(OrderedRelayNackReason::ParseFailure),
+        OrderedRelayRecipient::Room { .. } => Err(OrderedRelayNackReason::ParseFailure),
     }
 }
 
@@ -4875,6 +4889,15 @@ async fn outcome_for_nack(
             NackChannelAction::Divert(diversion_reason_for_nack(nack)),
             false,
         ),
+        // #1597: sender-synthesized when the peer does not know the
+        // versioned ordered-relay message id. Provably uncommitted, so
+        // this one operation fails but the channel must not be
+        // poisoned: roll the sequence back and keep the channel.
+        OrderedRelayNackReason::UnsupportedEnvelope => (
+            Some(definite_no_effect_outcome(is_iq)),
+            NackChannelAction::Rollback,
+            false,
+        ),
     }
 }
 
@@ -4883,6 +4906,10 @@ enum NackChannelAction {
     Divert(OrderedRelayDiversionReason),
     Forget,
     Keep,
+    /// #1597: the envelope provably never reached the peer's handler
+    /// (versioned message id unknown there). Un-consume its sequence
+    /// and keep the channel — the opposite of a sticky diversion.
+    Rollback,
 }
 
 fn definite_no_effect_outcome(is_iq: bool) -> FullJidDeliveryOutcome {
@@ -4911,6 +4938,9 @@ fn diversion_reason_for_nack(nack: &OrderedRelayNack) -> OrderedRelayDiversionRe
     match &nack.reason {
         OrderedRelayNackReason::Gap { .. }
         | OrderedRelayNackReason::ParseFailure
+        // #1597: never diverted in practice (outcome_for_nack maps it
+        // to Rollback); parse-shaped if it ever is.
+        | OrderedRelayNackReason::UnsupportedEnvelope
         | OrderedRelayNackReason::Diverted(_) => OrderedRelayDiversionReason::OrderingGap,
         OrderedRelayNackReason::NotOwner { .. } => OrderedRelayDiversionReason::NotOwner,
         OrderedRelayNackReason::Unreachable | OrderedRelayNackReason::TargetUnavailable => {
@@ -6440,7 +6470,7 @@ mod tests {
         }
 
         bridge
-            .apply_nack_channel_action(channel.clone(), NackChannelAction::Forget)
+            .apply_nack_channel_action(&envelope(), NackChannelAction::Forget)
             .await;
 
         let refreshed_channel = OrderedRelayChannel {
@@ -6661,6 +6691,88 @@ mod tests {
         );
     }
 
+    /// #1597: an `UnsupportedEnvelope` NACK (an old peer that does not
+    /// know the versioned ordered-relay message id — provably no
+    /// handler ran) must roll back the unconsumed sequence and keep
+    /// the channel. No sticky diversion, and the next envelope on the
+    /// channel reuses the rolled-back sequence, so a mixed-version
+    /// window degrades to per-operation failures instead of silently
+    /// dropping the channel's later traffic.
+    #[tokio::test]
+    async fn unsupported_envelope_nack_rolls_back_and_keeps_the_channel() {
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        let channel = envelope().channel;
+        let allocated = bridge
+            .sender_state
+            .lock()
+            .await
+            .next_envelope(
+                NodeId::new(origin_identity().node_id),
+                channel.clone(),
+                OriginInboundSequence(1),
+                envelope_claims(1),
+                message_payload(),
+            )
+            .expect("fresh channel allocates");
+        assert_eq!(allocated.sequence, OrderedRelaySequence::FIRST);
+
+        let outcome = OrderedRelayDeliveryBridge::finish_prepared_delivery_result(
+            Arc::clone(&bridge),
+            PreparedRemoteDelivery {
+                services: Arc::new(
+                    services_with_claims(
+                        origin_identity(),
+                        receiver_identity(),
+                        receiver_identity(),
+                        test_peer_id(),
+                    )
+                    .await,
+                ),
+                target_entity: target_entity(),
+                previous_owner: receiver_identity(),
+                channel: channel.clone(),
+                envelope: allocated.clone(),
+                target: jid::Jid::from(target_full()),
+                stanza: Stanza::Message(Message::new(Some(jid::Jid::from(target_full())))),
+                is_iq: false,
+            },
+            Ok(OrderedRelayReply::Nack(OrderedRelayNack {
+                channel: channel.clone(),
+                sequence: allocated.sequence,
+                reason: OrderedRelayNackReason::UnsupportedEnvelope,
+            })),
+        )
+        .await
+        .expect("UnsupportedEnvelope is an attempted delivery outcome");
+
+        assert_eq!(outcome.delivery, FullJidDeliveryOutcome::Dropped);
+        assert!(
+            !outcome.maybe_committed,
+            "UnknownMessage proves no handler ran"
+        );
+
+        let retry = bridge
+            .sender_state
+            .lock()
+            .await
+            .next_envelope(
+                NodeId::new(origin_identity().node_id),
+                channel,
+                OriginInboundSequence(2),
+                envelope_claims(1),
+                message_payload(),
+            )
+            .expect("the channel must stay undiverted");
+        assert_eq!(
+            retry.sequence,
+            OrderedRelaySequence::FIRST,
+            "the unconsumed sequence must be rolled back and reused"
+        );
+    }
+
     #[tokio::test]
     async fn same_owner_target_not_owner_nack_diverts_rejected_channel() {
         let services = services_with_claims(
@@ -6697,9 +6809,7 @@ mod tests {
             &ClusteringMessagingConfig::default(),
         );
         let channel = envelope().channel;
-        bridge
-            .apply_nack_channel_action(channel.clone(), action)
-            .await;
+        bridge.apply_nack_channel_action(&envelope(), action).await;
 
         let diverted = bridge
             .sender_state

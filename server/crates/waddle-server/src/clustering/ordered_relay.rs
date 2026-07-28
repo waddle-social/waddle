@@ -36,12 +36,30 @@ impl OrderedRelaySequence {
 #[serde(transparent)]
 pub struct OriginInboundSequence(pub u32);
 
+/// Ordered lane within one room's relay traffic (#1597).
+///
+/// The lane is part of the channel key, so each lane has its own
+/// sequence space and its own diversion. MUC stanza kinds share one
+/// lane because XEP-0045 requires join presence to precede messages;
+/// Muji signaling has no ordering relation to MUC stanzas — only to
+/// itself (XEP-0166: `session-initiate` before `session-terminate`) —
+/// so a poisoned Muji lane cannot stop room join/leave/groupchat
+/// traffic, and vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OrderedRelayRoomLane {
+    MucStanza,
+    MujiSignaling,
+}
+
 /// Typed recipient key for ordered-relay channels.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OrderedRelayRecipient {
     BareJid(jid::BareJid),
     FullJid(jid::FullJid),
-    Room(jid::BareJid),
+    Room {
+        room: jid::BareJid,
+        lane: OrderedRelayRoomLane,
+    },
 }
 
 /// Typed origin key for ordered-relay channels.
@@ -131,6 +149,22 @@ pub enum OrderedRelayMucProxyKind {
 }
 
 impl OrderedRelayMucProxyKind {
+    /// The room lane this kind rides (#1597). Every kind maps to
+    /// exactly one lane, and envelope validation rejects an envelope
+    /// whose channel lane disagrees with its payload kind.
+    pub fn room_lane(self) -> OrderedRelayRoomLane {
+        match self {
+            OrderedRelayMucProxyKind::JoinPresence
+            | OrderedRelayMucProxyKind::OccupantPresence
+            | OrderedRelayMucProxyKind::GroupchatMessage
+            | OrderedRelayMucProxyKind::PrivateMessage
+            | OrderedRelayMucProxyKind::BareRoomIq
+            | OrderedRelayMucProxyKind::OccupantIq
+            | OrderedRelayMucProxyKind::FanoutChunk => OrderedRelayRoomLane::MucStanza,
+            OrderedRelayMucProxyKind::MujiJingleIq => OrderedRelayRoomLane::MujiSignaling,
+        }
+    }
+
     fn matches_stanza(self, stanza: &waddle_xmpp::Stanza) -> bool {
         matches!(
             (self, stanza),
@@ -212,9 +246,9 @@ impl OrderedRelayPayload {
                 OrderedRelayRecipient::FullJid(full),
             ) => recipient == &jid::Jid::from(full.clone()),
             (
-                OrderedRelayPayload::MucProxy { room_jid, .. },
-                OrderedRelayRecipient::Room(channel_room),
-            ) => room_jid == channel_room,
+                OrderedRelayPayload::MucProxy { room_jid, kind, .. },
+                OrderedRelayRecipient::Room { room, lane },
+            ) => room_jid == room && kind.room_lane() == *lane,
             _ => false,
         }
     }
@@ -370,12 +404,23 @@ pub enum OrderedRelayClaimRole {
 /// synthesize client stanzas or mutate XEP-0198 counters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderedRelayNackReason {
-    Gap { expected: OrderedRelaySequence },
+    Gap {
+        expected: OrderedRelaySequence,
+    },
     InFlight,
-    NotOwner { role: OrderedRelayClaimRole },
+    NotOwner {
+        role: OrderedRelayClaimRole,
+    },
     Unreachable,
     TargetUnavailable,
     ParseFailure,
+    /// #1597: the peer does not know this envelope's versioned remote
+    /// message id (kameo `UnknownMessage`) — provably no handler ran.
+    /// Synthesized sender-side; the sender rolls back the unconsumed
+    /// sequence and keeps the channel instead of diverting, so a
+    /// mixed-version window degrades to per-operation failures rather
+    /// than a poisoned channel.
+    UnsupportedEnvelope,
     Backpressure,
     MaybeCommitted,
     Diverted(OrderedRelayDiversion),
@@ -398,6 +443,7 @@ impl OrderedRelayNackReason {
             OrderedRelayNackReason::Unreachable => "unreachable",
             OrderedRelayNackReason::TargetUnavailable => "target_unavailable",
             OrderedRelayNackReason::ParseFailure => "parse_failure",
+            OrderedRelayNackReason::UnsupportedEnvelope => "unsupported_envelope",
             OrderedRelayNackReason::Backpressure => "backpressure",
             OrderedRelayNackReason::MaybeCommitted => "maybe_committed",
             OrderedRelayNackReason::Diverted(_) => "diverted",
@@ -879,6 +925,9 @@ fn receiver_diversion_reason_for_nack(
     match reason {
         OrderedRelayNackReason::Gap { .. }
         | OrderedRelayNackReason::ParseFailure
+        // Sender-synthesized only; if it ever reaches the receiver
+        // abort path, treat it like any other parse-shaped failure.
+        | OrderedRelayNackReason::UnsupportedEnvelope
         | OrderedRelayNackReason::Diverted(_) => OrderedRelayDiversionReason::OrderingGap,
         OrderedRelayNackReason::InFlight | OrderedRelayNackReason::Backpressure => {
             OrderedRelayDiversionReason::Backpressure
@@ -1221,9 +1270,16 @@ mod tests {
     }
 
     fn room_channel() -> OrderedRelayChannel {
+        room_channel_for_lane(OrderedRelayRoomLane::MucStanza)
+    }
+
+    fn room_channel_for_lane(lane: OrderedRelayRoomLane) -> OrderedRelayChannel {
         OrderedRelayChannel {
             origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
-            recipient: OrderedRelayRecipient::Room(room_jid()),
+            recipient: OrderedRelayRecipient::Room {
+                room: room_jid(),
+                lane,
+            },
             target_epoch: ClaimEpoch(11),
         }
     }
@@ -1848,7 +1904,7 @@ mod tests {
     fn muji_envelope(kind: OrderedRelayMucProxyKind, stanza: RemoteStanza) -> RemoteStanzaEnvelope {
         RemoteStanzaEnvelope {
             asserted_origin_node: origin_node(),
-            channel: room_channel(),
+            channel: room_channel_for_lane(OrderedRelayRoomLane::MujiSignaling),
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),
@@ -1889,6 +1945,60 @@ mod tests {
                 payload,
             },
         )))
+    }
+
+    /// #1597: the channel lane is part of envelope validation. A Muji
+    /// IQ smuggled onto the MUC stanza lane (or a groupchat message
+    /// onto the Muji lane) must be rejected as inconsistent, so lane
+    /// isolation cannot be bypassed by mislabeling the channel.
+    #[test]
+    fn room_lane_must_match_the_muc_proxy_kind() {
+        let mut receiver = OrderedRelayReceiverState::default();
+        let mut muji_on_muc_lane = muji_envelope(
+            OrderedRelayMucProxyKind::MujiJingleIq,
+            muji_initiate_stanza(
+                xmpp_parsers::jingle::Action::SessionInitiate,
+                "room@example.test",
+            ),
+        );
+        muji_on_muc_lane.channel = room_channel_for_lane(OrderedRelayRoomLane::MucStanza);
+        assert!(
+            matches!(
+                receive(&mut receiver, muji_on_muc_lane),
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::ParseFailure,
+                    ..
+                })
+            ),
+            "a Muji IQ on the MUC stanza lane must be rejected"
+        );
+
+        let mut receiver = OrderedRelayReceiverState::default();
+        let groupchat_on_muji_lane = RemoteStanzaEnvelope {
+            asserted_origin_node: origin_node(),
+            channel: room_channel_for_lane(OrderedRelayRoomLane::MujiSignaling),
+            sequence: OrderedRelaySequence(1),
+            origin_inbound_sequence: inbound(1),
+            origin_claim: origin_claim(),
+            sender_claim: sender_claim(),
+            target_claim: room_claim(),
+            payload: OrderedRelayPayload::MucProxy {
+                room_jid: room_jid(),
+                kind: OrderedRelayMucProxyKind::GroupchatMessage,
+                stanza: groupchat_stanza_to("room@example.test"),
+            },
+            origin_proof: None,
+        };
+        assert!(
+            matches!(
+                receive(&mut receiver, groupchat_on_muji_lane),
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::ParseFailure,
+                    ..
+                })
+            ),
+            "a groupchat message on the Muji lane must be rejected"
+        );
     }
 
     #[test]

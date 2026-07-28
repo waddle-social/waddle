@@ -363,7 +363,19 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
     )
 }
 
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v1")]
+// #1597 HARD RULE: bump this version suffix on EVERY change to the
+// ordered-relay envelope wire format (`RemoteStanzaEnvelope` or
+// anything it contains — payload variants, recipient/lane shapes,
+// claim fields). A peer running an older build then fails the ask
+// with `UnknownMessage` — provably before its handler ran — which the
+// sender maps to an `UnsupportedEnvelope` NACK: sequence rolled back,
+// channel kept, no sticky diversion. Reusing an old id instead makes
+// the old peer fail mid-decode with `DeserializeMessage`, which is
+// indistinguishable from a reply-decode failure after a committed
+// effect and therefore poisons the channel for the mixed-version
+// window. The version bump is what makes rolling deploys safe.
+// v2: room-lane recipient split + UnsupportedEnvelope NACK (#1597).
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v2")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -1986,7 +1998,16 @@ fn is_no_effect_stale_ref_relookup_error<E>(error: &RemoteSendError<E>) -> bool 
     )
 }
 
-fn is_ordered_parse_nack_error<E>(error: &RemoteSendError<E>) -> bool {
+/// True only for errors that prove the peer never ran the handler
+/// because it does not know the (versioned) remote message id.
+///
+/// Deliberately excludes `DeserializeMessage`: kameo raises that both
+/// for the peer failing to decode the request (uncommitted) and for
+/// this node failing to decode the peer's reply (handler already
+/// committed), so it can never be treated as provably-uncommitted.
+/// The versioned `deliver_ordered.vN` id exists precisely so envelope
+/// format changes surface as `UnknownMessage` instead (#1597).
+fn is_ordered_unsupported_envelope_error<E>(error: &RemoteSendError<E>) -> bool {
     matches!(error, RemoteSendError::UnknownMessage { .. })
 }
 
@@ -1997,11 +2018,11 @@ fn ordered_send_error<E>(
 where
     RemoteSendError<E>: std::fmt::Display,
 {
-    if is_ordered_parse_nack_error(&error) {
+    if is_ordered_unsupported_envelope_error(&error) {
         return Ok(OrderedRelayReply::Nack(OrderedRelayNack {
             channel: envelope.channel.clone(),
             sequence: envelope.sequence,
-            reason: OrderedRelayNackReason::ParseFailure,
+            reason: OrderedRelayNackReason::UnsupportedEnvelope,
         }));
     }
     Err(send_error(error))
@@ -2372,23 +2393,52 @@ mod tests {
         >(&RemoteSendError::ReplyTimeout));
     }
 
+    /// #1597: an old peer that does not know the versioned ordered-relay
+    /// message id fails with `UnknownMessage` — provably before any
+    /// handler ran. That must synthesize the typed `UnsupportedEnvelope`
+    /// NACK (not `ParseFailure`) so the sender rolls back the unconsumed
+    /// sequence and keeps the channel instead of installing a sticky
+    /// diversion shared with unrelated traffic.
     #[test]
-    fn ordered_parse_nack_excludes_reply_side_codec_errors() {
-        assert!(is_ordered_parse_nack_error::<std::convert::Infallible>(
-            &RemoteSendError::UnknownMessage {
+    fn unknown_message_synthesizes_unsupported_envelope_nack() {
+        let envelope = timeout_envelope();
+        let reply = ordered_send_error::<std::convert::Infallible>(
+            &envelope,
+            RemoteSendError::UnknownMessage {
                 actor_remote_id: "actor".into(),
                 message_remote_id: "message".into(),
+            },
+        )
+        .expect("UnknownMessage must synthesize a NACK, not an ask error");
+        match reply {
+            OrderedRelayReply::Nack(nack) => {
+                assert_eq!(nack.reason, OrderedRelayNackReason::UnsupportedEnvelope);
+                assert_eq!(nack.sequence, envelope.sequence);
+                assert_eq!(nack.channel, envelope.channel);
             }
-        ));
-        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
-            &RemoteSendError::DeserializeMessage(String::new())
-        ));
-        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
-            &RemoteSendError::SerializeReply(String::new())
-        ));
-        assert!(!is_ordered_parse_nack_error::<std::convert::Infallible>(
-            &RemoteSendError::SerializeMessage(String::new())
-        ));
+            OrderedRelayReply::Ack(_) => panic!("UnknownMessage must not ACK"),
+        }
+    }
+
+    #[test]
+    fn unsupported_envelope_excludes_ambiguous_codec_errors() {
+        assert!(is_ordered_unsupported_envelope_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::UnknownMessage {
+            actor_remote_id: "actor".into(),
+            message_remote_id: "message".into(),
+        }));
+        assert!(!is_ordered_unsupported_envelope_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::DeserializeMessage(
+            String::new()
+        )));
+        assert!(!is_ordered_unsupported_envelope_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::SerializeReply(String::new())));
+        assert!(!is_ordered_unsupported_envelope_error::<
+            std::convert::Infallible,
+        >(&RemoteSendError::SerializeMessage(String::new())));
     }
 
     #[test]
