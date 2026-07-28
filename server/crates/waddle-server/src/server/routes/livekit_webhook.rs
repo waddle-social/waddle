@@ -591,8 +591,24 @@ fn route_from_claim(
 /// budget burns without enforcing anything.
 #[cfg(feature = "clustering")]
 const WEBHOOK_RELAY_MAILBOX_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+/// Deliberately smaller than the receiver's own wedge bounds (two
+/// 5s-capped actor asks + a claim read): a merely-slow owner costs
+/// this asker a timeout → 503 → one LiveKit retry, but the owner
+/// still completes the idempotent re-assert, so the retry confirms
+/// cheaply against a warm path. The alternative — waiting out the
+/// receiver's worst case — would hold the webhook socket past
+/// LiveKit's own delivery timeout, burning the retry anyway.
 #[cfg(feature = "clustering")]
 const WEBHOOK_RELAY_REPLY_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+/// Overall bound on the relay hop. Kademlia name resolution (up to
+/// three lookups with ~2.1s of backoff) and the stale-ref
+/// re-resolve-and-retry both sit OUTSIDE the per-ask timeouts, so a
+/// cold lookup against a just-died-but-fresh-leased owner could
+/// otherwise hold the webhook socket well past LiveKit's delivery
+/// timeout. On elapse the owner may still complete the (idempotent)
+/// re-assert; the LiveKit retry then confirms cheaply.
+#[cfg(feature = "clustering")]
+const WEBHOOK_RELAY_OVERALL_TIMEOUT: StdDuration = StdDuration::from_secs(4);
 
 #[cfg(feature = "clustering")]
 async fn reassert_on_claim_owner(
@@ -628,10 +644,22 @@ async fn reassert_on_claim_owner(
     };
     let mut relay = RelayHandle::new(NodeId::new(owner.node_id.clone()), stop_token.clone())
         .with_ask_timeouts(WEBHOOK_RELAY_MAILBOX_TIMEOUT, WEBHOOK_RELAY_REPLY_TIMEOUT);
-    match relay
-        .reassert_media_grants(room_jid.clone(), full_jid.clone())
-        .await
-    {
+    let asked = tokio::time::timeout(
+        WEBHOOK_RELAY_OVERALL_TIMEOUT,
+        relay.reassert_media_grants(room_jid.clone(), full_jid.clone()),
+    )
+    .await;
+    let Ok(result) = asked else {
+        warn!(
+            room = %room_jid,
+            user = %full_jid.to_bare(),
+            owner = %owner.node_id,
+            "cross-node media grant re-assert timed out resolving the owner; \
+             asking LiveKit to retry",
+        );
+        return ReassertOutcome::RetryableFailure;
+    };
+    match result {
         Ok(RelayReassertMediaGrantsReply::Applied) => {
             debug!(
                 room = %room_jid,
