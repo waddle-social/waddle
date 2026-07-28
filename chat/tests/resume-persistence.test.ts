@@ -532,6 +532,32 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
   });
 
+  test("a throwing owner scheduler rolls back only its provisional lease and permits reacquisition", () => {
+    const baseline = resumeOwnerLifecycleSnapshotForTests();
+    const throwingDriver = {
+      setInterval: () => { throw new Error("scheduler unavailable"); },
+      clearInterval: () => undefined,
+    };
+
+    expect(() => createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: throwingDriver,
+    })).toThrow("scheduler unavailable");
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+
+    const timers = ownerTimerHarness();
+    const recovered = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual({
+      registrations: baseline.registrations + 1,
+      activeTimers: baseline.activeTimers + 1,
+      ownerInstances: baseline.ownerInstances + 1,
+    });
+    recovered.dispose();
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+  });
+
   test("a disposed owner cannot mutate persistence, even if a captured heartbeat ticks", () => {
     const timers = ownerTimerHarness();
     const persistence = createLocalStorageResumePersistence("alice@example.com", undefined, {

@@ -111,6 +111,10 @@ internal class OutboundMessenger(
         sendMutex.withLock {
             val lease = activeSession.captureOwnerLease() ?: return@withLock
             val owner = lease.ownerBareJid
+            // Keep OutboundQueue.drain's snapshot membership recheck and its
+            // send callback under sendMutex. acknowledgeDelivery uses this
+            // same mutex, making the exact durable removal and transport
+            // selection one ordered decision.
             outboundQueue.drain(
                 ownerBareJid = owner,
                 send = { queued ->
@@ -147,8 +151,17 @@ internal class OutboundMessenger(
 
     /** Persisted delivery ownership moves to the server before UI dispatch. */
     suspend fun acknowledgeDelivery(clientStanzaId: String) {
-        val owner = activeSession.ownBareJid ?: return
-        outboundQueue.acknowledge(owner, clientStanzaId)
+        // The durable membership check in drainOutboundQueue and the FFI send
+        // share this authority.  An acknowledgement that acquires it first
+        // removes the exact intent before replay can select a client; one
+        // that arrives after replay has acquired it observes the resulting
+        // at-least-once send and removes the row afterwards.  Do not put a
+        // DataStore transaction around transport I/O: sendMutex is the only
+        // cross-suspension serialization point.
+        sendMutex.withLock {
+            val owner = activeSession.ownBareJid ?: return@withLock
+            outboundQueue.acknowledge(owner, clientStanzaId)
+        }
     }
 
     private suspend fun sendMessage(

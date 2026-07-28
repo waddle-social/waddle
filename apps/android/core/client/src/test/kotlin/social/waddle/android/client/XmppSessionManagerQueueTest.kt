@@ -156,7 +156,7 @@ class XmppSessionManagerQueueTest {
     }
 
     @Test
-    fun `ack racing a Sent return cannot resurrect the persisted row`() = runTest {
+    fun `ack after replay wins serialization only after the in-flight send`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
@@ -173,12 +173,41 @@ class XmppSessionManagerQueueTest {
         assertEquals(id, client.sendOptions.single()?.stanzaId)
         harness.factory.emit(WaddleClientEvent.DeliveryAcked(id))
         runCurrent()
-        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+        assertEquals(
+            "the replay already owns sendMutex, so the ack waits rather than racing its durable selection",
+            id,
+            harness.prefs.outboundQueue.first().single().clientStanzaId,
+        )
 
         releaseSend.complete(Unit)
         runCurrent()
         assertEquals(id, send.await().queuedId)
-        assertTrue("Sent completion performs no post-ack queue write", harness.prefs.outboundQueue.first().isEmpty())
+        assertTrue("the queued ack removes the exact row after the send linearizes", harness.prefs.outboundQueue.first().isEmpty())
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `ack before fresh-ready replay suppresses the retained durable intent`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        val queued = harness.manager.sendChatMessage("alice@waddle.test", "ack wins before replay")
+        val id = queued.queuedId!!
+        assertEquals(id, harness.prefs.outboundQueue.first().single().clientStanzaId)
+
+        // This is the old contains/send interleaving boundary. There is no
+        // longer a race window: acknowledgement acquires sendMutex first,
+        // deletes the exact durable intent, and the ready drain has nothing
+        // eligible to send.
+        harness.factory.emit(WaddleClientEvent.DeliveryAcked(id))
+        runCurrent()
+        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertTrue("an ack that linearizes first suppresses stale replay", harness.factory.clients.single().sendCalls.isEmpty())
 
         harness.manager.logout()
     }

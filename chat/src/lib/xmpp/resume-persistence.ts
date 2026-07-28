@@ -626,16 +626,28 @@ function retainOwnerHeartbeat(
     return () => releaseOwnerHeartbeat(accountKey, owner, existing);
   }
   claimOwnerLease(accountKey, owner);
-  const registration: OwnerHeartbeatRegistration = {
-    ownerId: owner.ownerId,
-    instanceId: owner.instanceId,
-    timer: timerDriver.setInterval(() => {
-      if (liveOwnerHeartbeats.get(key) !== registration) return;
-      claimOwnerLease(accountKey, owner);
-    }, OWNER_HEARTBEAT_MS),
-    refCount: 1,
-    timerDriver,
-  };
+  let registration: OwnerHeartbeatRegistration;
+  try {
+    registration = {
+      ownerId: owner.ownerId,
+      instanceId: owner.instanceId,
+      timer: timerDriver.setInterval(() => {
+        if (liveOwnerHeartbeats.get(key) !== registration) return;
+        claimOwnerLease(accountKey, owner);
+      }, OWNER_HEARTBEAT_MS),
+      refCount: 1,
+      timerDriver,
+    };
+  } catch (error) {
+    // A scheduler failure occurs before this owner has a live registration.
+    // Remove only the lease and registry entry claimed by this exact instance:
+    // another instance may have acquired either while a custom scheduler was
+    // failing, and must remain untouched.
+    removeOwnerLeaseIfOwned(accountKey, owner);
+    releaseOwnerInstance(accountKey, owner);
+    removeStoredOwnerIdIfOwned(owner);
+    throw error;
+  }
   (registration.timer as { unref?: () => void }).unref?.();
   liveOwnerHeartbeats.set(key, registration);
   return () => releaseOwnerHeartbeat(accountKey, owner, registration);
@@ -661,6 +673,18 @@ function releaseOwnerInstance(accountKey: string, owner: ResumeOwner): void {
   const ownerKey = ownerRegistryKey(accountKey, owner.ownerId);
   if (liveOwnerInstances.get(ownerKey) === owner.instanceId) {
     liveOwnerInstances.delete(ownerKey);
+  }
+}
+
+function removeStoredOwnerIdIfOwned(owner: ResumeOwner): void {
+  if (owner.explicit) return;
+  const storage = sessionStorageForOwner();
+  if (!storage) return;
+  const key = `${SM_PREFIX}.owner`;
+  try {
+    if (storage.getItem(key) === owner.ownerId) storage.removeItem(key);
+  } catch {
+    // sessionStorage failure cannot make a failed scheduler retain a lease.
   }
 }
 
