@@ -97,15 +97,18 @@ class ConversationScreenTest {
         val releaseSend = CompletableDeferred<Unit>()
         harness.activeFakeClient().sendMessageStall = releaseSend
 
-        composeRule.onNode(hasSetTextAction()).performTextInput("hi there penguin")
-        composeRule.onNodeWithContentDescription("Send").performClick()
+        try {
+            composeRule.onNode(hasSetTextAction()).performTextInput("hi there penguin")
+            composeRule.onNodeWithContentDescription("Send").performClick()
 
-        composeRule.waitUntil(timeoutMillis = 10_000) {
-            harness.activeFakeClient().sendCalls.contains(PEER_JID to "hi there penguin")
+            composeRule.waitUntil(timeoutMillis = 10_000) {
+                harness.activeFakeClient().sendCalls.contains(PEER_JID to "hi there penguin")
+            }
+            waitForText("Sending…")
+        } finally {
+            releaseSend.complete(Unit)
         }
-        waitForText("Sending…")
 
-        releaseSend.complete(Unit)
         waitForText("Queued — sends when connected")
     }
 
