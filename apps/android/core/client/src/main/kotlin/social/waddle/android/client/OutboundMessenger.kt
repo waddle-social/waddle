@@ -186,15 +186,20 @@ internal class OutboundMessenger(
         // mutations (reactions, markers) can resolve their target and
         // the sender can edit/retract the fresh message (see ownDmEcho).
         if (!isGroupchat && outcome is WaddleSendMessageOutcome.Sent) {
-            lease.takeIf(activeSession::isCurrent)?.ownerBareJid?.let { own ->
+            val echo = ownDmEcho(
+                ownJid = lease.ownerBareJid,
+                peerJid = conversationJid,
+                stanzaId = stanzaId,
+                body = finalBody,
+                options = options,
+            )
+            // sendIfCurrent releases the transport fence when the FFI call
+            // returns. A logout or relogin can win before this local
+            // projection, so publish the already-built echo only while its
+            // exact owner lease remains current.
+            activeSession.applyIfCurrent(lease) {
                 stores.timelineStore.onLiveMessage(
-                    ownDmEcho(
-                        ownJid = own,
-                        peerJid = conversationJid,
-                        stanzaId = stanzaId,
-                        body = finalBody,
-                        options = options,
-                    ),
+                    echo,
                 )
             }
         }

@@ -150,6 +150,55 @@ class ActiveSessionGatewayTest {
     }
 
     @Test
+    fun `a successful DM send cannot project its echo after same-account relogin`() = runTest {
+        val active = readySession()
+        val oldClient = FakeWaddleClient()
+        publishReady(active, oldClient)
+        val oldLease = checkNotNull(active.captureOwnerLease())
+        oldClient.sendOutcome = WaddleSendMessageOutcome.Sent("old-send")
+
+        assertEquals(
+            ActiveSession.LeaseSendResult.Attempted(WaddleSendMessageOutcome.Sent("old-send")),
+            active.sendIfCurrent(oldLease) { it.sendChatMessage("bob@waddle.test", "sent", null) },
+        )
+
+        active.revokeOutboundAuthority()
+        active.advanceGeneration()
+        active.activateOwner("alice@waddle.test")
+        val successor = FakeWaddleClient()
+        publishReady(active, successor)
+
+        var projections = 0
+        assertFalse(active.applyIfCurrent(oldLease) { projections += 1 })
+        assertEquals(0, projections)
+    }
+
+    @Test
+    fun `a successful DM send cannot project its echo into a different-account successor`() = runTest {
+        val active = readySession()
+        val oldClient = FakeWaddleClient()
+        publishReady(active, oldClient)
+        val oldLease = checkNotNull(active.captureOwnerLease())
+        oldClient.sendOutcome = WaddleSendMessageOutcome.Sent("old-send")
+
+        assertEquals(
+            ActiveSession.LeaseSendResult.Attempted(WaddleSendMessageOutcome.Sent("old-send")),
+            active.sendIfCurrent(oldLease) { it.sendChatMessage("bob@waddle.test", "sent", null) },
+        )
+
+        active.revokeOutboundAuthority()
+        active.advanceGeneration()
+        active.activateOwner("carol@waddle.test")
+        val successor = FakeWaddleClient()
+        val successorAttempt = checkNotNull(active.beginAttempt())
+        assertTrue(active.publishReady(successorAttempt, successor, "carol@waddle.test/waddle-android-test") {})
+
+        var projections = 0
+        assertFalse(active.applyIfCurrent(oldLease) { projections += 1 })
+        assertEquals(0, projections)
+    }
+
+    @Test
     fun `normal call signal is fenced across logout and rejected after revocation`() = runTest {
         val active = readySession()
         val oldClient = FakeWaddleClient()
