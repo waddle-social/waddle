@@ -139,6 +139,18 @@ type OwnerHeartbeatRegistration = {
 };
 
 const liveOwnerHeartbeats = new Map<string, OwnerHeartbeatRegistration>();
+
+/**
+ * `setInterval` is normally non-reentrant, but a test or host scheduler can
+ * synchronously construct another persistence instance before returning (or
+ * throwing). Keep the provisional installation identity separate from the
+ * live registration so a failed older attempt cannot roll back its successor.
+ */
+type OwnerHeartbeatAttempt = {
+  supersededBy: OwnerHeartbeatAttempt | null;
+};
+
+const pendingOwnerHeartbeatAttempts = new Map<string, OwnerHeartbeatAttempt>();
 const browserTimerDriver: ResumeOwnerTimerDriver = {
   setInterval: (callback, delayMs) => setInterval(callback, delayMs),
   clearInterval: (timer) => clearInterval(timer),
@@ -536,6 +548,11 @@ function resumeOwner(accountKey: string): ResumeOwner {
     let ownerId = inheritedOwnerId || randomClaimId();
     let instanceId = ownerInstanceId(accountKey, ownerId);
     if (inheritedOwnerId && copiedLiveOwnerNeedsRotation(accountKey, ownerId, instanceId)) {
+      // `ownerInstanceId` reserves the inherited identity before the complete
+      // reload handoff is checked. If that handoff fails, release only this
+      // provisional reservation before selecting the rotated owner so a later
+      // terminal release cannot leave an unreachable registry entry behind.
+      releaseOwnerInstance(accountKey, { ownerId, instanceId, explicit: false });
       ownerId = randomClaimId();
       instanceId = ownerInstanceId(accountKey, ownerId);
     }
@@ -625,6 +642,10 @@ function retainOwnerHeartbeat(
     existing.refCount += 1;
     return () => releaseOwnerHeartbeat(accountKey, owner, existing);
   }
+  const priorAttempt = pendingOwnerHeartbeatAttempts.get(key);
+  const attempt: OwnerHeartbeatAttempt = { supersededBy: null };
+  if (priorAttempt) priorAttempt.supersededBy = attempt;
+  pendingOwnerHeartbeatAttempts.set(key, attempt);
   claimOwnerLease(accountKey, owner);
   let registration: OwnerHeartbeatRegistration;
   try {
@@ -639,17 +660,35 @@ function retainOwnerHeartbeat(
       timerDriver,
     };
   } catch (error) {
-    // A scheduler failure occurs before this owner has a live registration.
-    // Remove only the lease and registry entry claimed by this exact instance:
-    // another instance may have acquired either while a custom scheduler was
-    // failing, and must remain untouched.
-    removeOwnerLeaseIfOwned(accountKey, owner);
-    releaseOwnerInstance(accountKey, owner);
-    removeStoredOwnerIdIfOwned(owner);
+    if (pendingOwnerHeartbeatAttempts.get(key) === attempt) {
+      pendingOwnerHeartbeatAttempts.delete(key);
+    }
+    // A scheduler failure may have re-entered and installed a successor for
+    // this same owner before throwing. Only the still-current provisional
+    // attempt is allowed to roll back its lease, owner instance, and session
+    // identity; a superseded attempt must leave its successor untouched.
+    if (attempt.supersededBy === null) {
+      removeOwnerLeaseIfOwned(accountKey, owner);
+      releaseOwnerInstance(accountKey, owner);
+      removeStoredOwnerIdIfOwned(owner);
+    }
     throw error;
+  }
+  if (attempt.supersededBy !== null) {
+    // A re-entrant successor owns the live lease. This older caller did not
+    // retain a reference, so discard only its own timer and make disposal a
+    // no-op.
+    timerDriver.clearInterval(registration.timer);
+    if (pendingOwnerHeartbeatAttempts.get(key) === attempt) {
+      pendingOwnerHeartbeatAttempts.delete(key);
+    }
+    return () => undefined;
   }
   (registration.timer as { unref?: () => void }).unref?.();
   liveOwnerHeartbeats.set(key, registration);
+  if (pendingOwnerHeartbeatAttempts.get(key) === attempt) {
+    pendingOwnerHeartbeatAttempts.delete(key);
+  }
   return () => releaseOwnerHeartbeat(accountKey, owner, registration);
 }
 
