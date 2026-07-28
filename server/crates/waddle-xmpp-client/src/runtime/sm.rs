@@ -213,15 +213,8 @@ impl XmppRuntime {
                     }));
                 }
                 if resume_failed {
-                    let failed = self.sm_state.unhandled_message_stanza_ids();
                     // Keep the queue resumable until fallback retries are written to the new stream.
-                    self.fallback_resume_state = self.sm_state.resume_state();
-                    self.pending_fallback_retries
-                        .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
-                    self.sm_state.previd = None;
-                    events.extend(failed.into_iter().map(|stanza_id| {
-                        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
-                    }));
+                    self.prepare_fresh_stream_fallback(events, true);
                 }
                 self.sm_state.stop();
                 self.sm_negotiation = SmNegotiationState::Inactive;

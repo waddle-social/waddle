@@ -542,6 +542,12 @@ impl SmState {
     pub fn unhandled_stanzas_for_fallback_retry(&self) -> Vec<Element> {
         self.outbound_queue
             .iter()
+            // A fresh stream cannot safely repeat an IQ request: unlike
+            // message and presence, XEP-0203 has no delayed-delivery
+            // semantics for IQ and the original request might already have
+            // taken effect.  XEP-0198 resumption may replay it verbatim, but
+            // fresh-stream fallback must leave IQ recovery to its owner.
+            .filter(|queued| matches!(queued.stanza.element.name(), "message" | "presence"))
             .map(UnhandledOutboundEntry::element_for_fallback_retry)
             .collect()
     }

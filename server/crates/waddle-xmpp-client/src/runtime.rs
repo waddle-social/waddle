@@ -6,7 +6,9 @@ use crate::bootstrap::{
 };
 use crate::config::ClientConfig;
 use crate::error::{ClientError, ClientResult};
-use crate::event::{ClientEvent, ConnectionEvent, LifecycleEvent, StreamManagementEvent};
+use crate::event::{
+    ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, StreamManagementEvent,
+};
 use crate::request::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
 use crate::stream_management::{SmAcknowledgementClockAction, SmResumeState, SmState};
@@ -469,6 +471,20 @@ impl XmppRuntime {
             } => {
                 if features.stream_management {
                     self.sm_advertised = true;
+                } else if self.sm_state.previd.is_some() {
+                    // A persisted XEP-0198 tail is only resumable while the
+                    // new stream advertises SM.  Do not bind a fresh session
+                    // while leaving that tail attached to a now-impossible
+                    // `<resume/>`: move it through the same typed fallback
+                    // queue used after an explicit `<failed/>` response.
+                    //
+                    // The queue remains authoritative until the exact retry
+                    // writes are confirmed by `MessageSent`; a transport
+                    // failure before then therefore keeps it available for
+                    // the next connection attempt.  Clearing `previd` here
+                    // also prevents a later feature emission on this stream
+                    // from producing an invalid delayed `<resume/>`.
+                    self.prepare_fresh_stream_fallback(events, false);
                 }
 
                 let sm_cfg = &self.config.session.stream_management;
@@ -621,6 +637,12 @@ impl XmppRuntime {
             events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                 TransportMessage::Element(enable),
             )));
+        } else {
+            // No SM was advertised after authentication.  A recovered tail
+            // can only be retried after a successful fresh bind, never before
+            // it; this is the no-SM counterpart to `<failed/>` followed by a
+            // fresh `<enabled/>`.
+            self.flush_pending_fallback_retries(events);
         }
 
         Ok(())
@@ -634,6 +656,29 @@ impl XmppRuntime {
                 TransportMessage::Element(element),
             )));
         }
+    }
+
+    /// Convert a persisted, no-longer-resumable SM tail into typed
+    /// fresh-stream retries.  This is intentionally shared by the
+    /// post-auth-no-SM path and the explicit `<failed/>` path so the retry
+    /// identities, XEP-0203 delay handling, and write-confirmed persistence
+    /// semantics cannot diverge.
+    fn prepare_fresh_stream_fallback(
+        &mut self,
+        events: &mut Vec<ClientEvent>,
+        stream_management_remains_available: bool,
+    ) {
+        let failed = self.sm_state.unhandled_message_stanza_ids();
+        self.fallback_resume_state = self.sm_state.resume_state();
+        self.pending_fallback_retries
+            .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
+        self.sm_state.previd = None;
+        self.sm_state.stop();
+        self.sm_negotiation = SmNegotiationState::Inactive;
+        self.sm_advertised = stream_management_remains_available;
+        events.extend(failed.into_iter().map(|stanza_id| {
+            ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+        }));
     }
 
     fn mark_fallback_retry_sent(&mut self, element: &Element) {

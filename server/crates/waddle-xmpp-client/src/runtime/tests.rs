@@ -10,6 +10,7 @@ use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::{
     ConnectionConfig, SmResumeState, StreamErrorCondition, StreamId, StreamManagementEvent,
+    UnhandledOutboundEntry,
 };
 
 fn config() -> ClientConfig {
@@ -1857,6 +1858,171 @@ fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
             TransportMessage::Element(element)
         )) if element.attr("id") == Some("carried-unhandled")
     )));
+}
+
+#[test]
+fn runtime_retries_persisted_tail_after_post_auth_features_omit_sm() {
+    let sent_at = Utc
+        .with_ymd_and_hms(2026, 7, 28, 10, 11, 12)
+        .single()
+        .expect("valid typed recovery timestamp");
+    let message = Element::builder("message", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retry-message")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+        .append(
+            Element::builder("origin-id", "urn:xmpp:sid:0")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "origin-retry-message",
+                )
+                .build(),
+        )
+        .build();
+    let presence = Element::builder("presence", crate::NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "retry-presence",
+        )
+        .build();
+    let iq = Element::builder("iq", crate::NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "must-not-retry-iq",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .append(Element::builder("query", "jabber:iq:version").build())
+        .build();
+    let resume_state = SmResumeState::from_unhandled_outbound_entries(
+        StreamId::new("old-sm-id"),
+        0,
+        3,
+        [
+            UnhandledOutboundEntry::try_new(message, sent_at).expect("message is countable"),
+            UnhandledOutboundEntry::try_new(presence, sent_at).expect("presence is countable"),
+            UnhandledOutboundEntry::try_new(iq, sent_at).expect("IQ is countable"),
+        ],
+    )
+    .expect("persisted SM tail is valid");
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    let no_sm_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    assert!(!no_sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "resume"
+    )));
+    let bind_id = no_sm_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("no-SM stream binds fresh");
+    assert!(
+        runtime.resume_state().is_some(),
+        "the durable tail survives the no-SM feature transition before a physical retry write"
+    );
+
+    let repeated_features = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    assert!(!repeated_features.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if matches!(element.name(), "resume" | "message" | "presence")
+    )));
+
+    let bound_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let retries = bound_events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if matches!(element.name(), "message" | "presence" | "iq") => Some(element.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retries.len(),
+        2,
+        "only message and presence get fresh-stream retries"
+    );
+    assert!(
+        retries
+            .iter()
+            .all(|element| element.attr("id") != Some("must-not-retry-iq")),
+        "IQ is never replayed on a fresh stream"
+    );
+    for retry in &retries {
+        let delays = retry
+            .children()
+            .filter(|child| child.name() == "delay" && child.ns() == "urn:xmpp:delay")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delays.len(),
+            1,
+            "each fresh-stream retry has one direct XEP-0203 delay"
+        );
+        assert_eq!(delays[0].attr("stamp"), Some("2026-07-28T10:11:12.000Z"));
+    }
+    let retried_message = retries
+        .iter()
+        .find(|element| element.attr("id") == Some("retry-message"))
+        .expect("message retry");
+    assert_eq!(
+        retried_message
+            .get_child("origin-id", "urn:xmpp:sid:0")
+            .and_then(|element| element.attr("id")),
+        Some("origin-retry-message"),
+        "XEP-0359 origin identity is retained"
+    );
+    assert!(
+        runtime.resume_state().is_some(),
+        "queue remains durable until the driver confirms the exact retry writes"
+    );
+
+    runtime
+        .apply_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+        .unwrap();
+    assert!(
+        runtime.resume_state().is_some(),
+        "a write failure cannot clear the fresh-stream retry tail"
+    );
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            retries[0].clone(),
+        )))
+        .unwrap();
+    assert!(
+        runtime.resume_state().is_some(),
+        "one confirmed retry is insufficient"
+    );
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            retries[1].clone(),
+        )))
+        .unwrap();
+    assert!(
+        runtime.resume_state().is_none(),
+        "the persisted tail clears only after every eligible exact retry write succeeds"
+    );
 }
 
 #[test]

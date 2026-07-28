@@ -19,15 +19,14 @@ fn delay(stamp: Option<&str>) -> Element {
     delay.build()
 }
 
-fn fallback_retry(stanza: Element) -> Element {
+fn fallback_retries(stanza: Element) -> Vec<Element> {
     let sent_at = Utc.with_ymd_and_hms(2026, 7, 28, 10, 11, 12).unwrap();
     let mut state = SmState::new();
     state.record_sent_stanza_at(&stanza, sent_at);
     state
         .unhandled_stanzas_for_fallback_retry()
         .into_iter()
-        .next()
-        .expect("countable stanza has one fallback retry")
+        .collect()
 }
 
 #[test]
@@ -38,7 +37,10 @@ fn xep0203_fallback_retry_replaces_duplicate_and_malformed_delays_for_message_an
         stanza.append_child(delay(Some("not-a-timestamp")));
         stanza.append_child(delay(None));
 
-        let retry = fallback_retry(stanza);
+        let retry = fallback_retries(stanza)
+            .into_iter()
+            .next()
+            .expect("message and presence have one fallback retry");
         let delays = retry
             .children()
             .filter(|child| child.name() == "delay" && child.ns() == NS_DELAY)
@@ -54,7 +56,10 @@ fn xep0203_fallback_retry_replaces_duplicate_and_malformed_delays_for_message_an
         let mut malformed = Element::builder(name, NS_CLIENT).build();
         malformed.append_child(delay(Some("not-a-timestamp")));
         malformed.append_child(delay(None));
-        let retry = fallback_retry(malformed);
+        let retry = fallback_retries(malformed)
+            .into_iter()
+            .next()
+            .expect("message and presence have one fallback retry");
         let delays = retry
             .children()
             .filter(|child| child.name() == "delay" && child.ns() == NS_DELAY)
@@ -65,16 +70,15 @@ fn xep0203_fallback_retry_replaces_duplicate_and_malformed_delays_for_message_an
 }
 
 #[test]
-fn xep0203_fallback_retry_never_adds_or_normalizes_delay_on_iq() {
+fn xep0203_fallback_retry_never_replays_iq_on_a_fresh_stream() {
     let mut iq = Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), "request-1")
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
         .build();
     iq.append_child(Element::builder("query", "jabber:iq:version").build());
 
-    assert_eq!(
-        fallback_retry(iq.clone()),
-        iq,
-        "IQ is not a delayed fallback delivery",
+    assert!(
+        fallback_retries(iq).is_empty(),
+        "IQ is never replayed as a fresh-stream fallback delivery",
     );
 }
