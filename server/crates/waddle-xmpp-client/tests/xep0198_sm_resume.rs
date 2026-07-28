@@ -77,8 +77,25 @@ fn xep0198_rejects_stream_controls_and_non_client_roots_from_durable_replay() {
 }
 
 #[test]
-fn xep0198_failed_accepts_rfc6120_stanza_error_diagnostics_in_order() {
+fn xep0198_failed_accepts_only_the_schema_stanza_error_group() {
     let failed = Element::builder("failed", "urn:xmpp:sm:3")
+        .append(
+            Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
+        )
+        .append(
+            Element::builder("retry-after", "urn:waddle:diagnostics")
+                .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
+                .build(),
+        )
+        .build();
+
+    assert_eq!(
+        SmState::parse_inbound_control(&failed),
+        Ok(SmInboundControl::Failed { h: None }),
+        "XEP-0198's schema permits the condition followed by one application condition",
+    );
+
+    let text = Element::builder("failed", "urn:xmpp:sm:3")
         .append(
             Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
         )
@@ -92,17 +109,11 @@ fn xep0198_failed_accepts_rfc6120_stanza_error_diagnostics_in_order() {
                 .append("Resume on a new stream")
                 .build(),
         )
-        .append(
-            Element::builder("retry-after", "urn:waddle:diagnostics")
-                .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
-                .build(),
-        )
         .build();
-
     assert_eq!(
-        SmState::parse_inbound_control(&failed),
-        Ok(SmInboundControl::Failed { h: None }),
-        "XEP-0198 §4.2 reuses the RFC 6120 stanza error group",
+        SmState::parse_inbound_control(&text),
+        Err(InvalidSmInboundControl),
+        "XEP-0198's failed schema does not include err:text",
     );
 
     let empty_text = Element::builder("failed", "urn:xmpp:sm:3")
@@ -113,8 +124,8 @@ fn xep0198_failed_accepts_rfc6120_stanza_error_diagnostics_in_order() {
         .build();
     assert_eq!(
         SmState::parse_inbound_control(&empty_text),
-        Ok(SmInboundControl::Failed { h: None }),
-        "the optional RFC 6120 err:text may be schema-valid and empty",
+        Err(InvalidSmInboundControl),
+        "an empty err:text is invalid too",
     );
 
     let out_of_order = Element::builder("failed", "urn:xmpp:sm:3")
@@ -131,6 +142,6 @@ fn xep0198_failed_accepts_rfc6120_stanza_error_diagnostics_in_order() {
     assert_eq!(
         SmState::parse_inbound_control(&out_of_order),
         Err(InvalidSmInboundControl),
-        "the RFC 6120 group requires text before an application condition",
+        "an application condition after err:text is invalid because err:text is not in the group",
     );
 }

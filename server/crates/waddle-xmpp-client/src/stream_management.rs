@@ -699,11 +699,10 @@ fn parse_xsd_boolean(value: &str) -> Result<bool, InvalidSmInboundControl> {
 /// Validate the optional `err:stanzaErrorGroup` accepted by XEP-0198
 /// `<failed/>`.
 ///
-/// XEP-0198 §4.2 deliberately reuses RFC 6120's stanza-error grammar.  Its
-/// condition comes first; a human-readable `err:text` and one opaque
-/// application-specific condition can follow.  The runtime only needs the
-/// typed `Failed` control, but accepting the complete legal group prevents a
-/// conforming peer's diagnostics from being mistaken for a stream violation.
+/// XEP-0198's schema permits one optional `err:stanzaErrorGroup`. That group
+/// starts with exactly one RFC 6120 stanza condition and can include at most
+/// one non-stanzas application condition. It does not include `err:text`;
+/// `err:text` is a separate extension in the schemas that use it.
 fn has_optional_stanza_error_group(element: &Element) -> bool {
     let mut nodes = element.nodes().filter(|node| !is_xml_whitespace_node(node));
     let Some(node) = nodes.next() else {
@@ -717,7 +716,6 @@ fn has_optional_stanza_error_group(element: &Element) -> bool {
         return false;
     }
 
-    let mut saw_text = false;
     let mut saw_application_condition = false;
     for node in nodes {
         let Some(child) = node.as_element() else {
@@ -725,11 +723,7 @@ fn has_optional_stanza_error_group(element: &Element) -> bool {
         };
 
         if child.ns() == NS_STANZA_ERRORS && child.name() == "text" {
-            if saw_text || saw_application_condition || !is_stanza_error_text(child) {
-                return false;
-            }
-            saw_text = true;
-            continue;
+            return false;
         }
 
         if saw_application_condition || !is_application_specific_stanza_error_condition(child) {
@@ -750,12 +744,6 @@ fn is_stanza_error_condition(condition: &Element) -> bool {
         } else {
             condition.nodes().next().is_none()
         }
-}
-
-fn is_stanza_error_text(text: &Element) -> bool {
-    text.attrs().iter().all(|((namespace, name), _)| {
-        namespace == &minidom::rxml::Namespace::XML && name.as_str() == "lang"
-    }) && text.nodes().all(|node| node.as_text().is_some())
 }
 
 fn is_application_specific_stanza_error_condition(condition: &Element) -> bool {
@@ -1003,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_inbound_control_accepts_the_xep0198_stanza_error_group() {
+    fn parse_inbound_control_accepts_xep0198_stanza_error_group() {
         let condition = Element::builder("item-not-found", NS_STANZA_ERRORS).build();
         let mut valid = Element::builder("failed", NS_SM).build();
         valid.append_text_node("\n  ");
@@ -1011,34 +999,6 @@ mod tests {
         valid.append_text_node("\n");
         assert_eq!(
             SmState::parse_inbound_control(&valid),
-            Ok(SmInboundControl::Failed { h: None })
-        );
-
-        let text = Element::builder("text", NS_STANZA_ERRORS)
-            .attr_ns(
-                minidom::rxml::Namespace::XML,
-                minidom::rxml::xml_ncname!("lang").to_owned(),
-                "en",
-            )
-            .append("The previous stream no longer exists")
-            .build();
-        assert_eq!(
-            SmState::parse_inbound_control(
-                &Element::builder("failed", NS_SM)
-                    .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
-                    .append(text)
-                    .build()
-            ),
-            Ok(SmInboundControl::Failed { h: None })
-        );
-
-        assert_eq!(
-            SmState::parse_inbound_control(
-                &Element::builder("failed", NS_SM)
-                    .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
-                    .append(Element::builder("text", NS_STANZA_ERRORS).build())
-                    .build()
-            ),
             Ok(SmInboundControl::Failed { h: None })
         );
 
@@ -1050,22 +1010,6 @@ mod tests {
             SmState::parse_inbound_control(
                 &Element::builder("failed", NS_SM)
                     .append(Element::builder("service-unavailable", NS_STANZA_ERRORS).build())
-                    .append(application_condition)
-                    .build()
-            ),
-            Ok(SmInboundControl::Failed { h: None })
-        );
-
-        let text = Element::builder("text", NS_STANZA_ERRORS)
-            .append("Retry on a fresh stream")
-            .build();
-        let application_condition =
-            Element::builder("retry-after", "urn:waddle:diagnostics").build();
-        assert_eq!(
-            SmState::parse_inbound_control(
-                &Element::builder("failed", NS_SM)
-                    .append(Element::builder("resource-constraint", NS_STANZA_ERRORS).build())
-                    .append(text)
                     .append(application_condition)
                     .build()
             ),
@@ -1110,6 +1054,10 @@ mod tests {
                         .build(),
                 )
                 .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .build(),
+            Element::builder("failed", NS_SM)
+                .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
+                .append(Element::builder("text", NS_STANZA_ERRORS).build())
                 .build(),
             Element::builder("failed", NS_SM)
                 .append(Element::builder("item-not-found", NS_STANZA_ERRORS).build())
