@@ -41,10 +41,12 @@ internal class ExtensionCommandVerbs(
     /** Exact-attempt discovery seam for lifecycle callers and tests. */
     internal suspend fun runDiscovery(lease: ActiveSession.OwnerLease): List<ExtensionCommand> {
         val commands = try {
-            when (val result = activeSession.invokeIfCurrent(
+            when (
+                val result = activeSession.invokeIfCurrent(
                 lease,
                 { client -> client.discoverExtensionCommands().map { it.toDomain() } },
-            )) {
+            )
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return emptyList()
@@ -59,7 +61,11 @@ internal class ExtensionCommandVerbs(
         return if (activeSession.applyIfCurrent(lease) {
                 stores.extensionCommandStore.applyDiscovered(commands)
             }
-        ) commands else emptyList()
+        ) {
+            commands
+        } else {
+            emptyList()
+        }
     }
 
     suspend fun invokeExtensionCommand(

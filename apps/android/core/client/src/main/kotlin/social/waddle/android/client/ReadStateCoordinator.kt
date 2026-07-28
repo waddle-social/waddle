@@ -84,7 +84,9 @@ internal class ReadStateCoordinator(
             // not resurrect the badge the user is looking at.
                     stores.inboxStore.markReadLocally(conversation)
                 }
-            ) return@withLock
+            ) {
+                return@withLock
+            }
         }
         val explicitExpectation = explicitTarget?.let {
             expectedCursorFor(items, conversation, it.markerId) ?: return
@@ -99,14 +101,16 @@ internal class ReadStateCoordinator(
         // The cursor (which dedupes future dispatches) is taken only
         // when every attempted send went through — a thrown/refused
         // dispatch stays retryable on the next timeline change.
-        val dispatched = when (val result = activeSession.invokeIfCurrent(
+        val dispatched = when (
+            val result = activeSession.invokeIfCurrent(
             lease,
             { client ->
                 val displayed = dispatchDisplayed(lease, client, conversation, isGroupchat, ids)
                 fireInboxMarkRead(client, conversation, threadId = null)
                 displayed
             },
-        )) {
+        )
+        ) {
             ActiveSession.LeaseInvocation.Stale,
             ActiveSession.LeaseInvocation.NotConnected,
             -> {
@@ -140,10 +144,12 @@ internal class ReadStateCoordinator(
         val lease = activeSession.captureOwnerLease() ?: return
         val conversation = bareJid(conversationJid)
         if (threadId == null && !activeSession.applyIfCurrent(lease) { stores.unreadStore.clear(conversation) }) return
-        when (activeSession.invokeIfCurrent(
+        when (
+            activeSession.invokeIfCurrent(
             lease,
             { client -> fireInboxMarkRead(client, conversation, threadId) },
-        )) {
+        )
+        ) {
             ActiveSession.LeaseInvocation.Stale -> Unit
             ActiveSession.LeaseInvocation.NotConnected -> activeSession.applyIfCurrent(lease) {
                 stores.inboxStore.markReadLocally(conversation, threadId)
@@ -396,7 +402,9 @@ internal class ReadStateCoordinator(
                 if (!activeSession.applyIfCurrent(lease) {
                         activeSession.bridge?.submit(XmppEvent.MdsEntries(entries, applied))
                     }
-                ) return
+                ) {
+                    return
+                }
                 // Bare join: swallowing a cancellation here (attempt
                 // teardown drops unconsumed events) would resume a
                 // cancelled pipeline into the drain.

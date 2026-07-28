@@ -159,9 +159,11 @@ internal class RoomAdminVerbs(
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return CreateRoomResult.InvalidName
         val roomJid = try {
-            when (val result = activeSession.invokeIfCurrent(lease) {
+            when (
+                val result = activeSession.invokeIfCurrent(lease) {
                 it.createGroupDm(trimmed, memberJids.map(::bareJid))
-            }) {
+            }
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return CreateRoomResult.NotConnected

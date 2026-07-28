@@ -1331,7 +1331,6 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         return retractionResult
     }
 
-
     /** XEP-0492 notify-mode verbs, sliced out into [FakeNotifyVerbs]. */
     val notify = FakeNotifyVerbs()
 
@@ -1382,5 +1381,4 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         environment: WaddlePushEnvironment,
         credentials: WaddlePushDeviceCredentials,
     ): WaddleRegisterDeviceResult? = unused()
-
 }

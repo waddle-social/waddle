@@ -107,17 +107,28 @@ class MucCallEngine internal constructor(
         }
         val connection = signaling.captureActiveConnection() ?: return false
         val attempt = MucAttempt(room, newSid(), media, selfNick, selfFullJid, expectedMixerJid, connection)
-        var claimed = false
-        connection.applyIfCurrent {
-            claimed = store.updateCallSlot { current ->
-                if (current is CallState.Idle || current is CallState.Ended) {
-                    CallState.MucPending(room, attempt.sid, media, selfNick, selfFullJid, connection = connection) to true
-                } else {
-                    current to false
-                }
+        val claimed = store.updateCallSlot { current ->
+            if (current is CallState.Idle || current is CallState.Ended) {
+                CallState.MucPending(room, attempt.sid, media, selfNick, selfFullJid)
+                    .copyWithConnection(connection = connection) to true
+            } else {
+                current to false
             }
         }
         if (!claimed) return false
+        // Claim the local slot before waiting for a prior transport verb:
+        // stale cleanup must see the new room owner and stand down rather
+        // than terminating the fresh mixer session when its fence clears.
+        if (!connection.applyIfCurrent {}) {
+            store.updateCallSlot { current ->
+                if (current is CallState.MucPending && current.sid == attempt.sid) {
+                    CallState.Idle to Unit
+                } else {
+                    current to Unit
+                }
+            }
+            return false
+        }
         _selfHandRaised.value = false
         // Joining without mic capture advertises muted; a live mic
         // toggle re-broadcasts the authoritative state post-connect.
@@ -172,7 +183,9 @@ class MucCallEngine internal constructor(
         teardownSignaling: LogoutCallTeardown,
         teardownOwnFullJid: String?,
     ) {
-        current.selfNick?.let { nick -> leavePresenceForLogout(current.peer, nick, teardownOwnFullJid, teardownSignaling) }
+        current.selfNick?.let { nick ->
+            leavePresenceForLogout(current.peer, nick, teardownOwnFullJid, teardownSignaling)
+        }
         terminateForLogout(current.peer, current.sid, teardownOwnFullJid, teardownSignaling)
     }
 
@@ -341,7 +354,7 @@ class MucCallEngine internal constructor(
         connection.applyIfCurrent {
             promoted = store.updateCallSlot { current ->
                 if (current is CallState.Idle || current is CallState.Ended) {
-                    promotedState.copy(connection = connection) to true
+                    promotedState.copyWithConnection(connection) to true
                 } else {
                     current to false
                 }
@@ -358,7 +371,7 @@ class MucCallEngine internal constructor(
         // slot, so it can never land after a leave that claimed it.
         _selfHandRaised.value = false
         _selfMuted.value = !media.audio
-        restampActivePresence(promotedState.copy(connection = connection), selfNick)
+        restampActivePresence(promotedState.copyWithConnection(connection), selfNick)
         return true
     }
 
@@ -556,7 +569,7 @@ class MucCallEngine internal constructor(
         if (!sent) return false
         val marked = store.updateCallSlot { current ->
             if (current is CallState.MucPending && current.roomJid == attempt.room && current.sid == attempt.sid) {
-                current.copy(activePresencePublished = true) to true
+                current.copyWithConnection(activePresencePublished = true) to true
             } else {
                 current to false
             }
@@ -623,8 +636,7 @@ class MucCallEngine internal constructor(
                     join = join,
                     kind = CallKind.MUC,
                     selfNick = attempt.selfNick,
-                    connection = attempt.connection,
-                ) to true
+                ).copyWithConnection(attempt.connection) to true
             } else {
                 current to false
             }
@@ -658,7 +670,9 @@ class MucCallEngine internal constructor(
         presence.cancelPreparationWaiters(attempt.room, attempt.selfNick)
         cancelPendingAccept(attempt.sid)
         leavePresence(attempt.room, attempt.selfNick, attempt.selfFullJid, attempt.connection)
-        if (pending.activePresencePublished) terminate(attempt.room, attempt.sid, attempt.selfFullJid, attempt.connection)
+        if (pending.activePresencePublished) {
+            terminate(attempt.room, attempt.sid, attempt.selfFullJid, attempt.connection)
+        }
         store.reportCallError(message)
         return false
     }

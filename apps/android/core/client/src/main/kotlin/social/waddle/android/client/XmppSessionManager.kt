@@ -205,8 +205,10 @@ class XmppSessionManager(
         if (callStore.state.value != CallState.Idle) {
             try {
                 val callSender = retiredCallConnection?.let(ClientCallSignaling::forRetiredConnection)
-                if (callSender != null) withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) {
+                if (callSender != null) {
+                    withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) {
                     callStore.hangUpWith(callSender, retiredCallConnection.ownFullJid)
+                }
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation

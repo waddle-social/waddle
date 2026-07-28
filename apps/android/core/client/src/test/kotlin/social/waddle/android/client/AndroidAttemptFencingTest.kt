@@ -48,7 +48,7 @@ class AndroidAttemptFencingTest {
                 active,
                 stores,
                 UserPrefs(InMemoryPreferencesDataStore()),
-            ) {},
+            ) {}
 
             assertEquals(null, conversations.fetchRoomHistory(retiredLease, "room@muc.waddle.test", 50u, null))
             assertFalse(rooms.refreshTopology(retiredLease))
@@ -56,12 +56,18 @@ class AndroidAttemptFencingTest {
             assertEquals(emptyList<ExtensionCommand>(), extensions.runDiscovery(retiredLease))
             reads.bootstrapMdsDisplayed(retiredLease)
 
-            assertEquals(ActiveSession.LeaseInvocation.Stale, active.invokeIfCurrent(retiredLease) {
+            assertEquals(
+                ActiveSession.LeaseInvocation.Stale,
+                active.invokeIfCurrent(retiredLease) {
                 it.sendReaction("room@muc.waddle.test", "reaction-1", listOf("👍"), true)
-            })
-            assertEquals(ActiveSession.LeaseInvocation.Stale, active.invokeIfCurrent(retiredLease) {
+            }
+            )
+            assertEquals(
+                ActiveSession.LeaseInvocation.Stale,
+                active.invokeIfCurrent(retiredLease) {
                 it.sendCorrection("peer@waddle.test", "correction-1", "fixed", false, null)
-            })
+            }
+            )
 
             assertTrue(oldClient.fetchHistoryCalls.isEmpty())
             assertTrue(successor.fetchHistoryCalls.isEmpty())

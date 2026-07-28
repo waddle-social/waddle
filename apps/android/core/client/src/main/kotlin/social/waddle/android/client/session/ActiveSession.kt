@@ -291,6 +291,17 @@ internal class ActiveSession {
         true
     }
 
+    /**
+     * Run a suspending owner-scoped effect while the transport fence still
+     * names [lease]. This is for durable session projections: completing an
+     * old write after logout could otherwise restore state into a successor.
+     */
+    suspend fun runIfCurrent(lease: OwnerLease, action: suspend () -> Unit): Boolean = transportFence.withLock {
+        if (!isCurrent(lease)) return@withLock false
+        action()
+        true
+    }
+
     /** Fenced readiness probe for control flow that must not retain a client. */
     suspend fun hasActiveClient(): Boolean = invoke { true } is Invocation.Completed
 
@@ -357,12 +368,11 @@ internal class ActiveSession {
         lease: OwnerLease,
         op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
     ): LeaseSendResult = transportFence.withLock {
-        // Capture the attempt's transport before validating its lease. The
-        // fence stays held across `op`: either logout revoked first and this
-        // returns Stale without calling a retired client, or this invocation
-        // owns the selected client and logout waits for its completion.
-        val liveClient = client ?: return@withLock LeaseSendResult.Attempted(WaddleSendMessageOutcome.NotConnected)
         if (!isCurrent(lease)) return@withLock LeaseSendResult.Stale
+        // The fence stays held across `op`: either logout revoked first and
+        // this returns Stale without calling a retired client, or this
+        // invocation owns the selected client and logout waits for completion.
+        val liveClient = client ?: return@withLock LeaseSendResult.Attempted(WaddleSendMessageOutcome.NotConnected)
         try {
             LeaseSendResult.Attempted(op(liveClient))
         } catch (cancellation: CancellationException) {

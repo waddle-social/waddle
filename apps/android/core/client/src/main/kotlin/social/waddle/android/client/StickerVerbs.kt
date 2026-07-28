@@ -94,7 +94,11 @@ internal class StickerVerbs(
                     ),
                 )
             }
-        ) VerbResult.Ok else VerbResult.NotConnected
+        ) {
+            VerbResult.Ok
+        } else {
+            VerbResult.NotConnected
+        }
     }
 
     /** Retract the pack item [packId]; drops it from the store on Ok. */
@@ -118,6 +122,10 @@ internal class StickerVerbs(
         return if (activeSession.applyIfCurrent(lease) {
                 stores.stickerPackStore.applyRemoved(packId)
             }
-        ) VerbResult.Ok else VerbResult.NotConnected
+        ) {
+            VerbResult.Ok
+        } else {
+            VerbResult.NotConnected
+        }
     }
 }

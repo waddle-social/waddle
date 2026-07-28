@@ -60,15 +60,33 @@ internal interface CallConnection {
     suspend fun retract(peerBareJid: String, sid: String): Boolean
     suspend fun retractTieBreak(peerFullJid: String, sid: String): Boolean
     suspend fun finish(peerFullJid: String, sid: String): Boolean
-    suspend fun finishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason): Boolean
+    suspend fun finishWithReason(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason,
+    ): Boolean
     suspend fun finishMigrated(peerFullJid: String, oldSid: String, newSid: String): Boolean
-    suspend fun sessionInitiate(peerFullJid: String, initiatorFullJid: String, sid: String, media: WaddleCallMedia): Boolean
-    suspend fun sessionAccept(peerFullJid: String, responderFullJid: String, sid: String, media: WaddleCallMedia): Boolean
+    suspend fun sessionInitiate(
+        peerFullJid: String,
+        initiatorFullJid: String,
+        sid: String,
+        media: WaddleCallMedia,
+    ): Boolean
+    suspend fun sessionAccept(
+        peerFullJid: String,
+        responderFullJid: String,
+        sid: String,
+        media: WaddleCallMedia,
+    ): Boolean
     suspend fun sessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?): Boolean
     suspend fun mujiSessionInitiate(roomJid: String, initiatorFullJid: String, sid: String, video: Boolean): Boolean
     suspend fun mujiSessionTerminate(roomJid: String, sid: String): Boolean
     suspend fun updateMujiPresence(update: MujiPresenceUpdate): Boolean
-    suspend fun sessionTerminateWithOutcome(peerFullJid: String, sid: String, reason: WaddleJingleReason?): WaddleCallSessionTerminateOutcome
+    suspend fun sessionTerminateWithOutcome(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason?,
+    ): WaddleCallSessionTerminateOutcome
     suspend fun fetchExternalServices(): List<WaddleExternalService>?
 }
 
@@ -92,33 +110,71 @@ private class ActiveCallConnection(
     private val activeSession: ActiveSession,
     override val lease: ActiveSession.OwnerLease,
 ) : CallConnection {
-    override suspend fun applyIfCurrent(action: () -> Unit): Boolean = activeSession.applyIfCurrent(lease, action)
+    override suspend fun applyIfCurrent(action: () -> Unit): Boolean =
+        activeSession.applyIfCurrent(lease, action)
 
     override suspend fun propose(peerBareJid: String, sid: String, media: WaddleCallMedia): Boolean =
         verb { it.sendCallPropose(peerBareJid, sid, media.audio, media.video) }
-    override suspend fun ringing(peerBareJid: String, sid: String): Boolean = verb { it.sendCallRinging(peerBareJid, sid) }
-    override suspend fun proceed(peerFullJid: String, sid: String): Boolean = verb { it.sendCallProceed(peerFullJid, sid) }
-    override suspend fun reject(peerFullJid: String, sid: String): Boolean = verb { it.sendCallReject(peerFullJid, sid) }
-    override suspend fun rejectTieBreak(peerFullJid: String, sid: String): Boolean = verb { it.sendCallRejectTieBreak(peerFullJid, sid) }
-    override suspend fun retract(peerBareJid: String, sid: String): Boolean = verb { it.sendCallRetract(peerBareJid, sid) }
-    override suspend fun retractTieBreak(peerFullJid: String, sid: String): Boolean = verb { it.sendCallRetractTieBreak(peerFullJid, sid) }
-    override suspend fun finish(peerFullJid: String, sid: String): Boolean = verb { it.sendCallFinish(peerFullJid, sid) }
+    override suspend fun ringing(peerBareJid: String, sid: String): Boolean =
+        verb { it.sendCallRinging(peerBareJid, sid) }
+    override suspend fun proceed(peerFullJid: String, sid: String): Boolean =
+        verb { it.sendCallProceed(peerFullJid, sid) }
+    override suspend fun reject(peerFullJid: String, sid: String): Boolean =
+        verb { it.sendCallReject(peerFullJid, sid) }
+    override suspend fun rejectTieBreak(peerFullJid: String, sid: String): Boolean = verb {
+        it.sendCallRejectTieBreak(peerFullJid, sid)
+    }
+    override suspend fun retract(peerBareJid: String, sid: String): Boolean =
+        verb { it.sendCallRetract(peerBareJid, sid) }
+    override suspend fun retractTieBreak(peerFullJid: String, sid: String): Boolean = verb {
+        it.sendCallRetractTieBreak(peerFullJid, sid)
+    }
+    override suspend fun finish(peerFullJid: String, sid: String): Boolean =
+        verb { it.sendCallFinish(peerFullJid, sid) }
     override suspend fun finishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason): Boolean =
         verb { it.sendCallFinishWithReason(peerFullJid, sid, reason) }
     override suspend fun finishMigrated(peerFullJid: String, oldSid: String, newSid: String): Boolean =
         verb { it.sendCallFinishMigrated(peerFullJid, oldSid, newSid) }
-    override suspend fun sessionInitiate(peerFullJid: String, initiatorFullJid: String, sid: String, media: WaddleCallMedia): Boolean =
+    override suspend fun sessionInitiate(
+        peerFullJid: String,
+        initiatorFullJid: String,
+        sid: String,
+        media: WaddleCallMedia,
+    ): Boolean =
         verb { it.sendCallSessionInitiate(peerFullJid, initiatorFullJid, sid, media.audio, media.video) }
-    override suspend fun sessionAccept(peerFullJid: String, responderFullJid: String, sid: String, media: WaddleCallMedia): Boolean =
+    override suspend fun sessionAccept(
+        peerFullJid: String,
+        responderFullJid: String,
+        sid: String,
+        media: WaddleCallMedia,
+    ): Boolean =
         verb { it.sendCallSessionAccept(peerFullJid, responderFullJid, sid, media.audio, media.video) }
     override suspend fun sessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?): Boolean =
         verb { it.sendCallSessionTerminate(peerFullJid, sid, reason) }
-    override suspend fun mujiSessionInitiate(roomJid: String, initiatorFullJid: String, sid: String, video: Boolean): Boolean =
-        verb { it.sendMujiSessionInitiate(roomJid, initiatorFullJid, sid, video); true }
+    override suspend fun mujiSessionInitiate(
+        roomJid: String,
+        initiatorFullJid: String,
+        sid: String,
+        video: Boolean,
+    ): Boolean =
+        verb {
+            it.sendMujiSessionInitiate(roomJid, initiatorFullJid, sid, video)
+        true
+        }
     override suspend fun mujiSessionTerminate(roomJid: String, sid: String): Boolean =
-        verb { it.sendMujiSessionTerminate(roomJid, sid); true }
+        verb {
+            it.sendMujiSessionTerminate(roomJid, sid)
+        true
+        }
     override suspend fun updateMujiPresence(update: MujiPresenceUpdate): Boolean = verb {
-        it.updateMujiPresence(update.roomJid, update.nick, update.active, update.preparing, update.video, update.flags)
+        it.updateMujiPresence(
+            update.roomJid,
+            update.nick,
+            update.active,
+            update.preparing,
+            update.video,
+            update.flags,
+        )
         true
     }
 
@@ -128,7 +184,9 @@ private class ActiveCallConnection(
         it.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason)
     }
 
-    override suspend fun fetchExternalServices(): List<WaddleExternalService>? = invokeOr(null) { it.fetchExternalServices() }
+    override suspend fun fetchExternalServices(): List<WaddleExternalService>? = invokeOr(null) {
+        it.fetchExternalServices()
+    }
 
     private suspend fun verb(op: suspend (WaddleClientInterface) -> Boolean): Boolean = invokeOr(false, op)
 
@@ -150,8 +208,12 @@ private class ActiveCallConnection(
 private class RetiredCallTeardown(
     private val connection: ActiveSession.RetiredCallConnection,
 ) : LogoutCallTeardown {
-    override suspend fun retractForLogout(peerBareJid: String, sid: String): Boolean = call { it.sendCallRetract(peerBareJid, sid) }
-    override suspend fun rejectForLogout(peerFullJid: String, sid: String): Boolean = call { it.sendCallReject(peerFullJid, sid) }
+    override suspend fun retractForLogout(peerBareJid: String, sid: String): Boolean = call {
+        it.sendCallRetract(peerBareJid, sid)
+    }
+    override suspend fun rejectForLogout(peerFullJid: String, sid: String): Boolean = call {
+        it.sendCallReject(peerFullJid, sid)
+    }
     override suspend fun cancelAcceptingCallForLogout(peerFullJid: String, sid: String): Boolean =
         call { it.sendCallFinishWithReason(peerFullJid, sid, WaddleJingleReason.CANCEL) }
     override suspend fun terminateCallForLogout(peerFullJid: String, sid: String): WaddleCallSessionTerminateOutcome =
@@ -168,7 +230,10 @@ private class RetiredCallTeardown(
         true
     }
     override suspend fun terminateMujiForLogout(roomJid: String, sid: String): Boolean =
-        call { it.sendMujiSessionTerminate(roomJid, sid); true }
+        call {
+            it.sendMujiSessionTerminate(roomJid, sid)
+        true
+        }
     private suspend fun call(op: suspend (WaddleClientInterface) -> Boolean): Boolean = invokeOr(false, op)
     private suspend fun <T> invokeOr(fallback: T, op: suspend (WaddleClientInterface) -> T): T = try {
         op(connection.client)

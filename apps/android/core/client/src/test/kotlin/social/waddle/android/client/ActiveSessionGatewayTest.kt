@@ -198,12 +198,14 @@ class ActiveSessionGatewayTest {
         publishReady(active, successor)
 
         assertFalse(connection.propose("bob@waddle.test", "parked-dm", WaddleCallMedia(audio = true, video = false)))
-        assertFalse(connection.updateMujiPresence(
+        assertFalse(
+            connection.updateMujiPresence(
             social.waddle.android.client.calls.MujiPresenceUpdate(
                 roomJid = "room@muc.waddle.test", nick = "alice", active = false, preparing = true,
                 video = false, flags = social.waddle.client.ffi.WaddleInCallPresenceFlags(false, false),
             ),
-        ))
+        )
+        )
         assertTrue(oldClient.callVerbs.isEmpty())
         assertTrue(successor.callVerbs.isEmpty())
     }
@@ -222,7 +224,14 @@ class ActiveSessionGatewayTest {
         publishReady(active, successor)
 
         assertFalse(connection.proceed("bob@waddle.test/phone", "parked-dm"))
-        assertFalse(connection.mujiSessionInitiate("room@muc.waddle.test", "carol@waddle.test/device", "parked-muji", false))
+        assertFalse(
+            connection.mujiSessionInitiate(
+                "room@muc.waddle.test",
+                "carol@waddle.test/device",
+                "parked-muji",
+                false,
+            ),
+        )
         assertTrue(oldClient.callVerbs.isEmpty())
         assertTrue(successor.callVerbs.isEmpty())
     }

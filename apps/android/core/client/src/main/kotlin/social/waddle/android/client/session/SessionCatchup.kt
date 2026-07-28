@@ -94,9 +94,11 @@ internal class SessionCatchup(
      */
     private suspend fun hydrateInbox(lease: ActiveSession.OwnerLease) {
         val result = try {
-            when (val invocation = activeSession.invokeIfCurrent(lease) {
+            when (
+                val invocation = activeSession.invokeIfCurrent(lease) {
                 it.fetchInbox(onlyUnread = false, noMessages = true)
-            }) {
+            }
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return
@@ -112,7 +114,9 @@ internal class SessionCatchup(
         if (!activeSession.applyIfCurrent(lease) {
                 activeSession.bridge?.submit(XmppEvent.InboxEntries(result.conversations, applied))
             }
-        ) return
+        ) {
+            return
+        }
         // Bare join (bootstrapMdsDisplayed parity): swallowing a
         // cancellation here would resume a cancelled pipeline.
         applied.join()
@@ -128,7 +132,8 @@ internal class SessionCatchup(
      */
     private suspend fun hydrateNotifySettings(lease: ActiveSession.OwnerLease) {
         try {
-            when (activeSession.invokeIfCurrent(
+            when (
+                activeSession.invokeIfCurrent(
                 lease,
                 { client ->
                     stores.notifySettingsStore.hydrate(
@@ -136,7 +141,8 @@ internal class SessionCatchup(
                         fetchDmBookmarks = { client.fetchDmBookmarks() },
                     )
                 },
-            )) {
+            )
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return

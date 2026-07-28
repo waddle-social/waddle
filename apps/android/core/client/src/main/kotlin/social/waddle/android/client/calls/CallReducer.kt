@@ -49,7 +49,7 @@ private fun reduceRinging(current: CallState, event: WaddleCallEvent): CallState
         current.sid == event.sid &&
         bareJid(event.from).lowercase() == bareJid(current.to).lowercase()
     ) {
-        current.copy(ringing = true)
+        current.copyWithConnection(ringing = true)
     } else {
         current
     }
@@ -101,8 +101,7 @@ private fun reduceSessionInitiate(
         media = kind.media,
         join = kind.join,
         initiator = event.from,
-        connection = current.connection,
-    )
+    ).copyWithConnection(current.connection)
 }
 
 /**
@@ -122,8 +121,7 @@ private fun reduceSessionAccept(
         media = kind.media,
         join = kind.join,
         initiator = current.initiator,
-        connection = current.connection,
-    )
+    ).copyWithConnection(current.connection)
 }
 
 /**

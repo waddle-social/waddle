@@ -44,31 +44,33 @@ internal class ConversationVerbs(
      */
     suspend fun joinRoom(roomJid: String, nick: String): VerbResult {
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
-        val joined = try {
+        try {
             when (val result = activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, nick) }) {
-                ActiveSession.LeaseInvocation.Stale,
-                ActiveSession.LeaseInvocation.NotConnected,
-                -> false
-                is ActiveSession.LeaseInvocation.Completed -> true
+                ActiveSession.LeaseInvocation.Stale -> return VerbResult.NotConnected
+                ActiveSession.LeaseInvocation.NotConnected -> {
+                    if (!activeSession.runIfCurrent(lease) {
+                            stores.roomStore.markJoined(roomJid)
+                            persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
+                        }
+                    ) {
+                        return VerbResult.NotConnected
+                    }
+                    return VerbResult.NotConnected
+                }
+                is ActiveSession.LeaseInvocation.Completed -> Unit
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return VerbResult.Rejected
         }
-        if (!joined) {
-            if (!activeSession.applyIfCurrent(lease) {
-                    stores.roomStore.markJoined(roomJid)
-                    persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
-                }
-            ) return VerbResult.NotConnected
-            return VerbResult.NotConnected
-        }
-        if (!activeSession.applyIfCurrent(lease) {
+        if (!activeSession.runIfCurrent(lease) {
                 stores.roomStore.markJoined(roomJid)
                 persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return VerbResult.Ok
     }
 
@@ -133,7 +135,8 @@ internal class ConversationVerbs(
     ): WaddleUploadSlot? {
         val lease = activeSession.captureOwnerLease() ?: return null
         return try {
-            when (val result = activeSession.invokeIfCurrent(
+            when (
+                val result = activeSession.invokeIfCurrent(
                 lease,
                 { client ->
                     val service = activeSession.uploadService
@@ -141,7 +144,8 @@ internal class ConversationVerbs(
                         ?: return@invokeIfCurrent null
                     client.requestUploadSlot(service, filename, sizeBytes, contentType)
                 },
-            )) {
+            )
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> null
@@ -179,7 +183,9 @@ internal class ConversationVerbs(
         if (!activeSession.applyIfCurrent(lease) {
                 applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, next)
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         var result: VerbResult = VerbResult.Rejected
         try {
             result = activeSession.verbCallIfCurrent(lease) {
@@ -191,8 +197,10 @@ internal class ConversationVerbs(
             // happen — in a DM nothing on the wire would ever correct
             // the phantom chip. Owner-gated: a rollback racing logout
             // must not park pre-logout state into the next session.
-            if (result != VerbResult.Ok) activeSession.applyIfCurrent(lease) {
+            if (result != VerbResult.Ok) {
+                activeSession.applyIfCurrent(lease) {
                 applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, base)
+            }
             }
         }
         return result
@@ -215,10 +223,12 @@ internal class ConversationVerbs(
             sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
         }
         val outcome = try {
-            when (val result = activeSession.invokeIfCurrent(
+            when (
+                val result = activeSession.invokeIfCurrent(
                 lease,
                 { it.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options) },
-            )) {
+            )
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return VerbResult.NotConnected
@@ -241,7 +251,9 @@ internal class ConversationVerbs(
                 isGroupchat,
                 )
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return VerbResult.Ok
     }
 
@@ -267,7 +279,9 @@ internal class ConversationVerbs(
                 isGroupchat,
                 )
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return result
     }
 
@@ -353,7 +367,8 @@ internal class ConversationVerbs(
         val lease = activeSession.captureOwnerLease() ?: return NotifySettingsResult.NotConnected
         val room = bareJid(roomJid)
         val outcome = try {
-            when (val result = activeSession.invokeIfCurrent(
+            when (
+                val result = activeSession.invokeIfCurrent(
                 lease,
                 {
                     it.setRoomNotificationMode(
@@ -363,7 +378,8 @@ internal class ConversationVerbs(
                         stores.notifySettingsStore.richPayloadOptIn(room),
                     )
                 },
-            )) {
+            )
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return NotifySettingsResult.NotConnected
@@ -379,7 +395,11 @@ internal class ConversationVerbs(
                 if (activeSession.applyIfCurrent(lease) {
                         stores.notifySettingsStore.applyRoomUpdate(outcome.item)
                     }
-                ) NotifySettingsResult.Ok else NotifySettingsResult.NotConnected
+                ) {
+                    NotifySettingsResult.Ok
+                } else {
+                    NotifySettingsResult.NotConnected
+                }
             }
             WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch -> NotifySettingsResult.NodeConfigMismatch
             WaddleSetRoomNotificationModeOutcome.Error -> NotifySettingsResult.Rejected
@@ -396,10 +416,12 @@ internal class ConversationVerbs(
         val lease = activeSession.captureOwnerLease() ?: return NotifySettingsResult.NotConnected
         val peer = bareJid(peerJid)
         val outcome = try {
-            when (val result = activeSession.invokeIfCurrent(
+            when (
+                val result = activeSession.invokeIfCurrent(
                 lease,
                 { it.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer)) },
-            )) {
+            )
+            ) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return NotifySettingsResult.NotConnected
@@ -415,13 +437,21 @@ internal class ConversationVerbs(
                 if (activeSession.applyIfCurrent(lease) {
                         stores.notifySettingsStore.applyDmUpdate(outcome.item)
                     }
-                ) NotifySettingsResult.Ok else NotifySettingsResult.NotConnected
+                ) {
+                    NotifySettingsResult.Ok
+                } else {
+                    NotifySettingsResult.NotConnected
+                }
             }
             is WaddleSetDmNotificationModeOutcome.Removed -> {
                 if (activeSession.applyIfCurrent(lease) {
                         stores.notifySettingsStore.applyDmRemoved(outcome.jid)
                     }
-                ) NotifySettingsResult.Ok else NotifySettingsResult.NotConnected
+                ) {
+                    NotifySettingsResult.Ok
+                } else {
+                    NotifySettingsResult.NotConnected
+                }
             }
             WaddleSetDmNotificationModeOutcome.NodeConfigMismatch -> NotifySettingsResult.NodeConfigMismatch
             WaddleSetDmNotificationModeOutcome.Error -> NotifySettingsResult.Rejected

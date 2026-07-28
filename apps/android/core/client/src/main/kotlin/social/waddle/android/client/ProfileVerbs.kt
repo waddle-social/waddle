@@ -201,7 +201,8 @@ internal class ProfileVerbs(
                     url = null,
                 ),
             )
-        }) {
+        }
+        ) {
             return VerbResult.NotConnected
         }
         return result
@@ -227,7 +228,9 @@ internal class ProfileVerbs(
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfMood(WaddleMood(kind = kind, text = text))
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return result
     }
 
@@ -238,7 +241,9 @@ internal class ProfileVerbs(
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfMood(null)
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return result
     }
 
@@ -251,7 +256,9 @@ internal class ProfileVerbs(
                     WaddleActivity(general = general, specific = specific, text = text),
                 )
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return result
     }
 
@@ -262,7 +269,9 @@ internal class ProfileVerbs(
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfActivity(null)
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return result
     }
 
@@ -273,7 +282,9 @@ internal class ProfileVerbs(
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfTune(tune)
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return result
     }
 
@@ -284,7 +295,9 @@ internal class ProfileVerbs(
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfTune(null)
             }
-        ) return VerbResult.NotConnected
+        ) {
+            return VerbResult.NotConnected
+        }
         return result
     }
 
