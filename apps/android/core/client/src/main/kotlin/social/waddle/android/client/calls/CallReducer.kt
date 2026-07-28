@@ -101,6 +101,7 @@ private fun reduceSessionInitiate(
         media = kind.media,
         join = kind.join,
         initiator = event.from,
+        connection = current.connection,
     )
 }
 
@@ -121,6 +122,7 @@ private fun reduceSessionAccept(
         media = kind.media,
         join = kind.join,
         initiator = current.initiator,
+        connection = current.connection,
     )
 }
 

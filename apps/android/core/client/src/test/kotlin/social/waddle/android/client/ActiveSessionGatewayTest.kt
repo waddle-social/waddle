@@ -182,6 +182,49 @@ class ActiveSessionGatewayTest {
         assertTrue("the revoked call must never redirect onto a relogin client", successor.callVerbs.isEmpty())
     }
 
+    @Test
+    fun `parked DM and Muji call connection cannot signal a same-account successor`() = runTest {
+        val active = readySession()
+        val oldClient = FakeWaddleClient()
+        publishReady(active, oldClient)
+        val connection = checkNotNull(ClientCallSignaling(active).captureActiveConnection())
+
+        active.revokeOutboundAuthority()
+        active.advanceGeneration()
+        active.activateOwner("alice@waddle.test")
+        val successor = FakeWaddleClient()
+        publishReady(active, successor)
+
+        assertFalse(connection.propose("bob@waddle.test", "parked-dm", WaddleCallMedia(audio = true, video = false)))
+        assertFalse(connection.updateMujiPresence(
+            social.waddle.android.client.calls.MujiPresenceUpdate(
+                roomJid = "room@muc.waddle.test", nick = "alice", active = false, preparing = true,
+                video = false, flags = social.waddle.client.ffi.WaddleInCallPresenceFlags(false, false),
+            ),
+        ))
+        assertTrue(oldClient.callVerbs.isEmpty())
+        assertTrue(successor.callVerbs.isEmpty())
+    }
+
+    @Test
+    fun `parked call connection cannot signal a different-account successor`() = runTest {
+        val active = readySession()
+        val oldClient = FakeWaddleClient()
+        publishReady(active, oldClient)
+        val connection = checkNotNull(ClientCallSignaling(active).captureActiveConnection())
+
+        active.revokeOutboundAuthority()
+        active.advanceGeneration()
+        active.activateOwner("carol@waddle.test")
+        val successor = FakeWaddleClient()
+        publishReady(active, successor)
+
+        assertFalse(connection.proceed("bob@waddle.test/phone", "parked-dm"))
+        assertFalse(connection.mujiSessionInitiate("room@muc.waddle.test", "carol@waddle.test/device", "parked-muji", false))
+        assertTrue(oldClient.callVerbs.isEmpty())
+        assertTrue(successor.callVerbs.isEmpty())
+    }
+
     private suspend fun readySession(): ActiveSession {
         val active = ActiveSession()
         active.advanceGeneration()

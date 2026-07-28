@@ -18,29 +18,37 @@ internal class CallTeardown(
     private val ownFullJid: () -> String?,
     private val callbacks: CallTeardownCallbacks,
 ) {
-    suspend fun hangUp(reason: WaddleJingleReason) = hangUpWith(signaling, ownFullJid(), reason)
+    suspend fun hangUp(reason: WaddleJingleReason) {
+        val connection = signaling.captureActiveConnection() ?: return
+        hangUpWith(connection, ownFullJid(), reason)
+    }
 
-    suspend fun hangUpWith(sender: CallSignaling, ownJid: String?, reason: WaddleJingleReason) {
-        val current: CallState
-        synchronized(stateLock) {
-            callbacks.cancelTimers()
-            current = state.value
-            state.value = CallState.Idle
-        }
-        when (current) {
-            is CallState.Active -> if (current.kind == CallKind.MUC) {
-                muc.teardownActiveWith(current, sender, ownJid)
+    suspend fun hangUpWith(sender: CallConnection, ownJid: String?, reason: WaddleJingleReason) {
+        var current: CallState? = null
+        if (!sender.applyIfCurrent {
+                synchronized(stateLock) {
+                    val live = state.value.connectionOrNull
+                    if (sender.lease != null && live != null && live !== sender) return@applyIfCurrent
+                    callbacks.cancelTimers()
+                    current = state.value
+                    state.value = CallState.Idle
+                }
+            }) return
+        val claimed = current ?: return
+        when (claimed) {
+            is CallState.Active -> if (claimed.kind == CallKind.MUC) {
+                muc.teardownActiveWith(claimed, sender, ownJid)
             } else {
-                terminateActive(current, reason, sender)
+                terminateActive(claimed, reason, sender)
             }
-            is CallState.MucPending -> muc.teardownPendingWith(current, sender)
+            is CallState.MucPending -> muc.teardownPendingWith(claimed, sender)
             is CallState.Outgoing ->
-                if (!sender.retract(bareJid(current.to), current.sid)) callbacks.reportError("call retract failed")
-            is CallState.Incoming -> if (current.accepting) {
-                if (!sender.finishWithReason(current.from, current.sid, WaddleJingleReason.CANCEL)) {
+                if (!sender.retract(bareJid(claimed.to), claimed.sid)) callbacks.reportError("call retract failed")
+            is CallState.Incoming -> if (claimed.accepting) {
+                if (!sender.finishWithReason(claimed.from, claimed.sid, WaddleJingleReason.CANCEL)) {
                     callbacks.reportError("call finish failed")
                 }
-            } else if (!sender.reject(current.from, current.sid)) {
+            } else if (!sender.reject(claimed.from, claimed.sid)) {
                 callbacks.reportError("call reject failed")
             }
             else -> Unit
@@ -48,15 +56,19 @@ internal class CallTeardown(
     }
 
     suspend fun hangUpActiveIf(sid: String, reason: WaddleJingleReason) {
-        val current: CallState.Active
-        synchronized(stateLock) {
-            val active = state.value
-            if (active !is CallState.Active || active.sid != sid) return
-            callbacks.cancelTimers()
-            current = active
-            state.value = CallState.Idle
-        }
-        if (current.kind == CallKind.MUC) muc.teardownActive(current) else terminateActive(current, reason, signaling)
+        val connection = signaling.captureActiveConnection() ?: return
+        var current: CallState.Active? = null
+        if (!connection.applyIfCurrent {
+                synchronized(stateLock) {
+                    val active = state.value
+                    if (active !is CallState.Active || active.sid != sid || active.connection !== connection) return@applyIfCurrent
+                    callbacks.cancelTimers()
+                    current = active
+                    state.value = CallState.Idle
+                }
+            }) return
+        val claimed = current ?: return
+        if (claimed.kind == CallKind.MUC) muc.teardownActiveWith(claimed, connection, null) else terminateActive(claimed, reason, connection)
     }
 
     fun dismiss() {
@@ -68,7 +80,7 @@ internal class CallTeardown(
         }
     }
 
-    private suspend fun terminateActive(current: CallState.Active, reason: WaddleJingleReason, sender: CallSignaling) {
+    private suspend fun terminateActive(current: CallState.Active, reason: WaddleJingleReason, sender: CallConnection) {
         val outcome = sender.sessionTerminateWithOutcome(current.peer, current.sid, reason)
         if (outcome == WaddleCallSessionTerminateOutcome.ERROR) {
             callbacks.reportError("call session terminate failed")
