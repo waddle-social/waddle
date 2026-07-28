@@ -27,16 +27,28 @@ spec:
     clustering:
       enabled: true
       enrolledKeyCount: 4
-    # ADR-0017 Phase 4: surge-based rollout, no full-outage Recreate.
-    # Mixed-version relay windows are safe since #1597: the ordered-relay
-    # envelope message id is versioned, so an old replica answers
-    # UnknownMessage (provably uncommitted) and the sender rolls back
-    # instead of installing a sticky diversion.
+    # TEMPORARY — hard cutover for the #1445 release, revert after (#1597).
+    #
+    # #1445 adds a new ordered-relay envelope variant (MujiJingleIq). A
+    # replica running the previous image cannot deserialize it, which
+    # surfaces as a maybe-committed codec failure and leaves a sticky
+    # diversion on the ordered channel — a channel shared with that
+    # sender's ordinary MUC join/leave/groupchat traffic for the room.
+    # One attempted cross-node call during a mixed-version window can
+    # therefore drop that user's chat in that room until they reconnect.
+    #
+    # RollingUpdate with maxSurge 1 / maxUnavailable 0 guarantees such a
+    # window on every deploy. Recreate terminates both pods before
+    # starting any new one, so no two versions ever exchange relay
+    # envelopes. Cost is a brief full outage; XMPP clients reconnect via
+    # stream management, and in-flight calls are accepted as expendable
+    # for this release.
+    #
+    # Revert to RollingUpdate (maxSurge 1 / maxUnavailable 0) once this
+    # release is out — Recreate is a regression against the ADR-0017
+    # Phase 4 move away from it, not a new steady state.
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
