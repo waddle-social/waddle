@@ -27,22 +27,18 @@ spec:
     clustering:
       enabled: true
       enrolledKeyCount: 4
-    # TEMPORARY — hard cutover for the #1445 release, revert after (#1597).
+    # TEMPORARY — one final hard cutover for the #1597 release, revert
+    # right after it is deployed.
     #
-    # #1445 adds a new ordered-relay envelope variant (MujiJingleIq). A
-    # replica running the previous image cannot deserialize it, which
-    # surfaces as a maybe-committed codec failure and leaves a sticky
-    # diversion on the ordered channel — a channel shared with that
-    # sender's ordinary MUC join/leave/groupchat traffic for the room.
-    # One attempted cross-node call during a mixed-version window can
-    # therefore drop that user's chat in that room until they reconnect.
-    #
-    # RollingUpdate with maxSurge 1 / maxUnavailable 0 guarantees such a
-    # window on every deploy. Recreate terminates both pods before
-    # starting any new one, so no two versions ever exchange relay
-    # envelopes. Cost is a brief full outage; XMPP clients reconnect via
-    # stream management, and in-flight calls are accepted as expendable
-    # for this release.
+    # #1597 moves Muji IQs onto their own ordered-relay side-band lane
+    # (RoomSideBand). During a mixed-version window an old-binary
+    # sender still puts Muji on the shared room lane, which the new
+    # receiver rejects — diverting the OLD sender's shared lane and
+    # silently dropping that user's chat in the room (the exact #1445
+    # failure). One last Recreate deploy removes that window. Once
+    # every replica runs the side-band lane, mixed-version relay
+    # poisoning is bounded to the new feature's own lane, and rolling
+    # deploys become safe for future relay variants too.
     #
     # Revert to RollingUpdate (maxSurge 1 / maxUnavailable 0) once this
     # release is out — Recreate is a regression against the ADR-0017

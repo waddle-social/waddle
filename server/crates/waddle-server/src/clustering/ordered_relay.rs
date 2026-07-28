@@ -42,6 +42,27 @@ pub enum OrderedRelayRecipient {
     BareJid(jid::BareJid),
     FullJid(jid::FullJid),
     Room(jid::BareJid),
+    /// Side-band lane for room-bound payloads that are not ordinary
+    /// MUC stanza traffic (#1597). The recipient participates in the
+    /// channel key, so side-band kinds get their own sequence space
+    /// and their own diversion: a poisoned side-band lane (e.g. a
+    /// peer that cannot decode a newly added payload variant during
+    /// version skew) cannot drop the same sender's join/leave/
+    /// groupchat traffic for the room.
+    RoomSideBand(jid::BareJid),
+}
+
+impl OrderedRelayRecipient {
+    /// The one lane-selection point for MUC-proxy channels: every
+    /// channel carrying an `OrderedRelayPayload::MucProxy` must derive
+    /// its recipient here so sender and receiver agree on the lane.
+    pub fn for_muc_proxy(room_jid: jid::BareJid, kind: OrderedRelayMucProxyKind) -> Self {
+        if kind.is_side_band() {
+            Self::RoomSideBand(room_jid)
+        } else {
+            Self::Room(room_jid)
+        }
+    }
 }
 
 /// Typed origin key for ordered-relay channels.
@@ -126,11 +147,23 @@ pub enum OrderedRelayMucProxyKind {
     /// the stanza is NOT addressed to the room: `to` is the calls
     /// mixer (`calls.<domain>`) and the target room lives in the
     /// `<muji room='…'/>` payload, which the envelope validation binds
-    /// to the channel's room.
+    /// to the channel's room. Rides the `RoomSideBand` lane (#1597),
+    /// so a diversion on it cannot stall the sender's ordinary MUC
+    /// traffic for the room.
     MujiJingleIq,
 }
 
 impl OrderedRelayMucProxyKind {
+    /// Kinds that ride the `RoomSideBand` lane instead of the shared
+    /// room lane (#1597). Any future kind whose payload an old binary
+    /// may not decode belongs here, so a mixed-version window bounds
+    /// the resulting diversion to the side-band lane (all side-band
+    /// kinds share it — such a window can stall existing side-band
+    /// traffic like Muji call signaling, but never room chat).
+    pub fn is_side_band(self) -> bool {
+        matches!(self, OrderedRelayMucProxyKind::MujiJingleIq)
+    }
+
     fn matches_stanza(self, stanza: &waddle_xmpp::Stanza) -> bool {
         matches!(
             (self, stanza),
@@ -211,10 +244,18 @@ impl OrderedRelayPayload {
                 | OrderedRelayPayload::Presence { recipient, .. },
                 OrderedRelayRecipient::FullJid(full),
             ) => recipient == &jid::Jid::from(full.clone()),
+            // The lane split (#1597) is enforced here: a MUC-proxy
+            // payload is only consistent with the lane its kind rides,
+            // so sender and receiver can never disagree about which
+            // channel a kind orders on.
             (
-                OrderedRelayPayload::MucProxy { room_jid, .. },
+                OrderedRelayPayload::MucProxy { room_jid, kind, .. },
                 OrderedRelayRecipient::Room(channel_room),
-            ) => room_jid == channel_room,
+            ) => !kind.is_side_band() && room_jid == channel_room,
+            (
+                OrderedRelayPayload::MucProxy { room_jid, kind, .. },
+                OrderedRelayRecipient::RoomSideBand(channel_room),
+            ) => kind.is_side_band() && room_jid == channel_room,
             _ => false,
         }
     }
@@ -1848,7 +1889,10 @@ mod tests {
     fn muji_envelope(kind: OrderedRelayMucProxyKind, stanza: RemoteStanza) -> RemoteStanzaEnvelope {
         RemoteStanzaEnvelope {
             asserted_origin_node: origin_node(),
-            channel: room_channel(),
+            channel: OrderedRelayChannel {
+                recipient: OrderedRelayRecipient::for_muc_proxy(room_jid(), kind),
+                ..room_channel()
+            },
             sequence: OrderedRelaySequence(1),
             origin_inbound_sequence: inbound(1),
             origin_claim: origin_claim(),

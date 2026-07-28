@@ -958,7 +958,7 @@ impl OrderedRelayDeliveryBridge {
         };
         let channel = OrderedRelayChannel {
             origin: channel_origin,
-            recipient: OrderedRelayRecipient::Room(room_jid.clone()),
+            recipient: OrderedRelayRecipient::for_muc_proxy(room_jid.clone(), kind),
             target_epoch: target_snapshot.claim_epoch,
         };
         let retry_channel = channel.clone();
@@ -1059,18 +1059,20 @@ impl OrderedRelayDeliveryBridge {
             }
             // A `MujiJingleIq` maybe-committed deliberately gets the
             // same treatment as every other kind: the channel keeps
-            // its diversion. An earlier attempt to `forget_channel`
-            // here was WRONG and is recorded so it is not retried —
+            // its diversion. Since #1597 that diversion lands on the
+            // Muji side-band lane, so it stalls only this sender's
+            // later Muji IQs for the room, never their chat. An
+            // earlier attempt to `forget_channel` here was WRONG and
+            // is recorded so it is not retried —
             // `OrderedRelaySenderState::forget_channel` drops
             // `next_by_channel`, resetting the SENDER's sequence to
             // FIRST while the receiver's `next_expected` is untouched.
-            // The next envelope on the channel (the user's next
-            // groupchat message or leave presence) would then arrive
-            // with a stale sequence and NACK as an ordering gap,
-            // converting a bounded failure into a diversion attached
-            // to unrelated MUC traffic. Only the `JoinPresence` arm
-            // above can forget safely, because it immediately re-sends
-            // and has `try_proxy_muc_join_repair` as a backstop.
+            // The next envelope on the channel would then arrive with
+            // a stale sequence and NACK as an ordering gap, restoring
+            // the diversion it tried to clear. Only the `JoinPresence`
+            // arm above can forget safely, because it immediately
+            // re-sends and has `try_proxy_muc_join_repair` as a
+            // backstop.
             return MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted);
         }
 
@@ -2947,7 +2949,10 @@ impl OrderedRelayDeliveryBridge {
         };
         let channel = OrderedRelayChannel {
             origin: OrderedRelayOrigin::Entity(repair_origin_entity.clone()),
-            recipient: OrderedRelayRecipient::Room(room_jid.clone()),
+            recipient: OrderedRelayRecipient::for_muc_proxy(
+                room_jid.clone(),
+                OrderedRelayMucProxyKind::JoinPresence,
+            ),
             target_epoch: target_snapshot.claim_epoch,
         };
         let seed = RemoteDeliverySeed {
@@ -4204,7 +4209,9 @@ fn relay_payload_target(
         OrderedRelayRecipient::FullJid(_) | OrderedRelayRecipient::BareJid(_) => {
             Err(OrderedRelayNackReason::ParseFailure)
         }
-        OrderedRelayRecipient::Room(_) => Err(OrderedRelayNackReason::ParseFailure),
+        OrderedRelayRecipient::Room(_) | OrderedRelayRecipient::RoomSideBand(_) => {
+            Err(OrderedRelayNackReason::ParseFailure)
+        }
     }
 }
 

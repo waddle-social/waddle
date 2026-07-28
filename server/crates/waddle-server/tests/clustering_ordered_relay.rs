@@ -1049,3 +1049,168 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
         })
     ));
 }
+
+fn muji_payload() -> OrderedRelayPayload {
+    use waddle_xmpp::xep::xep0167::MediaKind;
+    use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+    let muji = Muji {
+        room: Some(room_jid()),
+        preparing: false,
+        contents: vec![MujiContent::new(
+            "audio",
+            Creator::Initiator,
+            MediaKind::Audio,
+        )],
+    };
+    let jingle = xmpp_parsers::jingle::Jingle::new(
+        xmpp_parsers::jingle::Action::SessionInitiate,
+        xmpp_parsers::jingle::SessionId("muji-sid-1".into()),
+    );
+    let mut payload: xmpp_parsers::minidom::Element = jingle.into();
+    payload.append_child(muji.to_element());
+    let stanza = RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
+        xmpp_parsers::iq::Iq::Set {
+            from: Some(jid::Jid::from_str("romeo@example.test/home").expect("full jid")),
+            to: Some(jid::Jid::from_str("calls.example.test").expect("mixer jid")),
+            id: "muji-iq-1".into(),
+            payload,
+        },
+    )));
+    OrderedRelayPayload::MucProxy {
+        room_jid: room_jid(),
+        kind: OrderedRelayMucProxyKind::MujiJingleIq,
+        stanza,
+    }
+}
+
+fn groupchat_payload() -> OrderedRelayPayload {
+    OrderedRelayPayload::MucProxy {
+        room_jid: room_jid(),
+        kind: OrderedRelayMucProxyKind::GroupchatMessage,
+        stanza: groupchat_stanza_to("room@example.test"),
+    }
+}
+
+fn side_band_channel() -> OrderedRelayChannel {
+    OrderedRelayChannel {
+        origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
+        recipient: OrderedRelayRecipient::for_muc_proxy(
+            room_jid(),
+            OrderedRelayMucProxyKind::MujiJingleIq,
+        ),
+        target_epoch: ClaimEpoch(11),
+    }
+}
+
+/// #1597: Muji IQs ride their own side-band lane so a diversion there
+/// (e.g. a peer that cannot decode the variant during version skew)
+/// cannot drop the same sender's ordinary MUC traffic for the room.
+#[test]
+fn muji_side_band_diversion_leaves_room_lane_deliverable() {
+    let mut state = OrderedRelaySenderState::default();
+    let muji_channel = side_band_channel();
+    let room_channel = room_channel();
+    assert_ne!(
+        muji_channel, room_channel,
+        "the Muji lane must be a distinct ordering scope from the room lane"
+    );
+    assert_eq!(
+        OrderedRelayRecipient::for_muc_proxy(
+            room_jid(),
+            OrderedRelayMucProxyKind::GroupchatMessage
+        ),
+        OrderedRelayRecipient::Room(room_jid()),
+        "ordinary MUC kinds must stay on the shared room lane"
+    );
+
+    state.divert(OrderedRelayDiversion {
+        channel: muji_channel.clone(),
+        reason: OrderedRelayDiversionReason::Unreachable,
+    });
+
+    let muji_result = state.next_envelope(
+        origin_node(),
+        muji_channel,
+        inbound(1),
+        claims_for_target(room_claim()),
+        muji_payload(),
+    );
+    assert!(
+        muji_result.is_err(),
+        "the diverted Muji lane stays diverted"
+    );
+
+    let groupchat = state
+        .next_envelope(
+            origin_node(),
+            room_channel,
+            inbound(2),
+            claims_for_target(room_claim()),
+            groupchat_payload(),
+        )
+        .expect("groupchat on the room lane is unaffected by the Muji diversion");
+    assert_eq!(groupchat.sequence, OrderedRelaySequence(1));
+}
+
+/// #1597: the receiver enforces the lane split. A Muji payload on the
+/// shared room lane, or an ordinary MUC payload on the side-band
+/// lane, is an envelope-consistency failure — sender and receiver can
+/// never disagree about which lane a kind rides.
+#[test]
+fn receiver_enforces_muji_side_band_lane_split() {
+    let valid_side_band = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: side_band_channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: room_claim(),
+        payload: muji_payload(),
+        origin_proof: None,
+    };
+    let muji_on_room_lane = RemoteStanzaEnvelope {
+        channel: room_channel(),
+        ..valid_side_band.clone()
+    };
+    let groupchat_on_side_band = RemoteStanzaEnvelope {
+        payload: groupchat_payload(),
+        ..valid_side_band.clone()
+    };
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(
+        matches!(
+            receive(&mut receiver, valid_side_band),
+            OrderedRelayReply::Ack(OrderedRelayAck { .. })
+        ),
+        "a Muji envelope on the side-band lane must validate"
+    );
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(
+        matches!(
+            receive(&mut receiver, muji_on_room_lane),
+            OrderedRelayReply::Nack(OrderedRelayNack {
+                reason: OrderedRelayNackReason::ParseFailure,
+                ..
+            })
+        ),
+        "a Muji payload must be rejected on the shared room lane"
+    );
+
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(
+        matches!(
+            receive(&mut receiver, groupchat_on_side_band),
+            OrderedRelayReply::Nack(OrderedRelayNack {
+                reason: OrderedRelayNackReason::ParseFailure,
+                ..
+            })
+        ),
+        "ordinary MUC payloads must be rejected on the side-band lane"
+    );
+}
