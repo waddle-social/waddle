@@ -34,17 +34,20 @@ internal class RoomAdminVerbs(
      * when every tier failed and nothing was collected.
      */
     suspend fun refreshRoomMembers(roomJid: String) {
-        stores.roomMembersStore.markLoading(roomJid)
+        val lease = activeSession.captureOwnerLease() ?: return
+        if (!activeSession.applyIfCurrent(lease) { stores.roomMembersStore.markLoading(roomJid) }) return
         val members = mutableListOf<WaddleRoomMemberEntry>()
         var failures = 0
         for (tier in MEMBER_LIST_TIERS) {
             try {
-                when (val result = activeSession.invoke { it.listRoomMembers(roomJid, tier) }) {
-                    ActiveSession.Invocation.NotConnected -> {
-                        stores.roomMembersStore.applyUnavailable(roomJid)
+                when (val result = activeSession.invokeIfCurrent(lease) { it.listRoomMembers(roomJid, tier) }) {
+                    ActiveSession.LeaseInvocation.Stale,
+                    ActiveSession.LeaseInvocation.NotConnected,
+                    -> {
+                        activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyUnavailable(roomJid) }
                         return
                     }
-                    is ActiveSession.Invocation.Completed -> members += result.value
+                    is ActiveSession.LeaseInvocation.Completed -> members += result.value
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -53,9 +56,9 @@ internal class RoomAdminVerbs(
             }
         }
         if (members.isEmpty() && failures > 0) {
-            stores.roomMembersStore.applyUnavailable(roomJid)
+            activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyUnavailable(roomJid) }
         } else {
-            stores.roomMembersStore.applyLoaded(roomJid, members)
+            activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyLoaded(roomJid, members) }
         }
     }
 
@@ -65,21 +68,23 @@ internal class RoomAdminVerbs(
         targetJid: String,
         affiliation: WaddleMucAffiliation,
         reason: String?,
-    ): RoomAdminResult = adminCall { client ->
+    ): RoomAdminResult = adminCallForCurrent { client ->
         client.setRoomAffiliation(bareJid(roomJid), bareJid(targetJid), affiliation, reason)
     }
 
     /** XEP-0045 §8.2 kick: eject by nick, role → none, affiliation kept. */
     suspend fun kickOccupant(roomJid: String, nick: String, reason: String?): RoomAdminResult =
-        adminCall { client -> client.kickOccupant(bareJid(roomJid), nick, reason) }
+        adminCallForCurrent { client -> client.kickOccupant(bareJid(roomJid), nick, reason) }
 
     /** XEP-0045 §10.2 owner config fetch; `null` offline / not owner. */
     suspend fun fetchRoomConfig(roomJid: String): WaddleRoomConfig? =
-        activeSession.fetch { client -> client.fetchRoomConfig(bareJid(roomJid)) }
+        activeSession.captureOwnerLease()?.let { lease ->
+            activeSession.fetchIfCurrent(lease) { client -> client.fetchRoomConfig(bareJid(roomJid)) }
+        }
 
     /** XEP-0045 §10.2 GET-merge-SET submit of an owner edit patch. */
     suspend fun submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch): RoomAdminResult =
-        adminCall { client -> client.submitRoomConfig(bareJid(roomJid), patch) }
+        adminCallForCurrent { client -> client.submitRoomConfig(bareJid(roomJid), patch) }
 
     /**
      * XEP-0045 §10.1 room creation (web `createMucRoom` parity): the
@@ -93,6 +98,7 @@ internal class RoomAdminVerbs(
         description: String?,
         forum: Boolean,
     ): CreateRoomResult {
+        val lease = activeSession.captureOwnerLease() ?: return CreateRoomResult.NotConnected
         val localpart = channelLocalpartOf(name)
         if (localpart.isEmpty()) return CreateRoomResult.InvalidName
         val patch = WaddleRoomConfigPatch(
@@ -102,9 +108,11 @@ internal class RoomAdminVerbs(
             pinPermission = null,
         )
         val roomJid = try {
-            when (val result = activeSession.invoke { it.createRoom(localpart, nick, patch) }) {
-                ActiveSession.Invocation.NotConnected -> return CreateRoomResult.NotConnected
-                is ActiveSession.Invocation.Completed -> result.value
+            when (val result = activeSession.invokeIfCurrent(lease) { it.createRoom(localpart, nick, patch) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return CreateRoomResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -123,16 +131,18 @@ internal class RoomAdminVerbs(
         } catch (_: Throwable) {
             return CreateRoomResult.Rejected
         }
-        refreshTopology()
-        return CreateRoomResult.Created(roomJid)
+        return if (refreshTopology(lease)) CreateRoomResult.Created(roomJid) else CreateRoomResult.NotConnected
     }
 
     /** XEP-0045 §10.9 destroy; refreshes the topology on success. */
     suspend fun destroyRoom(roomJid: String, reason: String?): RoomAdminResult {
-        val result = adminCall { client -> client.destroyRoom(bareJid(roomJid), reason) }
+        val lease = activeSession.captureOwnerLease() ?: return RoomAdminResult.NotConnected
+        val result = adminCall(lease) { client -> client.destroyRoom(bareJid(roomJid), reason) }
         if (result == RoomAdminResult.Ok) {
-            stores.roomStore.markLeft(roomJid)
-            refreshTopology()
+            if (!activeSession.applyIfCurrent(lease) { stores.roomStore.markLeft(roomJid) }) {
+                return RoomAdminResult.NotConnected
+            }
+            if (!refreshTopology(lease)) return RoomAdminResult.NotConnected
         }
         return result
     }
@@ -145,12 +155,17 @@ internal class RoomAdminVerbs(
      * its server-written bookmark before the caller joins it.
      */
     suspend fun createGroupDm(name: String, memberJids: List<String>): CreateRoomResult {
+        val lease = activeSession.captureOwnerLease() ?: return CreateRoomResult.NotConnected
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return CreateRoomResult.InvalidName
         val roomJid = try {
-            when (val result = activeSession.invoke { it.createGroupDm(trimmed, memberJids.map(::bareJid)) }) {
-                ActiveSession.Invocation.NotConnected -> return CreateRoomResult.NotConnected
-                is ActiveSession.Invocation.Completed -> result.value
+            when (val result = activeSession.invokeIfCurrent(lease) {
+                it.createGroupDm(trimmed, memberJids.map(::bareJid))
+            }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return CreateRoomResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -168,8 +183,7 @@ internal class RoomAdminVerbs(
         } catch (_: Throwable) {
             return CreateRoomResult.Rejected
         }
-        refreshTopology()
-        return CreateRoomResult.Created(roomJid)
+        return if (refreshTopology(lease)) CreateRoomResult.Created(roomJid) else CreateRoomResult.NotConnected
     }
 
     /**
@@ -179,10 +193,11 @@ internal class RoomAdminVerbs(
      * DM surface.
      */
     suspend fun renameGroupDm(roomJid: String, name: String?): RoomAdminResult {
-        val result = adminCall { client ->
+        val lease = activeSession.captureOwnerLease() ?: return RoomAdminResult.NotConnected
+        val result = adminCall(lease) { client ->
             client.renameGroupDm(bareJid(roomJid), name?.trim()?.takeIf { it.isNotEmpty() })
         }
-        if (result == RoomAdminResult.Ok) refreshTopology()
+        if (result == RoomAdminResult.Ok && !refreshTopology(lease)) return RoomAdminResult.NotConnected
         return result
     }
 
@@ -192,10 +207,13 @@ internal class RoomAdminVerbs(
      * refresh the topology so it drops off the DM surface.
      */
     suspend fun leaveGroupDm(roomJid: String): RoomAdminResult {
-        val result = adminCall { client -> client.leaveGroupDm(bareJid(roomJid)) }
+        val lease = activeSession.captureOwnerLease() ?: return RoomAdminResult.NotConnected
+        val result = adminCall(lease) { client -> client.leaveGroupDm(bareJid(roomJid)) }
         if (result == RoomAdminResult.Ok) {
-            stores.roomStore.markLeft(roomJid)
-            refreshTopology()
+            if (!activeSession.applyIfCurrent(lease) { stores.roomStore.markLeft(roomJid) }) {
+                return RoomAdminResult.NotConnected
+            }
+            if (!refreshTopology(lease)) return RoomAdminResult.NotConnected
         }
         return result
     }
@@ -210,25 +228,31 @@ internal class RoomAdminVerbs(
         roomJid: String,
         inviteeJid: String,
         fullHistory: Boolean,
-    ): RoomAdminResult = adminCall { client ->
+    ): RoomAdminResult = adminCallForCurrent { client ->
         client.inviteToGroupDm(bareJid(roomJid), bareJid(inviteeJid), fullHistory)
     }
 
     /** Re-discover the space/channel topology into the room store. */
     suspend fun refreshTopology() {
+        val lease = activeSession.captureOwnerLease() ?: return
+        refreshTopology(lease)
+    }
+
+    /** Exact-attempt topology refresh shared with lifecycle tests. */
+    internal suspend fun refreshTopology(lease: ActiveSession.OwnerLease): Boolean {
         // Generation-gated like every other post-wire store write
         // (ProfileVerbs precedent): a discovery answering after a
         // logout/relogin must not park the previous account's rooms
         // in the freshly seeded store.
-        val generation = activeSession.generation
-        val topology = activeSession.fetch { client -> client.discoverTopology() } ?: return
-        if (activeSession.generation != generation) return
-        stores.roomStore.setTopology(topology)
+        val topology = activeSession.fetchIfCurrent(lease) { client -> client.discoverTopology() } ?: return false
+        return activeSession.applyIfCurrent(lease) { stores.roomStore.setTopology(topology) }
     }
 
     /** XEP-0055 user search (`nick` column); `null` offline/failed. */
     suspend fun searchUsers(query: String): List<WaddleUserSearchEntry>? =
-        activeSession.fetch { client -> client.searchUsers(query) }
+        activeSession.captureOwnerLease()?.let { lease ->
+            activeSession.fetchIfCurrent(lease) { it.searchUsers(query) }
+        }
 
     /**
      * Best-effort community-owner probe (`urn:waddle:admin:users:list:0`
@@ -237,7 +261,9 @@ internal class RoomAdminVerbs(
      * cannot escalate anything.
      */
     suspend fun isCommunityOwner(): Boolean =
-        activeSession.fetch { client -> client.isCommunityOwner() } ?: false
+        activeSession.captureOwnerLease()?.let { lease ->
+            activeSession.fetchIfCurrent(lease) { it.isCommunityOwner() }
+        } ?: false
 
     /** V1 admin users page; `null` offline / not owner / failed. */
     suspend fun adminUsersList(
@@ -245,16 +271,28 @@ internal class RoomAdminVerbs(
         pageSize: UInt?,
         afterCursor: String?,
     ): WaddleAdminUsersPage? =
-        activeSession.fetch { client -> client.adminUsersList(prefix, pageSize, afterCursor) }
+        activeSession.captureOwnerLease()?.let { lease ->
+            activeSession.fetchIfCurrent(lease) { it.adminUsersList(prefix, pageSize, afterCursor) }
+        }
 
     /** Collapse a throwing FFI admin call into [RoomAdminResult]. */
+    private suspend fun adminCallForCurrent(
+        op: suspend (WaddleClientInterface) -> Unit,
+    ): RoomAdminResult {
+        val lease = activeSession.captureOwnerLease() ?: return RoomAdminResult.NotConnected
+        return adminCall(lease, op)
+    }
+
     private suspend fun adminCall(
+        lease: ActiveSession.OwnerLease,
         op: suspend (WaddleClientInterface) -> Unit,
     ): RoomAdminResult {
         return try {
-            when (activeSession.invoke(op)) {
-                ActiveSession.Invocation.NotConnected -> return RoomAdminResult.NotConnected
-                is ActiveSession.Invocation.Completed -> Unit
+            when (activeSession.invokeIfCurrent(lease, op)) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return RoomAdminResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> Unit
             }
             RoomAdminResult.Ok
         } catch (cancellation: CancellationException) {

@@ -30,30 +30,36 @@ internal class ExtensionCommandVerbs(
     private val discoveryMutex = Mutex()
 
     suspend fun discoverExtensionCommands(): List<ExtensionCommand> {
+        val lease = activeSession.captureOwnerLease() ?: return emptyList()
         stores.extensionCommandStore.commands.value?.let { return it }
         return discoveryMutex.withLock {
-            stores.extensionCommandStore.commands.value ?: runDiscovery()
+            if (!activeSession.isCurrent(lease)) return@withLock emptyList()
+            stores.extensionCommandStore.commands.value ?: runDiscovery(lease)
         }
     }
 
-    private suspend fun runDiscovery(): List<ExtensionCommand> {
-        val generation = activeSession.generation
+    /** Exact-attempt discovery seam for lifecycle callers and tests. */
+    internal suspend fun runDiscovery(lease: ActiveSession.OwnerLease): List<ExtensionCommand> {
         val commands = try {
-            when (val result = activeSession.invoke(
+            when (val result = activeSession.invokeIfCurrent(
+                lease,
                 { client -> client.discoverExtensionCommands().map { it.toDomain() } },
             )) {
-                ActiveSession.Invocation.NotConnected -> return emptyList()
-                is ActiveSession.Invocation.Completed -> result.value
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return emptyList()
+                is ActiveSession.LeaseInvocation.Completed -> result.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return emptyList()
         }
-        if (commands.isNotEmpty() && activeSession.generation == generation) {
-            stores.extensionCommandStore.applyDiscovered(commands)
-        }
-        return commands
+        if (commands.isEmpty()) return commands
+        return if (activeSession.applyIfCurrent(lease) {
+                stores.extensionCommandStore.applyDiscovered(commands)
+            }
+        ) commands else emptyList()
     }
 
     suspend fun invokeExtensionCommand(
@@ -80,10 +86,19 @@ internal class ExtensionCommandVerbs(
     private suspend fun call(
         op: suspend (WaddleClientInterface) -> WaddleExtensionCommandResult,
     ): ExtensionCommandCall {
+        val lease = activeSession.captureOwnerLease() ?: return ExtensionCommandCall.Failed(detail = null)
         return try {
-            when (val result = activeSession.invoke(op)) {
-                ActiveSession.Invocation.NotConnected -> ExtensionCommandCall.Failed(detail = null)
-                is ActiveSession.Invocation.Completed -> ExtensionCommandCall.Ok(result.value.toDomain())
+            when (val result = activeSession.invokeIfCurrent(lease, op)) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> ExtensionCommandCall.Failed(detail = null)
+                is ActiveSession.LeaseInvocation.Completed -> {
+                    if (activeSession.isCurrent(lease)) {
+                        ExtensionCommandCall.Ok(result.value.toDomain())
+                    } else {
+                        ExtensionCommandCall.Failed(detail = null)
+                    }
+                }
             }
         } catch (cancellation: CancellationException) {
             throw cancellation

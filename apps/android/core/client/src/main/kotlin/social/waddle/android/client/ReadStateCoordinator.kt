@@ -59,6 +59,7 @@ internal class ReadStateCoordinator(
         isGroupchat: Boolean,
         explicitTarget: DisplayedTarget? = null,
     ): Unit = displayedMutex.withLock {
+        val lease = activeSession.captureOwnerLease() ?: return@withLock
         // Serialized: unguarded concurrent dispatches (timeline
         // collector, visibility hooks, the notification receiver) could
         // interleave across the suspend points and let a STALE call's
@@ -76,11 +77,14 @@ internal class ReadStateCoordinator(
         // the badge for a message the user has never seen (the tap-time
         // clear already happened in the receiver).
         if (explicitTarget == null) {
-            stores.unreadStore.clear(conversation)
+            if (!activeSession.applyIfCurrent(lease) {
+                    stores.unreadStore.clear(conversation)
             // Arm the inbox read-clear barrier at the same moment: a
             // racing XEP-0430 push still naming the read message must
             // not resurrect the badge the user is looking at.
-            stores.inboxStore.markReadLocally(conversation)
+                    stores.inboxStore.markReadLocally(conversation)
+                }
+            ) return@withLock
         }
         val explicitExpectation = explicitTarget?.let {
             expectedCursorFor(items, conversation, it.markerId) ?: return
@@ -95,21 +99,24 @@ internal class ReadStateCoordinator(
         // The cursor (which dedupes future dispatches) is taken only
         // when every attempted send went through — a thrown/refused
         // dispatch stays retryable on the next timeline change.
-        val dispatched = when (val result = activeSession.invoke(
+        val dispatched = when (val result = activeSession.invokeIfCurrent(
+            lease,
             { client ->
-                val displayed = dispatchDisplayed(client, conversation, isGroupchat, ids)
+                val displayed = dispatchDisplayed(lease, client, conversation, isGroupchat, ids)
                 fireInboxMarkRead(client, conversation, threadId = null)
                 displayed
             },
         )) {
-            ActiveSession.Invocation.NotConnected -> {
+            ActiveSession.LeaseInvocation.Stale,
+            ActiveSession.LeaseInvocation.NotConnected,
+            -> {
                 // No live session: park the RESOLVED target and replay it on
                 // the next ready (a notification tap during a reconnect gap
                 // must not permanently drop the read receipt).
                 pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
                 return
             }
-            is ActiveSession.Invocation.Completed -> result.value
+            is ActiveSession.LeaseInvocation.Completed -> result.value
         }
         if (dispatched) {
             // CAS on both paths: a concurrent applyMdsEntry advance (it
@@ -117,7 +124,9 @@ internal class ReadStateCoordinator(
             // be clobbered by our older marker.
             val expected =
                 if (explicitTarget != null) explicitExpectation?.cursor else cursorBefore
-            stores.readCursorStore.compareAndAdvance(conversation, expected, ids.markerId)
+            activeSession.applyIfCurrent(lease) {
+                stores.readCursorStore.compareAndAdvance(conversation, expected, ids.markerId)
+            }
         }
     }
 
@@ -128,13 +137,18 @@ internal class ReadStateCoordinator(
      * and the next hydrate restores whatever the server last knew.
      */
     suspend fun markInboxRead(conversationJid: String, threadId: String? = null) {
+        val lease = activeSession.captureOwnerLease() ?: return
         val conversation = bareJid(conversationJid)
-        if (threadId == null) stores.unreadStore.clear(conversation)
-        when (activeSession.invoke(
+        if (threadId == null && !activeSession.applyIfCurrent(lease) { stores.unreadStore.clear(conversation) }) return
+        when (activeSession.invokeIfCurrent(
+            lease,
             { client -> fireInboxMarkRead(client, conversation, threadId) },
         )) {
-            ActiveSession.Invocation.NotConnected -> stores.inboxStore.markReadLocally(conversation, threadId)
-            is ActiveSession.Invocation.Completed -> Unit
+            ActiveSession.LeaseInvocation.Stale -> Unit
+            ActiveSession.LeaseInvocation.NotConnected -> activeSession.applyIfCurrent(lease) {
+                stores.inboxStore.markReadLocally(conversation, threadId)
+            }
+            is ActiveSession.LeaseInvocation.Completed -> Unit
         }
     }
 
@@ -143,6 +157,9 @@ internal class ReadStateCoordinator(
         conversation: String,
         threadId: String?,
     ) {
+        // This helper is called only from invokeIfCurrent's callback. The
+        // transport fence already proves the same lease and cannot be
+        // re-entered via applyIfCurrent without deadlocking.
         stores.inboxStore.markReadLocally(conversation, threadId)
         runCatching { client.markInboxRead(conversation, threadId) }
     }
@@ -192,6 +209,7 @@ internal class ReadStateCoordinator(
      * only when every attempted send went through.
      */
     private suspend fun dispatchDisplayed(
+        lease: ActiveSession.OwnerLease,
         client: WaddleClientInterface,
         conversation: String,
         isGroupchat: Boolean,
@@ -204,7 +222,7 @@ internal class ReadStateCoordinator(
             }.getOrDefault(false)
             failed = failed || !sent
         }
-        if (ids.stanzaId != null && ids.stanzaIdBy != null && supportsMdsPublish(client)) {
+        if (ids.stanzaId != null && ids.stanzaIdBy != null && supportsMdsPublish(lease, client)) {
             val published = runCatching {
                 client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy)
             }.getOrDefault(false)
@@ -252,9 +270,16 @@ internal class ReadStateCoordinator(
      * XEP-0490 §3 publish-options probe, once per session attempt
      * (web parity); a failed probe retries on the next dispatch.
      */
-    private suspend fun supportsMdsPublish(client: WaddleClientInterface): Boolean {
+    private suspend fun supportsMdsPublish(
+        lease: ActiveSession.OwnerLease,
+        client: WaddleClientInterface,
+    ): Boolean {
+        if (!activeSession.isCurrent(lease)) return false
         activeSession.mdsPublishSupported?.let { return it }
         val supported = runCatching { client.supportsMdsPublishOptions() }.getOrNull() ?: return false
+        // This is called from invokeIfCurrent while the transport fence is
+        // held. It is therefore already exact-lease fenced; re-entering via
+        // applyIfCurrent would deadlock the non-reentrant mutex.
         activeSession.mdsPublishSupported = supported
         return supported
     }
@@ -344,10 +369,17 @@ internal class ReadStateCoordinator(
      * could have its badge erased by a stale recompute.
      */
     suspend fun bootstrapMdsDisplayed() {
+        val lease = activeSession.captureOwnerLease() ?: return
+        bootstrapMdsDisplayed(lease)
+    }
+
+    internal suspend fun bootstrapMdsDisplayed(lease: ActiveSession.OwnerLease) {
         val entries = try {
-            when (val result = activeSession.invoke { it.fetchMdsDisplayed() }) {
-                ActiveSession.Invocation.NotConnected -> return
-                is ActiveSession.Invocation.Completed -> result.value
+            when (val result = activeSession.invokeIfCurrent(lease) { it.fetchMdsDisplayed() }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return
+                is ActiveSession.LeaseInvocation.Completed -> result.value
             }
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
@@ -361,7 +393,10 @@ internal class ReadStateCoordinator(
                 // cursors — a parked read replayed before them could
                 // publish an older MDS cursor over a sibling's newer one.
                 val applied = Job()
-                activeSession.bridge?.submit(XmppEvent.MdsEntries(entries, applied))
+                if (!activeSession.applyIfCurrent(lease) {
+                        activeSession.bridge?.submit(XmppEvent.MdsEntries(entries, applied))
+                    }
+                ) return
                 // Bare join: swallowing a cancellation here (attempt
                 // teardown drops unconsumed events) would resume a
                 // cancelled pipeline into the drain.
@@ -369,7 +404,7 @@ internal class ReadStateCoordinator(
             }
         }
         try {
-            activeSession.invoke { it.subscribeMdsDisplayed() }
+            activeSession.invokeIfCurrent(lease) { it.subscribeMdsDisplayed() }
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (_: Throwable) {

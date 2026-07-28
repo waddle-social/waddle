@@ -33,10 +33,14 @@ internal class SessionCatchup(
      * autojoin join set. Best-effort: a failed discovery returns `null`
      * and the rejoin degrades to the persisted-intent rooms only.
      */
-    private suspend fun refreshTopology(): WaddleTopology? = try {
-        when (val result = activeSession.invoke { it.discoverTopology() }) {
-            ActiveSession.Invocation.NotConnected -> null
-            is ActiveSession.Invocation.Completed -> result.value.also { stores.roomStore.setTopology(it) }
+    private suspend fun refreshTopology(lease: ActiveSession.OwnerLease): WaddleTopology? = try {
+        when (val result = activeSession.invokeIfCurrent(lease) { it.discoverTopology() }) {
+            ActiveSession.LeaseInvocation.Stale,
+            ActiveSession.LeaseInvocation.NotConnected,
+            -> null
+            is ActiveSession.LeaseInvocation.Completed -> result.value.takeIf {
+                activeSession.applyIfCurrent(lease) { stores.roomStore.setTopology(it) }
+            }
         }
     } catch (cancellation: CancellationException) {
         throw cancellation
@@ -59,20 +63,21 @@ internal class SessionCatchup(
         // can raise IOException, and an escaped throw on this root
         // coroutine would kill the process ("never throw" contract).
         persistQuietly {
-            val topology = refreshTopology()
-            rejoinRooms(session, topology)
+            val lease = activeSession.captureOwnerLease() ?: return@persistQuietly
+            val topology = refreshTopology(lease)
+            rejoinRooms(lease, session, topology)
             messenger.drainOutboundQueue()
             // Every ready session, resumed streams included (web
             // parity): the inbox is the server-authoritative unread
             // baseline the live pushes then patch.
-            hydrateInbox()
+            hydrateInbox(lease)
             if (freshStream) {
-                catchUpConversations()
-                hydrateNotifySettings()
+                catchUpConversations(lease)
+                hydrateNotifySettings(lease)
             }
             // After catch-up so fetched cursors can resolve against
             // the freshly loaded newest pages.
-            readState.bootstrapMdsDisplayed()
+            readState.bootstrapMdsDisplayed(lease)
             readState.drainPendingDisplayed()
         }
     }
@@ -87,11 +92,15 @@ internal class SessionCatchup(
      * `<result/>` payloads the web consumes would be dead weight here.
      * Best-effort: a failed fetch keeps the previous counts.
      */
-    private suspend fun hydrateInbox() {
+    private suspend fun hydrateInbox(lease: ActiveSession.OwnerLease) {
         val result = try {
-            when (val invocation = activeSession.invoke { it.fetchInbox(onlyUnread = false, noMessages = true) }) {
-                ActiveSession.Invocation.NotConnected -> return
-                is ActiveSession.Invocation.Completed -> invocation.value
+            when (val invocation = activeSession.invokeIfCurrent(lease) {
+                it.fetchInbox(onlyUnread = false, noMessages = true)
+            }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return
+                is ActiveSession.LeaseInvocation.Completed -> invocation.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -100,7 +109,10 @@ internal class SessionCatchup(
         }
         if (result.conversations.isEmpty()) return
         val applied = Job()
-        activeSession.bridge?.submit(XmppEvent.InboxEntries(result.conversations, applied))
+        if (!activeSession.applyIfCurrent(lease) {
+                activeSession.bridge?.submit(XmppEvent.InboxEntries(result.conversations, applied))
+            }
+        ) return
         // Bare join (bootstrapMdsDisplayed parity): swallowing a
         // cancellation here would resume a cancelled pipeline.
         applied.join()
@@ -114,9 +126,10 @@ internal class SessionCatchup(
      * Best-effort: a failed fetch keeps the previous entries (the §3
      * defaults cover conversations that never hydrated).
      */
-    private suspend fun hydrateNotifySettings() {
+    private suspend fun hydrateNotifySettings(lease: ActiveSession.OwnerLease) {
         try {
-            when (activeSession.invoke(
+            when (activeSession.invokeIfCurrent(
+                lease,
                 { client ->
                     stores.notifySettingsStore.hydrate(
                         fetchRoomBookmarks = { client.fetchUserBookmarks() },
@@ -124,8 +137,10 @@ internal class SessionCatchup(
                     )
                 },
             )) {
-                ActiveSession.Invocation.NotConnected -> return
-                is ActiveSession.Invocation.Completed -> Unit
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return
+                is ActiveSession.LeaseInvocation.Completed -> Unit
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -153,6 +168,7 @@ internal class SessionCatchup(
      * only and are NOT widened with autojoin rooms.
      */
     private suspend fun rejoinRooms(
+        lease: ActiveSession.OwnerLease,
         session: WaddleSessionInfo,
         topology: WaddleTopology?,
     ) {
@@ -162,11 +178,13 @@ internal class SessionCatchup(
         val joinSet = autojoinRooms.toSet() + sessionPrefs.joinedRooms.first()
         for (roomJid in joinSet) {
             try {
-                when (activeSession.invoke { it.joinRoom(roomJid, session.xmppLocalpart) }) {
-                    ActiveSession.Invocation.NotConnected -> return
-                    is ActiveSession.Invocation.Completed -> Unit
+                when (activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, session.xmppLocalpart) }) {
+                    ActiveSession.LeaseInvocation.Stale,
+                    ActiveSession.LeaseInvocation.NotConnected,
+                    -> return
+                    is ActiveSession.LeaseInvocation.Completed -> Unit
                 }
-                stores.roomStore.markJoined(roomJid)
+                if (!activeSession.applyIfCurrent(lease) { stores.roomStore.markJoined(roomJid) }) return
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {
@@ -186,13 +204,13 @@ internal class SessionCatchup(
      * per-screen refetch. Sequential and bounded (one page each, DMs
      * capped) to avoid hammering the server after every reconnect.
      */
-    private suspend fun catchUpConversations() {
+    private suspend fun catchUpConversations(lease: ActiveSession.OwnerLease) {
         val rooms = stores.roomStore.joinedRooms.value
         for (roomJid in rooms) {
-            verbs.fetchRoomHistory(roomJid, CATCHUP_PAGE_SIZE, beforeId = null)
+            verbs.fetchRoomHistory(lease, roomJid, CATCHUP_PAGE_SIZE, beforeId = null)
         }
         for (peerJid in resume.cursorTracker.newestFirst(excluding = rooms, limit = CATCHUP_DM_LIMIT)) {
-            verbs.fetchDmHistory(peerJid, CATCHUP_PAGE_SIZE, beforeId = null)
+            verbs.fetchDmHistory(lease, peerJid, CATCHUP_PAGE_SIZE, beforeId = null)
         }
     }
 

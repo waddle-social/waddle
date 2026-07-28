@@ -309,6 +309,29 @@ internal class ActiveSession {
         }
     }
 
+    /**
+     * [verbCall] bound to one exact account attempt.  A caller which has
+     * already projected optimistic state must use this shape rather than
+     * selecting whatever client happened to become ready after it parked.
+     */
+    suspend fun verbCallIfCurrent(
+        lease: OwnerLease,
+        op: suspend (WaddleClientInterface) -> Boolean,
+    ): VerbResult {
+        return try {
+            when (val result = invokeIfCurrent(lease, op)) {
+                LeaseInvocation.Stale,
+                LeaseInvocation.NotConnected,
+                -> VerbResult.NotConnected
+                is LeaseInvocation.Completed -> if (result.value) VerbResult.Ok else VerbResult.Rejected
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            VerbResult.Rejected
+        }
+    }
+
     /** Message send shape: no client → `NotConnected`, throw → `TransportError`. */
     suspend fun send(
         op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
@@ -355,6 +378,25 @@ internal class ActiveSession {
             when (val result = invoke(op)) {
                 Invocation.NotConnected -> null
                 is Invocation.Completed -> result.value
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Nullable [fetch] bound to one exact account attempt. */
+    suspend fun <T : Any> fetchIfCurrent(
+        lease: OwnerLease,
+        op: suspend (WaddleClientInterface) -> T,
+    ): T? {
+        return try {
+            when (val result = invokeIfCurrent(lease, op)) {
+                LeaseInvocation.Stale,
+                LeaseInvocation.NotConnected,
+                -> null
+                is LeaseInvocation.Completed -> result.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
