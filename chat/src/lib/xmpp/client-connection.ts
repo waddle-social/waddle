@@ -507,7 +507,8 @@ export class OfflineSendQueue {
     // completes. A microtask, not a direct call: on the construction
     // path the instrumentation subscribes right after the constructor
     // returns, and a synchronous emit would fire into zero listeners.
-    queueMicrotask(() => this.emitQueueDepth());
+    const seedGeneration = this.generation;
+    queueMicrotask(() => this.emitQueueDepthForGeneration(seedGeneration));
   }
 
   /** Stop the stuck-queue heartbeat; called from the client's
@@ -756,11 +757,21 @@ export class OfflineSendQueue {
     // telemetry layer dedupes unchanged readings inside its re-emit
     // window, #1443). Self-clears once the queue drains.
     if (entries.length > 0) {
-      this.depthHeartbeat ??= setInterval(() => this.emitQueueDepth(), 65_000);
+      const heartbeatGeneration = this.generation;
+      this.depthHeartbeat ??= setInterval(
+        () => this.emitQueueDepthForGeneration(heartbeatGeneration),
+        65_000,
+      );
     } else if (this.depthHeartbeat !== null) {
       clearInterval(this.depthHeartbeat);
       this.depthHeartbeat = null;
     }
+  }
+
+  /** A disposed queue must not beacon, install, or revive a heartbeat. */
+  private emitQueueDepthForGeneration(generation: number): void {
+    if (generation !== this.generation) return;
+    this.emitQueueDepth();
   }
 
   /** Roll back only the attempt which still owns this queue generation. */

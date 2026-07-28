@@ -389,15 +389,17 @@ class XmppSessionManagerQueueTest {
         val successorClient = FakeWaddleClient()
         activeSession.advanceGeneration()
         activeSession.activateOwner("icepuma@waddle.test")
-        activeSession.onReady(oldClient)
+        val oldAttempt = checkNotNull(activeSession.beginAttempt())
+        assertTrue(activeSession.publishReady(oldAttempt, oldClient, "icepuma@waddle.test/waddle-android-test") {})
         val oldLease = checkNotNull(activeSession.captureOwnerLease())
 
         // Logout and a login to the same bare JID replace the attempt. The
         // old lease must not select the newly-ready FFI client.
         activeSession.advanceGeneration()
-        activeSession.endAttempt(oldClient)
+        activeSession.endAttempt(oldAttempt, oldClient)
         activeSession.activateOwner("icepuma@waddle.test")
-        activeSession.onReady(successorClient)
+        val successorAttempt = checkNotNull(activeSession.beginAttempt())
+        assertTrue(activeSession.publishReady(successorAttempt, successorClient, "icepuma@waddle.test/waddle-android-next") {})
 
         val result = activeSession.sendIfCurrent(oldLease) { client ->
             client.sendChatMessage("alice@waddle.test", "must stay fenced", null)
@@ -414,7 +416,8 @@ class XmppSessionManagerQueueTest {
         val oldClient = FakeWaddleClient()
         activeSession.advanceGeneration()
         activeSession.activateOwner("icepuma@waddle.test")
-        activeSession.onReady(oldClient)
+        val attempt = checkNotNull(activeSession.beginAttempt())
+        assertTrue(activeSession.publishReady(attempt, oldClient, "icepuma@waddle.test/waddle-android-test") {})
         val lease = checkNotNull(activeSession.captureOwnerLease())
 
         // This pause is after the lease check and client selection. The send

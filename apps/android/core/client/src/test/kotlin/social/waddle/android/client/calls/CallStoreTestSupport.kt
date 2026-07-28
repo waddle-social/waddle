@@ -68,9 +68,12 @@ internal class Fixture(
     val store: CallStore
 
     init {
-        activeSession.ownBareJid = "alice@waddle.test"
-        activeSession.ownFullJid = "alice@waddle.test/waddle-android-1"
-        runBlocking { activeSession.onReady(client) }
+        runBlocking {
+            activeSession.advanceGeneration()
+            activeSession.activateOwner("alice@waddle.test")
+            val attempt = checkNotNull(activeSession.beginAttempt())
+            check(activeSession.publishReady(attempt, client, "alice@waddle.test/waddle-android-1") {})
+        }
         store = CallStore(
             signaling = ClientCallSignaling(activeSession),
             ownBareJid = { activeSession.ownBareJid },

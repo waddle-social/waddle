@@ -40,6 +40,9 @@ function createStorageMock() {
 
 const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;
+const originalQueueMicrotask = globalThis.queueMicrotask;
+const originalSetInterval = globalThis.setInterval;
+const originalClearInterval = globalThis.clearInterval;
 
 beforeEach(() => {
   const storage = createStorageMock();
@@ -63,6 +66,9 @@ afterEach(() => {
   } else {
     (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
   }
+  globalThis.queueMicrotask = originalQueueMicrotask;
+  globalThis.setInterval = originalSetInterval;
+  globalThis.clearInterval = originalClearInterval;
 });
 
 type QueueOverrides = {
@@ -340,6 +346,56 @@ describe("OfflineSendQueue drain ordering", () => {
       { kind: "dm", persisted: 0, inflight: 0 },
       { kind: "room", persisted: 0, inflight: 0 },
     ]);
+  });
+
+  test("dispose fences a queued resume seed microtask before it can beacon or arm a heartbeat", () => {
+    const microtasks: Array<() => void> = [];
+    const timerCallbacks: Array<() => void> = [];
+    globalThis.queueMicrotask = (callback) => { microtasks.push(callback); };
+    globalThis.setInterval = ((callback: () => void) => {
+      timerCallbacks.push(callback);
+      return timerCallbacks.length as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+    globalThis.clearInterval = (() => {}) as typeof clearInterval;
+
+    const { queue, events } = createQueue();
+    const depths: unknown[] = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    // Leave one durable entry, but dispose its initial heartbeat before the
+    // later XEP-0198 seed queues its construction microtask.
+    queue.queueDirectMessage("bob@example.com", "saved", { id: "seed-race" });
+    queue.dispose();
+    depths.length = 0;
+    timerCallbacks.length = 0;
+
+    queue.seedFromResumeState({ previd: "p", inboundH: 0, outboundH: 0, unhandledOutboundEntries: [] });
+    queue.dispose();
+    for (const callback of microtasks) callback();
+
+    expect(depths).toEqual([]);
+    expect(timerCallbacks).toEqual([]);
+  });
+
+  test("a stale queue-depth heartbeat is inert after disposal and never rearms", () => {
+    const timerCallbacks: Array<() => void> = [];
+    globalThis.setInterval = ((callback: () => void) => {
+      timerCallbacks.push(callback);
+      return timerCallbacks.length as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+    globalThis.clearInterval = (() => {}) as typeof clearInterval;
+
+    const { queue, events } = createQueue();
+    const depths: unknown[] = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    queue.queueDirectMessage("bob@example.com", "saved", { id: "timer-race" });
+    expect(timerCallbacks).toHaveLength(1);
+    depths.length = 0;
+
+    queue.dispose();
+    timerCallbacks[0]!();
+
+    expect(depths).toEqual([]);
+    expect(timerCallbacks).toHaveLength(1);
   });
 
   test("fresh fallback leaves the native resume tail owned until its core retry is acked", async () => {

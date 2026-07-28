@@ -115,11 +115,12 @@ internal class ConnectionLoop(
      * attempt immediately instead of waiting out the connect budget.
      */
     private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
-        val bridge = activeSession.beginAttempt()
+        val attempt = activeSession.beginAttempt() ?: return AttemptEnd.CONNECT_FAILED
+        val bridge = attempt.bridge
         val config = buildConfig(session)
         // The full JID the call engine signs Jingle stanzas with
         // (initiator/responder attributes, tie-break comparand).
-        activeSession.ownFullJid = "${config.jid}/${config.resource}"
+        val ownFullJid = "${config.jid}/${config.resource}"
         val client = clientFactory.create(config, bridge)
         try {
             return coroutineScope {
@@ -134,7 +135,7 @@ internal class ConnectionLoop(
                     }
                 }
                 val consumer = async {
-                    consumeEvents(bridge.events, client, session, this)
+                    consumeEvents(bridge.events, client, session, attempt, ownFullJid, this)
                 }
                 val end = select<AttemptEnd?> {
                     consumer.onAwait { it }
@@ -146,7 +147,7 @@ internal class ConnectionLoop(
                 end
             }
         } finally {
-            activeSession.endAttempt(client)
+            activeSession.endAttempt(attempt, client)
             withContext(NonCancellable) {
                 runCatching { client.disconnect() }
             }
@@ -163,6 +164,8 @@ internal class ConnectionLoop(
         events: ReceiveChannel<XmppEvent>,
         client: WaddleClientInterface,
         session: WaddleSessionInfo,
+        attempt: ActiveSession.Attempt,
+        ownFullJid: String,
         attemptScope: CoroutineScope,
     ): AttemptEnd {
         val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(events) }
@@ -171,12 +174,19 @@ internal class ConnectionLoop(
             Readiness.AUTH_FAILED -> return AttemptEnd.AUTH_FAILED
             Readiness.READY -> Unit
         }
-        activeSession.onReady(client)
+        if (!activeSession.publishReady(
+                attempt = attempt,
+                readyClient = client,
+                readyOwnFullJid = ownFullJid,
+                onPublished = {
+                callbacks.onReady(attemptScope, session, true, attempt.lease)
+                },
+            )
+        ) return AttemptEnd.CONNECT_FAILED
         _state.value = ConnectionState.Ready
         // Native FFI clients deliberately start fresh streams: the web-only
         // typed SM persistence path owns resumable browser sessions, while
         // Android catch-up is durable and idempotent.
-        callbacks.onReady(attemptScope, session, true)
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
@@ -297,6 +307,7 @@ internal typealias SessionReadyListener = (
     attemptScope: CoroutineScope,
     session: WaddleSessionInfo,
     freshStream: Boolean,
+    lease: ActiveSession.OwnerLease,
 ) -> Unit
 
 /** Typed lifecycle callbacks kept together as one constructor dependency. */

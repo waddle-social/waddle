@@ -20,10 +20,59 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
  */
 class ActiveSessionGatewayTest {
     @Test
+    fun `a readiness event revoked before publication cannot expose a client bridge or ready pipeline`() = runTest {
+        val active = readySession()
+        val oldAttempt = checkNotNull(active.beginAttempt())
+        val oldClient = FakeWaddleClient()
+        var readyPipelineStarts = 0
+
+        active.revokeOutboundAuthority()
+
+        assertFalse(
+            active.publishReady(oldAttempt, oldClient, "alice@waddle.test/waddle-android-old") {
+                readyPipelineStarts += 1
+            },
+        )
+        assertEquals(0, readyPipelineStarts)
+        assertEquals(ActiveSession.Invocation.NotConnected, active.invoke { true })
+        assertEquals(null, active.bridge)
+    }
+
+    @Test
+    fun `an old same-account readiness and end attempt cannot clobber the relogin client`() = runTest {
+        val active = readySession()
+        val oldAttempt = checkNotNull(active.beginAttempt())
+        val oldClient = FakeWaddleClient()
+        var oldReadyPipelineStarts = 0
+
+        active.revokeOutboundAuthority()
+        active.activateOwner("alice@waddle.test")
+        val successorAttempt = checkNotNull(active.beginAttempt())
+        val successor = FakeWaddleClient()
+        assertTrue(active.publishReady(successorAttempt, successor, "alice@waddle.test/waddle-android-new") {})
+        val successorBridge = active.bridge
+
+        assertFalse(
+            active.publishReady(oldAttempt, oldClient, "alice@waddle.test/waddle-android-old") {
+                oldReadyPipelineStarts += 1
+            },
+        )
+        active.endAttempt(oldAttempt, oldClient)
+
+        assertEquals(0, oldReadyPipelineStarts)
+        assertEquals(successorBridge, active.bridge)
+        assertEquals(
+            ActiveSession.Invocation.Completed(true),
+            active.invoke { client -> client === successor },
+        )
+        assertTrue("old readiness cannot redirect ordinary verbs", oldClient.sendCalls.isEmpty())
+    }
+
+    @Test
     fun `correction that wins the fence completes before logout and cannot leak to relogin`() = runTest {
         val active = readySession()
         val oldClient = FakeWaddleClient()
-        active.onReady(oldClient)
+        publishReady(active, oldClient)
         val releaseCorrection = CompletableDeferred<Unit>()
         oldClient.correctionStall = releaseCorrection
 
@@ -48,7 +97,7 @@ class ActiveSessionGatewayTest {
         val successor = FakeWaddleClient()
         active.advanceGeneration()
         active.activateOwner("alice@waddle.test")
-        active.onReady(successor)
+        publishReady(active, successor)
         assertTrue("the completed correction stays on its original client", successor.correctionCalls.isEmpty())
     }
 
@@ -56,7 +105,7 @@ class ActiveSessionGatewayTest {
     fun `revocation wins direct correction before a same-account relogin`() = runTest {
         val active = readySession()
         val oldClient = FakeWaddleClient()
-        active.onReady(oldClient)
+        publishReady(active, oldClient)
         active.revokeOutboundAuthority()
 
         val result = active.invoke {
@@ -68,7 +117,7 @@ class ActiveSessionGatewayTest {
         val successor = FakeWaddleClient()
         active.advanceGeneration()
         active.activateOwner("alice@waddle.test")
-        active.onReady(successor)
+        publishReady(active, successor)
         assertTrue(
             "a revoked correction cannot be redirected to the relogin client",
             successor.correctionCalls.isEmpty(),
@@ -79,7 +128,7 @@ class ActiveSessionGatewayTest {
     fun `normal call signal is fenced across logout and rejected after revocation`() = runTest {
         val active = readySession()
         val oldClient = FakeWaddleClient()
-        active.onReady(oldClient)
+        publishReady(active, oldClient)
         val signaling = ClientCallSignaling(active)
         val releaseCall = CompletableDeferred<Unit>()
         oldClient.callProposeStall = releaseCall
@@ -105,7 +154,7 @@ class ActiveSessionGatewayTest {
         val successor = FakeWaddleClient()
         active.advanceGeneration()
         active.activateOwner("alice@waddle.test")
-        active.onReady(successor)
+        publishReady(active, successor)
         assertTrue("the revoked call must never redirect onto a relogin client", successor.callVerbs.isEmpty())
     }
 
@@ -114,5 +163,10 @@ class ActiveSessionGatewayTest {
         active.advanceGeneration()
         active.activateOwner("alice@waddle.test")
         return active
+    }
+
+    private suspend fun publishReady(active: ActiveSession, client: FakeWaddleClient) {
+        val attempt = checkNotNull(active.beginAttempt())
+        assertTrue(active.publishReady(attempt, client, "alice@waddle.test/waddle-android-test") {})
     }
 }

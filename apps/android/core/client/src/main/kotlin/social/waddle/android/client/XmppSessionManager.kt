@@ -508,14 +508,19 @@ class XmppSessionManager(
         attemptScope: CoroutineScope,
         session: WaddleSessionInfo,
         freshStream: Boolean,
+        lease: ActiveSession.OwnerLease,
     ) {
         // Topology discovery now heads the sequential ready pipeline:
         // the bookmark-driven rejoin derives its join set from it.
-        attemptScope.launch { catchup.onSessionReady(session, freshStream) }
+        attemptScope.launch {
+            if (activeSession.isCurrent(lease)) catchup.onSessionReady(session, freshStream)
+        }
         // Once per connect: retry the XEP-0166 mixer terminates a
         // previous group-call leave still owes (terminate-pending
         // session-cache entries survive process death and reconnects).
-        attemptScope.launch { callStore.muc.retryPendingTerminates(activeSession.ownFullJid) }
+        attemptScope.launch {
+            if (activeSession.isCurrent(lease)) callStore.muc.retryPendingTerminates(activeSession.ownFullJid)
+        }
     }
 
     private suspend fun onTerminalAuthFailure() {

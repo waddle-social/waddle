@@ -51,6 +51,16 @@ internal class ActiveSession {
     )
 
     /**
+     * Private identity for one physical connection attempt.  It carries the
+     * owner lease captured before config/client construction so an old bridge
+     * can never publish itself after logout or a same-account relogin.
+     */
+    data class Attempt internal constructor(
+        val lease: OwnerLease,
+        val bridge: XmppEventBridge,
+    )
+
+    /**
      * The retired connection that may send only the bounded call
      * teardown during logout. It is deliberately separate from the
      * outbound authority below: ordinary verbs and message sends cannot
@@ -167,18 +177,36 @@ internal class ActiveSession {
     @Volatile
     var uploadService: String? = null
 
-    /** Fresh bridge for a new attempt (the FFI client is one-shot). */
-    fun beginAttempt(): XmppEventBridge {
-        val attemptBridge = XmppEventBridge()
-        bridge = attemptBridge
-        return attemptBridge
+    /**
+     * Capture an exact owner lease before config/client construction.  The
+     * bridge remains attempt-private until [publishReady] linearizes it with
+     * the client and full JID under [transportFence].
+     */
+    suspend fun beginAttempt(): Attempt? = transportFence.withLock {
+        val lease = outboundOwner ?: return@withLock null
+        Attempt(lease, XmppEventBridge())
     }
 
-    /** The attempt reached `SessionReady`: expose its client, reset probes. */
-    suspend fun onReady(readyClient: WaddleClientInterface) = transportFence.withLock {
+    /**
+     * Atomically publish all ready-only state for [attempt].  The callback
+     * starts the ready pipeline while the same fence still proves ownership;
+     * a revoked or old attempt does not expose a bridge/client/JID and must be
+     * closed by its caller without touching a successor.
+     */
+    suspend fun publishReady(
+        attempt: Attempt,
+        readyClient: WaddleClientInterface,
+        readyOwnFullJid: String,
+        onPublished: () -> Unit,
+    ): Boolean = transportFence.withLock {
+        if (!isCurrent(attempt.lease)) return@withLock false
+        bridge = attempt.bridge
         client = readyClient
+        ownFullJid = readyOwnFullJid
         mdsPublishSupported = null
         uploadService = null
+        onPublished()
+        true
     }
 
     /**
@@ -186,8 +214,11 @@ internal class ActiveSession {
      * delayed old attempt must never erase a successor that has reached
      * ready state.
      */
-    suspend fun endAttempt(endingClient: WaddleClientInterface) = transportFence.withLock {
-        if (client === endingClient) client = null
+    suspend fun endAttempt(attempt: Attempt, endingClient: WaddleClientInterface) = transportFence.withLock {
+        // Both the lease and client identity must match.  An old attempt can
+        // finish after a same-account relogin, so comparing the client alone
+        // is insufficient to protect the successor's slot.
+        if (isCurrent(attempt.lease) && client === endingClient) client = null
     }
 
     /**
