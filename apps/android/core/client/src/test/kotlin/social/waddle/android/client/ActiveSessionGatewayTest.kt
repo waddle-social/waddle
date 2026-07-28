@@ -154,11 +154,12 @@ class ActiveSessionGatewayTest {
         val oldClient = FakeWaddleClient()
         publishReady(active, oldClient)
         val signaling = ClientCallSignaling(active)
+        val connection = checkNotNull(signaling.captureActiveConnection())
         val releaseCall = CompletableDeferred<Unit>()
         oldClient.callProposeStall = releaseCall
 
         val call = async {
-            signaling.propose("bob@waddle.test", "call-1", WaddleCallMedia(audio = true, video = false))
+            connection.propose("bob@waddle.test", "call-1", WaddleCallMedia(audio = true, video = false))
         }
         runCurrent()
         assertTrue(oldClient.callVerbs.isNotEmpty())
@@ -171,7 +172,7 @@ class ActiveSessionGatewayTest {
 
         assertFalse(
             "a call started after revocation must not find a retired client",
-            signaling.propose("bob@waddle.test", "call-2", WaddleCallMedia(audio = true, video = false)),
+            connection.propose("bob@waddle.test", "call-2", WaddleCallMedia(audio = true, video = false)),
         )
         assertEquals(1, oldClient.callVerbs.size)
 

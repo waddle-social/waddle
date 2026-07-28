@@ -179,7 +179,12 @@ class CallStore internal constructor(
             connection.applyIfCurrent {
                 synchronized(stateLock) {
                     val next = _state.value
-                    if (next is CallState.Outgoing && next.sid == sid && next.connection === connection) _state.value = CallState.Idle
+                    if (next is CallState.Outgoing &&
+                        next.sid == sid &&
+                        next.connection.isSameActiveAttempt(connection)
+                    ) {
+                        _state.value = CallState.Idle
+                    }
                 }
             }
             reportError("call propose failed")
@@ -206,7 +211,8 @@ class CallStore internal constructor(
             synchronized(stateLock) {
                 val current = _state.value
                 if (current !is CallState.Incoming || current.accepting) return@applyIfCurrent
-                target = current.copy(connection = connection)
+                if (!current.connection.isSameActiveAttempt(connection)) return@applyIfCurrent
+                target = current
                 _state.value = checkNotNull(target).copy(accepting = true)
                 claimed = true
             }
@@ -217,7 +223,10 @@ class CallStore internal constructor(
             connection.applyIfCurrent {
                 synchronized(stateLock) {
                     val next = _state.value
-                    if (next is CallState.Incoming && next.sid == accepted.sid && next.connection === connection) {
+                    if (next is CallState.Incoming &&
+                        next.sid == accepted.sid &&
+                        next.connection.isSameActiveAttempt(connection)
+                    ) {
                         _state.value = next.copy(accepting = false)
                     }
                 }
@@ -248,8 +257,9 @@ class CallStore internal constructor(
             synchronized(stateLock) {
                 val current = _state.value
                 if (current !is CallState.Incoming) return@applyIfCurrent
+                if (!current.connection.isSameActiveAttempt(connection)) return@applyIfCurrent
                 cancelCallTimersLocked()
-                target = current.copy(connection = connection)
+                target = current
                 _state.value = CallState.Idle
                 claimed = true
             }
@@ -426,6 +436,7 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
+        val connection = prev.connection ?: return
         // The effect queue runs after the reducer pass that captured
         // `prev`; a slot that moved before this effect ran still owes
         // the peer's propose an answer (XEP-0353 tolerates no silent
@@ -444,7 +455,7 @@ class CallStore internal constructor(
         } else {
             // The receiver of the HIGHER-sid propose rejects it with
             // <tie-break/> + <expired/>; our own outgoing ring continues.
-            if (!signaling.rejectTieBreak(event.from, event.sid)) {
+            if (!connection.rejectTieBreak(event.from, event.sid)) {
                 reportError("call tie-break reject failed")
             }
         }
@@ -466,7 +477,8 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
-        if (!signaling.retractTieBreak(event.from, prev.sid)) {
+        val connection = prev.connection ?: return
+        if (!connection.retractTieBreak(event.from, prev.sid)) {
             reportError("call tie-break retract failed")
             return
         }
@@ -511,6 +523,7 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Active,
     ) {
+        val connection = prev.connection ?: return
         val outcome = synchronized(stateLock) {
             val current = _state.value
             when {
@@ -530,6 +543,7 @@ class CallStore internal constructor(
                         sid = event.sid,
                         media = kind.media,
                         accepting = true,
+                        connection = connection,
                     )
                     _lastError.value = null
                     RefusedMigration.OLD_CONCLUDED_REMOTELY
@@ -539,14 +553,14 @@ class CallStore internal constructor(
         }
         when (outcome) {
             RefusedMigration.PROPOSE_DIED -> scope?.launch {
-                if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
+                if (!connection.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
                     reportError("call session terminate failed")
                 }
             }
             RefusedMigration.OLD_CONCLUDED_REMOTELY ->
                 scheduleSessionInitiateTimeout(event.from, event.sid)
             RefusedMigration.WALKED_AWAY ->
-                if (!signaling.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
+                if (!connection.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
                     reportError("call finish failed")
                 }
         }
@@ -559,6 +573,7 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
+        val connection = prev.connection ?: return
         val answer = synchronized(stateLock) {
             val current = _state.value
             when {
@@ -571,7 +586,12 @@ class CallStore internal constructor(
                     current.sid == prev.sid &&
                     current.reason == CallEndReason.Expired -> {
                     cancelCallTimersLocked()
-                    _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = kind.media)
+                    _state.value = CallState.Incoming(
+                        from = event.from,
+                        sid = event.sid,
+                        media = kind.media,
+                        connection = connection,
+                    )
                     _lastError.value = null
                     SlotMovedAnswer.RING_WINNER
                 }
@@ -580,9 +600,9 @@ class CallStore internal constructor(
         }
         when (answer) {
             SlotMovedAnswer.RING_WINNER ->
-                if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
+                if (!connection.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
             SlotMovedAnswer.DECLINE ->
-                if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+                if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
             SlotMovedAnswer.ALREADY_CONCLUDED -> Unit
         }
     }
@@ -600,16 +620,17 @@ class CallStore internal constructor(
         event: WaddleCallEvent,
         prev: CallState.Outgoing,
     ) {
+        val connection = prev.connection ?: return
         if (compareOctetStrings(event.sid, prev.sid) >= 0) {
-            if (!signaling.rejectTieBreak(event.from, event.sid)) {
+            if (!connection.rejectTieBreak(event.from, event.sid)) {
                 reportError("call tie-break reject failed")
             }
             return
         }
-        if (!signaling.retractTieBreak(event.from, prev.sid)) {
+        if (!connection.retractTieBreak(event.from, prev.sid)) {
             reportError("call tie-break retract failed")
         }
-        if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+        if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
         endRetractedOutgoing(prev)
     }
 
@@ -631,20 +652,21 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Active,
     ) {
+        val connection = prev.connection ?: return
         // Same stale-effect guard as the tie-break branch: if the user
         // hung up while this effect was queued, the teardown already
         // sent terminate+finish for the old sid — but the peer's fresh
         // propose still needs an answer, so decline it.
         if (!slotStillMatches(prev)) {
-            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
             return
         }
-        val migrated = signaling.finishMigrated(event.from, prev.sid, event.sid) &&
-            signaling.proceed(event.from, event.sid)
+        val migrated = connection.finishMigrated(event.from, prev.sid, event.sid) &&
+            connection.proceed(event.from, event.sid)
         if (!migrated) {
             // Same no-silent-drop invariant as the guard paths: answer
             // the re-propose (best effort) before failing the old call.
-            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
             failCall(prev.sid, "call migration failed")
             return
         }
@@ -664,7 +686,7 @@ class CallStore internal constructor(
         // resource; don't let its IQ round-trip block the XEP-0353
         // migration markers that keep both users' devices in sync.
         scope?.launch {
-            if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
+            if (!connection.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
                 reportError("call session terminate failed")
             }
         }
@@ -689,6 +711,7 @@ class CallStore internal constructor(
 
     private suspend fun proceedSideEffect(event: WaddleCallEvent, prev: CallState) {
         if (prev !is CallState.Outgoing || prev.sid != event.sid) return
+        val connection = prev.connection ?: return
         // A hang-up (or a hang-up plus a NEW outgoing call) that landed
         // while this effect was queued already retracted this sid; a
         // stale session-initiate must not go out for it — and its
@@ -701,7 +724,7 @@ class CallStore internal constructor(
             failCall(event.sid, "call session initiate failed: no bound resource")
             return
         }
-        if (signaling.sessionInitiate(event.from, ourJid, event.sid, prev.media)) {
+        if (connection.sessionInitiate(event.from, ourJid, event.sid, prev.media)) {
             scheduleSessionAcceptTimeout(event.from, event.sid)
         } else {
             failCall(event.sid, "call session initiate failed")
@@ -714,6 +737,7 @@ class CallStore internal constructor(
         prev: CallState,
     ) {
         if (prev !is CallState.Incoming || prev.sid != event.sid) return
+        val connection = prev.connection ?: return
         // Same stale-effect guard as the proceed path: a concurrent
         // hang-up already terminated this sid on the wire.
         if (!callStillLive(event.sid)) return
@@ -725,7 +749,7 @@ class CallStore internal constructor(
             failCall(event.sid, "call session accept failed: no bound resource")
             return
         }
-        if (!signaling.sessionAccept(event.from, ourJid, event.sid, kind.media)) {
+        if (!connection.sessionAccept(event.from, ourJid, event.sid, kind.media)) {
             failCall(event.sid, "call session accept failed")
         }
     }
@@ -747,7 +771,7 @@ class CallStore internal constructor(
     }
 
     private fun slotMatchesConnection(sid: String, connection: CallConnection): Boolean = synchronized(stateLock) {
-        _state.value.sidOrNull == sid && _state.value.connectionOrNull === connection
+        _state.value.sidOrNull == sid && _state.value.connectionOrNull.isSameActiveAttempt(connection)
     }
 
     /**
@@ -763,6 +787,7 @@ class CallStore internal constructor(
         expectedSlot: CallState,
         accepting: Boolean = false,
     ): Boolean {
+        val connection = expectedSlot.connectionOrNull ?: return false
         synchronized(stateLock) {
             // Reentrant monitor: check-and-replace is one atomic step.
             if (!slotStillMatches(expectedSlot)) return false
@@ -777,6 +802,7 @@ class CallStore internal constructor(
                 sid = event.sid,
                 media = media,
                 accepting = accepting,
+                connection = connection,
             )
             _lastError.value = null
         }
@@ -824,7 +850,10 @@ class CallStore internal constructor(
         val connection = target.connection ?: return
         if (!connection.applyIfCurrent {
                 synchronized(stateLock) {
-                    if (_state.value is CallState.Outgoing && _state.value.sidOrNull == sid && _state.value.connectionOrNull === connection) {
+                    if (_state.value is CallState.Outgoing &&
+                        _state.value.sidOrNull == sid &&
+                        _state.value.connectionOrNull.isSameActiveAttempt(connection)
+                    ) {
                         _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
                     }
                 }
@@ -862,7 +891,10 @@ class CallStore internal constructor(
         val connection = target.connection ?: return
         if (!connection.applyIfCurrent {
                 synchronized(stateLock) {
-                    if (_state.value is CallState.Outgoing && _state.value.sidOrNull == sid && _state.value.connectionOrNull === connection) {
+                    if (_state.value is CallState.Outgoing &&
+                        _state.value.sidOrNull == sid &&
+                        _state.value.connectionOrNull.isSameActiveAttempt(connection)
+                    ) {
                         _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
                     }
                 }
@@ -902,7 +934,10 @@ class CallStore internal constructor(
         val connection = target.connection ?: return
         if (!connection.applyIfCurrent {
                 synchronized(stateLock) {
-                    if (_state.value is CallState.Incoming && _state.value.sidOrNull == sid && _state.value.connectionOrNull === connection) {
+                    if (_state.value is CallState.Incoming &&
+                        _state.value.sidOrNull == sid &&
+                        _state.value.connectionOrNull.isSameActiveAttempt(connection)
+                    ) {
                         _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
                     }
                 }

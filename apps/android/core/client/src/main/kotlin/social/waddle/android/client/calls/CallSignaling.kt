@@ -26,39 +26,6 @@ internal interface CallSignaling {
      * slot. The returned object never selects a later replacement client.
      */
     fun captureActiveConnection(): CallConnection?
-
-    suspend fun propose(peerBareJid: String, sid: String, media: WaddleCallMedia): Boolean =
-        captureActiveConnection()?.propose(peerBareJid, sid, media) ?: false
-    suspend fun ringing(peerBareJid: String, sid: String): Boolean =
-        captureActiveConnection()?.ringing(peerBareJid, sid) ?: false
-    suspend fun proceed(peerFullJid: String, sid: String): Boolean =
-        captureActiveConnection()?.proceed(peerFullJid, sid) ?: false
-    suspend fun reject(peerFullJid: String, sid: String): Boolean =
-        captureActiveConnection()?.reject(peerFullJid, sid) ?: false
-    suspend fun rejectTieBreak(peerFullJid: String, sid: String): Boolean =
-        captureActiveConnection()?.rejectTieBreak(peerFullJid, sid) ?: false
-    suspend fun retract(peerBareJid: String, sid: String): Boolean =
-        captureActiveConnection()?.retract(peerBareJid, sid) ?: false
-    suspend fun retractTieBreak(peerFullJid: String, sid: String): Boolean =
-        captureActiveConnection()?.retractTieBreak(peerFullJid, sid) ?: false
-    suspend fun finish(peerFullJid: String, sid: String): Boolean = captureActiveConnection()?.finish(peerFullJid, sid) ?: false
-    suspend fun finishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason): Boolean =
-        captureActiveConnection()?.finishWithReason(peerFullJid, sid, reason) ?: false
-    suspend fun finishMigrated(peerFullJid: String, oldSid: String, newSid: String): Boolean =
-        captureActiveConnection()?.finishMigrated(peerFullJid, oldSid, newSid) ?: false
-    suspend fun sessionInitiate(peerFullJid: String, initiatorFullJid: String, sid: String, media: WaddleCallMedia): Boolean =
-        captureActiveConnection()?.sessionInitiate(peerFullJid, initiatorFullJid, sid, media) ?: false
-    suspend fun sessionAccept(peerFullJid: String, responderFullJid: String, sid: String, media: WaddleCallMedia): Boolean =
-        captureActiveConnection()?.sessionAccept(peerFullJid, responderFullJid, sid, media) ?: false
-    suspend fun sessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?): Boolean =
-        captureActiveConnection()?.sessionTerminate(peerFullJid, sid, reason) ?: false
-    suspend fun mujiSessionInitiate(roomJid: String, initiatorFullJid: String, sid: String, video: Boolean): Boolean =
-        captureActiveConnection()?.mujiSessionInitiate(roomJid, initiatorFullJid, sid, video) ?: false
-    suspend fun mujiSessionTerminate(roomJid: String, sid: String): Boolean =
-        captureActiveConnection()?.mujiSessionTerminate(roomJid, sid) ?: false
-    suspend fun updateMujiPresence(update: MujiPresenceUpdate): Boolean =
-        captureActiveConnection()?.updateMujiPresence(update) ?: false
-    suspend fun fetchExternalServices(): List<WaddleExternalService>? = captureActiveConnection()?.fetchExternalServices()
 }
 
 /**
@@ -89,6 +56,10 @@ internal interface CallConnection {
     suspend fun sessionTerminateWithOutcome(peerFullJid: String, sid: String, reason: WaddleJingleReason?): WaddleCallSessionTerminateOutcome
     suspend fun fetchExternalServices(): List<WaddleExternalService>?
 }
+
+/** Two wrappers name the same transport only when they carry the same owner generation. */
+internal fun CallConnection?.isSameActiveAttempt(other: CallConnection?): Boolean =
+    this?.lease != null && this.lease == other?.lease
 
 /** Production [CallSignaling] factory; it deliberately exposes no unpinned verb. */
 internal class ClientCallSignaling(private val activeSession: ActiveSession) : CallSignaling {

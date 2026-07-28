@@ -28,7 +28,7 @@ internal class CallTeardown(
         if (!sender.applyIfCurrent {
                 synchronized(stateLock) {
                     val live = state.value.connectionOrNull
-                    if (sender.lease != null && live != null && live !== sender) return@applyIfCurrent
+                    if (sender.lease != null && !live.isSameActiveAttempt(sender)) return@applyIfCurrent
                     callbacks.cancelTimers()
                     current = state.value
                     state.value = CallState.Idle
@@ -61,7 +61,12 @@ internal class CallTeardown(
         if (!connection.applyIfCurrent {
                 synchronized(stateLock) {
                     val active = state.value
-                    if (active !is CallState.Active || active.sid != sid || active.connection !== connection) return@applyIfCurrent
+                    if (active !is CallState.Active ||
+                        active.sid != sid ||
+                        !active.connection.isSameActiveAttempt(connection)
+                    ) {
+                        return@applyIfCurrent
+                    }
                     callbacks.cancelTimers()
                     current = active
                     state.value = CallState.Idle
