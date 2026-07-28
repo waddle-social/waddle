@@ -47,7 +47,7 @@ describe("XMPP page lifecycle", () => {
     (client as unknown as { xmpp: unknown }).xmpp = {
       try_request_stream_management_ack_for_pagehide: () => {
         order.push("request-ack");
-        return "accepted";
+        return 0;
       },
     };
     (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = () => {
@@ -68,7 +68,7 @@ describe("XMPP page lifecycle", () => {
     });
     const persist = mock(() => undefined);
     (client as unknown as { xmpp: unknown }).xmpp = {
-      try_request_stream_management_ack_for_pagehide: () => "full",
+      try_request_stream_management_ack_for_pagehide: () => 1,
     };
     (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = persist;
 
@@ -87,7 +87,7 @@ describe("XMPP page lifecycle", () => {
       xmpp_websocket_url: "wss://example.com/ws",
     });
     (client as unknown as { xmpp: unknown }).xmpp = {
-      try_request_stream_management_ack_for_pagehide: () => "closed",
+      try_request_stream_management_ack_for_pagehide: () => 2,
     };
     (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = () => undefined;
 

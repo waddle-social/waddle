@@ -77,7 +77,7 @@ impl WaddleConfig {
         outbound_h: u32,
         entries: JsValue,
     ) -> Result<(), JsValue> {
-        let entries = resume_entries_from_js(entries)?;
+        let entries = resume_entries_from_js(entries).map_err(|err| js_error(err.to_string()))?;
         self.resume_state = Some(
             waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
                 waddle_xmpp_client::StreamId::new(previd),
@@ -98,7 +98,7 @@ impl WaddleConfig {
         entries: JsValue,
         max_resume_seconds: u32,
     ) -> Result<(), JsValue> {
-        let entries = resume_entries_from_js(entries)?;
+        let entries = resume_entries_from_js(entries).map_err(|err| js_error(err.to_string()))?;
         self.resume_state = Some(
             waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
                 waddle_xmpp_client::StreamId::new(previd),
@@ -182,16 +182,34 @@ pub(crate) struct JsUnhandledOutboundEntry {
     sent_at: String,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum PersistedResumeEntryError {
+    #[error("invalid resume stanza XML")]
+    Xml,
+    #[error("invalid resume stanza timestamp")]
+    Timestamp,
+    #[error("invalid persisted resume stanza")]
+    UncountableStanza,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum PersistedResumeEntriesError {
+    #[error("invalid resume entries")]
+    InvalidEntries,
+    #[error(transparent)]
+    Entry(#[from] PersistedResumeEntryError),
+}
+
 fn resume_entries_from_js(
     entries: JsValue,
-) -> Result<Vec<waddle_xmpp_client::UnhandledOutboundEntry>, JsValue> {
+) -> Result<Vec<waddle_xmpp_client::UnhandledOutboundEntry>, PersistedResumeEntriesError> {
     let entries: Vec<JsUnhandledOutboundEntry> = serde_wasm_bindgen::from_value(entries)
-        .map_err(|err| js_error(format!("invalid resume entries: {err}")))?;
+        .map_err(|_| PersistedResumeEntriesError::InvalidEntries)?;
     entries
         .into_iter()
         .map(resume_entry_from_persisted_js)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(js_error)
+        .map_err(PersistedResumeEntriesError::from)
 }
 
 /// Rebuild one persisted entry at the browser persistence boundary.  The
@@ -199,16 +217,16 @@ fn resume_entries_from_js(
 /// keeps the original element for later replay.
 fn resume_entry_from_persisted_js(
     entry: JsUnhandledOutboundEntry,
-) -> Result<waddle_xmpp_client::UnhandledOutboundEntry, String> {
+) -> Result<waddle_xmpp_client::UnhandledOutboundEntry, PersistedResumeEntryError> {
     let stanza = entry
         .xml
         .parse::<Element>()
-        .map_err(|err| format!("invalid resume stanza XML: {err}"))?;
+        .map_err(|_| PersistedResumeEntryError::Xml)?;
     let sent_at = chrono::DateTime::parse_from_rfc3339(&entry.sent_at)
-        .map_err(|err| format!("invalid resume stanza timestamp: {err}"))?
+        .map_err(|_| PersistedResumeEntryError::Timestamp)?
         .with_timezone(&chrono::Utc);
     waddle_xmpp_client::UnhandledOutboundEntry::try_new(stanza, sent_at)
-        .map_err(|err| format!("invalid persisted resume stanza: {err}"))
+        .map_err(|_| PersistedResumeEntryError::UncountableStanza)
 }
 
 #[wasm_bindgen]
@@ -425,13 +443,27 @@ mod tests {
             "<resumed xmlns='urn:xmpp:sm:3' h='1' previd='old'/>",
             "<foo xmlns='jabber:client'/>",
             "<message xmlns='urn:example:other'/>",
-            "<message",
         ] {
-            assert!(
+            assert_eq!(
                 resume_entry_from_persisted_js(persisted_entry(xml, "2026-07-27T12:00:00.000Z"))
-                    .is_err(),
+                    .expect_err("controls and non-client roots must not replay"),
+                PersistedResumeEntryError::UncountableStanza,
                 "{xml} must not enter the XEP-0198 replay queue",
             );
         }
+
+        assert_eq!(
+            resume_entry_from_persisted_js(persisted_entry("<message", "2026-07-27T12:00:00.000Z"))
+                .expect_err("malformed XML must not replay"),
+            PersistedResumeEntryError::Xml,
+        );
+        assert_eq!(
+            resume_entry_from_persisted_js(persisted_entry(
+                "<message xmlns='jabber:client'/>",
+                "not-a-timestamp",
+            ))
+            .expect_err("invalid timestamps must not replay"),
+            PersistedResumeEntryError::Timestamp,
+        );
     }
 }

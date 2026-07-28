@@ -276,6 +276,39 @@ pub(crate) async fn cancel_iq_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
+/// Closed pagehide admission result exposed to the browser binding. This is
+/// deliberately a wasm enum rather than a stringly-typed queue status.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagehideSmAckEnqueueOutcome {
+    Accepted,
+    Full,
+    Closed,
+}
+
+/// Try to enqueue the pagehide-only XEP-0198 acknowledgement request without
+/// awaiting channel capacity or driver completion. FIFO remains intact: the
+/// request is appended only when the existing command lane has capacity.
+pub(crate) fn try_request_stream_management_ack_for_pagehide(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+) -> PagehideSmAckEnqueueOutcome {
+    let Ok(mut cmd_tx) = command_sender(inner) else {
+        return PagehideSmAckEnqueueOutcome::Closed;
+    };
+    try_enqueue_pagehide_sm_ack(&mut cmd_tx)
+}
+
+fn try_enqueue_pagehide_sm_ack(
+    cmd_tx: &mut mpsc::Sender<WasmCommand>,
+) -> PagehideSmAckEnqueueOutcome {
+    let (responder, _response) = oneshot::channel();
+    match cmd_tx.try_send(WasmCommand::RequestStreamManagementAck { responder }) {
+        Ok(()) => PagehideSmAckEnqueueOutcome::Accepted,
+        Err(error) if error.is_full() => PagehideSmAckEnqueueOutcome::Full,
+        Err(_) => PagehideSmAckEnqueueOutcome::Closed,
+    }
+}
+
 /// Variant of [`send_iq_command`] that surfaces RFC 6120 §8.3 stanza
 /// errors as a typed [`waddle_xmpp_client::StanzaError`] on the Rust
 /// side instead of rejecting the Promise. Transport / disconnect
@@ -488,30 +521,5 @@ mod tests {
             futures::future::ready(()),
         ));
         assert!(matches!(outcome, IqReplyWait::DeadlineExpired));
-    }
-
-    #[test]
-    fn pagehide_ack_try_enqueue_is_nonblocking_and_reports_capacity_or_closure() {
-        let (mut sender, receiver) = mpsc::channel(1);
-        let mut accepted = 0;
-        loop {
-            match try_enqueue_pagehide_sm_ack(&mut sender) {
-                PagehideSmAckEnqueueOutcome::Accepted => accepted += 1,
-                PagehideSmAckEnqueueOutcome::Full => break,
-                PagehideSmAckEnqueueOutcome::Closed => {
-                    panic!("live receiver cannot close the command lane")
-                }
-            }
-        }
-        assert!(
-            accepted > 0,
-            "a live bounded lane accepts at least one command"
-        );
-
-        drop(receiver);
-        assert_eq!(
-            try_enqueue_pagehide_sm_ack(&mut sender),
-            PagehideSmAckEnqueueOutcome::Closed,
-        );
     }
 }

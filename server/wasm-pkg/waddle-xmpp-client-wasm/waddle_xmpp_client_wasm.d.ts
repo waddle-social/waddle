@@ -1,6 +1,19 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * The bounded, synchronous result of placing a pagehide `<r/>` request on
+ * the already-established driver lane.  It describes queue admission only;
+ * pagehide intentionally does not wait for a socket write or acknowledgement.
+ * Closed pagehide admission result exposed to the browser binding. This is
+ * deliberately a wasm enum rather than a stringly-typed queue status.
+ */
+export enum PagehideSmAckEnqueueOutcome {
+    Accepted = 0,
+    Full = 1,
+    Closed = 2,
+}
+
 export class WaddleClient {
     free(): void;
     [Symbol.dispose](): void;
@@ -555,7 +568,7 @@ export class WaddleClient {
      * does not await capacity, a driver turn, or a socket write; callers get
      * only the closed queue outcome and must persist immediately afterwards.
      */
-    try_request_stream_management_ack_for_pagehide(): string;
+    try_request_stream_management_ack_for_pagehide(): PagehideSmAckEnqueueOutcome;
     /**
      * Publish a 1:1 DM unpin request.
      */

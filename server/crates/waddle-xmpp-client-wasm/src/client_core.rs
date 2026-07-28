@@ -118,10 +118,8 @@ impl WaddleClient {
     /// Pagehide-only, nonblocking XEP-0198 acknowledgement admission.  This
     /// does not await capacity, a driver turn, or a socket write; callers get
     /// only the closed queue outcome and must persist immediately afterwards.
-    pub fn try_request_stream_management_ack_for_pagehide(&self) -> String {
+    pub fn try_request_stream_management_ack_for_pagehide(&self) -> PagehideSmAckEnqueueOutcome {
         try_request_stream_management_ack_for_pagehide(&self.inner)
-            .as_str()
-            .to_owned()
     }
 
     pub fn connect(&self) -> Promise {

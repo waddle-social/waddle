@@ -312,6 +312,11 @@ type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
   discover_extension_routes?: () => Promise<unknown>;
   fetch_extension_route_items?: (route: unknown, roomJid: string) => Promise<unknown>;
 };
+type PagehideSmAckEnqueueOutcome = import("@waddle/xmpp-client-wasm").PagehideSmAckEnqueueOutcome;
+
+// wasm-bindgen exports this C-style enum as stable numeric discriminants. Keep
+// the browser boundary typed without importing the WASM module before init.
+const PAGEHIDE_SM_ACK_ACCEPTED: PagehideSmAckEnqueueOutcome = 0;
 
 
 /** Per-event handler signatures for the legacy emitter surface some
@@ -352,7 +357,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
   request_stream_management_ack?: () => Promise<void>;
-  try_request_stream_management_ack_for_pagehide?: () => "accepted" | "full" | "closed";
+  try_request_stream_management_ack_for_pagehide?: () => PagehideSmAckEnqueueOutcome;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
@@ -964,7 +969,8 @@ export class BrowserXmppClient {
       // for channel capacity, a driver turn, or a socket write; it preserves
       // FIFO by appending only when the existing command lane has capacity.
       if (this.xmpp) {
-        acknowledgementUnavailable = this.xmpp.try_request_stream_management_ack_for_pagehide?.() !== "accepted";
+        acknowledgementUnavailable = this.xmpp.try_request_stream_management_ack_for_pagehide?.()
+          !== PAGEHIDE_SM_ACK_ACCEPTED;
       }
     } catch {
       acknowledgementUnavailable = true;
