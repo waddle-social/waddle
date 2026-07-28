@@ -5027,7 +5027,7 @@ impl OrderedRelayDeliveryBridge {
         participant: &jid::FullJid,
     ) -> LocalMediaGrantReassertion {
         use crate::server::routes::websocket::muc_call_sfu::{
-            enforce_current_voice_grants, GrantEnforcement,
+            apply_derived_enforcement, derive_current_voice, GrantEnforcement, VoiceDerivation,
         };
         let Some(services) = self.services.get().cloned() else {
             return LocalMediaGrantReassertion::Unavailable;
@@ -5046,6 +5046,33 @@ impl OrderedRelayDeliveryBridge {
         // gate in this module applies); otherwise answer
         // `NoLocalRoomActor` so the asker's retry re-resolves the
         // owner.
+        let me = services.node_identity.current();
+        let gate_epoch = match services
+            .claim_store
+            .current_claim(&room_entity(room_jid))
+            .await
+        {
+            Ok(Some(snapshot)) if snapshot.owner_lease_fresh && snapshot.owner == me => {
+                snapshot.claim_epoch
+            }
+            Ok(_) => return LocalMediaGrantReassertion::NoLocalRoomActor,
+            Err(_) => return LocalMediaGrantReassertion::Unavailable,
+        };
+        // Derive first, act second: the room-actor ask can take up to
+        // its reply timeout, during which the claim can be stolen and
+        // the local actor's occupant set superseded. Re-checking the
+        // claim (same epoch, still fresh-and-mine) between the answer
+        // and the SFU effect fences the answer to the claim it was
+        // derived under — the SFU push/evict happens only while this
+        // node's ownership is continuously observable.
+        let derivation = derive_current_voice(state.as_ref(), room_jid, participant).await;
+        match derivation {
+            VoiceDerivation::NoLocalRoomActor => {
+                return LocalMediaGrantReassertion::NoLocalRoomActor
+            }
+            VoiceDerivation::LookupFailed => return LocalMediaGrantReassertion::Unavailable,
+            VoiceDerivation::Occupant(_) | VoiceDerivation::NotOccupant => {}
+        }
         match services
             .claim_store
             .current_claim(&room_entity(room_jid))
@@ -5053,19 +5080,26 @@ impl OrderedRelayDeliveryBridge {
         {
             Ok(Some(snapshot))
                 if snapshot.owner_lease_fresh
-                    && snapshot.owner == services.node_identity.current() => {}
+                    && snapshot.owner == me
+                    && snapshot.claim_epoch == gate_epoch => {}
             Ok(_) => return LocalMediaGrantReassertion::NoLocalRoomActor,
             Err(_) => return LocalMediaGrantReassertion::Unavailable,
         }
-        match enforce_current_voice_grants(state.as_ref(), room_jid, participant).await {
+        let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+            // An SFU-less node cannot push grants — "cannot execute
+            // here", never an authorization conclusion.
+            return LocalMediaGrantReassertion::Unavailable;
+        };
+        match apply_derived_enforcement(sfu, room_jid, participant, derivation) {
             GrantEnforcement::Applied => LocalMediaGrantReassertion::Applied,
             GrantEnforcement::EvictedNonOccupant => LocalMediaGrantReassertion::EvictedNonOccupant,
-            GrantEnforcement::NoLocalRoomActor => LocalMediaGrantReassertion::NoLocalRoomActor,
-            // An SFU-less node cannot push grants, and a flaked lookup
-            // proves nothing — both are "cannot execute here".
-            GrantEnforcement::LookupFailed | GrantEnforcement::SfuNotConfigured => {
-                LocalMediaGrantReassertion::Unavailable
-            }
+            // Unreachable: both non-authoritative derivations returned
+            // above, and `apply_derived_enforcement` maps the two
+            // authoritative ones exhaustively to the two arms matched
+            // here.
+            GrantEnforcement::NoLocalRoomActor
+            | GrantEnforcement::LookupFailed
+            | GrantEnforcement::SfuNotConfigured => LocalMediaGrantReassertion::Unavailable,
         }
     }
 }

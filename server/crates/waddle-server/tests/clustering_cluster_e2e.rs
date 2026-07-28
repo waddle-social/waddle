@@ -2479,7 +2479,6 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
 
     const DOMAIN: &str = "localhost";
     const OWNER_USERNAME: &str = "admin";
-    const NS_MUC: &str = "http://jabber.org/protocol/muc";
     const WEBHOOK_SECRET: &str = "test-webhook-secret-with-at-least-32-bytes";
 
     // Fake LiveKit admin origins, ONE PER NODE. `admin_base_url_from_ws`
@@ -2556,9 +2555,7 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
     .await
     .expect("client A connects to node A");
     client_a
-        .send(&format!(
-            r#"<presence to="{room}/owner-a"><x xmlns="{NS_MUC}"/></presence>"#
-        ))
+        .send(&String::from(&muc_join_presence(&room, "owner-a")))
         .await
         .expect("client A sends join presence");
     client_a
@@ -2580,9 +2577,7 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
     .await
     .expect("client B connects to node B");
     client_b
-        .send(&format!(
-            r#"<presence to="{room}/joiner-b"><x xmlns="{NS_MUC}"/></presence>"#
-        ))
+        .send(&String::from(&muc_join_presence(&room, "joiner-b")))
         .await
         .expect("client B sends join presence");
     client_b
@@ -2668,6 +2663,20 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
     drop(server_a);
     drop(server_b);
     drop(client_a);
+}
+
+/// MUC join `<presence/>` built with the typed XML builder (repo
+/// XML-generation rule: never construct XML with `format!`).
+fn muc_join_presence(room: &str, nick: &str) -> xmpp_parsers::minidom::Element {
+    use xmpp_parsers::minidom::Element;
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+    Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/{nick}"),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .build()
 }
 
 /// Signed `Authorization` header for a synthetic LiveKit webhook body,

@@ -148,28 +148,35 @@ pub(crate) enum GrantEnforcement {
     SfuNotConfigured,
 }
 
-/// Re-derive `full_jid`'s XEP-0045 voice from THIS process's room
-/// actor and converge their live SFU media grants with it — the
-/// shared enforcement core behind both the same-node
-/// `participant_joined` webhook path and the owner side of the #1594
-/// cross-node relay. Keeping both on one function is deliberate: the
-/// relayed path must not be able to diverge from the local one.
-///
-/// Side effects happen only on an authoritative answer: a seated
-/// occupant gets their voice-derived grants pushed, a confirmed
-/// non-occupant is evicted, and every other outcome performs nothing.
-pub(crate) async fn enforce_current_voice_grants(
+/// The side-effect-free half of [`enforce_current_voice_grants`]:
+/// THIS process's room actor's authoritative answer about one live
+/// SFU participant, with no SFU effect performed. Split out so the
+/// #1594 relayed path can re-validate its room claim BETWEEN deriving
+/// the answer and acting on it — binding the (possibly slow) actor
+/// answer to the claim it was derived under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VoiceDerivation {
+    /// A local actor answered with the occupant's current voice.
+    Occupant(Voice),
+    /// A local (authoritative) actor answered "not an occupant".
+    NotOccupant,
+    /// No room actor in this process — cannot determine anything.
+    NoLocalRoomActor,
+    /// The registry or actor lookup failed transiently.
+    LookupFailed,
+}
+
+/// Resolve `full_jid`'s current XEP-0045 voice from THIS process's
+/// room actor. Performs no side effects.
+pub(crate) async fn derive_current_voice(
     state: &WebSocketState,
     room_jid: &BareJid,
     full_jid: &FullJid,
-) -> GrantEnforcement {
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return GrantEnforcement::SfuNotConfigured;
-    };
+) -> VoiceDerivation {
     let actor = match crate::server::routes::websocket::get_room_actor_result(state, room_jid).await
     {
         Ok(Some(actor)) => actor,
-        Ok(None) => return GrantEnforcement::NoLocalRoomActor,
+        Ok(None) => return VoiceDerivation::NoLocalRoomActor,
         Err(error) => {
             tracing::warn!(
                 room = %room_jid,
@@ -177,7 +184,7 @@ pub(crate) async fn enforce_current_voice_grants(
                 error = %error,
                 "could not resolve MUC voice for a live call participant",
             );
-            return GrantEnforcement::LookupFailed;
+            return VoiceDerivation::LookupFailed;
         }
     };
     match actor
@@ -191,7 +198,33 @@ pub(crate) async fn enforce_current_voice_grants(
         .reply_timeout(waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT)
         .await
     {
-        Ok(Some(voice)) => {
+        Ok(Some(voice)) => VoiceDerivation::Occupant(voice),
+        Ok(None) => VoiceDerivation::NotOccupant,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                error = %error,
+                "MUC voice lookup failed for a live call participant",
+            );
+            VoiceDerivation::LookupFailed
+        }
+    }
+}
+
+/// The side-effecting half of [`enforce_current_voice_grants`]: act
+/// on an already-derived answer. Side effects happen only on an
+/// authoritative derivation: a seated occupant gets their
+/// voice-derived grants pushed, a confirmed non-occupant is evicted,
+/// and every other derivation performs nothing.
+pub(crate) fn apply_derived_enforcement(
+    sfu: &std::sync::Arc<dyn waddle_sfu::SfuService>,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+    derivation: VoiceDerivation,
+) -> GrantEnforcement {
+    match derivation {
+        VoiceDerivation::Occupant(voice) => {
             tracing::debug!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
@@ -200,13 +233,13 @@ pub(crate) async fn enforce_current_voice_grants(
             apply_voice_grants_via_sfu(sfu, room_jid, full_jid, voice);
             GrantEnforcement::Applied
         }
-        Ok(None) => {
+        VoiceDerivation::NotOccupant => {
             // A LOCAL room actor answered, so it owns this room and its
             // occupant set is authoritative: this participant is in the
             // SFU room while not being an occupant of the MUC.
             // Occupancy is the precondition for call participation, so
             // this is a stale-token join and must end. (Contrast the
-            // absent-actor case above, which proves nothing.)
+            // absent-actor case, which proves nothing.)
             tracing::warn!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
@@ -215,16 +248,29 @@ pub(crate) async fn enforce_current_voice_grants(
             unregister_participant_via_sfu(sfu, room_jid, full_jid);
             GrantEnforcement::EvictedNonOccupant
         }
-        Err(error) => {
-            tracing::warn!(
-                room = %room_jid,
-                user = %full_jid.to_bare(),
-                error = %error,
-                "MUC voice lookup failed for a live call participant",
-            );
-            GrantEnforcement::LookupFailed
-        }
+        VoiceDerivation::NoLocalRoomActor => GrantEnforcement::NoLocalRoomActor,
+        VoiceDerivation::LookupFailed => GrantEnforcement::LookupFailed,
     }
+}
+
+/// Re-derive `full_jid`'s XEP-0045 voice from THIS process's room
+/// actor and converge their live SFU media grants with it — the
+/// shared enforcement core behind both the same-node
+/// `participant_joined` webhook path and the owner side of the #1594
+/// cross-node relay. Keeping both on one core is deliberate: the
+/// relayed path must not be able to diverge from the local one (it
+/// composes [`derive_current_voice`] and [`apply_derived_enforcement`]
+/// with a claim re-check in between).
+pub(crate) async fn enforce_current_voice_grants(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+) -> GrantEnforcement {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return GrantEnforcement::SfuNotConfigured;
+    };
+    let derivation = derive_current_voice(state, room_jid, full_jid).await;
+    apply_derived_enforcement(sfu, room_jid, full_jid, derivation)
 }
 
 /// Push every occupant's current XEP-0045 voice to the SFU after a
