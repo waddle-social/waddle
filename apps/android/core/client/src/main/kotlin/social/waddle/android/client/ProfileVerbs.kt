@@ -42,11 +42,13 @@ internal class ProfileVerbs(
      * best-effort — an absent PEP node must not fail the load.
      */
     suspend fun loadSelfProfile(): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
         val own = activeSession.ownBareJid ?: return VerbResult.NotReady
         val generation = activeSession.generation
         val vcard = try {
-            client.fetchVcard4(own)
+            when (val result = activeSession.invoke { it.fetchVcard4(own) }) {
+                ActiveSession.Invocation.NotConnected -> return VerbResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -83,11 +85,13 @@ internal class ProfileVerbs(
                 return cached
             }
         }
-        val client = activeSession.client ?: return null
         val generation = activeSession.generation
         val knownIds = stores.profileStore.knownAvatarIds(owner)
         val result = try {
-            client.requestAvatar(owner, knownIds)
+            when (val invocation = activeSession.invoke { it.requestAvatar(owner, knownIds) }) {
+                ActiveSession.Invocation.NotConnected -> return null
+                is ActiveSession.Invocation.Completed -> invocation.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -120,7 +124,6 @@ internal class ProfileVerbs(
         // client is provably null, and capturing `previous` there would
         // let the rollback resurrect the OLD account's vCard into the
         // freshly seeded stores.
-        activeSession.client ?: return VerbResult.NotConnected
         val generation = activeSession.generation
         val previous = stores.profileStore.selfVcard.value
         stores.profileStore.setSelfVcard(vcard)
@@ -227,9 +230,11 @@ internal class ProfileVerbs(
      *  refusal by throwing `WaddleException` instead of returning
      *  false, so success is simply "did not throw". */
     private suspend fun unitVerb(op: suspend (WaddleClientInterface) -> Unit): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
         return try {
-            op(client)
+            when (activeSession.invoke(op)) {
+                ActiveSession.Invocation.NotConnected -> return VerbResult.NotConnected
+                is ActiveSession.Invocation.Completed -> Unit
+            }
             VerbResult.Ok
         } catch (cancellation: CancellationException) {
             throw cancellation

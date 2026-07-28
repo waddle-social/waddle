@@ -573,6 +573,10 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var callProceedDelayMillis = 0L
 
+    /** Deterministic gate for a normal call signal holding the transport fence. */
+    @Volatile
+    var callProposeStall: CompletableDeferred<Unit>? = null
+
     /**
      * Virtual-time stall before [sendCallRetractTieBreak] answers —
      * lets tests land an inbound event mid-tie-break.
@@ -620,6 +624,7 @@ class FakeWaddleClient : WaddleClientInterface {
         video: Boolean,
     ): Boolean {
         callVerbs += RecordedCallVerb.Propose(peerBareJid, sid, audio, video)
+        callProposeStall?.await()
         return callVerbResult
     }
 
@@ -966,6 +971,10 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var correctionOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("corr-1")
 
+    /** Deterministic gate for correction interleavings with logout. */
+    @Volatile
+    var correctionStall: CompletableDeferred<Unit>? = null
+
     override suspend fun sendCorrection(
         peerJid: String,
         targetId: String,
@@ -974,6 +983,7 @@ class FakeWaddleClient : WaddleClientInterface {
         options: WaddleSendOptions?,
     ): WaddleSendMessageOutcome {
         correctionCalls += Triple(peerJid, targetId, newBody)
+        correctionStall?.await()
         return correctionOutcome
     }
 

@@ -85,15 +85,6 @@ internal class ReadStateCoordinator(
         val explicitExpectation = explicitTarget?.let {
             expectedCursorFor(items, conversation, it.markerId) ?: return
         }
-        val client = activeSession.client ?: run {
-            // No live session: park the RESOLVED target and replay it on
-            // the next ready (a notification tap during a reconnect gap
-            // must not permanently drop the read receipt). Parking null
-            // would re-resolve after MAM catch-up and mark messages the
-            // user never saw.
-            pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
-            return
-        }
         // Snapshot the cursor to CAS against below: applyMdsEntry runs
         // OUTSIDE displayedMutex and can advance the cursor to a newer
         // sibling value across our suspend points — an unconditional
@@ -104,7 +95,21 @@ internal class ReadStateCoordinator(
         // The cursor (which dedupes future dispatches) is taken only
         // when every attempted send went through — a thrown/refused
         // dispatch stays retryable on the next timeline change.
-        if (dispatchDisplayed(client, conversation, isGroupchat, ids)) {
+        val dispatched = when (val result = activeSession.invoke { client ->
+            val displayed = dispatchDisplayed(client, conversation, isGroupchat, ids)
+            fireInboxMarkRead(client, conversation, threadId = null)
+            displayed
+        }) {
+            ActiveSession.Invocation.NotConnected -> {
+                // No live session: park the RESOLVED target and replay it on
+                // the next ready (a notification tap during a reconnect gap
+                // must not permanently drop the read receipt).
+                pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
+                return
+            }
+            is ActiveSession.Invocation.Completed -> result.value
+        }
+        if (dispatched) {
             // CAS on both paths: a concurrent applyMdsEntry advance (it
             // does not hold displayedMutex) during our sends must never
             // be clobbered by our older marker.
@@ -112,11 +117,6 @@ internal class ReadStateCoordinator(
                 if (explicitTarget != null) explicitExpectation?.cursor else cursorBefore
             stores.readCursorStore.compareAndAdvance(conversation, expected, ids.markerId)
         }
-        // Co-fire the `urn:waddle:inbox:0` mark-read alongside the
-        // displayed dispatch (web read-activity parity): the server
-        // zeroes its authoritative unread and answers with a fresh
-        // push; the barrier above clamps a racing stale one.
-        fireInboxMarkRead(client, conversation, threadId = null)
     }
 
     /**
@@ -128,11 +128,12 @@ internal class ReadStateCoordinator(
     suspend fun markInboxRead(conversationJid: String, threadId: String? = null) {
         val conversation = bareJid(conversationJid)
         if (threadId == null) stores.unreadStore.clear(conversation)
-        val client = activeSession.client ?: run {
-            stores.inboxStore.markReadLocally(conversation, threadId)
-            return
+        when (activeSession.invoke { client ->
+            fireInboxMarkRead(client, conversation, threadId)
+        }) {
+            ActiveSession.Invocation.NotConnected -> stores.inboxStore.markReadLocally(conversation, threadId)
+            is ActiveSession.Invocation.Completed -> Unit
         }
-        fireInboxMarkRead(client, conversation, threadId)
     }
 
     private suspend fun fireInboxMarkRead(
@@ -234,7 +235,7 @@ internal class ReadStateCoordinator(
         while (pendingDisplayed.isNotEmpty()) {
             // A dispatch below re-parks when the session dropped mid-
             // drain; bail instead of spinning on it.
-            if (activeSession.client == null) return
+            if (!activeSession.hasActiveClient()) return
             for (conversation in pendingDisplayed.keys) {
                 val pending = pendingDisplayed.remove(conversation) ?: continue
                 markConversationDisplayed(conversation, pending.isGroupchat, pending.target)
@@ -340,8 +341,18 @@ internal class ReadStateCoordinator(
      * increments on the single event consumer, or a concurrent arrival
      * could have its badge erased by a stale recompute.
      */
-    suspend fun bootstrapMdsDisplayed(client: WaddleClientInterface) {
-        runCatching { client.fetchMdsDisplayed() }.getOrNull()?.let { entries ->
+    suspend fun bootstrapMdsDisplayed() {
+        val entries = try {
+            when (val result = activeSession.invoke { it.fetchMdsDisplayed() }) {
+                ActiveSession.Invocation.NotConnected -> return
+                is ActiveSession.Invocation.Completed -> result.value
+            }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return
+        }
+        entries.let { entries ->
             if (entries.isNotEmpty()) {
                 // Handshake: the pipeline continues (pending-displayed
                 // drain!) only after the consumer APPLIED the fetched
@@ -355,7 +366,13 @@ internal class ReadStateCoordinator(
                 applied.join()
             }
         }
-        runCatching { client.subscribeMdsDisplayed() }
+        try {
+            activeSession.invoke { it.subscribeMdsDisplayed() }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Best-effort subscription; the next ready bootstrap retries.
+        }
     }
 
     /** A displayed dispatch waiting for a live session. */

@@ -1,5 +1,6 @@
 package social.waddle.android.client.calls
 
+import kotlinx.coroutines.runBlocking
 import social.waddle.android.client.FakeWaddleClient
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.session.ActiveSession
@@ -69,7 +70,7 @@ internal class Fixture(
     init {
         activeSession.ownBareJid = "alice@waddle.test"
         activeSession.ownFullJid = "alice@waddle.test/waddle-android-1"
-        activeSession.onReady(client)
+        runBlocking { activeSession.onReady(client) }
         store = CallStore(
             signaling = ClientCallSignaling(activeSession),
             ownBareJid = { activeSession.ownBareJid },

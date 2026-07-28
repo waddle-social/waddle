@@ -34,17 +34,18 @@ internal class RoomAdminVerbs(
      * when every tier failed and nothing was collected.
      */
     suspend fun refreshRoomMembers(roomJid: String) {
-        val client = activeSession.client
-        if (client == null) {
-            stores.roomMembersStore.applyUnavailable(roomJid)
-            return
-        }
         stores.roomMembersStore.markLoading(roomJid)
         val members = mutableListOf<WaddleRoomMemberEntry>()
         var failures = 0
         for (tier in MEMBER_LIST_TIERS) {
             try {
-                members += client.listRoomMembers(roomJid, tier)
+                when (val result = activeSession.invoke { it.listRoomMembers(roomJid, tier) }) {
+                    ActiveSession.Invocation.NotConnected -> {
+                        stores.roomMembersStore.applyUnavailable(roomJid)
+                        return
+                    }
+                    is ActiveSession.Invocation.Completed -> members += result.value
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {
@@ -92,7 +93,6 @@ internal class RoomAdminVerbs(
         description: String?,
         forum: Boolean,
     ): CreateRoomResult {
-        val client = activeSession.client ?: return CreateRoomResult.NotConnected
         val localpart = channelLocalpartOf(name)
         if (localpart.isEmpty()) return CreateRoomResult.InvalidName
         val patch = WaddleRoomConfigPatch(
@@ -102,7 +102,10 @@ internal class RoomAdminVerbs(
             pinPermission = null,
         )
         val roomJid = try {
-            client.createRoom(localpart, nick, patch)
+            when (val result = activeSession.invoke { it.createRoom(localpart, nick, patch) }) {
+                ActiveSession.Invocation.NotConnected -> return CreateRoomResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (error: WaddleException) {
@@ -142,11 +145,13 @@ internal class RoomAdminVerbs(
      * its server-written bookmark before the caller joins it.
      */
     suspend fun createGroupDm(name: String, memberJids: List<String>): CreateRoomResult {
-        val client = activeSession.client ?: return CreateRoomResult.NotConnected
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return CreateRoomResult.InvalidName
         val roomJid = try {
-            client.createGroupDm(trimmed, memberJids.map(::bareJid))
+            when (val result = activeSession.invoke { it.createGroupDm(trimmed, memberJids.map(::bareJid)) }) {
+                ActiveSession.Invocation.NotConnected -> return CreateRoomResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (error: WaddleException) {
@@ -246,9 +251,11 @@ internal class RoomAdminVerbs(
     private suspend fun adminCall(
         op: suspend (WaddleClientInterface) -> Unit,
     ): RoomAdminResult {
-        val client = activeSession.client ?: return RoomAdminResult.NotConnected
         return try {
-            op(client)
+            when (activeSession.invoke(op)) {
+                ActiveSession.Invocation.NotConnected -> return RoomAdminResult.NotConnected
+                is ActiveSession.Invocation.Completed -> Unit
+            }
             RoomAdminResult.Ok
         } catch (cancellation: CancellationException) {
             throw cancellation

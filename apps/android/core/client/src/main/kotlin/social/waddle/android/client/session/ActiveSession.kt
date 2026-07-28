@@ -65,9 +65,24 @@ internal class ActiveSession {
      * The client of the attempt that reached `SessionReady`, while that
      * attempt is alive — the target of the UI passthroughs.
      */
+    /**
+     * The ready attempt's client.  This is deliberately private: every
+     * ordinary XMPP operation must enter through [invoke], which holds the
+     * same fence as logout/relogin retirement.  A nullable public client
+     * made it possible for a caller to retain an old transport after the
+     * check and call it after logout had installed a successor.
+     */
     @Volatile
-    var client: WaddleClientInterface? = null
-        private set
+    private var client: WaddleClientInterface? = null
+
+    /** Result of an ordinary, transport-fenced client invocation. */
+    sealed interface Invocation<out T> {
+        /** Logout/revocation won before a client could be selected. */
+        data object NotConnected : Invocation<Nothing>
+
+        /** The active attempt owned the transport through this invocation. */
+        data class Completed<T>(val value: T) : Invocation<T>
+    }
 
     @Volatile
     var ownBareJid: String? = null
@@ -104,7 +119,7 @@ internal class ActiveSession {
     }
 
     /** Publish a new account's authority after login has finished clearing old state. */
-    fun activateOwner(ownerBareJid: String) {
+    suspend fun activateOwner(ownerBareJid: String) = transportFence.withLock {
         ownBareJid = ownerBareJid
         outboundOwner = OwnerLease(ownerBareJid = ownerBareJid, generation = generation)
     }
@@ -160,7 +175,7 @@ internal class ActiveSession {
     }
 
     /** The attempt reached `SessionReady`: expose its client, reset probes. */
-    fun onReady(readyClient: WaddleClientInterface) {
+    suspend fun onReady(readyClient: WaddleClientInterface) = transportFence.withLock {
         client = readyClient
         mdsPublishSupported = null
         uploadService = null
@@ -171,16 +186,35 @@ internal class ActiveSession {
      * delayed old attempt must never erase a successor that has reached
      * ready state.
      */
-    fun endAttempt(endingClient: WaddleClientInterface) {
+    suspend fun endAttempt(endingClient: WaddleClientInterface) = transportFence.withLock {
         if (client === endingClient) client = null
     }
+
+    /**
+     * The only ordinary gateway to a live FFI client.  The fence remains
+     * held until [op] completes: an invocation that wins may finish on its
+     * selected client, while a logout that wins first revokes the slot and
+     * guarantees [op] is never called on either the retired or successor
+     * client.  Callers must not call this recursively.
+     */
+    suspend fun <T> invoke(
+        op: suspend (WaddleClientInterface) -> T,
+    ): Invocation<T> = transportFence.withLock {
+        val liveClient = client ?: return@withLock Invocation.NotConnected
+        Invocation.Completed(op(liveClient))
+    }
+
+    /** Fenced readiness probe for control flow that must not retain a client. */
+    suspend fun hasActiveClient(): Boolean = invoke { true } is Invocation.Completed
 
     /** Fire-and-check verb shape: no client → [VerbResult.NotConnected],
      *  a refusal or a broken transport → [VerbResult.Rejected]. */
     suspend fun verbCall(op: suspend (WaddleClientInterface) -> Boolean): VerbResult {
-        val liveClient = client ?: return VerbResult.NotConnected
         return try {
-            if (op(liveClient)) VerbResult.Ok else VerbResult.Rejected
+            when (val result = invoke(op)) {
+                Invocation.NotConnected -> VerbResult.NotConnected
+                is Invocation.Completed -> if (result.value) VerbResult.Ok else VerbResult.Rejected
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -192,9 +226,11 @@ internal class ActiveSession {
     suspend fun send(
         op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
     ): WaddleSendMessageOutcome {
-        val liveClient = client ?: return WaddleSendMessageOutcome.NotConnected
         return try {
-            op(liveClient)
+            when (val result = invoke(op)) {
+                Invocation.NotConnected -> WaddleSendMessageOutcome.NotConnected
+                is Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -228,9 +264,11 @@ internal class ActiveSession {
 
     /** Nullable fetch shape: `null` when no session is ready or the call threw. */
     suspend fun <T : Any> fetch(op: suspend (WaddleClientInterface) -> T): T? {
-        val liveClient = client ?: return null
         return try {
-            op(liveClient)
+            when (val result = invoke(op)) {
+                Invocation.NotConnected -> null
+                is Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {

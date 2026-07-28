@@ -104,16 +104,17 @@ internal interface CallSignaling {
 }
 
 /** Production [CallSignaling] forwarding to the live attempt's FFI client. */
-internal class ClientCallSignaling(
-    private val clientProvider: () -> WaddleClientInterface?,
+internal class ClientCallSignaling private constructor(
+    private val activeSession: ActiveSession?,
+    private val retiredConnection: ActiveSession.RetiredCallConnection?,
 ) : CallSignaling {
-    constructor(activeSession: ActiveSession) : this({ activeSession.client })
+    constructor(activeSession: ActiveSession) : this(activeSession, null)
 
     companion object {
         /** A logout-only sender captured before ordinary authority was revoked. */
         fun forRetiredConnection(
             connection: ActiveSession.RetiredCallConnection,
-        ): ClientCallSignaling = ClientCallSignaling { connection.client }
+        ): ClientCallSignaling = ClientCallSignaling(null, connection)
     }
     override suspend fun propose(peerBareJid: String, sid: String, media: WaddleCallMedia): Boolean =
         verb { it.sendCallPropose(peerBareJid, sid, media.audio, media.video) }
@@ -204,10 +205,18 @@ internal class ClientCallSignaling(
         sid: String,
         reason: WaddleJingleReason?,
     ): WaddleCallSessionTerminateOutcome {
-        val client = clientProvider()
-            ?: return WaddleCallSessionTerminateOutcome.ERROR
         return try {
-            client.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason)
+            val retired = retiredConnection
+            if (retired != null) {
+                retired.client.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason)
+            } else {
+                when (val result = requireNotNull(activeSession).invoke {
+                    it.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason)
+                }) {
+                    ActiveSession.Invocation.NotConnected -> WaddleCallSessionTerminateOutcome.ERROR
+                    is ActiveSession.Invocation.Completed -> result.value
+                }
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -221,9 +230,16 @@ internal class ClientCallSignaling(
     private suspend fun verb(
         op: suspend (social.waddle.client.ffi.WaddleClientInterface) -> Boolean,
     ): Boolean {
-        val client = clientProvider() ?: return false
         return try {
-            op(client)
+            val retired = retiredConnection
+            if (retired != null) {
+                op(retired.client)
+            } else {
+                when (val result = requireNotNull(activeSession).invoke(op)) {
+                    ActiveSession.Invocation.NotConnected -> false
+                    is ActiveSession.Invocation.Completed -> result.value
+                }
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -234,9 +250,16 @@ internal class ClientCallSignaling(
     private suspend fun <T : Any> invokeOrNull(
         op: suspend (WaddleClientInterface) -> T,
     ): T? {
-        val client = clientProvider() ?: return null
         return try {
-            op(client)
+            val retired = retiredConnection
+            if (retired != null) {
+                op(retired.client)
+            } else {
+                when (val result = requireNotNull(activeSession).invoke(op)) {
+                    ActiveSession.Invocation.NotConnected -> null
+                    is ActiveSession.Invocation.Completed -> result.value
+                }
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {

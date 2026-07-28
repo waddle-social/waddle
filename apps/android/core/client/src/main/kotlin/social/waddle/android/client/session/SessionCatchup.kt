@@ -11,7 +11,6 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.persistQuietly
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.store.SessionStores
-import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleTopology
 
 /**
@@ -34,8 +33,11 @@ internal class SessionCatchup(
      * autojoin join set. Best-effort: a failed discovery returns `null`
      * and the rejoin degrades to the persisted-intent rooms only.
      */
-    private suspend fun refreshTopology(client: WaddleClientInterface): WaddleTopology? = try {
-        client.discoverTopology().also { stores.roomStore.setTopology(it) }
+    private suspend fun refreshTopology(): WaddleTopology? = try {
+        when (val result = activeSession.invoke { it.discoverTopology() }) {
+            ActiveSession.Invocation.NotConnected -> null
+            is ActiveSession.Invocation.Completed -> result.value.also { stores.roomStore.setTopology(it) }
+        }
     } catch (cancellation: CancellationException) {
         throw cancellation
     } catch (_: Throwable) {
@@ -50,7 +52,6 @@ internal class SessionCatchup(
      * replay or hammer the server.
      */
     suspend fun onSessionReady(
-        client: WaddleClientInterface,
         session: WaddleSessionInfo,
         freshStream: Boolean,
     ) {
@@ -58,20 +59,20 @@ internal class SessionCatchup(
         // can raise IOException, and an escaped throw on this root
         // coroutine would kill the process ("never throw" contract).
         persistQuietly {
-            val topology = refreshTopology(client)
-            rejoinRooms(client, session, topology)
+            val topology = refreshTopology()
+            rejoinRooms(session, topology)
             messenger.drainOutboundQueue()
             // Every ready session, resumed streams included (web
             // parity): the inbox is the server-authoritative unread
             // baseline the live pushes then patch.
-            hydrateInbox(client)
+            hydrateInbox()
             if (freshStream) {
                 catchUpConversations()
-                hydrateNotifySettings(client)
+                hydrateNotifySettings()
             }
             // After catch-up so fetched cursors can resolve against
             // the freshly loaded newest pages.
-            readState.bootstrapMdsDisplayed(client)
+            readState.bootstrapMdsDisplayed()
             readState.drainPendingDisplayed()
         }
     }
@@ -86,9 +87,12 @@ internal class SessionCatchup(
      * `<result/>` payloads the web consumes would be dead weight here.
      * Best-effort: a failed fetch keeps the previous counts.
      */
-    private suspend fun hydrateInbox(client: WaddleClientInterface) {
+    private suspend fun hydrateInbox() {
         val result = try {
-            client.fetchInbox(onlyUnread = false, noMessages = true)
+            when (val invocation = activeSession.invoke { it.fetchInbox(onlyUnread = false, noMessages = true) }) {
+                ActiveSession.Invocation.NotConnected -> return
+                is ActiveSession.Invocation.Completed -> invocation.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -110,12 +114,17 @@ internal class SessionCatchup(
      * Best-effort: a failed fetch keeps the previous entries (the §3
      * defaults cover conversations that never hydrated).
      */
-    private suspend fun hydrateNotifySettings(client: WaddleClientInterface) {
+    private suspend fun hydrateNotifySettings() {
         try {
-            stores.notifySettingsStore.hydrate(
-                fetchRoomBookmarks = { client.fetchUserBookmarks() },
-                fetchDmBookmarks = { client.fetchDmBookmarks() },
-            )
+            when (activeSession.invoke { client ->
+                stores.notifySettingsStore.hydrate(
+                    fetchRoomBookmarks = { client.fetchUserBookmarks() },
+                    fetchDmBookmarks = { client.fetchDmBookmarks() },
+                )
+            }) {
+                ActiveSession.Invocation.NotConnected -> return
+                is ActiveSession.Invocation.Completed -> Unit
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -142,7 +151,6 @@ internal class SessionCatchup(
      * only and are NOT widened with autojoin rooms.
      */
     private suspend fun rejoinRooms(
-        client: WaddleClientInterface,
         session: WaddleSessionInfo,
         topology: WaddleTopology?,
     ) {
@@ -152,7 +160,10 @@ internal class SessionCatchup(
         val joinSet = autojoinRooms.toSet() + sessionPrefs.joinedRooms.first()
         for (roomJid in joinSet) {
             try {
-                client.joinRoom(roomJid, session.xmppLocalpart)
+                when (activeSession.invoke { it.joinRoom(roomJid, session.xmppLocalpart) }) {
+                    ActiveSession.Invocation.NotConnected -> return
+                    is ActiveSession.Invocation.Completed -> Unit
+                }
                 stores.roomStore.markJoined(roomJid)
             } catch (cancellation: CancellationException) {
                 throw cancellation

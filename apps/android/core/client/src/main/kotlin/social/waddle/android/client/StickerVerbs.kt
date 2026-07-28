@@ -26,13 +26,14 @@ internal class StickerVerbs(
      */
     suspend fun loadStickerPacks() {
         if (stores.stickerPackStore.isLoaded) return
-        val client = activeSession.client
-        if (client == null) {
-            stores.stickerPackStore.applyUnavailable()
-            return
-        }
         val packs = try {
-            client.fetchStickerPacks(null)
+            when (val result = activeSession.invoke { it.fetchStickerPacks(null) }) {
+                ActiveSession.Invocation.NotConnected -> {
+                    stores.stickerPackStore.applyUnavailable()
+                    return
+                }
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -50,7 +51,6 @@ internal class StickerVerbs(
      */
     suspend fun publishPack(name: String, summary: String?, items: List<StickerItem>): VerbResult {
         if (items.isEmpty()) return VerbResult.NotReady
-        val client = activeSession.client ?: return VerbResult.NotConnected
         val pack = WaddleStickerPack(
             // Display-state only: the FFI derives the real id from content.
             id = "",
@@ -60,7 +60,10 @@ internal class StickerVerbs(
             stickers = items.map { it.toFfi() },
         )
         val packId = try {
-            client.publishStickerPack(pack)
+            when (val result = activeSession.invoke { it.publishStickerPack(pack) }) {
+                ActiveSession.Invocation.NotConnected -> return VerbResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: WaddleException.NotConnected) {
@@ -82,9 +85,11 @@ internal class StickerVerbs(
 
     /** Retract the pack item [packId]; drops it from the store on Ok. */
     suspend fun removePack(packId: String): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
         val retracted = try {
-            client.retractStickerPack(packId)
+            when (val result = activeSession.invoke { it.retractStickerPack(packId) }) {
+                ActiveSession.Invocation.NotConnected -> return VerbResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: WaddleException.NotConnected) {

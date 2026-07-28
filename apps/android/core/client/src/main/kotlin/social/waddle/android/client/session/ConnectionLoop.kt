@@ -176,7 +176,7 @@ internal class ConnectionLoop(
         // Native FFI clients deliberately start fresh streams: the web-only
         // typed SM persistence path owns resumable browser sessions, while
         // Android catch-up is durable and idempotent.
-        callbacks.onReady(attemptScope, client, session, true)
+        callbacks.onReady(attemptScope, session, true)
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
@@ -290,12 +290,11 @@ internal class ConnectionLoop(
 
 /**
  * Callback fired on the attempt's scope once `SessionReady` lands:
- * receives the live client and whether the stream is fresh (needs
- * catch-up) so the owner can launch the ready pipeline.
+ * receives whether the stream is fresh (needs catch-up) so the owner can
+ * launch the ready pipeline through [ActiveSession]'s transport gateway.
  */
 internal typealias SessionReadyListener = (
     attemptScope: CoroutineScope,
-    client: WaddleClientInterface,
     session: WaddleSessionInfo,
     freshStream: Boolean,
 ) -> Unit

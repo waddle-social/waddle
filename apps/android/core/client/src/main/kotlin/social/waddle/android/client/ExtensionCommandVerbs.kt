@@ -38,9 +38,13 @@ internal class ExtensionCommandVerbs(
 
     private suspend fun runDiscovery(): List<ExtensionCommand> {
         val generation = activeSession.generation
-        val client = activeSession.client ?: return emptyList()
         val commands = try {
-            client.discoverExtensionCommands().map { it.toDomain() }
+            when (val result = activeSession.invoke { client ->
+                client.discoverExtensionCommands().map { it.toDomain() }
+            }) {
+                ActiveSession.Invocation.NotConnected -> return emptyList()
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -76,9 +80,11 @@ internal class ExtensionCommandVerbs(
     private suspend fun call(
         op: suspend (WaddleClientInterface) -> WaddleExtensionCommandResult,
     ): ExtensionCommandCall {
-        val client = activeSession.client ?: return ExtensionCommandCall.Failed(detail = null)
         return try {
-            ExtensionCommandCall.Ok(op(client).toDomain())
+            when (val result = activeSession.invoke(op)) {
+                ActiveSession.Invocation.NotConnected -> ExtensionCommandCall.Failed(detail = null)
+                is ActiveSession.Invocation.Completed -> ExtensionCommandCall.Ok(result.value.toDomain())
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (stanza: WaddleException.Stanza) {

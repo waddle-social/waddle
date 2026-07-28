@@ -43,18 +43,20 @@ internal class ConversationVerbs(
      * that never received messages.
      */
     suspend fun joinRoom(roomJid: String, nick: String): VerbResult {
-        val client = activeSession.client
-        if (client == null) {
-            stores.roomStore.markJoined(roomJid)
-            persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
-            return VerbResult.NotConnected
-        }
-        try {
-            client.joinRoom(roomJid, nick)
+        val joined = try {
+            when (val result = activeSession.invoke { it.joinRoom(roomJid, nick) }) {
+                ActiveSession.Invocation.NotConnected -> false
+                is ActiveSession.Invocation.Completed -> true
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return VerbResult.Rejected
+        }
+        if (!joined) {
+            stores.roomStore.markJoined(roomJid)
+            persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
+            return VerbResult.NotConnected
         }
         stores.roomStore.markJoined(roomJid)
         persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
@@ -98,14 +100,18 @@ internal class ConversationVerbs(
         sizeBytes: ULong,
         contentType: String,
     ): WaddleUploadSlot? {
-        val client = activeSession.client ?: return null
-        val service = activeSession.uploadService ?: run {
-            val discovered = runCatching { client.discoverUploadService() }.getOrNull() ?: return null
-            activeSession.uploadService = discovered
-            discovered
-        }
         return try {
-            client.requestUploadSlot(service, filename, sizeBytes, contentType)
+            when (val result = activeSession.invoke { client ->
+                val service = activeSession.uploadService ?: run {
+                    val discovered = client.discoverUploadService()
+                    activeSession.uploadService = discovered
+                    discovered
+                }
+                client.requestUploadSlot(service, filename, sizeBytes, contentType)
+            }) {
+                ActiveSession.Invocation.NotConnected -> null
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -165,13 +171,17 @@ internal class ConversationVerbs(
         newBody: String,
         threadId: String? = null,
     ): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
         val sender = ownMutationSender(conversationJid, isGroupchat) ?: return VerbResult.NotReady
         val options = threadId?.let {
             sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
         }
         val outcome = try {
-            client.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options)
+            when (val result = activeSession.invoke {
+                it.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options)
+            }) {
+                ActiveSession.Invocation.NotConnected -> return VerbResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -258,11 +268,13 @@ internal class ConversationVerbs(
      * that arrived while the fetch was in flight.
      */
     suspend fun refreshRoomPins(roomJid: String) {
-        val client = activeSession.client ?: return
         val room = bareJid(roomJid)
         val fetchedAtVersion = stores.pinStore.eventVersion(room)
         val entries = try {
-            client.fetchRoomPins(room)
+            when (val result = activeSession.invoke { it.fetchRoomPins(room) }) {
+                ActiveSession.Invocation.NotConnected -> return
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -282,10 +294,14 @@ internal class ConversationVerbs(
         mode: WaddleNotifyMode,
         name: String? = null,
     ): NotifySettingsResult {
-        val client = activeSession.client ?: return NotifySettingsResult.NotConnected
         val room = bareJid(roomJid)
         val outcome = try {
-            client.setRoomNotificationMode(room, mode, name, stores.notifySettingsStore.richPayloadOptIn(room))
+            when (val result = activeSession.invoke {
+                it.setRoomNotificationMode(room, mode, name, stores.notifySettingsStore.richPayloadOptIn(room))
+            }) {
+                ActiveSession.Invocation.NotConnected -> return NotifySettingsResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -308,10 +324,14 @@ internal class ConversationVerbs(
      * store reconciles by dropping the entry.
      */
     suspend fun setDmNotificationMode(peerJid: String, mode: WaddleNotifyMode): NotifySettingsResult {
-        val client = activeSession.client ?: return NotifySettingsResult.NotConnected
         val peer = bareJid(peerJid)
         val outcome = try {
-            client.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer))
+            when (val result = activeSession.invoke {
+                it.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer))
+            }) {
+                ActiveSession.Invocation.NotConnected -> return NotifySettingsResult.NotConnected
+                is ActiveSession.Invocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {

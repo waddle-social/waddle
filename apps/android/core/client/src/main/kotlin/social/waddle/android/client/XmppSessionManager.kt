@@ -30,7 +30,6 @@ import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleChatState
-import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMucAffiliation
@@ -507,13 +506,12 @@ class XmppSessionManager(
     /** `SessionReady` hook for [ConnectionLoop]: launch the ready work. */
     private fun onSessionReady(
         attemptScope: CoroutineScope,
-        client: WaddleClientInterface,
         session: WaddleSessionInfo,
         freshStream: Boolean,
     ) {
         // Topology discovery now heads the sequential ready pipeline:
         // the bookmark-driven rejoin derives its join set from it.
-        attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
+        attemptScope.launch { catchup.onSessionReady(session, freshStream) }
         // Once per connect: retry the XEP-0166 mixer terminates a
         // previous group-call leave still owes (terminate-pending
         // session-cache entries survive process death and reconnects).
