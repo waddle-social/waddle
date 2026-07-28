@@ -461,9 +461,6 @@ async fn reassert_voice_grants_on_join(
     room_name: &str,
     identity: &str,
 ) -> ReassertOutcome {
-    if state.deps.protocol.sfu.is_none() {
-        return ReassertOutcome::Handled;
-    }
     let Ok(full_jid) = identity.parse::<FullJid>() else {
         // Permanent: retrying cannot make this parse.
         warn!(
@@ -518,10 +515,12 @@ async fn reassert_voice_grants_on_join(
     }
 }
 
-/// Fallback when the cross-node re-assert cannot even be attempted
-/// (no clustering, room unclaimed, or the claim store is unreadable):
-/// acknowledge the delivery and leave convergence to the owning
-/// node's reconciliation pass, exactly the pre-#1594 behavior.
+/// Fallback when there is no fresh foreign owner to relay to (no
+/// clustering, room unclaimed, stale owner lease, or the claim is this
+/// node's own): acknowledge the delivery and leave convergence to the
+/// owning node's reconciliation pass, exactly the pre-#1594 behavior.
+/// (A claim-store read *error* is transient and maps to a LiveKit
+/// retry instead — see [`route_from_claim`].)
 fn converge_on_reconcile(room_jid: &BareJid, full_jid: &FullJid) -> ReassertOutcome {
     warn!(
         room = %room_jid,
@@ -538,6 +537,63 @@ fn converge_on_reconcile(room_jid: &BareJid, full_jid: &FullJid) -> ReassertOutc
 /// owner degrades to [`converge_on_reconcile`]; failures where a
 /// LiveKit retry could plausibly land after the cluster settles map
 /// to [`ReassertOutcome::RetryableFailure`].
+/// Where a `participant_joined` re-assert should go, given the room's
+/// claim state as read by the webhook-receiving node. Pure so every
+/// branch is unit-testable without a claim-store double.
+#[cfg(feature = "clustering")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaimRoute {
+    /// A fresh foreign owner holds the claim — relay the re-assert to
+    /// this node.
+    AskOwner(waddle_xmpp::ownership::NodeIdentity),
+    /// No owner worth relaying to (unclaimed, stale lease, or the
+    /// claim is our own spawn/teardown race) — acknowledge and leave
+    /// it to the reconciler.
+    ConvergeOnReconcile,
+    /// The claim read itself failed transiently — ask LiveKit to
+    /// retry the delivery.
+    RetryLater,
+}
+
+#[cfg(feature = "clustering")]
+fn route_from_claim(
+    claim: Result<
+        Option<waddle_xmpp::ownership::ClaimSnapshot>,
+        waddle_xmpp::ownership::ClaimError,
+    >,
+    me: &waddle_xmpp::ownership::NodeIdentity,
+) -> ClaimRoute {
+    match claim {
+        // Unclaimed room: nobody holds an authoritative occupant set,
+        // so there is no owner to ask and nothing a retry would reach.
+        Ok(None) => ClaimRoute::ConvergeOnReconcile,
+        // The claim's owner stopped renewing its node lease. Relaying
+        // to a possibly-dead node would just time out, and how long
+        // until another node steals the claim is unbounded — don't
+        // burn LiveKit's bounded retries on it.
+        Ok(Some(snapshot)) if !snapshot.owner_lease_fresh => ClaimRoute::ConvergeOnReconcile,
+        // This node owns the claim but has no actor — a startup or
+        // teardown race. The local reconciliation pass covers it.
+        Ok(Some(snapshot)) if snapshot.owner == *me => ClaimRoute::ConvergeOnReconcile,
+        Ok(Some(snapshot)) => ClaimRoute::AskOwner(snapshot.owner),
+        // A store read error is transient (unlike the structural
+        // no-owner cases above): the next LiveKit retry re-reads it.
+        Err(_) => ClaimRoute::RetryLater,
+    }
+}
+
+/// Ask-timeout budget for the webhook-triggered relay hop. Deliberately
+/// much tighter than the clustering defaults (5s mailbox / 20s reply):
+/// LiveKit abandons a webhook delivery after a few seconds and retries,
+/// and a retry that arrives while the previous attempt still holds the
+/// dedupe entry is swallowed as a duplicate — so the whole hop must
+/// resolve well inside LiveKit's own delivery timeout or the retry
+/// budget burns without enforcing anything.
+#[cfg(feature = "clustering")]
+const WEBHOOK_RELAY_MAILBOX_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+#[cfg(feature = "clustering")]
+const WEBHOOK_RELAY_REPLY_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+
 #[cfg(feature = "clustering")]
 async fn reassert_on_claim_owner(
     state: &WebSocketState,
@@ -555,41 +611,23 @@ async fn reassert_on_claim_owner(
         return converge_on_reconcile(room_jid, full_jid);
     };
     let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
-    let snapshot = match claim_store.current_claim(&entity).await {
-        Ok(Some(snapshot)) => snapshot,
-        Ok(None) => {
-            // Unclaimed room: nobody holds an authoritative occupant
-            // set, so there is no owner to ask and nothing a retry
-            // would reach.
-            return converge_on_reconcile(room_jid, full_jid);
-        }
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                user = %full_jid.to_bare(),
-                error = %error,
-                "room claim lookup failed on participant join; \
-                 asking LiveKit to retry",
-            );
-            return ReassertOutcome::RetryableFailure;
-        }
+    let claim = claim_store.current_claim(&entity).await;
+    if let Err(error) = &claim {
+        warn!(
+            room = %room_jid,
+            user = %full_jid.to_bare(),
+            error = %error,
+            "room claim lookup failed on participant join; \
+             asking LiveKit to retry",
+        );
+    }
+    let owner = match route_from_claim(claim, &node_identity.current()) {
+        ClaimRoute::AskOwner(owner) => owner,
+        ClaimRoute::ConvergeOnReconcile => return converge_on_reconcile(room_jid, full_jid),
+        ClaimRoute::RetryLater => return ReassertOutcome::RetryableFailure,
     };
-    if !snapshot.owner_lease_fresh {
-        // The claim's owner stopped renewing its node lease. Relaying
-        // to a possibly-dead node would just time out, and how long
-        // until another node steals the claim is unbounded — don't
-        // burn LiveKit's bounded retries on it.
-        return converge_on_reconcile(room_jid, full_jid);
-    }
-    if snapshot.owner == node_identity.current() {
-        // This node owns the claim but has no actor — a startup or
-        // teardown race. The local reconciliation pass covers it.
-        return converge_on_reconcile(room_jid, full_jid);
-    }
-    let mut relay = RelayHandle::new(
-        NodeId::new(snapshot.owner.node_id.clone()),
-        stop_token.clone(),
-    );
+    let mut relay = RelayHandle::new(NodeId::new(owner.node_id.clone()), stop_token.clone())
+        .with_ask_timeouts(WEBHOOK_RELAY_MAILBOX_TIMEOUT, WEBHOOK_RELAY_REPLY_TIMEOUT);
     match relay
         .reassert_media_grants(room_jid.clone(), full_jid.clone())
         .await
@@ -598,7 +636,7 @@ async fn reassert_on_claim_owner(
             debug!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
-                owner = %snapshot.owner.node_id,
+                owner = %owner.node_id,
                 "media grants re-asserted on the room's claim owner",
             );
             ReassertOutcome::Handled
@@ -615,7 +653,7 @@ async fn reassert_on_claim_owner(
             warn!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
-                owner = %snapshot.owner.node_id,
+                owner = %owner.node_id,
                 "room claim owner had no local room actor; \
                  asking LiveKit to retry",
             );
@@ -625,7 +663,7 @@ async fn reassert_on_claim_owner(
             warn!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
-                owner = %snapshot.owner.node_id,
+                owner = %owner.node_id,
                 "room claim owner could not re-assert media grants; \
                  asking LiveKit to retry",
             );
@@ -635,7 +673,7 @@ async fn reassert_on_claim_owner(
             warn!(
                 room = %room_jid,
                 user = %full_jid.to_bare(),
-                owner = %snapshot.owner.node_id,
+                owner = %owner.node_id,
                 error = %error,
                 "cross-node media grant re-assert failed; \
                  asking LiveKit to retry",
@@ -1260,6 +1298,55 @@ mod tests {
             assert!(
                 recorder.snapshot().is_empty(),
                 "must never evict on absence"
+            );
+        }
+
+        /// Every branch of the pure claim-routing decision: only a
+        /// FRESH claim held by ANOTHER node is worth a relay ask;
+        /// unclaimed / stale-lease / self-owned all degrade to the
+        /// reconciler, and only a claim-store read error burns a
+        /// LiveKit retry.
+        #[test]
+        fn claim_routing_decides_owner_fallback_and_retry() {
+            use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, ClaimSnapshot};
+            let me = NodeIdentity::new("node-self", "epoch-1");
+            let other = NodeIdentity::new("node-other", "epoch-9");
+            let fresh = |owner: &NodeIdentity| ClaimSnapshot {
+                owner: owner.clone(),
+                claim_epoch: ClaimEpoch(1),
+                owner_lease_fresh: true,
+            };
+
+            assert_eq!(
+                route_from_claim(Ok(None), &me),
+                ClaimRoute::ConvergeOnReconcile,
+                "unclaimed room has no owner to ask"
+            );
+            assert_eq!(
+                route_from_claim(
+                    Ok(Some(ClaimSnapshot {
+                        owner_lease_fresh: false,
+                        ..fresh(&other)
+                    })),
+                    &me
+                ),
+                ClaimRoute::ConvergeOnReconcile,
+                "a stale-leased owner must not be relayed to"
+            );
+            assert_eq!(
+                route_from_claim(Ok(Some(fresh(&me))), &me),
+                ClaimRoute::ConvergeOnReconcile,
+                "a self-owned claim is a local race, not a relay target"
+            );
+            assert_eq!(
+                route_from_claim(Ok(Some(fresh(&other))), &me),
+                ClaimRoute::AskOwner(other.clone()),
+                "a fresh foreign owner gets the relay ask"
+            );
+            assert_eq!(
+                route_from_claim(Err(ClaimError::Poisoned), &me),
+                ClaimRoute::RetryLater,
+                "a transient store error is worth a LiveKit retry"
             );
         }
 

@@ -2482,36 +2482,41 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
     const NS_MUC: &str = "http://jabber.org/protocol/muc";
     const WEBHOOK_SECRET: &str = "test-webhook-secret-with-at-least-32-bytes";
 
-    // Fake LiveKit admin origin. `admin_base_url_from_ws` derives the
-    // admin REST base by swapping the `LIVEKIT_WS_URL` scheme
-    // (`ws://` → `http://`) on the same authority, so pointing the WS
-    // URL at this mock lets the test observe which NODE pushed a grant.
-    let livekit_admin = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-        .mount(&livekit_admin)
-        .await;
-    let livekit_ws_url: &'static str = Box::leak(
-        livekit_admin
-            .uri()
-            .replacen("http://", "ws://", 1)
-            .into_boxed_str(),
-    );
+    // Fake LiveKit admin origins, ONE PER NODE. `admin_base_url_from_ws`
+    // derives the admin REST base by swapping the `LIVEKIT_WS_URL`
+    // scheme (`ws://` → `http://`) on the same authority, so giving
+    // each node its own mock attributes every admin call to the node
+    // that made it — the assertion below is "the OWNER pushed", not
+    // "someone pushed".
+    async fn fake_livekit_admin() -> (wiremock::MockServer, &'static str) {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+        let ws_url: &'static str =
+            Box::leak(mock.uri().replacen("http://", "ws://", 1).into_boxed_str());
+        (mock, ws_url)
+    }
+    let (livekit_admin_a, ws_url_a) = fake_livekit_admin().await;
+    let (livekit_admin_b, ws_url_b) = fake_livekit_admin().await;
 
-    let livekit_envs: &[(&'static str, &'static str)] = &[
-        ("LIVEKIT_API_KEY", "APItestkeycluster"),
-        (
-            "LIVEKIT_API_SECRET",
-            "test-secret-with-at-least-32-bytes-of-payload",
-        ),
-        ("LIVEKIT_WS_URL", livekit_ws_url),
-        ("LIVEKIT_TURN_HOST", "turn.example.test"),
-        (
-            "LIVEKIT_TURN_SHARED_SECRET",
-            "turn-shared-secret-value-also-long-enough",
-        ),
-        ("LIVEKIT_WEBHOOK_SECRET", WEBHOOK_SECRET),
-    ];
+    fn livekit_envs(ws_url: &'static str) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("LIVEKIT_API_KEY", "APItestkeycluster"),
+            (
+                "LIVEKIT_API_SECRET",
+                "test-secret-with-at-least-32-bytes-of-payload",
+            ),
+            ("LIVEKIT_WS_URL", ws_url),
+            ("LIVEKIT_TURN_HOST", "turn.example.test"),
+            (
+                "LIVEKIT_TURN_SHARED_SECRET",
+                "turn-shared-secret-value-also-long-enough",
+            ),
+            ("LIVEKIT_WEBHOOK_SECRET", WEBHOOK_SECRET),
+        ]
+    }
 
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
@@ -2520,7 +2525,7 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         &pool.pool_env,
         port_a,
         &[port_b],
-        livekit_envs,
+        &livekit_envs(ws_url_a),
     )
     .await;
     let (server_b, _node_b, _peer_b) = spawn_cluster_server_with_envs(
@@ -2528,7 +2533,7 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         &pool.pool_env,
         port_b,
         &[port_a],
-        livekit_envs,
+        &livekit_envs(ws_url_b),
     )
     .await;
 
@@ -2615,20 +2620,25 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
 
     // The OWNER (node A) pushes the re-derived grant to LiveKit. The
     // push is fire-and-forget after the relay reply, so poll briefly.
+    // Each node has its own mock, so this attributes the push to node
+    // A structurally, not by timing alone.
+    let is_update_for_identity = |request: &wiremock::Request| {
+        request.url.path() == "/twirp/livekit.RoomService/UpdateParticipant"
+            && String::from_utf8_lossy(&request.body).contains(&identity)
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let requests = livekit_admin.received_requests().await.unwrap_or_default();
-        let update_seen = requests.iter().any(|request| {
-            request.url.path() == "/twirp/livekit.RoomService/UpdateParticipant"
-                && String::from_utf8_lossy(&request.body).contains(&identity)
-        });
-        if update_seen {
+        let requests = livekit_admin_a
+            .received_requests()
+            .await
+            .unwrap_or_default();
+        if requests.iter().any(is_update_for_identity) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the claim owner must push an UpdateParticipant for the relayed \
-             re-assert; admin requests seen: {:?}",
+            "the claim owner (node A) must push an UpdateParticipant for the \
+             relayed re-assert; node A admin requests seen: {:?}",
             requests
                 .iter()
                 .map(|request| request.url.path().to_string())
@@ -2636,6 +2646,23 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+
+    // And the non-owning webhook receiver must NOT have pushed it —
+    // node B has no local actor, so an UpdateParticipant from B would
+    // mean the relay was bypassed by some local fallback.
+    let node_b_requests = livekit_admin_b
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    assert!(
+        !node_b_requests.iter().any(is_update_for_identity),
+        "the non-owning node must not push grants for this join; node B \
+         admin requests seen: {:?}",
+        node_b_requests
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
 
     client_b.close().await.expect("client B closes");
     drop(server_a);

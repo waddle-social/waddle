@@ -184,6 +184,11 @@ pub(crate) async fn enforce_current_voice_grants(
         .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
             jid: full_jid.clone(),
         })
+        // Bounded for the same reason as the reconciler's identical
+        // ask: a wedged room actor must not park an HTTP webhook
+        // handler — or, on the relayed #1594 path, leak an owner-side
+        // delegated relay task per LiveKit retry.
+        .reply_timeout(waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT)
         .await
     {
         Ok(Some(voice)) => {
