@@ -331,6 +331,46 @@ class XmppSessionManagerQueueTest {
     }
 
     @Test
+    fun `foreign full queue is pruned when another account sends before SessionReady`() = runTest {
+        val firstProcess = Harness(this)
+        val firstAccount = testSessionInfo(
+            username = "queue-a",
+            jid = "queue-a@waddle.test",
+        )
+        firstProcess.manager.login(firstAccount)
+        runCurrent()
+
+        repeat(OutboundQueue.DEFAULT_CAPACITY) { index ->
+            assertTrue(firstProcess.manager.sendChatMessage("peer@waddle.test", "a-$index").queued)
+        }
+        assertEquals(OutboundQueue.DEFAULT_CAPACITY, firstProcess.prefs.outboundQueue.first().size)
+
+        // A process crash leaves A's durable queue behind. B has logged in but
+        // has not reached SessionReady, so enqueue must not depend on drain's
+        // later foreign-owner pruning.
+        val secondProcess = Harness(this, firstProcess.prefs)
+        secondProcess.manager.login(
+            testSessionInfo(
+                username = "queue-b",
+                jid = "queue-b@waddle.test",
+            ),
+        )
+        runCurrent()
+
+        val result = secondProcess.manager.sendChatMessage("peer@waddle.test", "b-pre-ready")
+
+        assertEquals(WaddleSendMessageOutcome.NotConnected, result.outcome)
+        assertNotNull(result.queuedId)
+        assertEquals(
+            listOf("queue-b@waddle.test" to "b-pre-ready"),
+            secondProcess.prefs.outboundQueue.first().map { it.ownerBareJid to it.body },
+        )
+
+        secondProcess.manager.logout()
+        firstProcess.manager.logout()
+    }
+
+    @Test
     fun `persistence failure returns typed Error before transport`() = runTest {
         val harness = Harness(
             testScope = this,

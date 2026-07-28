@@ -17,20 +17,23 @@ class OutboundQueue(
     private val capacity: Int = DEFAULT_CAPACITY,
 ) {
     /**
-     * Atomically persist [message]. Accepted rows are never evicted: a new
-     * row at [capacity] is rejected without changing the existing queue.
-     * Re-inserting the same owned identity is idempotent.
+     * Atomically persist [message]. Foreign rows are removed with this
+     * insertion so a crash/account switch cannot make another owner's full
+     * queue reject the current owner's pre-ready send. Accepted current-owner
+     * rows are never evicted: a new row at [capacity] is rejected without
+     * changing those rows. Re-inserting the same owned identity is idempotent.
      */
     suspend fun enqueue(message: QueuedOutboundMessage): EnqueueResult {
         var result = EnqueueResult.ACCEPTED
         sessionPrefs.updateOutboundQueue { current ->
+            val owned = current.filter { it.ownerBareJid == message.ownerBareJid }
             when {
-                current.any { it.sameIdentityAs(message) } -> current
-                current.size >= capacity -> {
+                owned.any { it.sameIdentityAs(message) } -> owned
+                owned.size >= capacity -> {
                     result = EnqueueResult.FULL
-                    current
+                    owned
                 }
-                else -> current + message
+                else -> owned + message
             }
         }
         return result
