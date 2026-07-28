@@ -531,7 +531,7 @@ mod command_lane_tests {
     }
 
     #[test]
-    fn command_lane_never_promotes_a_cancelled_waiter_or_accepts_after_close() {
+    fn command_lane_never_promotes_a_cancelled_waiter_or_loses_the_next_waiter() {
         let (wake_tx, _wake_rx) = mpsc::channel(1);
         let mut lane = WasmCommandLane::new(wake_tx);
         for id in 0..WASM_COMMAND_CAPACITY {
@@ -542,9 +542,25 @@ mod command_lane_tests {
             Ok(None) => panic!("capacity must make this command wait"),
             Err(_) => panic!("live lane must accept a waiter"),
         };
+        let admitted_after_cancelled = match lane.enqueue(command("after-cancelled")) {
+            Ok(Some(waiter)) => waiter,
+            Ok(None) => panic!("an older waiter must retain FIFO admission"),
+            Err(_) => panic!("live lane must accept a waiter"),
+        };
         drop(cancelled);
-        let _ = lane.pop_ready();
-        while lane.pop_ready().is_some() {}
+        assert_eq!(command_id(lane.pop_ready().expect("first command")), "0");
+        block_on(admitted_after_cancelled).expect("the later live waiter was admitted");
+        for id in 1..WASM_COMMAND_CAPACITY {
+            assert_eq!(
+                command_id(lane.pop_ready().expect("admitted command")),
+                id.to_string()
+            );
+        }
+        assert_eq!(
+            command_id(lane.pop_ready().expect("later waiter")),
+            "after-cancelled",
+            "a cancelled waiter must neither execute nor consume the next admitted command"
+        );
         assert!(lane.pop_ready().is_none());
 
         drop(lane.close());

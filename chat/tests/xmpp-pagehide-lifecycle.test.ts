@@ -103,6 +103,38 @@ describe("XMPP page lifecycle", () => {
     expect(failures).toEqual([{ operation: "prepare-xmpp" }]);
   });
 
+  test("pagehide persists before reporting every non-success acknowledgement outcome", () => {
+    // Keep these raw discriminants in lockstep with the wasm-bindgen enum.
+    // Success is deliberately limited to Sent (0) and AlreadyPending (1).
+    for (const outcome of [2, 3, 4, 5, undefined]) {
+      const target = new LifecycleTarget();
+      const order: string[] = [];
+      const client = new BrowserXmppClient({
+        username: "alice",
+        jid: "alice@example.com/desktop",
+        session_id: "token",
+        xmpp_websocket_url: "wss://example.com/ws",
+      });
+      (client as unknown as { xmpp: unknown }).xmpp = {
+        try_request_stream_management_ack_for_pagehide: () => outcome,
+      };
+      (client as unknown as { persistResumeStateForPageHide: () => void }).persistResumeStateForPageHide = () => {
+        order.push("persist");
+      };
+
+      const dispose = installXmppPagehideLifecycle(
+        target as unknown as Window,
+        () => client,
+        () => undefined,
+        () => order.push("report"),
+      );
+      target.dispatch("pagehide", true);
+      dispose();
+
+      expect(order).toEqual(["persist", "report"]);
+    }
+  });
+
   test("stale WASM stream-management callbacks cannot report into the current generation", () => {
     const client = new BrowserXmppClient({
       username: "alice",

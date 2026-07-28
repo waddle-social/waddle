@@ -1007,11 +1007,6 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
                     Element::builder("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
                         .build(),
                 )
-                .append(
-                    Element::builder("retry-after", "urn:waddle:diagnostics")
-                        .attr(minidom::rxml::xml_ncname!("seconds").to_owned(), "30")
-                        .build(),
-                )
                 .build(),
         )))
         .unwrap();

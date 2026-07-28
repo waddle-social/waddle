@@ -564,8 +564,10 @@ export class WaddleClient {
     subscribe_to_presence(peer_jid: string): Promise<any>;
     supports_mds_publish_options(): Promise<any>;
     /**
-     * Synchronously write a typed XEP-0198 acknowledgement request during
-     * pagehide. Callers must persist immediately after every outcome.
+     * Pagehide-only XEP-0198 acknowledgement handoff. This synchronously
+     * drains the admitted FIFO and writes the typed `<r/>` through the
+     * driver's exact socket before returning; it never awaits capacity or a
+     * driver turn. Callers must persist immediately after every outcome.
      */
     try_request_stream_management_ack_for_pagehide(): PagehideSmAckEnqueueOutcome;
     /**
