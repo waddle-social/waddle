@@ -829,6 +829,91 @@ impl Message<Demote> for RelayActor {
     }
 }
 
+/// #1594: server-originated request to re-assert one live SFU
+/// participant's media grants on the node holding `room`'s claim.
+///
+/// Sent by a node whose LiveKit `participant_joined` webhook found no
+/// local room actor (the webhook URL is load-balanced, so with more
+/// than one replica most joins land on a non-owning node). The
+/// receiver re-derives the occupant's XEP-0045 voice from its OWN room
+/// actor and pushes the grants — converging a token minted before a
+/// voice change in milliseconds instead of the reconciler's next tick.
+///
+/// Mirrors [`Demote`]'s shape: a small, fully typed payload discovered
+/// via the claim store and asked directly on the owner's relay — not
+/// the ordered MUC proxy, which requires a client-stanza origin a
+/// webhook does not have (and whose ordering an idempotent re-assert
+/// does not need).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayReassertMediaGrants {
+    pub room: jid::BareJid,
+    pub participant: jid::FullJid,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+/// Reply to [`RelayReassertMediaGrants`]. Only the first two variants
+/// are authoritative; the last two mean "could not determine", which
+/// the asker maps to a LiveKit webhook retry — never to an
+/// authorization decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayReassertMediaGrantsReply {
+    /// The owner's room actor answered with the occupant's voice and
+    /// the grants were pushed to the SFU.
+    Applied,
+    /// The owner's room actor answered authoritatively that the
+    /// participant is not an occupant; they were evicted from the call.
+    NotOccupantEvicted,
+    /// The receiver holds no room actor for `room` — the asker's claim
+    /// read was stale or the actor is mid-(re)spawn. Terminal on the
+    /// receiver (never re-relayed) so a stale claim cannot bounce a
+    /// webhook around the cluster.
+    NotOwner,
+    /// The receiver could not execute the re-assert (services or state
+    /// unavailable, local lookup flaked).
+    Unavailable,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.reassert_media_grants.v1")]
+impl Message<RelayReassertMediaGrants> for RelayActor {
+    // Delegated for the same reason as [`RelayResumeSteal`]: the
+    // owner-side room-actor ask is bounded but must not head-of-line
+    // block this node's relay mailbox while it resolves.
+    type Reply = kameo::reply::DelegatedReply<RelayReassertMediaGrantsReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayReassertMediaGrants,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span("reassert_media_grants", &msg.trace);
+        span.record("entity", tracing::field::display(&msg.room));
+        span.record("jid", tracing::field::display(msg.participant.to_bare()));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            use super::route_bridge::LocalMediaGrantReassertion;
+            match bridge
+                .reassert_media_grants_local(&msg.room, &msg.participant)
+                .await
+            {
+                LocalMediaGrantReassertion::Applied => RelayReassertMediaGrantsReply::Applied,
+                LocalMediaGrantReassertion::EvictedNonOccupant => {
+                    RelayReassertMediaGrantsReply::NotOccupantEvicted
+                }
+                LocalMediaGrantReassertion::NoLocalRoomActor => {
+                    RelayReassertMediaGrantsReply::NotOwner
+                }
+                LocalMediaGrantReassertion::Unavailable => {
+                    RelayReassertMediaGrantsReply::Unavailable
+                }
+            }
+        })
+    }
+}
+
 /// Harness fault injection: crash the relay actor (simulating an unexpected
 /// stop, so the supervised respawn + same-name re-registration and the
 /// sender-side stale-ref recovery can be asserted cross-node). Inert unless
@@ -1793,6 +1878,59 @@ impl RelayHandle {
         }
     }
 
+    /// #1594: ask the room's claim owner to re-assert one SFU
+    /// participant's media grants from its authoritative occupant
+    /// state. Idempotent (re-deriving and re-pushing the same grants
+    /// is a no-op), so it shares [`Self::demote`]'s exact stale-ref
+    /// refresh-and-retry-once behaviour and `stop_token`-raced
+    /// cancellation-safety.
+    pub async fn reassert_media_grants(
+        &mut self,
+        room: jid::BareJid,
+        participant: jid::FullJid,
+    ) -> Result<RelayReassertMediaGrantsReply, RelayAskError> {
+        let trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.reassert_media_grants_inner(room, participant, trace) => result,
+        }
+    }
+
+    async fn reassert_media_grants_inner(
+        &mut self,
+        room: jid::BareJid,
+        participant: jid::FullJid,
+        trace: RelayTraceContext,
+    ) -> Result<RelayReassertMediaGrantsReply, RelayAskError> {
+        let message = RelayReassertMediaGrants {
+            room,
+            participant,
+            trace,
+        };
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_stale_ref_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
     async fn demote_inner(
         &mut self,
         entity: Entity,
@@ -2427,6 +2565,58 @@ mod tests {
                 &crate::config::ClusteringMessagingConfig::default(),
             ),
         ))
+    }
+
+    /// #1594: a re-assert ask against a relay whose delivery bridge has
+    /// no wired services (this node's `WebSocketState` is unreachable)
+    /// must answer `Unavailable` — never a fabricated occupancy answer,
+    /// and never a hang.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reassert_media_grants_without_wired_services_answers_unavailable() {
+        // Thread-scoped subscriber, not asserted on: a relay ask on a
+        // subscriber-less thread destabilizes the interest cache the
+        // *_records_the_dispatch_span tests depend on when the tests
+        // overlap (pre-existing test-support limitation, observed
+        // deterministically pairwise).
+        let _spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let actor_ref = spawn_test_relay_actor();
+
+        let reply = actor_ref
+            .ask(RelayReassertMediaGrants {
+                room: "room@muc.example.com".parse().expect("room jid"),
+                participant: "alice@example.com/web".parse().expect("participant jid"),
+                trace: RelayTraceContext::default(),
+            })
+            .await
+            .expect("reassert ask succeeds");
+
+        assert_eq!(reply, RelayReassertMediaGrantsReply::Unavailable);
+    }
+
+    /// #1594: the re-assert handler delegates its reply (the owner-side
+    /// room-actor ask is bounded but slow-able), and delegated work must
+    /// still run under the named relay dispatch root span (#1483).
+    #[tokio::test(flavor = "current_thread")]
+    async fn reassert_media_grants_ask_records_the_dispatch_span() {
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let actor_ref = spawn_test_relay_actor();
+
+        let _reply = actor_ref
+            .ask(RelayReassertMediaGrants {
+                room: "room@muc.example.com".parse().expect("room jid"),
+                participant: "alice@example.com/web".parse().expect("participant jid"),
+                trace: RelayTraceContext::default(),
+            })
+            .await
+            .expect("reassert ask succeeds");
+
+        assert_eq!(
+            spans
+                .recorded_field("clustering.relay.dispatch", "relay.message")
+                .as_deref(),
+            Some("reassert_media_grants"),
+            "reassert handling must run under the named relay dispatch root span"
+        );
     }
 
     /// #1483: an inbound relay ask handled inline (no delegated reply) must

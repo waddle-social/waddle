@@ -121,6 +121,167 @@ pub(crate) fn converge_voice_changes_via_sfu(
     }
 }
 
+/// What [`enforce_current_voice_grants`] established about one live
+/// SFU participant's authorization, from THIS process's room map.
+///
+/// The distinction between [`Self::NoLocalRoomActor`] and every other
+/// variant is load-bearing for clustering (#1594): only a LOCAL room
+/// actor's answer is authoritative. An absent actor means "the room
+/// may be claimed by another replica", never "not an occupant" —
+/// treating absence as authorization evidence would evict legitimate
+/// occupants from roughly every join that lands on a non-owning node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantEnforcement {
+    /// The occupant's current voice was pushed to the SFU.
+    Applied,
+    /// A local (authoritative) actor answered "not an occupant"; the
+    /// participant was evicted from the call.
+    EvictedNonOccupant,
+    /// No room actor in this process — the claim may live on another
+    /// replica. No side effect was performed.
+    NoLocalRoomActor,
+    /// The registry or actor lookup failed transiently. No side effect
+    /// was performed; retrying may succeed.
+    LookupFailed,
+    /// This deployment has no SFU configured; there is nothing to
+    /// enforce against.
+    SfuNotConfigured,
+}
+
+/// The side-effect-free half of [`enforce_current_voice_grants`]:
+/// THIS process's room actor's authoritative answer about one live
+/// SFU participant, with no SFU effect performed. Split out so the
+/// #1594 relayed path can re-validate its room claim BETWEEN deriving
+/// the answer and acting on it — binding the (possibly slow) actor
+/// answer to the claim it was derived under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VoiceDerivation {
+    /// A local actor answered with the occupant's current voice.
+    Occupant(Voice),
+    /// A local (authoritative) actor answered "not an occupant".
+    NotOccupant,
+    /// No room actor in this process — cannot determine anything.
+    NoLocalRoomActor,
+    /// The registry or actor lookup failed transiently.
+    LookupFailed,
+}
+
+/// Resolve `full_jid`'s current XEP-0045 voice from THIS process's
+/// room actor.
+///
+/// Performs no SFU side effects — the state-changing half lives in
+/// [`apply_derived_enforcement`], so the #1594 relayed path can
+/// re-validate its room claim between the two. The failure branches
+/// DO emit their diagnostic WARN here, deliberately: both callers
+/// (the same-node webhook path and the relayed owner-side executor)
+/// need the same error-carrying line, and emitting it once at the
+/// derivation site is what keeps log-based alerting from
+/// double-counting a single transient failure.
+pub(crate) async fn derive_current_voice(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+) -> VoiceDerivation {
+    let actor = match crate::server::routes::websocket::get_room_actor_result(state, room_jid).await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return VoiceDerivation::NoLocalRoomActor,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                error = %error,
+                "could not resolve MUC voice for a live call participant",
+            );
+            return VoiceDerivation::LookupFailed;
+        }
+    };
+    match actor
+        .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
+            jid: full_jid.clone(),
+        })
+        // Bounded for the same reason as the reconciler's identical
+        // ask: a wedged room actor must not park an HTTP webhook
+        // handler — or, on the relayed #1594 path, leak an owner-side
+        // delegated relay task per LiveKit retry.
+        .reply_timeout(waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT)
+        .await
+    {
+        Ok(Some(voice)) => VoiceDerivation::Occupant(voice),
+        Ok(None) => VoiceDerivation::NotOccupant,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                error = %error,
+                "MUC voice lookup failed for a live call participant",
+            );
+            VoiceDerivation::LookupFailed
+        }
+    }
+}
+
+/// The side-effecting half of [`enforce_current_voice_grants`]: act
+/// on an already-derived answer. Side effects happen only on an
+/// authoritative derivation: a seated occupant gets their
+/// voice-derived grants pushed, a confirmed non-occupant is evicted,
+/// and every other derivation performs nothing.
+pub(crate) fn apply_derived_enforcement(
+    sfu: &std::sync::Arc<dyn waddle_sfu::SfuService>,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+    derivation: VoiceDerivation,
+) -> GrantEnforcement {
+    match derivation {
+        VoiceDerivation::Occupant(voice) => {
+            tracing::debug!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "re-asserting SFU media grants from current MUC voice",
+            );
+            apply_voice_grants_via_sfu(sfu, room_jid, full_jid, voice);
+            GrantEnforcement::Applied
+        }
+        VoiceDerivation::NotOccupant => {
+            // A LOCAL room actor answered, so it owns this room and its
+            // occupant set is authoritative: this participant is in the
+            // SFU room while not being an occupant of the MUC.
+            // Occupancy is the precondition for call participation, so
+            // this is a stale-token join and must end. (Contrast the
+            // absent-actor case, which proves nothing.)
+            tracing::warn!(
+                room = %room_jid,
+                user = %full_jid.to_bare(),
+                "LiveKit participant is not a MUC occupant; evicting from the call",
+            );
+            unregister_participant_via_sfu(sfu, room_jid, full_jid);
+            GrantEnforcement::EvictedNonOccupant
+        }
+        VoiceDerivation::NoLocalRoomActor => GrantEnforcement::NoLocalRoomActor,
+        VoiceDerivation::LookupFailed => GrantEnforcement::LookupFailed,
+    }
+}
+
+/// Re-derive `full_jid`'s XEP-0045 voice from THIS process's room
+/// actor and converge their live SFU media grants with it — the
+/// shared enforcement core behind both the same-node
+/// `participant_joined` webhook path and the owner side of the #1594
+/// cross-node relay. Keeping both on one core is deliberate: the
+/// relayed path must not be able to diverge from the local one (it
+/// composes [`derive_current_voice`] and [`apply_derived_enforcement`]
+/// with a claim re-check in between).
+pub(crate) async fn enforce_current_voice_grants(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+) -> GrantEnforcement {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return GrantEnforcement::SfuNotConfigured;
+    };
+    let derivation = derive_current_voice(state, room_jid, full_jid).await;
+    apply_derived_enforcement(sfu, room_jid, full_jid, derivation)
+}
+
 /// Push every occupant's current XEP-0045 voice to the SFU after a
 /// room-configuration change flipped `moderated`.
 ///

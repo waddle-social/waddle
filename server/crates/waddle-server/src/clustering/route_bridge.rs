@@ -4988,6 +4988,133 @@ fn ask_error_maybe_committed(error: &RelayAskError) -> bool {
     )
 }
 
+/// Bound on each receiver-side claim-store read in
+/// [`OrderedRelayDeliveryBridge::reassert_media_grants_local`]. The
+/// executor runs in a delegated relay task that outlives the asker's
+/// webhook timeout, so a stalled control-plane pool would otherwise
+/// keep one pending task alive per LiveKit retry. On elapse the
+/// executor answers `Unavailable` — a retry signal, never an
+/// authorization conclusion.
+const REASSERT_CLAIM_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Owner-side outcome of a #1594 cross-node media-grant re-assert,
+/// executed against THIS node's room map. The relay actor maps these
+/// onto [`super::relay::RelayReassertMediaGrantsReply`] — kept as a
+/// separate enum so the bridge (like `ResumeStealBridge`'s
+/// `LocalForcedDetachOutcome`) does not depend on relay wire types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalMediaGrantReassertion {
+    /// A local room actor answered with the occupant's voice and the
+    /// grants were pushed to the SFU.
+    Applied,
+    /// A local room actor answered authoritatively that the
+    /// participant is not an occupant; they were evicted from the call.
+    EvictedNonOccupant,
+    /// No room actor lives in this process — the asker's claim read is
+    /// stale or the actor is mid-(re)spawn. No side effect performed.
+    NoLocalRoomActor,
+    /// This node cannot execute the re-assert right now (services or
+    /// `WebSocketState` unavailable, or the local lookup flaked). No
+    /// authorization conclusion may be drawn from this.
+    Unavailable,
+}
+
+impl OrderedRelayDeliveryBridge {
+    /// Execute a relayed `participant_joined` grant re-assert on this
+    /// node — the receiving side of #1594. Terminal by design: this
+    /// never re-relays, so a stale claim read on the asker cannot
+    /// bounce a webhook around the cluster; a `NoLocalRoomActor`
+    /// answer sends the asker back to LiveKit's retry (which
+    /// re-resolves the claim).
+    ///
+    /// Reuses the exact same enforcement core as the same-node webhook
+    /// path (`muc_call_sfu::enforce_current_voice_grants`), so relayed
+    /// and local enforcement cannot diverge.
+    pub async fn reassert_media_grants_local(
+        &self,
+        room_jid: &jid::BareJid,
+        participant: &jid::FullJid,
+    ) -> LocalMediaGrantReassertion {
+        use crate::server::routes::websocket::muc_call_sfu::{
+            apply_derived_enforcement, derive_current_voice, GrantEnforcement, VoiceDerivation,
+        };
+        let Some(services) = self.services.get().cloned() else {
+            return LocalMediaGrantReassertion::Unavailable;
+        };
+        let Some(state) = services.web_socket_state.upgrade() else {
+            return LocalMediaGrantReassertion::Unavailable;
+        };
+        // Receiver-side claim gate, mirroring what `validate_claims`
+        // does for ordered payloads: the asker's claim read can be
+        // stale, and a lingering post-demote actor on this node must
+        // not answer authoritatively — evicting from a superseded
+        // occupant set is the #1593 breaker class. Execute only while
+        // this node still owns the claim WITH a fresh lease (an
+        // expired lease means another node may already be stealing
+        // it — the same fresh-and-mine predicate every other receiver
+        // gate in this module applies); otherwise answer
+        // `NoLocalRoomActor` so the asker's retry re-resolves the
+        // owner.
+        let me = services.node_identity.current();
+        let gate_epoch = match tokio::time::timeout(
+            REASSERT_CLAIM_READ_TIMEOUT,
+            services.claim_store.current_claim(&room_entity(room_jid)),
+        )
+        .await
+        {
+            Ok(Ok(Some(snapshot))) if snapshot.owner_lease_fresh && snapshot.owner == me => {
+                snapshot.claim_epoch
+            }
+            Ok(Ok(_)) => return LocalMediaGrantReassertion::NoLocalRoomActor,
+            Ok(Err(_)) | Err(_) => return LocalMediaGrantReassertion::Unavailable,
+        };
+        // Derive first, act second: the room-actor ask can take up to
+        // its reply timeout, during which the claim can be stolen and
+        // the local actor's occupant set superseded. Re-checking the
+        // claim (same epoch, still fresh-and-mine) between the answer
+        // and the SFU effect fences the answer to the claim it was
+        // derived under — the SFU push/evict happens only while this
+        // node's ownership is continuously observable.
+        let derivation = derive_current_voice(state.as_ref(), room_jid, participant).await;
+        match derivation {
+            VoiceDerivation::NoLocalRoomActor => {
+                return LocalMediaGrantReassertion::NoLocalRoomActor
+            }
+            VoiceDerivation::LookupFailed => return LocalMediaGrantReassertion::Unavailable,
+            VoiceDerivation::Occupant(_) | VoiceDerivation::NotOccupant => {}
+        }
+        match tokio::time::timeout(
+            REASSERT_CLAIM_READ_TIMEOUT,
+            services.claim_store.current_claim(&room_entity(room_jid)),
+        )
+        .await
+        {
+            Ok(Ok(Some(snapshot)))
+                if snapshot.owner_lease_fresh
+                    && snapshot.owner == me
+                    && snapshot.claim_epoch == gate_epoch => {}
+            Ok(Ok(_)) => return LocalMediaGrantReassertion::NoLocalRoomActor,
+            Ok(Err(_)) | Err(_) => return LocalMediaGrantReassertion::Unavailable,
+        }
+        let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+            // An SFU-less node cannot push grants — "cannot execute
+            // here", never an authorization conclusion.
+            return LocalMediaGrantReassertion::Unavailable;
+        };
+        match apply_derived_enforcement(sfu, room_jid, participant, derivation) {
+            GrantEnforcement::Applied => LocalMediaGrantReassertion::Applied,
+            GrantEnforcement::EvictedNonOccupant => LocalMediaGrantReassertion::EvictedNonOccupant,
+            // Unreachable: both non-authoritative derivations returned
+            // above, and `apply_derived_enforcement` maps the two
+            // authoritative ones exhaustively to the two arms matched
+            // here.
+            GrantEnforcement::NoLocalRoomActor
+            | GrantEnforcement::LookupFailed
+            | GrantEnforcement::SfuNotConfigured => LocalMediaGrantReassertion::Unavailable,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5341,6 +5468,408 @@ mod tests {
             blocking_storage,
             web_socket_state: Weak::new(),
         }
+    }
+
+    /// #1594: the owner-side re-assert executor must degrade to
+    /// `Unavailable` when the bridge is wired but this node's
+    /// `WebSocketState` has been dropped — the asker maps that to a
+    /// LiveKit retry, never to an authorization decision.
+    #[tokio::test]
+    async fn reassert_media_grants_local_without_live_state_is_unavailable() {
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(
+            services_with_claims(
+                origin_identity(),
+                receiver_identity(),
+                receiver_identity(),
+                test_peer_id(),
+            )
+            .await,
+        ));
+
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room jid");
+        let participant: jid::FullJid = "alice@example.com/web".parse().expect("participant jid");
+        let outcome = bridge
+            .reassert_media_grants_local(&room, &participant)
+            .await;
+
+        assert_eq!(outcome, LocalMediaGrantReassertion::Unavailable);
+    }
+
+    /// #1594 receiver-side claim gate: even with a live local room
+    /// actor holding the participant, a node that does NOT own the
+    /// room's claim must refuse to execute a relayed re-assert — a
+    /// lingering post-demote actor answering from a superseded
+    /// occupant set is the #1593 breaker class. Without the gate this
+    /// setup would answer `Applied` and push a grant.
+    #[tokio::test]
+    async fn reassert_media_grants_local_without_owned_claim_refuses_to_execute() {
+        use crate::server::routes::websocket::tests::{
+            create_test_server_owner_session, create_test_websocket_state_with_sfu, RecordingSfu,
+        };
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room: jid::BareJid = "gate-refused@muc.example.com".parse().expect("room jid");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("participant jid");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        // Claim store knows the fixture entities but NOT this room —
+        // exactly what a deposed/never-owning receiver observes.
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.web_socket_state = Arc::downgrade(&state);
+        bridge.wire(Arc::new(services));
+
+        let outcome = bridge.reassert_media_grants_local(&room, &alice).await;
+
+        assert_eq!(outcome, LocalMediaGrantReassertion::NoLocalRoomActor);
+        assert!(
+            recorder.update_snapshot().is_empty(),
+            "an unowned claim must suppress the grant push"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "an unowned claim must never evict"
+        );
+    }
+
+    /// #1594 receiver-side claim gate, freshness half: a claim row
+    /// still naming this node whose node lease has EXPIRED is not
+    /// authority — another node may already be stealing the claim, so
+    /// a lingering local actor must not answer from its (about to be
+    /// superseded) occupant set. Same fresh-and-mine predicate as
+    /// every other receiver gate in this module.
+    #[tokio::test]
+    async fn reassert_media_grants_local_with_stale_lease_refuses_to_execute() {
+        use crate::server::routes::websocket::tests::{
+            create_test_server_owner_session, create_test_websocket_state_with_sfu, RecordingSfu,
+        };
+        use waddle_xmpp::ownership::{ClaimSnapshot, StalePredicate};
+
+        /// `current_claim` answers "owned by `me`, lease expired";
+        /// nothing else is reachable from the gate under test.
+        struct StaleLeaseClaimStore {
+            me: NodeIdentity,
+        }
+
+        #[async_trait::async_trait]
+        impl waddle_xmpp::ownership::ClaimStore for StaleLeaseClaimStore {
+            async fn ensure_schema(&self) -> Result<(), ClaimError> {
+                Ok(())
+            }
+            async fn acquire(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+            async fn ensure_claimed(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+            async fn steal_stale(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _staleness: StalePredicate,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+            async fn steal_for_resume(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _witness: waddle_xmpp::ownership::ResumeIdentityProof,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+            async fn current_claim(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                Ok(Some(ClaimSnapshot {
+                    owner: self.me.clone(),
+                    claim_epoch: ClaimEpoch(1),
+                    owner_lease_fresh: false,
+                }))
+            }
+            async fn current_claim_after_pending_writes(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+            async fn fence(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<bool, ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+            async fn release(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<(), ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+            async fn release_many(
+                &self,
+                _entities: &[Entity],
+                _me: &NodeIdentity,
+            ) -> Result<(), ClaimError> {
+                unreachable!("gate test only calls current_claim")
+            }
+        }
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room: jid::BareJid = "gate-stale@muc.example.com".parse().expect("room jid");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("participant jid");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.web_socket_state = Arc::downgrade(&state);
+        services.claim_store = Arc::new(StaleLeaseClaimStore {
+            me: receiver_identity(),
+        });
+        bridge.wire(Arc::new(services));
+
+        let outcome = bridge.reassert_media_grants_local(&room, &alice).await;
+
+        assert_eq!(outcome, LocalMediaGrantReassertion::NoLocalRoomActor);
+        assert!(
+            recorder.update_snapshot().is_empty(),
+            "an expired lease must suppress the grant push"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "an expired lease must never evict"
+        );
+    }
+
+    /// #1594: the receiver-side claim reads are bounded. The executor
+    /// runs in a delegated relay task that outlives the asker's
+    /// webhook timeout, so a stalled claim store (pool exhaustion)
+    /// must resolve to `Unavailable` within the read budget instead
+    /// of accumulating one pending task per LiveKit retry.
+    #[tokio::test]
+    async fn reassert_media_grants_local_bounds_a_stalled_claim_store() {
+        use crate::server::routes::websocket::tests::{
+            create_test_websocket_state_with_sfu, RecordingSfu,
+        };
+        use waddle_xmpp::ownership::{ClaimSnapshot, StalePredicate};
+
+        /// `current_claim` never resolves; nothing else is reachable.
+        struct StalledClaimStore;
+
+        #[async_trait::async_trait]
+        impl waddle_xmpp::ownership::ClaimStore for StalledClaimStore {
+            async fn ensure_schema(&self) -> Result<(), ClaimError> {
+                Ok(())
+            }
+            async fn acquire(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn ensure_claimed(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn steal_stale(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _staleness: StalePredicate,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn steal_for_resume(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _witness: waddle_xmpp::ownership::ResumeIdentityProof,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn current_claim(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                std::future::pending().await
+            }
+            async fn current_claim_after_pending_writes(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn fence(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<bool, ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn release(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<(), ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+            async fn release_many(
+                &self,
+                _entities: &[Entity],
+                _me: &NodeIdentity,
+            ) -> Result<(), ClaimError> {
+                unreachable!("stall test only calls current_claim")
+            }
+        }
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.web_socket_state = Arc::downgrade(&state);
+        services.claim_store = Arc::new(StalledClaimStore);
+        bridge.wire(Arc::new(services));
+
+        let room: jid::BareJid = "gate-stalled@muc.example.com".parse().expect("room jid");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("participant jid");
+        let outcome = tokio::time::timeout(
+            REASSERT_CLAIM_READ_TIMEOUT + Duration::from_secs(3),
+            bridge.reassert_media_grants_local(&room, &alice),
+        )
+        .await
+        .expect("a stalled claim store must not hang the executor");
+
+        assert_eq!(outcome, LocalMediaGrantReassertion::Unavailable);
+        assert!(recorder.update_snapshot().is_empty());
+        assert!(recorder.snapshot().is_empty());
+    }
+
+    /// #1594 owner-side executor happy path: claim owned by this node
+    /// plus a live room actor with the seated occupant → the relayed
+    /// re-assert pushes the voice-derived grant, observable on the
+    /// recording SFU.
+    #[tokio::test]
+    async fn reassert_media_grants_local_with_owned_claim_pushes_grants() {
+        use crate::server::routes::websocket::tests::{
+            create_test_server_owner_session, create_test_websocket_state_with_sfu, RecordingSfu,
+        };
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room: jid::BareJid = "gate-owned@muc.example.com".parse().expect("room jid");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("participant jid");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.web_socket_state = Arc::downgrade(&state);
+        services
+            .claim_store
+            .acquire(&room_entity(&room), &receiver_identity())
+            .await
+            .expect("receiver acquires the room claim");
+        bridge.wire(Arc::new(services));
+
+        let outcome = bridge.reassert_media_grants_local(&room, &alice).await;
+
+        assert_eq!(outcome, LocalMediaGrantReassertion::Applied);
+        let updates = recorder.update_snapshot();
+        assert_eq!(updates.len(), 1, "exactly one grant push expected");
+        assert_eq!(updates[0].1.as_livekit_identity(), alice.to_string());
     }
 
     #[tokio::test]

@@ -2453,6 +2453,253 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
     drop(client_a);
 }
 
+/// #1594: a `participant_joined` webhook that lands on the replica NOT
+/// holding the room's claim must converge that participant's media
+/// grants immediately — relayed to the claim owner, which re-derives
+/// the occupant's XEP-0045 voice from its authoritative room actor and
+/// pushes it to LiveKit. Observable as the owner's Twirp
+/// `UpdateParticipant` call against the (mocked) LiveKit admin API,
+/// where pre-#1594 the delivery was merely acknowledged and enforcement
+/// waited for the owner's 60s reconciliation tick.
+#[tokio::test]
+async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping participant_joined_webhook_reasserts_grants_on_foreign_room_owner: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const OWNER_USERNAME: &str = "admin";
+    const WEBHOOK_SECRET: &str = "test-webhook-secret-with-at-least-32-bytes";
+
+    // Fake LiveKit admin origins, ONE PER NODE. `admin_base_url_from_ws`
+    // derives the admin REST base by swapping the `LIVEKIT_WS_URL`
+    // scheme (`ws://` → `http://`) on the same authority, so giving
+    // each node its own mock attributes every admin call to the node
+    // that made it — the assertion below is "the OWNER pushed", not
+    // "someone pushed".
+    async fn fake_livekit_admin() -> (wiremock::MockServer, &'static str) {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+        let ws_url: &'static str =
+            Box::leak(mock.uri().replacen("http://", "ws://", 1).into_boxed_str());
+        (mock, ws_url)
+    }
+    let (livekit_admin_a, ws_url_a) = fake_livekit_admin().await;
+    let (livekit_admin_b, ws_url_b) = fake_livekit_admin().await;
+
+    fn livekit_envs(ws_url: &'static str) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("LIVEKIT_API_KEY", "APItestkeycluster"),
+            (
+                "LIVEKIT_API_SECRET",
+                "test-secret-with-at-least-32-bytes-of-payload",
+            ),
+            ("LIVEKIT_WS_URL", ws_url),
+            ("LIVEKIT_TURN_HOST", "turn.example.test"),
+            (
+                "LIVEKIT_TURN_SHARED_SECRET",
+                "turn-shared-secret-value-also-long-enough",
+            ),
+            ("LIVEKIT_WEBHOOK_SECRET", WEBHOOK_SECRET),
+        ]
+    }
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        port_a,
+        &[port_b],
+        &livekit_envs(ws_url_a),
+    )
+    .await;
+    let (server_b, _node_b, _peer_b) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        port_b,
+        &[port_a],
+        &livekit_envs(ws_url_b),
+    )
+    .await;
+
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let owner_password = server_b.fixed_account_password().to_string();
+    let room = format!("grants-foreign-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    // Client A creates and joins the room on node A — node A holds the
+    // room claim and the authoritative occupancy.
+    let resource_a = format!("grants-owner-a-{}", uuid::Uuid::new_v4());
+    let mut client_a = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        OWNER_USERNAME,
+        &owner_password,
+        &resource_a,
+    )
+    .await
+    .expect("client A connects to node A");
+    client_a
+        .send(&String::from(&muc_join_presence(&room, "owner-a")))
+        .await
+        .expect("client A sends join presence");
+    client_a
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("client A's join completes (room created, A is Owner)");
+
+    // Client B joins the same room THROUGH NODE B (relayed join), so
+    // B's occupancy — and therefore B's voice — lives on node A while
+    // node B has no room actor.
+    let resource_b = format!("grants-joiner-b-{}", uuid::Uuid::new_v4());
+    let mut client_b = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &resource_b,
+    )
+    .await
+    .expect("client B connects to node B");
+    client_b
+        .send(&String::from(&muc_join_presence(&room, "joiner-b")))
+        .await
+        .expect("client B sends join presence");
+    client_b
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("client B's relayed join completes");
+
+    // LiveKit reports B's SFU join to node B — the NON-owning replica.
+    // Pre-#1594 this was acknowledged with grants unenforced until the
+    // owner's reconcile tick; now node B must relay the re-assert to
+    // node A synchronously with the delivery.
+    let identity = format!("{CLUSTER_PEER_USERNAME}@{DOMAIN}/{resource_b}");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "id": format!("EV_{}", uuid::Uuid::new_v4()),
+        "event": "participant_joined",
+        "room": { "name": room },
+        "participant": { "identity": identity },
+    }))
+    .expect("webhook body");
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/api/v1/livekit/webhook",
+            server_b.http_base_url()
+        ))
+        .header("Authorization", livekit_webhook_auth(WEBHOOK_SECRET, &body))
+        .body(body)
+        .send()
+        .await
+        .expect("post LiveKit webhook to the non-owning node");
+    assert!(
+        response.status().is_success(),
+        "a cross-node re-assertable join must be acknowledged, got {}",
+        response.status()
+    );
+
+    // The OWNER (node A) pushes the re-derived grant to LiveKit. The
+    // push is fire-and-forget after the relay reply, so poll briefly.
+    // Each node has its own mock, so this attributes the push to node
+    // A structurally, not by timing alone.
+    let is_update_for_identity = |request: &wiremock::Request| {
+        request.url.path() == "/twirp/livekit.RoomService/UpdateParticipant"
+            && String::from_utf8_lossy(&request.body).contains(&identity)
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let requests = livekit_admin_a
+            .received_requests()
+            .await
+            .unwrap_or_default();
+        if requests.iter().any(is_update_for_identity) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the claim owner (node A) must push an UpdateParticipant for the \
+             relayed re-assert; node A admin requests seen: {:?}",
+            requests
+                .iter()
+                .map(|request| request.url.path().to_string())
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // And the non-owning webhook receiver must NOT have pushed it —
+    // node B has no local actor, so an UpdateParticipant from B would
+    // mean the relay was bypassed by some local fallback.
+    let node_b_requests = livekit_admin_b
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    assert!(
+        !node_b_requests.iter().any(is_update_for_identity),
+        "the non-owning node must not push grants for this join; node B \
+         admin requests seen: {:?}",
+        node_b_requests
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    client_b.close().await.expect("client B closes");
+    drop(server_a);
+    drop(server_b);
+    drop(client_a);
+}
+
+/// MUC join `<presence/>` built with the typed XML builder (repo
+/// XML-generation rule: never construct XML with `format!`).
+fn muc_join_presence(room: &str, nick: &str) -> xmpp_parsers::minidom::Element {
+    use xmpp_parsers::minidom::Element;
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+    Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/{nick}"),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .build()
+}
+
+/// Signed `Authorization` header for a synthetic LiveKit webhook body,
+/// matching LiveKit's scheme: a JWT over the body's SHA-256, signed
+/// with the deployment's webhook secret.
+fn livekit_webhook_auth(secret: &str, body: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(body);
+    let claims = serde_json::json!({
+        "sha256": base64::engine::general_purpose::STANDARD.encode(hasher.finalize()),
+        "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
+        "iat": chrono::Utc::now().timestamp(),
+    });
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .expect("sign LiveKit webhook");
+    format!("Bearer {token}")
+}
+
 /// Muji `session-terminate` IQ for `room` — the hangup counterpart of
 /// [`muji_initiate_iq`]. XEP-0272 requires only the `<muji room='…'/>`
 /// marker on terminate, no contents.
