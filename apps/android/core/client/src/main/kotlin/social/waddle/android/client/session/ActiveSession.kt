@@ -37,6 +37,17 @@ internal class ActiveSession {
     )
 
     /**
+     * The retired connection that may send only the bounded call
+     * teardown during logout. It is deliberately separate from the
+     * outbound authority below: ordinary verbs and message sends cannot
+     * discover this client after revocation.
+     */
+    data class RetiredCallConnection(
+        val client: WaddleClientInterface,
+        val ownFullJid: String?,
+    )
+
+    /**
      * The client of the attempt that reached `SessionReady`, while that
      * attempt is alive — the target of the UI passthroughs.
      */
@@ -59,19 +70,45 @@ internal class ActiveSession {
     var generation: Long = 0L
         private set
 
+    /**
+     * The sole authority used to start durable outbound work. Publishing
+     * or revoking it is one volatile operation, rather than a sequence of
+     * owner/generation field reads that logout could expose halfway.
+     */
+    @Volatile
+    private var outboundOwner: OwnerLease? = null
+
     /** Called under the manager's lifecycle mutex on login/sign-out. */
     fun advanceGeneration() {
         generation += 1
+        outboundOwner = null
+    }
+
+    /** Publish a new account's authority after login has finished clearing old state. */
+    fun activateOwner(ownerBareJid: String) {
+        ownBareJid = ownerBareJid
+        outboundOwner = OwnerLease(ownerBareJid = ownerBareJid, generation = generation)
+    }
+
+    /**
+     * Revoke ordinary outbound authority before logout can suspend. The
+     * returned connection is call-teardown-only; it is never reinstalled
+     * as the active transport.
+     */
+    fun revokeOutboundAuthority(): RetiredCallConnection? {
+        val retired = client?.let { RetiredCallConnection(it, ownFullJid) }
+        advanceGeneration()
+        ownBareJid = null
+        ownFullJid = null
+        client = null
+        return retired
     }
 
     /** Capture the current account authority for a durable operation. */
-    fun captureOwnerLease(): OwnerLease? = ownBareJid?.let { owner ->
-        OwnerLease(ownerBareJid = owner, generation = generation)
-    }
+    fun captureOwnerLease(): OwnerLease? = outboundOwner
 
     /** True only while [lease] still names this exact account attempt. */
-    fun isCurrent(lease: OwnerLease): Boolean =
-        ownBareJid == lease.ownerBareJid && generation == lease.generation
+    fun isCurrent(lease: OwnerLease): Boolean = outboundOwner == lease
 
     /**
      * The attempt's FULL JID (account bare JID + bound resource) —
@@ -110,9 +147,13 @@ internal class ActiveSession {
         uploadService = null
     }
 
-    /** The attempt ended; passthroughs fall back to their not-connected shape. */
-    fun endAttempt() {
-        client = null
+    /**
+     * The attempt ended; only its own client may clear the live slot. A
+     * delayed old attempt must never erase a successor that has reached
+     * ready state.
+     */
+    fun endAttempt(endingClient: WaddleClientInterface) {
+        if (client === endingClient) client = null
     }
 
     /** Fire-and-check verb shape: no client → [VerbResult.NotConnected],

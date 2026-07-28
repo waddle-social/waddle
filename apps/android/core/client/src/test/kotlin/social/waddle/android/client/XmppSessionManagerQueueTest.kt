@@ -358,16 +358,16 @@ class XmppSessionManagerQueueTest {
         val activeSession = ActiveSession()
         val oldClient = FakeWaddleClient()
         val successorClient = FakeWaddleClient()
-        activeSession.ownBareJid = "icepuma@waddle.test"
         activeSession.advanceGeneration()
+        activeSession.activateOwner("icepuma@waddle.test")
         activeSession.onReady(oldClient)
         val oldLease = checkNotNull(activeSession.captureOwnerLease())
 
         // Logout and a login to the same bare JID replace the attempt. The
         // old lease must not select the newly-ready FFI client.
         activeSession.advanceGeneration()
-        activeSession.endAttempt()
-        activeSession.ownBareJid = "icepuma@waddle.test"
+        activeSession.endAttempt(oldClient)
+        activeSession.activateOwner("icepuma@waddle.test")
         activeSession.onReady(successorClient)
 
         val result = activeSession.sendIfCurrent(oldLease) { client ->

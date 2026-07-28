@@ -146,9 +146,17 @@ class MucCallEngine internal constructor(
      * participants who are leaving"), then the mixer terminate. Media
      * disconnect happens via the controller on the slot change.
      */
-    suspend fun teardownActive(current: CallState.Active) {
-        current.selfNick?.let { nick -> leavePresence(current.peer, nick, ownFullJid()) }
-        terminate(current.peer, current.sid, ownFullJid())
+    suspend fun teardownActive(current: CallState.Active) =
+        teardownActiveWith(current, signaling, ownFullJid())
+
+    /** Internal logout path with a captured call-only sender. */
+    internal suspend fun teardownActiveWith(
+        current: CallState.Active,
+        teardownSignaling: CallSignaling,
+        teardownOwnFullJid: String?,
+    ) {
+        current.selfNick?.let { nick -> leavePresence(current.peer, nick, teardownOwnFullJid, teardownSignaling) }
+        terminate(current.peer, current.sid, teardownOwnFullJid, teardownSignaling)
     }
 
     /**
@@ -176,12 +184,19 @@ class MucCallEngine internal constructor(
     }
 
     /** Teardown for an abandoned setup whose slot the caller already cleared. */
-    suspend fun teardownPending(current: CallState.MucPending) {
+    suspend fun teardownPending(current: CallState.MucPending) =
+        teardownPendingWith(current, signaling)
+
+    /** Internal logout path with a captured call-only sender. */
+    internal suspend fun teardownPendingWith(
+        current: CallState.MucPending,
+        teardownSignaling: CallSignaling,
+    ) {
         presence.cancelPreparationWaiters(current.roomJid, current.selfNick)
         cancelPendingAccept(current.sid)
-        leavePresence(current.roomJid, current.selfNick, current.selfFullJid)
+        leavePresence(current.roomJid, current.selfNick, current.selfFullJid, teardownSignaling)
         if (current.activePresencePublished) {
-            terminate(current.roomJid, current.sid, current.selfFullJid)
+            terminate(current.roomJid, current.sid, current.selfFullJid, teardownSignaling)
         }
     }
 
@@ -617,10 +632,15 @@ class MucCallEngine internal constructor(
      * must survive this stale clear, and its own rollback/teardown
      * sends the leave if it fails.
      */
-    private suspend fun leavePresence(room: String, selfNick: String, selfFullJid: String?) {
+    private suspend fun leavePresence(
+        room: String,
+        selfNick: String,
+        selfFullJid: String?,
+        teardownSignaling: CallSignaling = signaling,
+    ) {
         val cleared = presenceSendMutex.withLock {
             if (slotHoldsMucRoom(room)) return
-            signaling.updateMujiPresence(
+            teardownSignaling.updateMujiPresence(
                 MujiPresenceUpdate(
                     roomJid = room, nick = selfNick,
                     active = false, preparing = false, video = false,
@@ -645,8 +665,13 @@ class MucCallEngine internal constructor(
         }
     }
 
-    private suspend fun terminate(room: String, sid: String, selfFullJid: String?) {
-        if (signaling.mujiSessionTerminate(room, sid)) {
+    private suspend fun terminate(
+        room: String,
+        sid: String,
+        selfFullJid: String?,
+        teardownSignaling: CallSignaling = signaling,
+    ) {
+        if (teardownSignaling.mujiSessionTerminate(room, sid)) {
             sessionCache.forget(room, selfFullJid, sid)
         } else {
             store.reportCallError("muji session terminate failed")

@@ -162,7 +162,7 @@ class XmppSessionManager(
         // into the freshly seeded stores.
         activeSession.advanceGeneration()
         clearSessionState()
-        activeSession.ownBareJid = bareJid(session.jid)
+        activeSession.activateOwner(bareJid(session.jid))
         persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
         timelineStore.setOwnBareJid(session.jid)
         persistQuietly { sessionPrefs.setSessionId(session.sessionId) }
@@ -179,9 +179,11 @@ class XmppSessionManager(
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
-        // Fence parked outbound and post-ack work before any teardown can
-        // suspend. This also invalidates a same-account relogin attempt.
-        activeSession.advanceGeneration()
+        // Fence ALL ordinary outbound work before the call teardown can
+        // suspend. The one captured connection is call-teardown-only;
+        // concurrent sends cannot capture a lease, persist a row, or use
+        // its transport. This also invalidates a same-account relogin.
+        val retiredCallConnection = activeSession.revokeOutboundAuthority()
         // Best-effort call teardown BEFORE the stream closes (web
         // client.ts disconnect parity): the peer must get the
         // retract/reject/terminate + XEP-0353 <finish/> bookend instead
@@ -193,7 +195,11 @@ class XmppSessionManager(
         // already-cancelled coroutine and abort it halfway.
         if (callStore.state.value != CallState.Idle) {
             try {
-                withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) { callStore.hangUp() }
+                val callSender = retiredCallConnection?.let(ClientCallSignaling::forRetiredConnection)
+                    ?: ClientCallSignaling(activeSession)
+                withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) {
+                    callStore.hangUpWith(callSender, retiredCallConnection?.ownFullJid)
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {
@@ -201,8 +207,6 @@ class XmppSessionManager(
             }
         }
         cancelSessionScope()
-        activeSession.ownBareJid = null
-        activeSession.ownFullJid = null
         clearSessionState()
         sessionPrefs.clear()
         loop.resetToIdle()

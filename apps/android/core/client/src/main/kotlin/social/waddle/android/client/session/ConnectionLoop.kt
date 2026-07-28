@@ -146,7 +146,7 @@ internal class ConnectionLoop(
                 end
             }
         } finally {
-            activeSession.endAttempt()
+            activeSession.endAttempt(client)
             withContext(NonCancellable) {
                 runCatching { client.disconnect() }
             }

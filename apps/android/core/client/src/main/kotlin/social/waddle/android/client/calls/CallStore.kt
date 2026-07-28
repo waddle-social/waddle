@@ -12,7 +12,6 @@ import social.waddle.android.client.bareJid
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
-import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddlePresence
 import java.util.UUID
@@ -52,16 +51,26 @@ class CallStore internal constructor(
 
     /** The live call slot; the UI renders ringing/in-call surfaces off this. */
     val state: StateFlow<CallState> = _state.asStateFlow()
-
     private val _lastError = MutableStateFlow<String?>(null)
 
     /** Most recent wire-send failure; cleared on the next transition. */
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
-
     private var scope: CoroutineScope? = null
     private var effects: Channel<suspend () -> Unit>? = null
     private var outgoingTimer: Job? = null
     private var sessionAcceptTimer: Job? = null
+    private val teardown = CallTeardown(
+        stateLock = stateLock,
+        state = _state,
+        muc = muc,
+        signaling = signaling,
+        ownFullJid = ownFullJid,
+        callbacks = CallTeardownCallbacks(
+            cancelTimers = ::cancelCallTimersLocked,
+            reportError = ::reportError,
+            clearError = { _lastError.value = null },
+        ),
+    )
 
     /**
      * Sids of Reject/Retract events the reducer could not apply (the
@@ -239,39 +248,15 @@ class CallStore internal constructor(
         return true
     }
 
-    /**
-     * Best-effort teardown for the live slot (web `tearDownActiveCall`):
-     * active → XEP-0166 session-terminate (outcome-aware) plus the
-     * XEP-0353 `<finish/>` bookend both parties SHOULD send so MAM
-     * archives stay consistent; outgoing → `<retract/>`; incoming →
-     * `<reject/>`.
-     */
-    suspend fun hangUp(reason: WaddleJingleReason = WaddleJingleReason.SUCCESS) {
-        val current: CallState
-        synchronized(stateLock) {
-            cancelCallTimersLocked()
-            current = _state.value
-            _state.value = CallState.Idle
-        }
-        when (current) {
-            is CallState.Active ->
-                if (current.kind == CallKind.MUC) muc.teardownActive(current) else terminateActive(current, reason)
-            is CallState.MucPending -> muc.teardownPending(current)
-            is CallState.Outgoing ->
-                if (!signaling.retract(bareJid(current.to), current.sid)) reportError("call retract failed")
-            is CallState.Incoming ->
-                if (current.accepting) {
-                    // Our <proceed/> is already out — abandon with the
-                    // finish bookend (<cancel/>), never a late reject.
-                    if (!signaling.finishWithReason(current.from, current.sid, WaddleJingleReason.CANCEL)) {
-                        reportError("call finish failed")
-                    }
-                } else if (!signaling.reject(current.from, current.sid)) {
-                    reportError("call reject failed")
-                }
-            else -> Unit
-        }
-    }
+    /** Best-effort teardown for the live slot (web `tearDownActiveCall`). */
+    suspend fun hangUp(reason: WaddleJingleReason = WaddleJingleReason.SUCCESS) = teardown.hangUp(reason)
+
+    /** Internal logout path; ordinary UI callers cannot select a retired transport. */
+    internal suspend fun hangUpWith(
+        sender: CallSignaling,
+        ownJid: String?,
+        reason: WaddleJingleReason = WaddleJingleReason.SUCCESS,
+    ) = teardown.hangUpWith(sender, ownJid, reason)
 
     /**
      * Scoped teardown for NON-user callers (the media controller): acts
@@ -281,17 +266,7 @@ class CallStore internal constructor(
      * migration ring, an Ended banner, or a fresh call. Plain [hangUp]
      * stays reserved for explicit user intent.
      */
-    suspend fun hangUpActiveIf(sid: String, reason: WaddleJingleReason) {
-        val current: CallState.Active
-        synchronized(stateLock) {
-            val state = _state.value
-            if (state !is CallState.Active || state.sid != sid) return
-            cancelCallTimersLocked()
-            current = state
-            _state.value = CallState.Idle
-        }
-        if (current.kind == CallKind.MUC) muc.teardownActive(current) else terminateActive(current, reason)
-    }
+    suspend fun hangUpActiveIf(sid: String, reason: WaddleJingleReason) = teardown.hangUpActiveIf(sid, reason)
 
     /**
      * Dismiss the `Ended` banner → `Idle`. Phase-guarded: a Close tap
@@ -300,32 +275,10 @@ class CallStore internal constructor(
      * the wire) must not silently kill a live call — live phases end
      * only through the wire-answering actions.
      */
-    fun dismiss() {
-        synchronized(stateLock) {
-            if (_state.value !is CallState.Ended) return
-            cancelCallTimersLocked()
-            _state.value = CallState.Idle
-            _lastError.value = null
-        }
-    }
+    fun dismiss() = teardown.dismiss()
 
     /** XEP-0215 TURN/STUN advertisement for the media layer's RTC config. */
     suspend fun fetchExternalServices() = signaling.fetchExternalServices()
-
-    private suspend fun terminateActive(current: CallState.Active, reason: WaddleJingleReason) {
-        val outcome = signaling.sessionTerminateWithOutcome(current.peer, current.sid, reason)
-        if (outcome == WaddleCallSessionTerminateOutcome.ERROR) {
-            reportError("call session terminate failed")
-            return
-        }
-        // XEP-0353: both parties SHOULD send <finish/> after the call
-        // ends. A classified ORPHANED terminate means the server already
-        // lost the call registry, so only the message-level bookend can
-        // still route (web parity).
-        if (!signaling.finish(current.peer, current.sid)) {
-            reportError("call finish failed")
-        }
-    }
 
     // ── applyCallEvent port ──────────────────────────────────────────────────
 

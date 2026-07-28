@@ -1,10 +1,10 @@
 package social.waddle.android.client.calls
 
 import kotlinx.coroutines.CancellationException
-import social.waddle.android.client.VerbResult
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
+import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleExternalService
 import social.waddle.client.ffi.WaddleInCallPresenceFlags
 import social.waddle.client.ffi.WaddleJingleReason
@@ -105,8 +105,16 @@ internal interface CallSignaling {
 
 /** Production [CallSignaling] forwarding to the live attempt's FFI client. */
 internal class ClientCallSignaling(
-    private val activeSession: ActiveSession,
+    private val clientProvider: () -> WaddleClientInterface?,
 ) : CallSignaling {
+    constructor(activeSession: ActiveSession) : this({ activeSession.client })
+
+    companion object {
+        /** A logout-only sender captured before ordinary authority was revoked. */
+        fun forRetiredConnection(
+            connection: ActiveSession.RetiredCallConnection,
+        ): ClientCallSignaling = ClientCallSignaling { connection.client }
+    }
     override suspend fun propose(peerBareJid: String, sid: String, media: WaddleCallMedia): Boolean =
         verb { it.sendCallPropose(peerBareJid, sid, media.audio, media.video) }
 
@@ -196,7 +204,7 @@ internal class ClientCallSignaling(
         sid: String,
         reason: WaddleJingleReason?,
     ): WaddleCallSessionTerminateOutcome {
-        val client = activeSession.client
+        val client = clientProvider()
             ?: return WaddleCallSessionTerminateOutcome.ERROR
         return try {
             client.sendCallSessionTerminateWithOutcome(peerFullJid, sid, reason)
@@ -208,9 +216,31 @@ internal class ClientCallSignaling(
     }
 
     override suspend fun fetchExternalServices(): List<WaddleExternalService>? =
-        activeSession.fetch { it.fetchExternalServices() }
+        invokeOrNull { it.fetchExternalServices() }
 
     private suspend fun verb(
         op: suspend (social.waddle.client.ffi.WaddleClientInterface) -> Boolean,
-    ): Boolean = activeSession.verbCall(op) == VerbResult.Ok
+    ): Boolean {
+        val client = clientProvider() ?: return false
+        return try {
+            op(client)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private suspend fun <T : Any> invokeOrNull(
+        op: suspend (WaddleClientInterface) -> T,
+    ): T? {
+        val client = clientProvider() ?: return null
+        return try {
+            op(client)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+    }
 }

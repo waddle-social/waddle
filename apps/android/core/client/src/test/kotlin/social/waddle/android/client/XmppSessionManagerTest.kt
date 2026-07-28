@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import app.cash.turbine.test
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -533,6 +534,71 @@ class XmppSessionManagerTest {
             testScheduler.currentTime - before <= XmppSessionManager.LOGOUT_CALL_TEARDOWN_MILLIS,
         )
         assertEquals(WaddleAppState.SignedOut, harness.manager.appState.value)
+    }
+
+    @Test
+    fun `logout revokes outbound authority while call teardown is stalled`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        harness.manager.callStore.startCall(
+            peerJid = "bob@waddle.test",
+            media = social.waddle.client.ffi.WaddleCallMedia(audio = true, video = false),
+        )
+        runCurrent()
+        val sid = (
+            harness.manager.callStore.state.value as social.waddle.android.client.calls.CallState.Outgoing
+            ).sid
+        harness.factory.emit(
+            WaddleClientEvent.Call(
+                social.waddle.client.ffi.WaddleCallEvent(
+                    from = "bob@waddle.test/phone",
+                    to = null,
+                    sid = sid,
+                    kind = social.waddle.client.ffi.WaddleCallEventKind.SessionAccept(
+                        join = social.waddle.client.ffi.WaddleLiveKitJoin(
+                            url = "wss://livekit.waddle.test",
+                            room = "dm-room",
+                            identity = "icepuma@waddle.test/r",
+                            token = "jwt",
+                        ),
+                        media = social.waddle.client.ffi.WaddleCallMedia(audio = true, video = false),
+                    ),
+                ),
+            ),
+        )
+        runCurrent()
+
+        val oldClient = harness.factory.clients.single()
+        oldClient.callTerminateDelayMillis = 60_000L
+        val logout = async { harness.manager.logout() }
+        runCurrent()
+
+        // The terminate IQ is still stalled, but no new message can take
+        // an owner lease from the retired account or use its transport.
+        val rejected = async { harness.manager.sendChatMessage("alice@waddle.test", "must not cross logout") }
+        runCurrent()
+        assertEquals(WaddleSendMessageOutcome.Error, rejected.await().outcome)
+        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+        assertTrue(oldClient.sendCalls.isEmpty())
+
+        advanceTimeBy(XmppSessionManager.LOGOUT_CALL_TEARDOWN_MILLIS)
+        runCurrent()
+        logout.await()
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        val successor = harness.factory.clients.last()
+        val sent = harness.manager.sendChatMessage("alice@waddle.test", "new generation")
+        assertTrue(sent.outcome is WaddleSendMessageOutcome.Sent)
+        assertEquals(listOf("alice@waddle.test" to "new generation"), successor.sendCalls)
+
+        harness.manager.logout()
     }
 
     @Test
