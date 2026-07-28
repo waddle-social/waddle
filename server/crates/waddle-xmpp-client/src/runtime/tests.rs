@@ -1919,6 +1919,11 @@ fn runtime_retries_persisted_tail_after_post_auth_features_omit_sm() {
             TransportMessage::Element(element)
         )) if element.name() == "resume"
     )));
+    assert!(no_sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::IqCancelled { stanza_id }
+            if stanza_id.as_str() == "must-not-retry-iq"
+    )));
     let bind_id = no_sm_events
         .iter()
         .find_map(|event| match event {
@@ -2169,12 +2174,13 @@ fn runtime_preserves_failed_resume_snapshot_until_fallback_retry_is_sent() {
         )))
         .unwrap();
 
-    assert_resume_state_replays_id(
-        runtime
-            .resume_state()
-            .expect("fallback snapshot should survive fresh enable attempt"),
-        "retry-after-drop",
-    );
+    let fallback = runtime
+        .resume_state()
+        .expect("fallback snapshot should survive fresh enable attempt");
+    assert!(!fallback.is_resumable());
+    assert!(fallback
+        .unhandled_outbound_entries()
+        .any(|entry| { entry.stanza_for_persistence().attr("id") == Some("retry-after-drop") }));
 }
 
 #[test]
@@ -2349,7 +2355,7 @@ fn runtime_rejects_stanza_only_conditions_in_stream_error_namespace() {
 }
 
 #[test]
-fn runtime_discards_fallback_resume_state_after_prebind_stream_error() {
+fn runtime_preserves_no_sm_fallback_after_prebind_stream_error_for_reconnect() {
     let resume_state = resume_state_with_sent_messages(["retry-after-fallback-error"]);
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
@@ -2358,14 +2364,7 @@ fn runtime_discards_fallback_resume_state_after_prebind_stream_error() {
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            post_auth_features_with_sm(),
-        )))
-        .unwrap();
-    runtime
-        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            Element::builder("failed", crate::stream_management::NS_SM)
-                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
-                .build(),
+            post_auth_features(),
         )))
         .unwrap();
 
@@ -2379,14 +2378,169 @@ fn runtime_discards_fallback_resume_state_after_prebind_stream_error() {
             internal_server_error_stream_error(),
         )))
         .unwrap();
-    assert!(runtime.resume_state().is_none());
+    assert!(runtime.resume_state().is_some());
 
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
             StreamClose,
         )))
         .unwrap();
-    assert!(runtime.resume_state().is_none());
+    let persisted_fallback = runtime
+        .resume_state()
+        .expect("pre-bind stream error cannot discard unconfirmed no-SM retries");
+
+    let mut reconnect_config = config();
+    reconnect_config.session.stream_management.resume_state = Some(persisted_fallback);
+    let mut reconnect = XmppRuntime::new(reconnect_config).unwrap();
+    drive_to_authenticated_stream(&mut reconnect);
+    let no_sm_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    let bind_id = no_sm_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("reconnect binds a fresh no-SM stream");
+    let retry_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    assert!(retry_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("retry-after-fallback-error")
+    )));
+}
+
+#[test]
+fn runtime_never_resumes_or_replays_iq_after_persisted_no_sm_fallback() {
+    let sent_at = Utc
+        .with_ymd_and_hms(2026, 7, 28, 10, 11, 12)
+        .single()
+        .expect("valid typed recovery timestamp");
+    let message = Element::builder("message", crate::NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "fallback-message",
+        )
+        .build();
+    let iq = Element::builder("iq", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "fallback-iq")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .append(Element::builder("query", "jabber:iq:version").build())
+        .build();
+    let resume_state = SmResumeState::from_unhandled_outbound_entries(
+        StreamId::new("old-sm-id"),
+        0,
+        2,
+        [
+            UnhandledOutboundEntry::try_new(message, sent_at).expect("message is countable"),
+            UnhandledOutboundEntry::try_new(iq, sent_at).expect("IQ is countable"),
+        ],
+    )
+    .expect("persisted SM tail is valid");
+    let mut initial_config = config();
+    initial_config.session.stream_management.resume_state = Some(resume_state);
+    let mut initial = XmppRuntime::new(initial_config).unwrap();
+
+    drive_to_authenticated_stream(&mut initial);
+    let no_sm_events = initial
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    assert!(no_sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::IqCancelled { stanza_id } if stanza_id.as_str() == "fallback-iq"
+    )));
+    initial
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            internal_server_error_stream_error(),
+        )))
+        .unwrap();
+    initial
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .unwrap();
+    let persisted_fallback = initial
+        .resume_state()
+        .expect("unwritten fresh retry remains durable");
+    assert!(!persisted_fallback.is_resumable());
+    assert_eq!(
+        persisted_fallback.unhandled_outbound_entries().count(),
+        1,
+        "only the fresh-stream-safe message persists"
+    );
+
+    let mut reconnect_config = config();
+    reconnect_config.session.stream_management.resume_state = Some(persisted_fallback);
+    let mut reconnect = XmppRuntime::new(reconnect_config).unwrap();
+    drive_to_authenticated_stream(&mut reconnect);
+    let sm_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    assert!(!sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "resume"
+    )));
+    let bind_id = sm_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("a non-resumable fallback binds a fresh stream");
+    let binding_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = binding_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" => Some(element.clone()),
+            _ => None,
+        })
+        .expect("fresh stream negotiates SM normally");
+    reconnect
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+    let retry_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert!(retry_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("fallback-message")
+    )));
+    assert!(!retry_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("fallback-iq")
+    )));
 }
 
 #[test]
@@ -2849,32 +3003,4 @@ fn invalid_forbidden_stream_error() -> Element {
     Element::builder("error", NS_STREAMS)
         .append(Element::builder("forbidden", "urn:ietf:params:xml:ns:xmpp-streams").build())
         .build()
-}
-
-fn assert_resume_state_replays_id(resume_state: SmResumeState, expected_id: &str) {
-    let mut config = config();
-    config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(config).unwrap();
-
-    drive_to_authenticated_stream(&mut runtime);
-    runtime
-        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            post_auth_features_with_sm(),
-        )))
-        .unwrap();
-    let events = runtime
-        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
-                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
-                .build(),
-        )))
-        .unwrap();
-
-    assert!(events.iter().any(|event| matches!(
-        event,
-        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-            TransportMessage::Element(element)
-        )) if element.attr("id") == Some(expected_id)
-    )));
 }

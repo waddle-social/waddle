@@ -35,10 +35,6 @@ impl XmppRuntime {
         if matches!(self.bootstrap, BootstrapState::AwaitingResume) {
             self.discard_failed_prebind_resume(events);
         }
-
-        if !matches!(self.bootstrap, BootstrapState::Ready | BootstrapState::Idle) {
-            self.discard_fallback_resume_state();
-        }
     }
 
     pub(super) fn discard_failed_prebind_resume(&mut self, events: &mut Vec<ClientEvent>) {
@@ -60,12 +56,6 @@ impl XmppRuntime {
         events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
             StreamManagementEvent::Failed,
         )));
-    }
-
-    fn discard_fallback_resume_state(&mut self) {
-        self.fallback_resume_state = None;
-        self.pending_fallback_retries.clear();
-        self.fallback_retry_writes_in_flight.clear();
     }
 
     pub(super) fn handle_sm_element(

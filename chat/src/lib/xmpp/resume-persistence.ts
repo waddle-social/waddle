@@ -66,6 +66,7 @@ export type PersistedReconnectCatchup = {
  */
 export type PersistedSmResumeState = {
   previd: string;
+  resumable?: boolean;
   inboundH: number;
   outboundH: number;
   maxResumeSeconds?: number;

@@ -82,12 +82,16 @@ enum BootstrapState {
 impl XmppRuntime {
     pub fn new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
-        let sm_state = config
-            .session
-            .stream_management
-            .resume_state
+        let persisted_resume_state = config.session.stream_management.resume_state.clone();
+        let sm_state = persisted_resume_state
             .as_ref()
             .map(SmState::from_resume_state)
+            .unwrap_or_default();
+        let fallback_resume_state = persisted_resume_state
+            .filter(|state| !state.is_resumable() && state.has_unhandled_outbound_stanzas());
+        let pending_fallback_retries = fallback_resume_state
+            .as_ref()
+            .map(|_| sm_state.unhandled_stanzas_for_fallback_retry().into())
             .unwrap_or_default();
 
         Ok(Self {
@@ -99,8 +103,8 @@ impl XmppRuntime {
             sm_state,
             sm_negotiation: SmNegotiationState::Inactive,
             sm_advertised: false,
-            pending_fallback_retries: VecDeque::new(),
-            fallback_resume_state: None,
+            pending_fallback_retries,
+            fallback_resume_state,
             fallback_retry_writes_in_flight: VecDeque::new(),
         })
     }
@@ -669,7 +673,8 @@ impl XmppRuntime {
         stream_management_remains_available: bool,
     ) {
         let failed = self.sm_state.unhandled_message_stanza_ids();
-        self.fallback_resume_state = self.sm_state.resume_state();
+        let cancelled_iqs = self.sm_state.unhandled_iq_stanza_ids();
+        self.fallback_resume_state = self.sm_state.fallback_retry_state();
         self.pending_fallback_retries
             .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
         self.sm_state.previd = None;
@@ -679,6 +684,11 @@ impl XmppRuntime {
         events.extend(failed.into_iter().map(|stanza_id| {
             ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
         }));
+        events.extend(
+            cancelled_iqs
+                .into_iter()
+                .map(|stanza_id| ClientEvent::IqCancelled { stanza_id }),
+        );
     }
 
     fn mark_fallback_retry_sent(&mut self, element: &Element) {

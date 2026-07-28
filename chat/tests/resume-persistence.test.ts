@@ -394,6 +394,25 @@ describe("applyResumeStateToWasmConfig", () => {
     ]);
   });
 
+  test("restores a pagehide fresh-stream retry tail without permitting XEP-0198 resume", () => {
+    const { config, calls } = configWith(["with_fresh_stream_retry_state_entries", "with_resume_state_entries"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "declined-sm-stream",
+      resumable: false,
+      inboundH: 0,
+      outboundH: 0,
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }],
+    });
+
+    expect(calls).toEqual([
+      {
+        method: "with_fresh_stream_retry_state_entries",
+        args: ["declined-sm-stream", 0, 0, [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }]],
+      },
+    ]);
+  });
+
   test("uses max-aware resume when no unhandled stanzas need replay", () => {
     const { config, calls } = configWith(["with_resume_state_with_max", "with_resume_state"]);
 

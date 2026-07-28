@@ -11,6 +11,7 @@ import {
   OfflineSendQueue,
   ReconnectScheduler,
   ResumeStateStore,
+  applyResumeStateToWasmConfig,
   compatWasmSendResult,
   type XmppResumeState,
 } from "../src/lib/xmpp/client-connection";
@@ -592,6 +593,42 @@ describe("ResumeStateStore", () => {
     expect(calls).toEqual(["preparePagehideHandoff", "saveSm"]);
     expect(getSaved()).toEqual({ previd: "p1", inboundH: 3, outboundH: 4, resource: "web-abc" });
     expect(persistedRooms).toBe(1);
+  });
+
+  test("pagehide reload restores a nonresumable fresh-stream retry tail without resuming", () => {
+    const { persistence, getSaved } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+    const liveState = {
+      previd: "declined-sm-stream",
+      resumable: false,
+      inboundH: 0,
+      outboundH: 0,
+      hasUnackedOutbound: true,
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }],
+    };
+
+    store.persistForPageHide(liveState, "web-abc", () => undefined);
+
+    expect(getSaved()).toEqual({ ...liveState, resource: "web-abc" });
+
+    const reloaded = new ResumeStateStore(persistence);
+    const restored = reloaded.consumePersisted();
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const config = {
+      with_fresh_stream_retry_state_entries: (...args: unknown[]) => {
+        calls.push({ method: "fresh-stream", args });
+      },
+      with_resume_state_entries: (...args: unknown[]) => {
+        calls.push({ method: "resume", args });
+      },
+    };
+
+    expect(restored).toEqual({ ...liveState, resource: "web-abc" });
+    applyResumeStateToWasmConfig(config, restored!);
+    expect(calls).toEqual([{
+      method: "fresh-stream",
+      args: ["declined-sm-stream", 0, 0, liveState.unhandledOutboundEntries],
+    }]);
   });
 
   test("persistForPageHide drops unacked-outbound state it cannot replay", () => {

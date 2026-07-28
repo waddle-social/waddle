@@ -146,6 +146,7 @@ impl UnhandledOutboundEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmResumeState {
     previd: StreamId,
+    resumable: bool,
     inbound_h: u32,
     outbound_h: u32,
     max_resume_seconds: Option<u32>,
@@ -160,6 +161,7 @@ impl SmResumeState {
 
         Ok(Self {
             previd,
+            resumable: true,
             inbound_h,
             outbound_h,
             max_resume_seconds: None,
@@ -195,6 +197,21 @@ impl SmResumeState {
 
     pub fn previd(&self) -> &StreamId {
         &self.previd
+    }
+
+    /// Whether this durable tail may drive an XEP-0198 `<resume/>` attempt.
+    /// Fresh-stream fallback retries retain their original timestamped
+    /// message/presence entries but must never become a resumable SM session.
+    pub fn is_resumable(&self) -> bool {
+        self.resumable
+    }
+
+    /// Mark this persisted tail as fresh-stream retry work rather than an
+    /// XEP-0198 resumable session. This is the only valid durable shape after
+    /// the server has declined stream management.
+    pub fn into_fresh_stream_retry_state(mut self) -> Self {
+        self.resumable = false;
+        self
     }
 
     pub fn inbound_h(&self) -> u32 {
@@ -280,8 +297,13 @@ impl SmState {
             outbound_count: resume_state.outbound_h(),
             inbound_count: resume_state.inbound_h(),
             server_h: resume_state.outbound_h().wrapping_sub(queue_len),
-            previd: Some(resume_state.previd().clone()),
-            max_resume_seconds: resume_state.max_resume_seconds(),
+            previd: resume_state
+                .is_resumable()
+                .then(|| resume_state.previd().clone()),
+            max_resume_seconds: resume_state
+                .is_resumable()
+                .then(|| resume_state.max_resume_seconds())
+                .flatten(),
             outbound_queue: resume_state.outbound_queue.clone(),
             ..Self::default()
         }
@@ -298,6 +320,26 @@ impl SmState {
             .map(|state| state.with_max_resume_seconds(self.max_resume_seconds))
             .ok()
         })
+    }
+
+    /// Persist only the safe fresh-stream retry subset after SM resumption
+    /// becomes impossible. The original SM id remains opaque persistence
+    /// metadata, but the explicit flag prevents it from ever driving
+    /// `<resume/>` after a restart.
+    pub fn fallback_retry_state(&self) -> Option<SmResumeState> {
+        let previd = self.previd.clone()?;
+        let outbound_queue = self
+            .outbound_queue
+            .iter()
+            .filter(|queued| matches!(queued.stanza.element.name(), "message" | "presence"))
+            .cloned()
+            .collect::<VecDeque<_>>();
+        if outbound_queue.is_empty() {
+            return None;
+        }
+        SmResumeState::from_outbound_queue(previd, 0, 0, outbound_queue)
+            .ok()
+            .map(SmResumeState::into_fresh_stream_retry_state)
     }
 
     /// Increment the outbound stanza counter by `count`.
@@ -556,6 +598,18 @@ impl SmState {
         self.outbound_queue
             .iter()
             .filter_map(|queued| queued.message_stanza_id.clone())
+            .collect()
+    }
+
+    /// IQs cannot be replayed on a fresh stream because the original request
+    /// may already have taken effect. Return their typed correlation IDs so
+    /// the owning driver can complete every caller with cancellation.
+    pub fn unhandled_iq_stanza_ids(&self) -> Vec<StanzaId> {
+        self.outbound_queue
+            .iter()
+            .filter(|queued| queued.stanza.element.name() == "iq")
+            .filter_map(|queued| queued.stanza.element.attr("id"))
+            .filter_map(|id| StanzaId::new(id).ok())
             .collect()
     }
 

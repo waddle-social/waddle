@@ -70,6 +70,12 @@ pub enum ClientEvent {
         id: String,
         element: Element,
     },
+    /// A persisted XEP-0198 tail cannot safely replay this IQ on a fresh
+    /// stream. Drivers must complete the matching caller instead of leaving
+    /// its correlation responder pending indefinitely.
+    IqCancelled {
+        stanza_id: StanzaId,
+    },
     /// Post-bootstrap stanza that no built-in handler claimed.
     UnhandledStanza(Element),
 }

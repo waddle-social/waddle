@@ -112,6 +112,29 @@ impl WaddleConfig {
         Ok(())
     }
 
+    /// Restore a durable message/presence retry tail after a previous stream
+    /// explicitly declined XEP-0198. It must never issue `<resume/>`.
+    pub fn with_fresh_stream_retry_state_entries(
+        &mut self,
+        previd: String,
+        inbound_h: u32,
+        outbound_h: u32,
+        entries: JsValue,
+    ) -> Result<(), JsValue> {
+        let entries = resume_entries_from_js(entries).map_err(|err| js_error(err.to_string()))?;
+        self.resume_state = Some(
+            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
+                waddle_xmpp_client::StreamId::new(previd),
+                inbound_h,
+                outbound_h,
+                entries,
+            )
+            .map(waddle_xmpp_client::SmResumeState::into_fresh_stream_retry_state)
+            .map_err(|err| js_error(err.to_string()))?,
+        );
+        Ok(())
+    }
+
     pub fn with_resume_state_handle(&mut self, state: &WaddleResumeState) {
         self.resume_state = Some(state.inner.clone());
     }
@@ -142,6 +165,7 @@ impl From<&WaddleConfig> for StoredConfig {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JsResumeState {
     pub(crate) previd: String,
+    pub(crate) resumable: bool,
     pub(crate) inbound_h: u32,
     pub(crate) outbound_h: u32,
     pub(crate) has_unacked_outbound: bool,
@@ -166,6 +190,7 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
             .collect();
         Self {
             previd: value.previd().as_str().to_string(),
+            resumable: value.is_resumable(),
             inbound_h: value.inbound_h(),
             outbound_h: value.outbound_h(),
             has_unacked_outbound: value.has_unhandled_outbound_stanzas(),

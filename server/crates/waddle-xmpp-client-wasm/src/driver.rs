@@ -1056,6 +1056,17 @@ impl WasmDriverTask {
                 }
                 None
             }
+            ClientEvent::IqCancelled { stanza_id } => {
+                if let Some(responder) = self.pending_iqs.remove(stanza_id.as_str()) {
+                    let _ = responder.send(Err(ClientError::RequestCancelled));
+                } else if let Some(pending) = self.pending_mam_queries.remove(stanza_id.as_str()) {
+                    let _ = pending.responder.send(Err(ClientError::RequestCancelled));
+                } else if let Some(pending) = self.pending_inbox_queries.remove(stanza_id.as_str())
+                {
+                    let _ = pending.responder.send(Err(ClientError::RequestCancelled));
+                }
+                None
+            }
             ClientEvent::MamResult(archived) => {
                 collect_pending_mam_result(&mut self.pending_mam_queries, *archived);
                 None

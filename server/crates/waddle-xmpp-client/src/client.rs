@@ -505,6 +505,12 @@ impl DriverTask {
                 }
                 None
             }
+            ClientEvent::IqCancelled { stanza_id } => {
+                if let Some(responder) = self.pending_iqs.remove(stanza_id.as_str()) {
+                    let _ = responder.send(Err(ClientError::RequestCancelled));
+                }
+                None
+            }
             other => {
                 let _ = self.events.send(other);
                 None

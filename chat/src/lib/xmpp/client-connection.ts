@@ -31,6 +31,7 @@ import type { WasmSendMessageOutcome } from "./wasm-types";
 
 export type XmppResumeState = {
   previd: string;
+  resumable?: boolean;
   inboundH: number;
   outboundH: number;
   maxResumeSeconds?: number;
@@ -107,6 +108,12 @@ function validResumeMaxSeconds(value: number | undefined): number | undefined {
 
 export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppResumeState): void {
   const wasmConfig = config as {
+    with_fresh_stream_retry_state_entries?: (
+      previd: string,
+      inboundH: number,
+      outboundH: number,
+      entries: Array<{ xml: string; sentAt: string }>,
+    ) => void;
     with_resume_state_entries_with_max?: (
       previd: string,
       inboundH: number,
@@ -129,6 +136,19 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
     with_resume_state?: (previd: string, inboundH: number, outboundH: number) => void;
   };
   const maxResumeSeconds = validResumeMaxSeconds(resumeState.maxResumeSeconds);
+  if (resumeState.resumable === false) {
+    if (!resumeState.unhandledOutboundEntries?.length) return;
+    if (typeof wasmConfig.with_fresh_stream_retry_state_entries !== "function") {
+      throw new Error("WASM client cannot restore a fresh-stream retry tail");
+    }
+    wasmConfig.with_fresh_stream_retry_state_entries(
+      resumeState.previd,
+      resumeState.inboundH,
+      resumeState.outboundH,
+      resumeState.unhandledOutboundEntries,
+    );
+    return;
+  }
   if (
     resumeState.unhandledOutboundEntries?.length
     && maxResumeSeconds !== undefined

@@ -180,6 +180,28 @@ async fn driver_ignores_iq_with_unknown_id() {
     // No panic, no hang: test passes.
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn driver_cancels_unreplayable_iq_after_fresh_stream_fallback() {
+    let (mut task, _cmd_tx, _rx) = make_driver_task(MockTransport::new(
+        vec![],
+        vec![],
+        MockTransportShared::default(),
+    ));
+    let (iq_tx, iq_rx) = oneshot::channel();
+    task.pending_iqs
+        .insert("unreplayable-iq".to_string(), iq_tx);
+
+    task.dispatch_client_event(ClientEvent::IqCancelled {
+        stanza_id: StanzaId::new("unreplayable-iq").unwrap(),
+    });
+
+    assert!(!task.pending_iqs.contains_key("unreplayable-iq"));
+    assert!(matches!(
+        iq_rx.await.expect("cancelled IQ caller completes"),
+        Err(ClientError::RequestCancelled)
+    ));
+}
+
 // ── send_iq round-trip through mock ───────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
