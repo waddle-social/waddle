@@ -18,6 +18,10 @@ import {
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
+import {
+  $mucCallLiveParticipants,
+  setLiveCallParticipants,
+} from "../src/lib/calls/muc-call-live-participants";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
 import {
@@ -1081,6 +1085,56 @@ describe("tearDownActiveCall", () => {
       expect($lastCallError.get()).not.toBeNull();
     } finally {
       restore();
+    }
+  });
+
+  test("backgrounded MUC teardown does not wipe a newer call's state in the same room (#1446)", async () => {
+    const restore = setTeardownStanzaTimeoutMsForTests(10);
+    try {
+      const sender = {
+        update_muji_presence: mock(() => new Promise<void>(() => undefined)),
+        send_muji_session_terminate: mock(async () => undefined),
+      };
+      const roomJid = "room@muc.waddle.test";
+      $callState.set({
+        phase: "active",
+        peer: roomJid,
+        sid: "old-sid",
+        media: audioVideo,
+        join: { ...join, room: roomJid },
+        kind: "muc",
+        selfNick: "alice",
+        selfFullJid: "alice@waddle.test/web",
+      });
+
+      const teardown = tearDownActiveCall(
+        sender as unknown as Parameters<typeof tearDownActiveCall>[0],
+        "success",
+      );
+      // While the old teardown is stuck on a silent server, the user
+      // starts a NEW call in the same room.
+      $callState.set({
+        phase: "active",
+        peer: roomJid,
+        sid: "new-sid",
+        media: audioVideo,
+        join: { ...join, room: roomJid },
+        kind: "muc",
+        selfNick: "alice",
+        selfFullJid: "alice@waddle.test/web",
+      });
+      setLiveCallParticipants(roomJid, ["alice@waddle.test/web", "bob@waddle.test/phone"]);
+
+      await teardown;
+
+      // The stale teardown must not erase the new call's projections
+      // or its call slot.
+      expect($mucCallLiveParticipants.get()[roomJid]).toBeDefined();
+      expect($callState.get()).toMatchObject({ phase: "active", sid: "new-sid" });
+    } finally {
+      restore();
+      clearCallState();
+      $mucCallLiveParticipants.set({});
     }
   });
 

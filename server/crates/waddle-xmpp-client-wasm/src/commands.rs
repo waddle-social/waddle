@@ -65,24 +65,35 @@ pub(crate) enum IqReplyWait {
     DeadlineExpired,
 }
 
-/// Race the IQ-reply oneshot against `deadline`. Split from the wasm
-/// entry points (which supply a real `setTimeout` future) so the race
-/// itself is testable on native targets.
-pub(crate) async fn wait_iq_reply_with_deadline<D>(
-    rx: oneshot::Receiver<Result<Element, ClientError>>,
-    deadline: D,
-) -> IqReplyWait
+/// Race a full IQ round trip (queue admission + reply oneshot) against
+/// `deadline`. The whole trip sits inside the race on purpose: a
+/// stalled driver can block the bounded command channel before the
+/// stanza is even accepted, and that wait must count against the
+/// deadline too. Split from the wasm entry points (which supply a real
+/// `setTimeout` future) so the race itself is testable on native
+/// targets.
+pub(crate) async fn wait_iq_reply_with_deadline<F, D>(round_trip: F, deadline: D) -> IqReplyWait
 where
+    F: core::future::Future<Output = IqReplyWait>,
     D: core::future::Future<Output = ()>,
 {
     use futures::future::{select, Either};
+    futures::pin_mut!(round_trip);
     futures::pin_mut!(deadline);
-    match select(rx, deadline).await {
-        Either::Left((reply, _)) => match reply {
-            Ok(reply) => IqReplyWait::Reply(reply),
-            Err(_) => IqReplyWait::Disconnected,
-        },
+    match select(round_trip, deadline).await {
+        Either::Left((outcome, _)) => outcome,
         Either::Right(((), _)) => IqReplyWait::DeadlineExpired,
+    }
+}
+
+/// Map the reply oneshot into an [`IqReplyWait`]: a dropped responder
+/// is the driver's disconnect sweep.
+pub(crate) async fn iq_reply_from_oneshot(
+    rx: oneshot::Receiver<Result<Element, ClientError>>,
+) -> IqReplyWait {
+    match rx.await {
+        Ok(reply) => IqReplyWait::Reply(reply),
+        Err(_) => IqReplyWait::Disconnected,
     }
 }
 
@@ -108,19 +119,27 @@ fn sleep_ms(ms: u32) -> impl core::future::Future<Output = ()> {
 }
 
 /// Send an IQ and await its reply under [`IQ_REPLY_DEADLINE_MS`].
-/// Shared by [`send_iq_command`] and [`send_iq_command_stanza_aware`].
+/// Shared by [`send_iq_command`], [`send_iq_command_stanza_aware`],
+/// and [`send_avatar_iq_command`].
 async fn send_iq_roundtrip(
     inner: &Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<Result<Element, ClientError>, JsValue> {
     let mut cmd_tx = command_sender(inner)?;
+    let mut cancel_tx = cmd_tx.clone();
     let iq_id = stanza.attr("id").map(str::to_string);
     let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::SendIq { stanza, responder })
-        .await
-        .map_err(|_| js_error("client is disconnected"))?;
-    match wait_iq_reply_with_deadline(rx, sleep_ms(IQ_REPLY_DEADLINE_MS)).await {
+    let round_trip = async move {
+        if cmd_tx
+            .send(WasmCommand::SendIq { stanza, responder })
+            .await
+            .is_err()
+        {
+            return IqReplyWait::Disconnected;
+        }
+        iq_reply_from_oneshot(rx).await
+    };
+    match wait_iq_reply_with_deadline(round_trip, sleep_ms(IQ_REPLY_DEADLINE_MS)).await {
         IqReplyWait::Reply(reply) => Ok(reply),
         IqReplyWait::Disconnected => Err(js_error("client is disconnected")),
         IqReplyWait::DeadlineExpired => {
@@ -130,7 +149,7 @@ async fn send_iq_roundtrip(
             // to the disconnect sweep instead.
             if let Some(id) = iq_id {
                 let (cancel_responder, _cancel_rx) = oneshot::channel();
-                let _ = cmd_tx.try_send(WasmCommand::CancelIq {
+                let _ = cancel_tx.try_send(WasmCommand::CancelIq {
                     id,
                     responder: cancel_responder,
                 });
@@ -242,14 +261,9 @@ pub(crate) async fn send_avatar_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<Element, AvatarRequestFailure<JsValue>> {
-    let mut cmd_tx = command_sender(&inner).map_err(AvatarRequestFailure::Other)?;
-    let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::SendIq { stanza, responder })
+    send_iq_roundtrip(&inner, stanza)
         .await
-        .map_err(|_| AvatarRequestFailure::Other(js_error("client is disconnected")))?;
-    rx.await
-        .map_err(|_| AvatarRequestFailure::Other(js_error("client is disconnected")))?
+        .map_err(AvatarRequestFailure::Other)?
         .map_err(|err| match err {
             ClientError::StanzaError(_) => AvatarRequestFailure::StanzaError,
             other => AvatarRequestFailure::Other(js_error(other.to_string())),
@@ -391,7 +405,7 @@ mod tests {
         tx.send(Ok(iq_result_element()))
             .unwrap_or_else(|_| panic!("receiver alive"));
         let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
-            rx,
+            iq_reply_from_oneshot(rx),
             futures::future::pending::<()>(),
         ));
         match outcome {
@@ -405,7 +419,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<Result<Element, ClientError>>();
         drop(tx);
         let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
-            rx,
+            iq_reply_from_oneshot(rx),
             futures::future::pending::<()>(),
         ));
         assert!(matches!(outcome, IqReplyWait::Disconnected));
@@ -418,7 +432,19 @@ mod tests {
         // promise (and anything awaiting it, like call teardown) forever.
         let (_tx, rx) = oneshot::channel::<Result<Element, ClientError>>();
         let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
-            rx,
+            iq_reply_from_oneshot(rx),
+            futures::future::ready(()),
+        ));
+        assert!(matches!(outcome, IqReplyWait::DeadlineExpired));
+    }
+
+    #[test]
+    fn iq_reply_wait_expires_even_when_queue_admission_stalls() {
+        // The deadline must cover the bounded command-channel send too:
+        // a stalled driver that never accepts the command is the same
+        // user-visible hang as a server that never replies.
+        let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
+            futures::future::pending::<IqReplyWait>(),
             futures::future::ready(()),
         ));
         assert!(matches!(outcome, IqReplyWait::DeadlineExpired));

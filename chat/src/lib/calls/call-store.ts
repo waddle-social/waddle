@@ -747,13 +747,25 @@ class TeardownSendTimeoutError extends Error {
 }
 
 /**
- * Race a teardown wire send against the deadline, retrying exactly once
- * on timeout. A typed error reply from the server is a definitive
- * answer and is NOT retried — only silence is. The abandoned attempt's
- * promise is left to settle in the void; its result no longer matters.
+ * XEP-0166 session-terminate is the one teardown stanza worth a second
+ * attempt: it is what ends the call for the peer, and re-sending a sid
+ * the peer already forgot is harmless. Presence/retract/reject sends
+ * stay single-attempt — a duplicate delivered late is not.
  */
-async function boundedTeardownSend<T>(send: () => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt += 1) {
+const TERMINATE_SEND_ATTEMPTS = 2;
+
+/**
+ * Race a teardown wire send against the deadline, retrying on timeout
+ * up to `attempts` total tries. A typed error reply from the server is
+ * a definitive answer and is NOT retried — only silence is. The
+ * abandoned attempt's promise is left to settle in the void; its
+ * result no longer matters.
+ */
+async function boundedTeardownSend<T>(
+  send: () => Promise<T>,
+  attempts: number = 1,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     try {
       return await Promise.race([
@@ -766,9 +778,53 @@ async function boundedTeardownSend<T>(send: () => Promise<T>): Promise<T> {
         }),
       ]);
     } catch (err) {
-      if (!(err instanceof TeardownSendTimeoutError) || attempt >= 1) throw err;
+      if (!(err instanceof TeardownSendTimeoutError) || attempt >= attempts) throw err;
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * Whether a NEWER call has already re-occupied `roomJid` while a
+ * backgrounded teardown was still in flight (#1446). The old call's
+ * teardown must then skip every projection wipe that is not scoped to
+ * its own sid, or it would erase the new call's participants.
+ */
+function roomReoccupiedByNewerCall(roomJid: string, sid: string): boolean {
+  const now = $callState.get();
+  return (
+    (now.phase === "active" || now.phase === "muc-pending") &&
+    now.peer === roomJid &&
+    now.sid !== sid
+  );
+}
+
+/**
+ * Shared XEP-0272 §Leaving step for both the active-MUC and
+ * muc-pending teardown arms: drop our `<muji/>` presence
+ * advertisement, then clear the local self-participant projections —
+ * unless the room has been re-occupied by a newer call.
+ */
+async function leaveMujiCallPresence(
+  raw: RawIqSender,
+  s: { peer: string; sid: string; selfNick?: string; selfFullJid?: string | null },
+): Promise<void> {
+  const updateMujiPresence = raw.update_muji_presence;
+  const selfNick = s.selfNick;
+  if (!selfNick || !updateMujiPresence) return;
+  try {
+    await boundedTeardownSend(() =>
+      updateMujiPresence(s.peer, selfNick, false, false, false, {
+        handRaised: false,
+        muted: false, // leaving clears all in-call state
+      }));
+  } catch (err) {
+    reportCallError(err);
+  } finally {
+    if (!roomReoccupiedByNewerCall(s.peer, s.sid)) {
+      clearMucCallParticipant(s.peer, selfNick, s.selfFullJid);
+      setSelfRaisedHand(s.peer, false);
     }
   }
 }
@@ -864,6 +920,11 @@ export async function tearDownActiveCall(
 ): Promise<void> {
   cancelCallTimers();
   const s = $callState.get();
+  if (s.phase === "ended") {
+    // Normalize a lingering post-call summary slot away, as the old
+    // trailing idle-set always did (logout path).
+    $callState.set({ phase: "idle" });
+  }
   if (s.phase !== "idle" && s.phase !== "ended") {
     finishCallAttempt(s.sid, callLifecycleTerminalForTeardown(s.phase, reason));
     // Go idle BEFORE any wire teardown (#1446): the stanzas below are
@@ -880,8 +941,10 @@ export async function tearDownActiveCall(
           if (s.kind === "dm") {
             let terminateAllowsFinish = false;
             try {
-              const outcome = await boundedTeardownSend(() =>
-                outboundCalls.sessionTerminateWithOutcome(sender, s.peer, s.sid, reason));
+              const outcome = await boundedTeardownSend(
+                () => outboundCalls.sessionTerminateWithOutcome(sender, s.peer, s.sid, reason),
+                TERMINATE_SEND_ATTEMPTS,
+              );
               terminateAllowsFinish = outcome === "ok" || outcome === "orphaned";
               if (outcome === "error") {
                 reportCallError(new Error("call session terminate failed"));
@@ -914,25 +977,15 @@ export async function tearDownActiveCall(
             // try/catch so a single failure (e.g. a stale wasm
             // bundle) can't swallow the other.
             const raw = sender as RawIqSender;
-            const updateMujiPresence = raw.update_muji_presence;
-            const selfNick = s.selfNick;
-            if (selfNick && updateMujiPresence) {
-              try {
-                await boundedTeardownSend(() =>
-                  updateMujiPresence(s.peer, selfNick, false, false, false, {
-                    handRaised: false,
-                    muted: false, // leaving clears all in-call state
-                  }));
-              } catch (err) {
-                reportCallError(err);
-              } finally {
-                clearMucCallParticipant(s.peer, selfNick, s.selfFullJid);
-                setSelfRaisedHand(s.peer, false);
-              }
+            await leaveMujiCallPresence(raw, s);
+            if (!roomReoccupiedByNewerCall(s.peer, s.sid)) {
+              clearLiveCallParticipants(s.peer);
             }
-            clearLiveCallParticipants(s.peer);
             try {
-              await boundedTeardownSend(() => sendMujiSessionTerminate(raw, s.peer, s.sid));
+              await boundedTeardownSend(
+                () => sendMujiSessionTerminate(raw, s.peer, s.sid),
+                TERMINATE_SEND_ATTEMPTS,
+              );
               forgetMucCallSession({
                 roomJid: s.peer,
                 selfFullJid: s.selfFullJid,
@@ -971,25 +1024,13 @@ export async function tearDownActiveCall(
           );
           {
             const raw = sender as RawIqSender;
-            const updateMujiPresence = raw.update_muji_presence;
-            const selfNick = s.selfNick;
-            if (selfNick && updateMujiPresence) {
-              try {
-                await boundedTeardownSend(() =>
-                  updateMujiPresence(s.peer, selfNick, false, false, false, {
-                    handRaised: false,
-                    muted: false, // leaving clears all in-call state
-                  }));
-              } catch (err) {
-                reportCallError(err);
-              } finally {
-                clearMucCallParticipant(s.peer, selfNick, s.selfFullJid);
-                setSelfRaisedHand(s.peer, false);
-              }
-            }
+            await leaveMujiCallPresence(raw, s);
             if (s.activePresencePublished) {
               try {
-                await boundedTeardownSend(() => sendMujiSessionTerminate(raw, s.peer, s.sid));
+                await boundedTeardownSend(
+                  () => sendMujiSessionTerminate(raw, s.peer, s.sid),
+                  TERMINATE_SEND_ATTEMPTS,
+                );
                 forgetMucCallSession({
                   roomJid: s.peer,
                   selfFullJid: s.selfFullJid,
