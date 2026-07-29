@@ -263,8 +263,8 @@ pub(crate) async fn cancel_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     id: String,
 ) -> Result<(), JsValue> {
-    let id = waddle_xmpp_client::request::StanzaId::new(id)
-        .map_err(|err| js_error(err.to_string()))?;
+    let id =
+        waddle_xmpp_client::request::StanzaId::new(id).map_err(|err| js_error(err.to_string()))?;
     let mut cmd_tx = command_sender(&inner)?;
     let (responder, rx) = oneshot::channel();
     cmd_tx
