@@ -2,12 +2,6 @@ use super::*;
 use std::{future::Future, pin::Pin};
 use xmpp_parsers::iq::Iq;
 
-/// The SFU handle carried by [`Deps`], as a bare trait object for the
-/// undeliverable-IQ bounce compensation (#1444).
-fn deps_sfu<'a>(deps: &Deps<'a>) -> Option<&'a dyn waddle_sfu::SfuService> {
-    deps.sfu.map(|arc| arc.as_ref())
-}
-
 type OrderedRelayDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
 
@@ -258,11 +252,11 @@ async fn route_to_full_jid(
             if bare.domain().as_str() == deps.local_domain
                 && !local_account_exists_for(deps, &bare).await
             {
-                return bounce_for_nonexistent_account(stanza.as_ref(), deps_sfu(deps));
+                return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
             }
             return Vec::new();
         }
-        fallback_reply_for_undeliverable_iq(stanza.as_ref(), deps_sfu(deps))
+        bounce_undeliverable_iq(stanza.as_ref(), deps.sfu)
             .into_iter()
             .collect()
     } else {
@@ -475,7 +469,7 @@ async fn route_to_bare_jid(
             deliver_bare_jid_via_ordered_relay(deps, &bare, stanza.as_ref()).await
         {
             return if delivery == FullJidDeliveryOutcome::Unavailable {
-                fallback_reply_for_undeliverable_iq(stanza.as_ref(), deps_sfu(deps))
+                bounce_undeliverable_iq(stanza.as_ref(), deps.sfu)
                     .into_iter()
                     .collect()
             } else {
@@ -547,7 +541,7 @@ async fn route_to_bare_jid(
                      bouncing with service-unavailable instead of \
                      persisting (RFC 6121 §8.5.1)"
                 );
-                return bounce_for_nonexistent_account(stanza.as_ref(), deps_sfu(deps));
+                return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
             } else {
                 run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1).await;
             }
@@ -800,7 +794,7 @@ async fn route_to_bare_jid(
                     // (or no longer does) exist — bounce instead of
                     // creating archive/inbox rows for it (RFC 6121
                     // §8.5.1).
-                    return bounce_for_nonexistent_account(stanza.as_ref(), deps_sfu(deps));
+                    return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
                 } else {
                     debug!(
                         bare_jid = %bare,
@@ -887,9 +881,7 @@ fn bounce_for_nonexistent_account(
             );
             vec![Stanza::Message(reply)]
         }
-        Stanza::Iq(_) => fallback_reply_for_undeliverable_iq(stanza, sfu)
-            .into_iter()
-            .collect(),
+        Stanza::Iq(_) => bounce_undeliverable_iq(stanza, sfu).into_iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -1032,7 +1024,7 @@ fn deliver_bare_jid_via_ordered_relay<'a>(
 /// same arm revokes the minted token via `sfu` (when supplied) so the
 /// credential does not outlive the failed invite. Non-Jingle request
 /// IQs keep the correlating §8.3.1 echo.
-pub(crate) fn fallback_reply_for_undeliverable_iq(
+pub(crate) fn bounce_undeliverable_iq(
     stanza: &Stanza,
     sfu: Option<&dyn waddle_sfu::SfuService>,
 ) -> Option<Stanza> {
@@ -1057,7 +1049,8 @@ pub(crate) fn fallback_reply_for_undeliverable_iq(
         Iq::Result { .. } | Iq::Error { .. } => return None,
     };
     let is_jingle = payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE);
-    if is_jingle && payload.attr("action") == Some("session-terminate") {
+    if is_jingle && jingle_action(&payload) == Some(xmpp_parsers::jingle::Action::SessionTerminate)
+    {
         // The server already completed the teardown; ack the hangup.
         return Some(Stanza::Iq(Box::new(Iq::Result {
             from: to,
@@ -1091,9 +1084,19 @@ pub(crate) fn fallback_reply_for_undeliverable_iq(
         error,
         // RFC 6120 §8.3.1: echo the offending request so the sender can
         // correlate which stanza failed — EXCEPT for Jingle payloads,
-        // which may carry server-injected credentials (#1444).
+        // which may carry server-injected credentials (#1444). A
+        // jingle-namespaced payload that fails typed parsing is still
+        // scrubbed: fail closed, never fail into an echo.
         payload: if is_jingle { None } else { Some(payload) },
     })))
+}
+
+/// Typed XEP-0166 action of a jingle-namespaced payload, `None` when
+/// the payload does not parse as Jingle.
+fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Action> {
+    xmpp_parsers::jingle::Jingle::try_from(payload.clone())
+        .ok()
+        .map(|jingle| jingle.action)
 }
 
 /// #1106: queue the PROCESSED (recipient-stamped) stanza into the

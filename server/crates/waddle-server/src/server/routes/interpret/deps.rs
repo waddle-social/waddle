@@ -180,7 +180,7 @@ pub struct Deps<'a> {
     /// into a forwarded `session-initiate`/`session-accept` that then
     /// failed delivery. `None` in unit tests that don't exercise the
     /// call bounce path and in deployments without an SFU.
-    pub sfu: Option<&'a Arc<dyn waddle_sfu::SfuService>>,
+    pub sfu: Option<&'a dyn waddle_sfu::SfuService>,
 }
 
 impl<'a> Deps<'a> {

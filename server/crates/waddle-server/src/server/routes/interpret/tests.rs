@@ -2832,24 +2832,29 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     }];
 
     let mut deps = Deps::registry_with_user_registry(&registry, &user_registry);
-    deps.sfu = Some(&sfu);
+    deps.sfu = Some(sfu.as_ref());
     let outcome = interpret(events, &deps).await;
 
-    // The bounce carries no credential material whatsoever.
+    // The bounce carries no credential material whatsoever: typed, the
+    // error IQ has no payload at all.
     assert_eq!(
         outcome.frames.len(),
         1,
         "one error frame: {:?}",
         outcome.frames
     );
+    let bounced = Iq::try_from(Element::from_str(&outcome.frames[0]).expect("parseable IQ"))
+        .expect("typed IQ");
+    let Iq::Error { payload, .. } = bounced else {
+        panic!("expected IQ error, got {bounced:?}");
+    };
+    assert!(
+        payload.is_none(),
+        "undeliverable session-initiate error must carry no payload: {payload:?}"
+    );
     assert!(
         !outcome.frames[0].contains(token.jwt.as_str()),
         "bounced error must not contain the minted JWT"
-    );
-    assert!(
-        !outcome.frames[0].contains("livekit"),
-        "bounced error must not contain the LiveKit transport: {}",
-        outcome.frames[0]
     );
 
     // ...and the minted token was revoked (JTI moved to the revocation

@@ -109,7 +109,7 @@ pub(super) async fn route_full_jid_iq(
 
 fn fallback_iq_frames(iq: &xmpp_parsers::iq::Iq, state: &WebSocketState) -> Vec<String> {
     let stanza = Stanza::Iq(Box::new(iq.clone()));
-    let Some(reply) = crate::server::routes::interpret::fallback_reply_for_undeliverable_iq(
+    let Some(reply) = crate::server::routes::interpret::bounce_undeliverable_iq(
         &stanza,
         state.deps.protocol.sfu.as_deref(),
     ) else {

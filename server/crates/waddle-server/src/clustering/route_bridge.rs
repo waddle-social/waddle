@@ -4952,7 +4952,7 @@ fn replies_for_origin_handoff(
 ) -> Vec<Stanza> {
     match outcome {
         FullJidDeliveryOutcome::Unavailable => {
-            crate::server::routes::interpret::fallback_reply_for_undeliverable_iq(stanza, sfu)
+            crate::server::routes::interpret::bounce_undeliverable_iq(stanza, sfu)
                 .into_iter()
                 .collect()
         }

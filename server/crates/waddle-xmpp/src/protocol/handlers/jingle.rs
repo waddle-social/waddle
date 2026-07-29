@@ -1024,9 +1024,12 @@ pub struct UndeliverableNegotiationRollback {
 /// The call scoping mirrors [`JingleHandler::handle_session_negotiation`]:
 /// an initiate is scoped to its sender (the initiator), an accept to its
 /// addressee (the initiator being handed the responder's accept) — and
-/// the token was minted for the addressee in both cases. A Muji stanza
-/// yields a room-scoped id that can never match a `{bare}::{sid}` 1:1
-/// registry entry, so a spurious revocation is impossible.
+/// the token was minted for the addressee in both cases. Muji-bearing
+/// stanzas (XEP-0272 `<muji/>` child) yield `None`: their calls are
+/// room-scoped, so the `{bare}::{sid}` derivation would be wrong — and
+/// since `unregister_call_participant` also fires a LiveKit
+/// `RemoveParticipant`, a client-chosen sid colliding with the sender's
+/// own live 1:1 call must never trigger a misdirected eviction.
 pub fn undeliverable_negotiation_rollback(iq: &Iq) -> Option<UndeliverableNegotiationRollback> {
     let Iq::Set {
         from: Some(from),
@@ -1038,6 +1041,9 @@ pub fn undeliverable_negotiation_rollback(iq: &Iq) -> Option<UndeliverableNegoti
         return None;
     };
     if !payload.is("jingle", NS_JINGLE) {
+        return None;
+    }
+    if crate::xep::xep0272::find_muji(payload).is_some() {
         return None;
     }
     let jingle = Jingle::try_from(payload.clone()).ok()?;
@@ -1412,6 +1418,36 @@ mod tests {
                 "{action} must not trigger a token rollback"
             );
         }
+    }
+
+    #[test]
+    fn muji_bearing_accept_yields_no_rollback() {
+        // A Muji (XEP-0272) session-accept is room-scoped; deriving the
+        // 1:1 `{bare}::{sid}` shape from it would revoke — and evict,
+        // via the SFU RemoveParticipant leg — a same-sid 1:1 call.
+        let mut iq = negotiation_iq(
+            "session-accept",
+            "calls.waddle.test",
+            "alice@waddle.test/web",
+            "c1",
+        );
+        if let Iq::Set { payload, .. } = &mut iq {
+            let muji = Element::builder("muji", crate::xep::xep0272::NS_MUJI)
+                .attr(
+                    minidom::rxml::xml_ncname!("room").to_owned(),
+                    "room@muc.waddle.test",
+                )
+                .build();
+            *payload = Element::builder("jingle", xep0166::NS_JINGLE)
+                .attr(
+                    minidom::rxml::xml_ncname!("action").to_owned(),
+                    "session-accept",
+                )
+                .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "c1")
+                .append(muji)
+                .build();
+        }
+        assert!(undeliverable_negotiation_rollback(&iq).is_none());
     }
 
     #[test]
