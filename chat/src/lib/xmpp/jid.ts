@@ -1,6 +1,28 @@
 /** JID and room-address utilities. */
 import type { WaddleSession } from "../server-auth";
 
+declare const mucRoomJidBrand: unique symbol;
+
+/**
+ * A validated bare MUC room JID (`room@service`, no resource). Branded
+ * so call-teardown logic can require parse-at-the-boundary instead of
+ * accepting arbitrary strings; the raw bytes are preserved verbatim
+ * (no case folding) so wire sends are byte-identical to the state the
+ * JID came from.
+ */
+export type MucRoomJid = string & { readonly [mucRoomJidBrand]: true };
+
+/**
+ * Parse a raw room JID at the XMPP boundary. Rejects empty values,
+ * values without an `@`, and full JIDs carrying a resource. Trims
+ * surrounding whitespace but otherwise preserves the raw bytes.
+ */
+export function parseMucRoomJid(raw: string): MucRoomJid | null {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.includes("/") || !trimmed.includes("@")) return null;
+  return trimmed as MucRoomJid;
+}
+
 export function jidDomain(jid: string): string {
   const bareJid = barePeerJid(jid);
   return bareJid.split("@")[1] ?? "localhost";

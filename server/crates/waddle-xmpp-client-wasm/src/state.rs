@@ -210,7 +210,7 @@ pub(crate) enum WasmCommand {
         responder: oneshot::Sender<DriverResult<InboxPage>>,
     },
     CancelIq {
-        id: String,
+        id: waddle_xmpp_client::request::StanzaId,
         responder: oneshot::Sender<DriverResult<()>>,
     },
     Disconnect {
@@ -301,7 +301,8 @@ pub(crate) struct WasmDriverTask {
     pub(crate) cmd_rx: mpsc::Receiver<WasmCommand>,
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,
     pub(crate) inner: Rc<RefCell<WaddleClientInner>>,
-    pub(crate) pending_iqs: HashMap<String, oneshot::Sender<DriverResult<Element>>>,
+    pub(crate) pending_iqs:
+        HashMap<waddle_xmpp_client::request::StanzaId, oneshot::Sender<DriverResult<Element>>>,
     pub(crate) pending_mam_queries: HashMap<String, PendingMamQuery>,
     pub(crate) pending_inbox_queries: HashMap<String, PendingInboxQuery>,
     pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,

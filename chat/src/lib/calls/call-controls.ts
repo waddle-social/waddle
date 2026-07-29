@@ -155,18 +155,31 @@ export async function toggleScreenShare(): Promise<void> {
 }
 
 /**
- * Graceful hangup. Delegates to `tearDownActiveCall` so the
- * appropriate XEP-0166 / XEP-0272 stanzas go out before the engine
- * disconnects.
+ * Graceful hangup. Media first, protocol second (#1446): stop local
+ * capture and the LiveKit transport immediately, then let
+ * `tearDownActiveCall` send the XEP-0166 / XEP-0272 stanzas in the
+ * background. Hang-up must never wait on an XMPP round-trip to turn
+ * the camera off — a server that never replies would leave the user
+ * live on mic/camera after clicking "hang up". The wire teardown is
+ * bounded and best-effort; its failure never re-opens media.
  */
 export async function hangupActiveCall(): Promise<void> {
-  await tearDownActiveCall(getSender(), "success");
-  try {
-    const { engine } = useCallEngine();
-    await engine.disconnect();
-  } catch (err) {
-    reportCallError(err);
-  }
+  const sender = getSender();
+  const engineDisconnected = (async () => {
+    try {
+      await useCallEngine().engine.disconnect();
+    } catch (err) {
+      reportCallError(err);
+    }
+  })();
+  // Started AFTER the engine disconnect so capture release is
+  // initiated first, but not awaited behind it: the synchronous
+  // prefix flips the call slot to idle immediately, and the bounded
+  // wire teardown proceeds concurrently — a LiveKit disconnect
+  // stalling on a dead network can't pin the UI on the ended call
+  // or delay the terminate stanzas.
+  void tearDownActiveCall(sender, "success").catch(reportCallError);
+  await engineDisconnected;
 }
 
 /**
