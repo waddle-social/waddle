@@ -2786,18 +2786,28 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
         waddle_sfu::CallId::new("alice@example.com::offline-sid".to_string()).expect("call id");
     let bob_identity = waddle_sfu::Identity::from_jid(bob.clone());
     let token = sfu
-        .issue_join_token(&call_id, &bob_identity, MediaCapabilities::direct_call_peer())
+        .issue_join_token(
+            &call_id,
+            &bob_identity,
+            MediaCapabilities::direct_call_peer(),
+        )
         .expect("mint");
     sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(alice.clone()));
     sfu.register_call_participant(&call_id, &bob_identity);
 
     // The forwarded session-initiate carrying the minted credential.
     let jingle = Element::builder("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
-        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "session-initiate")
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-initiate",
+        )
         .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "offline-sid")
         .append(
             Element::builder("content", waddle_xmpp::xep::xep0166::NS_JINGLE)
-                .attr(minidom::rxml::xml_ncname!("creator").to_owned(), "initiator")
+                .attr(
+                    minidom::rxml::xml_ncname!("creator").to_owned(),
+                    "initiator",
+                )
                 .attr(minidom::rxml::xml_ncname!("name").to_owned(), "0")
                 .append(
                     Element::builder("transport", "urn:waddle:transports:livekit:0")
@@ -2826,7 +2836,12 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     let outcome = interpret(events, &deps).await;
 
     // The bounce carries no credential material whatsoever.
-    assert_eq!(outcome.frames.len(), 1, "one error frame: {:?}", outcome.frames);
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "one error frame: {:?}",
+        outcome.frames
+    );
     assert!(
         !outcome.frames[0].contains(token.jwt.as_str()),
         "bounced error must not contain the minted JWT"

@@ -1373,7 +1373,10 @@ mod tests {
         );
         let rollback = undeliverable_negotiation_rollback(&iq).expect("initiate yields rollback");
         assert_eq!(rollback.call_id.as_str(), "alice@waddle.test::c1");
-        assert_eq!(rollback.identity.as_jid().to_string(), "bob@waddle.test/phone");
+        assert_eq!(
+            rollback.identity.as_jid().to_string(),
+            "bob@waddle.test/phone"
+        );
     }
 
     #[test]
@@ -1389,13 +1392,21 @@ mod tests {
         );
         let rollback = undeliverable_negotiation_rollback(&iq).expect("accept yields rollback");
         assert_eq!(rollback.call_id.as_str(), "alice@waddle.test::c1");
-        assert_eq!(rollback.identity.as_jid().to_string(), "alice@waddle.test/web");
+        assert_eq!(
+            rollback.identity.as_jid().to_string(),
+            "alice@waddle.test/web"
+        );
     }
 
     #[test]
     fn non_negotiation_jingle_actions_yield_no_rollback() {
         for action in ["session-info", "session-terminate", "transport-info"] {
-            let iq = negotiation_iq(action, "alice@waddle.test/web", "bob@waddle.test/phone", "c1");
+            let iq = negotiation_iq(
+                action,
+                "alice@waddle.test/web",
+                "bob@waddle.test/phone",
+                "c1",
+            );
             assert!(
                 undeliverable_negotiation_rollback(&iq).is_none(),
                 "{action} must not trigger a token rollback"

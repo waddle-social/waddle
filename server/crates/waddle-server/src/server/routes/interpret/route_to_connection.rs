@@ -867,7 +867,10 @@ async fn local_account_exists_for(deps: &Deps<'_>, bare: &BareJid) -> bool {
 ///
 /// Returned stanzas are written back to the originating connection by
 /// the interpret loop, exactly like the undeliverable-IQ fallback.
-fn bounce_for_nonexistent_account(stanza: &Stanza, sfu: Option<&dyn waddle_sfu::SfuService>) -> Vec<Stanza> {
+fn bounce_for_nonexistent_account(
+    stanza: &Stanza,
+    sfu: Option<&dyn waddle_sfu::SfuService>,
+) -> Vec<Stanza> {
     match stanza {
         Stanza::Message(message) => {
             if matches!(message.type_, xmpp_parsers::message::MessageType::Error) {
