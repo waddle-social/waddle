@@ -165,13 +165,21 @@ export async function toggleScreenShare(): Promise<void> {
  */
 export async function hangupActiveCall(): Promise<void> {
   const sender = getSender();
-  try {
-    const { engine } = useCallEngine();
-    await engine.disconnect();
-  } catch (err) {
-    reportCallError(err);
-  }
+  const engineDisconnected = (async () => {
+    try {
+      await useCallEngine().engine.disconnect();
+    } catch (err) {
+      reportCallError(err);
+    }
+  })();
+  // Started AFTER the engine disconnect so capture release is
+  // initiated first, but not awaited behind it: the synchronous
+  // prefix flips the call slot to idle immediately, and the bounded
+  // wire teardown proceeds concurrently — a LiveKit disconnect
+  // stalling on a dead network can't pin the UI on the ended call
+  // or delay the terminate stanzas.
   void tearDownActiveCall(sender, "success").catch(reportCallError);
+  await engineDisconnected;
 }
 
 /**
