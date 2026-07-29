@@ -97,25 +97,44 @@ pub(crate) async fn iq_reply_from_oneshot(
     }
 }
 
-/// Resolve after `ms` on the JS event loop. Reads `setTimeout` off the
-/// global scope so it works in both window and worker contexts, and
-/// compiles (unused) on native test targets. If the runtime somehow
-/// lacks a timer API the promise never resolves and the wait degrades
-/// to the pre-deadline behavior.
-fn sleep_ms(ms: u32) -> impl core::future::Future<Output = ()> {
-    use wasm_bindgen::JsCast;
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let global = js_sys::global();
-        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .ok()
-            .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
-        if let Some(set_timeout) = set_timeout {
-            let _ = set_timeout.call2(&global, &resolve, &JsValue::from_f64(f64::from(ms)));
+/// Resolve after `ms` on the JS event loop, plus a cancel handle that
+/// clears the timer once the race is decided (so a won race doesn't
+/// retain the timer + resolve closure for the rest of the deadline).
+/// Reads `setTimeout`/`clearTimeout` off the global scope so it works
+/// in both window and worker contexts, and compiles (unused) on native
+/// test targets. If the runtime somehow lacks a timer API the promise
+/// never resolves and the wait degrades to the pre-deadline behavior.
+fn sleep_ms(ms: u32) -> (impl core::future::Future<Output = ()>, impl FnOnce()) {
+    let timer_id = Rc::new(std::cell::Cell::new(None::<f64>));
+    let timer_id_for_set = timer_id.clone();
+    let promise = js_sys::Promise::new(&mut move |resolve, _reject| {
+        if let Some(set_timeout) = global_timer_fn("setTimeout") {
+            let scheduled = set_timeout.call2(
+                &js_sys::global(),
+                &resolve,
+                &JsValue::from_f64(f64::from(ms)),
+            );
+            if let Ok(id) = scheduled {
+                timer_id_for_set.set(id.as_f64());
+            }
         }
     });
-    async move {
+    let cancel = move || {
+        if let (Some(id), Some(clear_timeout)) = (timer_id.get(), global_timer_fn("clearTimeout")) {
+            let _ = clear_timeout.call1(&js_sys::global(), &JsValue::from_f64(id));
+        }
+    };
+    let future = async move {
         let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-    }
+    };
+    (future, cancel)
+}
+
+fn global_timer_fn(name: &str) -> Option<js_sys::Function> {
+    use wasm_bindgen::JsCast;
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name))
+        .ok()
+        .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
 }
 
 /// Send an IQ and await its reply under [`IQ_REPLY_DEADLINE_MS`].
@@ -139,7 +158,10 @@ async fn send_iq_roundtrip(
         }
         iq_reply_from_oneshot(rx).await
     };
-    match wait_iq_reply_with_deadline(round_trip, sleep_ms(IQ_REPLY_DEADLINE_MS)).await {
+    let (deadline, cancel_deadline) = sleep_ms(IQ_REPLY_DEADLINE_MS);
+    let outcome = wait_iq_reply_with_deadline(round_trip, deadline).await;
+    cancel_deadline();
+    match outcome {
         IqReplyWait::Reply(reply) => Ok(reply),
         IqReplyWait::Disconnected => Err(js_error("client is disconnected")),
         IqReplyWait::DeadlineExpired => {

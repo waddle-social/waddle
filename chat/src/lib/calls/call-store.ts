@@ -814,6 +814,10 @@ async function leaveMujiCallPresence(
   const selfNick = s.selfNick;
   if (!selfNick || !updateMujiPresence) return;
   try {
+    // Guard the WIRE too, not just the local wipes: the server's Muji
+    // handlers key on room + occupant, not sid, so a stale leave/
+    // terminate for the old call would tear down the new one.
+    if (roomReoccupiedByNewerCall(s.peer, s.sid)) return;
     await boundedTeardownSend(() =>
       updateMujiPresence(s.peer, selfNick, false, false, false, {
         handRaised: false,
@@ -982,8 +986,15 @@ export async function tearDownActiveCall(
               clearLiveCallParticipants(s.peer);
             }
             try {
+              // Re-checked per attempt: the room can be re-occupied
+              // while the previous attempt sat on its deadline, and the
+              // server-side Muji terminate is room-scoped, not
+              // sid-scoped — sending it late would end the NEW call.
               await boundedTeardownSend(
-                () => sendMujiSessionTerminate(raw, s.peer, s.sid),
+                () =>
+                  roomReoccupiedByNewerCall(s.peer, s.sid)
+                    ? Promise.resolve()
+                    : sendMujiSessionTerminate(raw, s.peer, s.sid),
                 TERMINATE_SEND_ATTEMPTS,
               );
               forgetMucCallSession({
@@ -1004,10 +1015,12 @@ export async function tearDownActiveCall(
           }
           break;
         case "incoming":
+          // The ringtone is media too: silence it before the bounded
+          // reject send, not after — the slot is already idle.
+          incomingCallAlerts?.stop(s.sid);
           try {
             await boundedTeardownSend(() => outboundCalls.reject(sender, s.from, s.sid));
           } finally {
-            incomingCallAlerts?.stop(s.sid);
             clearDmCallActivity(s.from, s.sid);
           }
           break;
@@ -1027,8 +1040,14 @@ export async function tearDownActiveCall(
             await leaveMujiCallPresence(raw, s);
             if (s.activePresencePublished) {
               try {
+                // Same per-attempt room-reoccupation guard as the
+                // active-MUC arm: a late room-scoped terminate would
+                // end the room's NEW call.
                 await boundedTeardownSend(
-                  () => sendMujiSessionTerminate(raw, s.peer, s.sid),
+                  () =>
+                    roomReoccupiedByNewerCall(s.peer, s.sid)
+                      ? Promise.resolve()
+                      : sendMujiSessionTerminate(raw, s.peer, s.sid),
                   TERMINATE_SEND_ATTEMPTS,
                 );
                 forgetMucCallSession({

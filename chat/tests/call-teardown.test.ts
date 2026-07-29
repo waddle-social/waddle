@@ -1128,9 +1128,11 @@ describe("tearDownActiveCall", () => {
       await teardown;
 
       // The stale teardown must not erase the new call's projections
-      // or its call slot.
+      // or its call slot — and must not send the room-scoped Muji
+      // terminate, which would end the NEW call server-side.
       expect($mucCallLiveParticipants.get()[roomJid]).toBeDefined();
       expect($callState.get()).toMatchObject({ phase: "active", sid: "new-sid" });
+      expect(sender.send_muji_session_terminate).not.toHaveBeenCalled();
     } finally {
       restore();
       clearCallState();
