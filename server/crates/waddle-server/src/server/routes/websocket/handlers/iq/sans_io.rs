@@ -380,12 +380,14 @@ async fn relay_muji_to_room_owner(
         relay_error_frames()
     };
 
-    // The relay's envelope validation requires a bare `to` naming the
-    // calls mixer; anything else is NACKed as a parse failure by the
-    // receiver, which diverts the shared ordered channel and would
-    // silently break this sender's ordinary MUC traffic for the room.
-    // A client controls `to`, so reject the shape here rather than
-    // letting a malformed (or hostile) one reach the relay at all.
+    // The relay's envelope validation requires a bare `to` (and binds
+    // the `<muji room>` payload to the channel's room); a non-bare
+    // `to` is NACKed as a parse failure by the receiver, which
+    // diverts the Muji signaling lane (#1597) and would silently
+    // break this sender's later Muji IQs for the room. The exact
+    // mixer JID is enforced only here at ingress — a client controls
+    // `to`, so reject the shape here rather than letting a malformed
+    // (or hostile) one reach the relay at all.
     // Same for a room outside this server's MUC domain: it can have no
     // local claim, so relaying it only buys a claim-store lookup.
     let addressed_to_mixer = iq.to().is_some_and(|to| {
