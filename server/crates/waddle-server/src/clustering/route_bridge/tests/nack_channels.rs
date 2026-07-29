@@ -517,15 +517,15 @@ fn handoff_completion_synthesizes_iq_fallback_only_for_unavailable() {
     let stanza = Stanza::Iq(Box::new(iq));
 
     assert_eq!(
-        replies_for_origin_handoff(&stanza, FullJidDeliveryOutcome::Delivered).len(),
+        replies_for_origin_handoff(&stanza, FullJidDeliveryOutcome::Delivered, None).len(),
         0
     );
     assert_eq!(
-        replies_for_origin_handoff(&stanza, FullJidDeliveryOutcome::Dropped).len(),
+        replies_for_origin_handoff(&stanza, FullJidDeliveryOutcome::Dropped, None).len(),
         0
     );
     assert_eq!(
-        replies_for_origin_handoff(&stanza, FullJidDeliveryOutcome::Unavailable).len(),
+        replies_for_origin_handoff(&stanza, FullJidDeliveryOutcome::Unavailable, None).len(),
         1
     );
 }

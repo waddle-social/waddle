@@ -66,7 +66,7 @@ pub(super) async fn route_full_jid_iq(
                     Vec::new()
                 }
                 crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable => {
-                    fallback_iq_frames(&iq)
+                    fallback_iq_frames(&iq, state)
                 }
             };
         }
@@ -87,7 +87,7 @@ pub(super) async fn route_full_jid_iq(
                     Vec::new()
                 }
                 crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable => {
-                    fallback_iq_frames(&iq)
+                    fallback_iq_frames(&iq, state)
                 }
             };
         }
@@ -103,15 +103,16 @@ pub(super) async fn route_full_jid_iq(
     {
         waddle_xmpp::registry::SendResult::Sent => Vec::new(),
         waddle_xmpp::registry::SendResult::NotConnected
-        | waddle_xmpp::registry::SendResult::ChannelClosed => fallback_iq_frames(&iq),
+        | waddle_xmpp::registry::SendResult::ChannelClosed => fallback_iq_frames(&iq, state),
     }
 }
 
-fn fallback_iq_frames(iq: &xmpp_parsers::iq::Iq) -> Vec<String> {
+fn fallback_iq_frames(iq: &xmpp_parsers::iq::Iq, state: &WebSocketState) -> Vec<String> {
     let stanza = Stanza::Iq(Box::new(iq.clone()));
-    let Some(reply) =
-        crate::server::routes::interpret::fallback_reply_for_undeliverable_iq(&stanza)
-    else {
+    let Some(reply) = crate::server::routes::interpret::fallback_reply_for_undeliverable_iq(
+        &stanza,
+        state.deps.protocol.sfu.as_deref(),
+    ) else {
         return Vec::new();
     };
     let serialized = match reply {

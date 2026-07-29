@@ -311,6 +311,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         message_dispatcher: None,
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     };
     let _outcome = interpret(
         vec![OutboundEvent::SendCarbons {
@@ -2672,6 +2673,25 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
     );
 }
 
+fn sfu_fixture_for_route_test() -> Arc<dyn waddle_sfu::SfuService> {
+    let cfg = waddle_sfu::SfuConfig {
+        api_key: waddle_sfu::ApiKey::new("APIxxxxxxxx"),
+        api_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
+        webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
+        ws_url: waddle_sfu::WebsocketUrl::new("wss://livekit.test/".parse().expect("url"))
+            .expect("ws url"),
+        turn_host: waddle_sfu::TurnHost::new("turn.test"),
+        turn_tls_port: 443,
+        turn_udp_port: 3478,
+        turn_shared_secret: waddle_sfu::TurnSharedSecret::from_text("turn-secret"),
+        token_ttl: chrono::Duration::seconds(3600),
+        turn_ttl: chrono::Duration::seconds(3600),
+    };
+    Arc::new(waddle_sfu::LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+}
+
 fn jingle_payload_for_route_test(action: &str, sid: &str) -> Element {
     Element::builder("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
         .attr(minidom::rxml::xml_ncname!("action").to_owned(), action)
@@ -2738,11 +2758,91 @@ async fn route_to_connection_offline_full_jid_call_iq_returns_service_unavailabl
         error.defined_condition,
         DefinedCondition::ServiceUnavailable
     );
-    // RFC 6120 §8.3.1: the error echoes the original request payload so
-    // the sender can correlate which stanza failed.
-    let echoed = payload.expect("service-unavailable echoes the original payload");
-    assert_eq!(echoed.name(), "jingle");
-    assert_eq!(echoed.attr("sid"), Some("offline-sid"));
+    // #1444: Jingle payloads are NEVER echoed back — the server injects
+    // freshly minted LiveKit join credentials into forwarded negotiation
+    // stanzas, so an RFC 6120 §8.3.1 echo would hand the addressee's
+    // token to the sender. Correlation rides on the IQ id alone.
+    assert!(
+        payload.is_none(),
+        "undeliverable Jingle IQ error must not echo the payload: {payload:?}"
+    );
+}
+
+#[tokio::test]
+async fn route_to_connection_offline_session_initiate_bounce_carries_no_credentials_and_revokes_token(
+) {
+    use waddle_sfu::{MediaCapabilities, SfuService};
+    use waddle_xmpp::registry::UserRegistryActor;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+    let sfu: Arc<dyn SfuService> = sfu_fixture_for_route_test();
+
+    // Mirror what the Jingle handler did before routing: mint the
+    // callee's join token and register both participants.
+    let call_id =
+        waddle_sfu::CallId::new("alice@example.com::offline-sid".to_string()).expect("call id");
+    let bob_identity = waddle_sfu::Identity::from_jid(bob.clone());
+    let token = sfu
+        .issue_join_token(&call_id, &bob_identity, MediaCapabilities::direct_call_peer())
+        .expect("mint");
+    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(alice.clone()));
+    sfu.register_call_participant(&call_id, &bob_identity);
+
+    // The forwarded session-initiate carrying the minted credential.
+    let jingle = Element::builder("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "session-initiate")
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "offline-sid")
+        .append(
+            Element::builder("content", waddle_xmpp::xep::xep0166::NS_JINGLE)
+                .attr(minidom::rxml::xml_ncname!("creator").to_owned(), "initiator")
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "0")
+                .append(
+                    Element::builder("transport", "urn:waddle:transports:livekit:0")
+                        .attr(
+                            minidom::rxml::xml_ncname!("token").to_owned(),
+                            token.jwt.as_str(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let initiate = Iq::Set {
+        from: Some(jid::Jid::from(alice.clone())),
+        to: Some(jid::Jid::from(bob.clone())),
+        id: "call-offline-2".to_string(),
+        payload: jingle,
+    };
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: jid::Jid::from(bob.clone()),
+        stanza: Box::new(Stanza::Iq(Box::new(initiate))),
+    }];
+
+    let mut deps = Deps::registry_with_user_registry(&registry, &user_registry);
+    deps.sfu = Some(&sfu);
+    let outcome = interpret(events, &deps).await;
+
+    // The bounce carries no credential material whatsoever.
+    assert_eq!(outcome.frames.len(), 1, "one error frame: {:?}", outcome.frames);
+    assert!(
+        !outcome.frames[0].contains(token.jwt.as_str()),
+        "bounced error must not contain the minted JWT"
+    );
+    assert!(
+        !outcome.frames[0].contains("livekit"),
+        "bounced error must not contain the LiveKit transport: {}",
+        outcome.frames[0]
+    );
+
+    // ...and the minted token was revoked (JTI moved to the revocation
+    // set) so the credential cannot outlive the failed invite.
+    assert!(
+        sfu.is_revoked(&token.jti),
+        "undelivered invite must revoke the freshly minted JTI"
+    );
 }
 
 #[tokio::test]
@@ -3355,6 +3455,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
+        sfu: None,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(alice));
@@ -3718,6 +3819,7 @@ fn offline_pass_deps<'a>(
         message_dispatcher: Some(dispatcher),
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     }
 }
 
@@ -4593,6 +4695,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         message_dispatcher: None,
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     };
 
     let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
@@ -4868,6 +4971,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
+        sfu: None,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(sender));
@@ -5540,6 +5644,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         message_dispatcher: Some(&dispatcher),
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     };
 
     let msg = chat_msg("alice@example.com/web", "bob@example.com", "must arrive");

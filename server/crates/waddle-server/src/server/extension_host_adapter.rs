@@ -272,6 +272,7 @@ impl ExtensionHostAdapter {
             message_dispatcher: Some(&self.state.deps.protocol.dispatcher),
             pending_delivery_storage: Some(&self.state.deps.protocol.pending_delivery_storage),
             ordered_relay_origin: None,
+            sfu: self.state.deps.protocol.sfu.as_ref(),
         }
     }
 

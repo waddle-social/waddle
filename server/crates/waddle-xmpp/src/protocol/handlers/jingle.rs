@@ -1003,6 +1003,57 @@ fn scoped_call_id(initiator_bare: &BareJid, sid: &str) -> Result<CallId, SfuErro
     CallId::new(format!("{}::{}", initiator_bare, sid))
 }
 
+/// The `(call, identity)` whose freshly minted LiveKit join credentials
+/// must be revoked when a forwarded 1:1 Jingle negotiation IQ turns out
+/// undeliverable (#1444).
+///
+/// [`JingleHandler`] mints the addressee's join token and injects it
+/// into the forwarded `session-initiate` / `session-accept` BEFORE
+/// routability is known. When delivery then fails, the routing layer
+/// suppresses the credential echo and revokes this pair via
+/// [`SfuService::unregister_call_participant`].
+pub struct UndeliverableNegotiationRollback {
+    pub call_id: CallId,
+    pub identity: Identity,
+}
+
+/// Derive the rollback pair from the bounced stanza itself. Returns
+/// `None` for anything that is not a forwarded 1:1
+/// `session-initiate`/`session-accept` addressed to a full JID.
+///
+/// The call scoping mirrors [`JingleHandler::handle_session_negotiation`]:
+/// an initiate is scoped to its sender (the initiator), an accept to its
+/// addressee (the initiator being handed the responder's accept) — and
+/// the token was minted for the addressee in both cases. A Muji stanza
+/// yields a room-scoped id that can never match a `{bare}::{sid}` 1:1
+/// registry entry, so a spurious revocation is impossible.
+pub fn undeliverable_negotiation_rollback(iq: &Iq) -> Option<UndeliverableNegotiationRollback> {
+    let Iq::Set {
+        from: Some(from),
+        to: Some(to),
+        payload,
+        ..
+    } = iq
+    else {
+        return None;
+    };
+    if !payload.is("jingle", NS_JINGLE) {
+        return None;
+    }
+    let jingle = Jingle::try_from(payload.clone()).ok()?;
+    let to_full = to.clone().try_into_full().ok()?;
+    let initiator_bare = match jingle.action {
+        Action::SessionInitiate => from.to_bare(),
+        Action::SessionAccept => to_full.to_bare(),
+        _ => return None,
+    };
+    let call_id = scoped_call_id(&initiator_bare, &jingle.sid.0).ok()?;
+    Some(UndeliverableNegotiationRollback {
+        call_id,
+        identity: Identity::from_jid(to_full),
+    })
+}
+
 enum RewriteError {
     UnsupportedTransport,
     InvalidWaddleTransport(TransportParseError),
@@ -1298,6 +1349,72 @@ fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<Outboun
 mod tests {
     use super::*;
     use crate::xep::xep0166;
+
+    fn negotiation_iq(action: &str, from: &str, to: &str, sid: &str) -> Iq {
+        let payload = Element::builder("jingle", xep0166::NS_JINGLE)
+            .attr(minidom::rxml::xml_ncname!("action").to_owned(), action)
+            .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+            .build();
+        Iq::Set {
+            from: Some(from.parse().expect("from jid")),
+            to: Some(to.parse().expect("to jid")),
+            id: "bounce-1".to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn undeliverable_initiate_rollback_targets_the_addressee_scoped_to_the_sender() {
+        let iq = negotiation_iq(
+            "session-initiate",
+            "alice@waddle.test/web",
+            "bob@waddle.test/phone",
+            "c1",
+        );
+        let rollback = undeliverable_negotiation_rollback(&iq).expect("initiate yields rollback");
+        assert_eq!(rollback.call_id.as_str(), "alice@waddle.test::c1");
+        assert_eq!(rollback.identity.as_jid().to_string(), "bob@waddle.test/phone");
+    }
+
+    #[test]
+    fn undeliverable_accept_rollback_scopes_the_call_to_the_addressed_initiator() {
+        // A bounced accept was travelling responder → initiator; the
+        // token inside was minted for the initiator, and the call is
+        // scoped to that initiator's bare JID.
+        let iq = negotiation_iq(
+            "session-accept",
+            "bob@waddle.test/phone",
+            "alice@waddle.test/web",
+            "c1",
+        );
+        let rollback = undeliverable_negotiation_rollback(&iq).expect("accept yields rollback");
+        assert_eq!(rollback.call_id.as_str(), "alice@waddle.test::c1");
+        assert_eq!(rollback.identity.as_jid().to_string(), "alice@waddle.test/web");
+    }
+
+    #[test]
+    fn non_negotiation_jingle_actions_yield_no_rollback() {
+        for action in ["session-info", "session-terminate", "transport-info"] {
+            let iq = negotiation_iq(action, "alice@waddle.test/web", "bob@waddle.test/phone", "c1");
+            assert!(
+                undeliverable_negotiation_rollback(&iq).is_none(),
+                "{action} must not trigger a token rollback"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_jid_addressee_yields_no_rollback() {
+        // Tokens are only minted for full-JID addressees; a bare `to`
+        // (e.g. a Muji mixer route) has nothing to revoke.
+        let iq = negotiation_iq(
+            "session-initiate",
+            "alice@waddle.test/web",
+            "bob@waddle.test",
+            "c1",
+        );
+        assert!(undeliverable_negotiation_rollback(&iq).is_none());
+    }
 
     /// Pins the 1:1 room-name format through the correlation digest.
     /// The chat twin (`dmCallRoomName` pin in
