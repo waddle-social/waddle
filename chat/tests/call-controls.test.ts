@@ -14,6 +14,7 @@ import {
   $callScreenShareEnabled,
   $callScreenShareSupported,
   $callMicEnabled,
+  hangupActiveCall,
   installCallPagehideSuspension,
   refreshScreenShareSupported,
   resetCallControls,
@@ -336,6 +337,76 @@ describe("call page lifecycle controls", () => {
     expect(source).toContain("installCallPagehideSuspension(window)");
     expect(unmountBlock).toContain("void engine.disconnect();");
     expect(unmountBlock).not.toContain("tearDownActiveCall(");
+  });
+});
+
+describe("hangupActiveCall media-first ordering (#1446)", () => {
+  test("releases media and goes idle before any XMPP teardown send, even when the server never replies", async () => {
+    const events: string[] = [];
+    const sender = {
+      send_call_session_terminate: mock(() => {
+        events.push("terminate");
+        return new Promise<void>(() => undefined); // server never replies
+      }),
+    };
+    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      off: () => undefined,
+      localParticipant: undefined,
+      disconnect: async () => {
+        events.push("disconnect");
+      },
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: { audio: true, video: true },
+      join,
+      kind: "dm",
+    });
+
+    await hangupActiveCall();
+
+    // Camera/mic/LiveKit are released and the call slot is idle without
+    // waiting on the terminate IQ — the server never replied at all.
+    expect(events[0]).toBe("disconnect");
+    expect($callState.get()).toEqual({ phase: "idle" });
+
+    // The XEP-0166 terminate still goes out afterwards, in the background.
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    expect(events).toContain("terminate");
+    expect(events.indexOf("terminate")).toBeGreaterThan(events.indexOf("disconnect"));
+  });
+
+  test("a stalled LiveKit disconnect cannot pin the call slot or delay the terminate", async () => {
+    const sender = {
+      send_call_session_terminate: mock(async () => undefined),
+    };
+    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      off: () => undefined,
+      localParticipant: undefined,
+      disconnect: () => new Promise<void>(() => undefined), // dead network
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: { audio: true, video: true },
+      join,
+      kind: "dm",
+    });
+
+    void hangupActiveCall();
+
+    // The slot flips idle synchronously, and the terminate goes out,
+    // even though the engine disconnect never settles.
+    expect($callState.get()).toEqual({ phase: "idle" });
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
   });
 });
 

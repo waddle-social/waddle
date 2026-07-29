@@ -17,6 +17,11 @@ import {
   rememberMucCallSession,
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
+import {
+  boundedTeardownSend,
+  TERMINATE_SEND_ATTEMPTS,
+  type TeardownSendPolicy,
+} from "./call-teardown-transport";
 import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
 import { mediaErrorMessage } from "./call-media-issues";
 import {
@@ -32,7 +37,7 @@ import {
   publishDmCallOutcomeAnchor,
   publishDmCallStartedAnchor,
 } from "./dm-call-anchor";
-import { barePeerJid } from "../xmpp/jid";
+import { barePeerJid, parseMucRoomJid, type MucRoomJid } from "../xmpp/jid";
 import { dmCallRoomName } from "./call-correlation";
 import type { IncomingCallAlertController } from "@/shell/audio-alerts";
 import { reportError as reportTelemetryError } from "../telemetry";
@@ -724,6 +729,106 @@ function cancelCallTimers(): void {
 }
 
 /**
+ * Whether a NEWER call has already re-occupied `roomJid` while a
+ * backgrounded teardown was still in flight (#1446). The old call's
+ * teardown must then skip every projection wipe that is not scoped to
+ * its own sid, or it would erase the new call's participants.
+ */
+function roomReoccupiedByNewerCall(roomJid: MucRoomJid, sid: string): boolean {
+  const now = $callState.get();
+  return (
+    (now.phase === "active" || now.phase === "muc-pending") &&
+    parseMucRoomJid(now.peer) === roomJid &&
+    now.sid !== sid
+  );
+}
+
+/**
+ * Whether ANY newer call now occupies the single call slot. Late
+ * failures from a superseded teardown must not surface into — or
+ * re-arm the auto-clear timer of — the NEW call's global error slot,
+ * nor be attributed to its correlation id.
+ */
+function callSlotReoccupiedByNewerCall(sid: string): boolean {
+  const now = $callState.get();
+  return now.phase !== "idle" && now.phase !== "ended" && now.sid !== sid;
+}
+
+/**
+ * Shared XEP-0272 §Leaving step for both the active-MUC and
+ * muc-pending teardown arms: drop our `<muji/>` presence
+ * advertisement, then clear the local self-participant projections —
+ * unless the room has been re-occupied by a newer call.
+ */
+async function leaveMujiCallPresence(
+  raw: RawIqSender,
+  roomJid: MucRoomJid,
+  s: { sid: string; selfNick?: string; selfFullJid?: string | null },
+  policy: TeardownSendPolicy,
+): Promise<void> {
+  const updateMujiPresence = raw.update_muji_presence;
+  const selfNick = s.selfNick;
+  if (!selfNick || !updateMujiPresence) return;
+  try {
+    // Guard the WIRE too, not just the local wipes: the server's Muji
+    // handlers key on room + occupant, not sid, so a stale leave/
+    // terminate for the old call would tear down the new one. (The
+    // presence itself cannot be cancelled once queued — no id — but
+    // the driver's FIFO stream order guarantees a queued leave is
+    // delivered BEFORE any later rejoin presence, so late delivery is
+    // ordering-safe.)
+    if (roomReoccupiedByNewerCall(roomJid, s.sid)) return;
+    await boundedTeardownSend(
+      () =>
+        updateMujiPresence(roomJid, selfNick, false, false, false, {
+          handRaised: false,
+          muted: false, // leaving clears all in-call state
+        }),
+      policy,
+    );
+  } catch (err) {
+    if (!callSlotReoccupiedByNewerCall(s.sid)) reportCallError(err);
+  } finally {
+    if (!roomReoccupiedByNewerCall(roomJid, s.sid)) {
+      clearMucCallParticipant(roomJid, selfNick, s.selfFullJid);
+      setSelfRaisedHand(roomJid, false);
+    }
+  }
+}
+
+/**
+ * XEP-0166 session-terminate step shared by the active-MUC and
+ * muc-pending teardown arms. Re-checks room reoccupation per attempt
+ * (the server-side Muji terminate is room-scoped, not sid-scoped —
+ * sending it late would end the room's NEW call), and cancels the
+ * underlying IQ inside the WASM driver on every expired attempt so a
+ * stale terminate cannot linger in the pending/deferred queues after
+ * the JS deadline has moved on.
+ */
+async function terminateMujiSession(
+  raw: RawIqSender,
+  roomJid: MucRoomJid,
+  s: { sid: string; selfFullJid?: string | null },
+  policy: TeardownSendPolicy,
+): Promise<void> {
+  const iqId = crypto.randomUUID();
+  await boundedTeardownSend(
+    () =>
+      roomReoccupiedByNewerCall(roomJid, s.sid)
+        ? Promise.resolve()
+        : sendMujiSessionTerminate(raw, roomJid, s.sid, iqId),
+    {
+      ...policy,
+      attempts: TERMINATE_SEND_ATTEMPTS,
+      onTimeout: () => {
+        void raw.cancel_raw_iq?.(iqId).catch(() => undefined);
+      },
+    },
+  );
+  forgetMucCallSession({ roomJid, selfFullJid: s.selfFullJid, sid: s.sid });
+}
+
+/**
  * Surface a wire-send failure into the global error slot. Components
  * subscribe via `$lastCallError` to render an inline error row.
  * Auto-clears after `AUTO_CLEAR_MS` so the row doesn't linger past
@@ -811,12 +916,31 @@ export function callLifecycleTerminalForTeardown(
 export async function tearDownActiveCall(
   sender: CallWireSender | null,
   reason: "success" | "gone",
+  policy: TeardownSendPolicy = {},
 ): Promise<void> {
   cancelCallTimers();
   const s = $callState.get();
+  if (s.phase === "ended") {
+    // Normalize a lingering post-call summary slot away, as the old
+    // trailing idle-set always did (logout path).
+    $callState.set({ phase: "idle" });
+  }
   if (s.phase !== "idle" && s.phase !== "ended") {
     finishCallAttempt(s.sid, callLifecycleTerminalForTeardown(s.phase, reason));
+    // Go idle BEFORE any wire teardown (#1446): the stanzas below are
+    // best-effort notifications to the peer/mixer, and none of them may
+    // keep the local UI pinned on a dead call while a slow or silent
+    // server withholds its IQ replies. Everything after this line works
+    // from the `s` snapshot.
+    $callState.set({ phase: "idle" });
   }
+  // Wire failures below surface through this scoped reporter: the slot
+  // is already idle, so by the time a bounded send fails a NEWER call
+  // may own the global error surface (#1606 review).
+  const reportWireError = (err: unknown): void => {
+    if ("sid" in s && callSlotReoccupiedByNewerCall(s.sid)) return;
+    reportCallError(err);
+  };
   if (sender) {
     try {
       switch (s.phase) {
@@ -824,18 +948,16 @@ export async function tearDownActiveCall(
           if (s.kind === "dm") {
             let terminateAllowsFinish = false;
             try {
-              const outcome = await outboundCalls.sessionTerminateWithOutcome(
-                sender,
-                s.peer,
-                s.sid,
-                reason,
+              const outcome = await boundedTeardownSend(
+                () => outboundCalls.sessionTerminateWithOutcome(sender, s.peer, s.sid, reason),
+                { ...policy, attempts: TERMINATE_SEND_ATTEMPTS },
               );
               terminateAllowsFinish = outcome === "ok" || outcome === "orphaned";
               if (outcome === "error") {
-                reportCallError(new Error("call session terminate failed"));
+                reportWireError(new Error("call session terminate failed"));
               }
             } catch (err) {
-              reportCallError(err);
+              reportWireError(err);
             }
             if (terminateAllowsFinish) {
               try {
@@ -844,9 +966,12 @@ export async function tearDownActiveCall(
                 // consistently. A classified orphaned Jingle terminate
                 // means the server has already lost the call registry, so
                 // only the message-level bookend can still route.
-                await outboundCalls.finish(sender, s.peer, s.sid);
+                await boundedTeardownSend(
+                  () => outboundCalls.finish(sender, s.peer, s.sid),
+                  policy,
+                );
               } catch (err) {
-                reportCallError(err);
+                reportWireError(err);
               }
             }
             clearDmCallActivity(s.peer, s.sid);
@@ -862,44 +987,39 @@ export async function tearDownActiveCall(
             // try/catch so a single failure (e.g. a stale wasm
             // bundle) can't swallow the other.
             const raw = sender as RawIqSender;
-            if (s.selfNick && raw.update_muji_presence) {
-              try {
-                await raw.update_muji_presence(s.peer, s.selfNick, false, false, false, {
-                  handRaised: false,
-                  muted: false, // leaving clears all in-call state
-                });
-              } catch (err) {
-                reportCallError(err);
-              } finally {
-                clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
-                setSelfRaisedHand(s.peer, false);
-              }
+            // Parse at the boundary: the wire steps below require a
+            // validated bare room JID; local projection cleanup still
+            // runs even when the slot held something unparseable.
+            const roomJid = parseMucRoomJid(s.peer);
+            if (roomJid) {
+              await leaveMujiCallPresence(raw, roomJid, s, policy);
             }
-            clearLiveCallParticipants(s.peer);
+            if (!roomJid || !roomReoccupiedByNewerCall(roomJid, s.sid)) {
+              clearLiveCallParticipants(s.peer);
+            }
             try {
-              await sendMujiSessionTerminate(raw, s.peer, s.sid);
-              forgetMucCallSession({
-                roomJid: s.peer,
-                selfFullJid: s.selfFullJid,
-                sid: s.sid,
-              });
+              if (roomJid) {
+                await terminateMujiSession(raw, roomJid, s, policy);
+              }
             } catch (err) {
-              reportCallError(err);
+              reportWireError(err);
             }
           }
           break;
         case "outgoing":
           try {
-            await outboundCalls.retract(sender, s.to, s.sid);
+            await boundedTeardownSend(() => outboundCalls.retract(sender, s.to, s.sid), policy);
           } finally {
             clearDmCallActivity(s.to, s.sid);
           }
           break;
         case "incoming":
+          // The ringtone is media too: silence it before the bounded
+          // reject send, not after — the slot is already idle.
+          incomingCallAlerts?.stop(s.sid);
           try {
-            await outboundCalls.reject(sender, s.from, s.sid);
+            await boundedTeardownSend(() => outboundCalls.reject(sender, s.from, s.sid), policy);
           } finally {
-            incomingCallAlerts?.stop(s.sid);
             clearDmCallActivity(s.from, s.sid);
           }
           break;
@@ -914,32 +1034,17 @@ export async function tearDownActiveCall(
             s.selfNick,
             new Error("Muji preparing wait cancelled while clearing call state"),
           );
-          $callState.set({ phase: "idle" });
           {
             const raw = sender as RawIqSender;
-            if (s.selfNick && raw.update_muji_presence) {
-              try {
-                await raw.update_muji_presence(s.peer, s.selfNick, false, false, false, {
-                  handRaised: false,
-                  muted: false, // leaving clears all in-call state
-                });
-              } catch (err) {
-                reportCallError(err);
-              } finally {
-                clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
-                setSelfRaisedHand(s.peer, false);
-              }
+            const roomJid = parseMucRoomJid(s.peer);
+            if (roomJid) {
+              await leaveMujiCallPresence(raw, roomJid, s, policy);
             }
-            if (s.activePresencePublished) {
+            if (roomJid && s.activePresencePublished) {
               try {
-                await sendMujiSessionTerminate(raw, s.peer, s.sid);
-                forgetMucCallSession({
-                  roomJid: s.peer,
-                  selfFullJid: s.selfFullJid,
-                  sid: s.sid,
-                });
+                await terminateMujiSession(raw, roomJid, s, policy);
               } catch (err) {
-                reportCallError(err);
+                reportWireError(err);
               }
             }
           }
@@ -948,10 +1053,9 @@ export async function tearDownActiveCall(
           break;
       }
     } catch (err) {
-      reportCallError(err);
+      reportWireError(err);
     }
   }
-  $callState.set({ phase: "idle" });
 }
 
 /**
@@ -984,7 +1088,18 @@ export type RawIqSender = {
     sid: string,
     video: boolean,
   ) => Promise<void>;
-  send_muji_session_terminate?: (room_jid: string, sid: string) => Promise<void>;
+  /**
+   * `iq_id` is caller-supplied so the teardown path can cancel the
+   * still-pending or deferred IQ (`cancel_raw_iq`) when its own
+   * deadline expires.
+   */
+  send_muji_session_terminate?: (
+    room_jid: string,
+    sid: string,
+    iq_id: string,
+  ) => Promise<void>;
+  /** Cancel a pending or deferred raw IQ by its id. */
+  cancel_raw_iq?: (id: string) => Promise<void>;
   update_muji_presence?: (
     room_jid: string,
     nick: string,
@@ -1083,6 +1198,7 @@ async function sendMujiSessionTerminate(
   sender: RawIqSender | CallWireSender,
   roomJid: string,
   sid: string,
+  iqId: string = crypto.randomUUID(),
 ): Promise<void> {
   const rawSender = sender as RawIqSender;
   if (!rawSender.send_muji_session_terminate) {
@@ -1090,7 +1206,7 @@ async function sendMujiSessionTerminate(
       "wasm client does not expose send_muji_session_terminate; rebuild the wasm bundle",
     );
   }
-  await rawSender.send_muji_session_terminate(roomJid, sid);
+  await rawSender.send_muji_session_terminate(roomJid, sid, iqId);
 }
 
 function mucSetupStillPending(

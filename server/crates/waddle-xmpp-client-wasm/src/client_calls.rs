@@ -386,9 +386,22 @@ impl WaddleClient {
     ///   </jingle>
     /// </iq>
     /// ```
-    pub fn send_muji_session_terminate(&self, room_jid: String, sid_str: String) -> Promise {
+    /// `iq_id` is caller-supplied (and validated against the
+    /// [`waddle_xmpp_client::request::StanzaId`] invariant) so the JS
+    /// side can cancel the still-pending or deferred IQ via
+    /// [`WaddleClient::cancel_raw_iq`] when its own teardown deadline
+    /// expires — a stale room-scoped terminate must not linger in the
+    /// driver after the room has been re-occupied (#1606 review).
+    pub fn send_muji_session_terminate(
+        &self,
+        room_jid: String,
+        sid_str: String,
+        iq_id: String,
+    ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
+            let iq_id = waddle_xmpp_client::request::StanzaId::new(iq_id)
+                .map_err(|err| js_error(err.to_string()))?;
             let mixer = calls_mixer_jid(stored_full_jid(&inner)?.domain().as_str());
 
             let jingle = build_muji_session_terminate(&room_jid, &sid(sid_str));
@@ -396,7 +409,7 @@ impl WaddleClient {
                 .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
                 .attr(
                     minidom::rxml::xml_ncname!("id").to_owned(),
-                    uuid::Uuid::new_v4().to_string(),
+                    iq_id.as_str().to_string(),
                 )
                 .attr(minidom::rxml::xml_ncname!("to").to_owned(), mixer.as_str())
                 .append(jingle)

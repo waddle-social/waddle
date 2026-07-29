@@ -137,7 +137,11 @@ export async function leaveRetainedMucCallAction({
           "wasm client does not expose send_muji_session_terminate; rebuild the wasm bundle",
         );
       }
-      await sender.send_muji_session_terminate(cachedSession.roomJid, cachedSession.sid);
+      await sender.send_muji_session_terminate(
+        cachedSession.roomJid,
+        cachedSession.sid,
+        crypto.randomUUID(),
+      );
       forgetMucCallSession({
         roomJid: cachedSession.roomJid,
         selfFullJid,

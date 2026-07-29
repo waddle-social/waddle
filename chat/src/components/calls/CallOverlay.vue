@@ -106,8 +106,12 @@ watch(
       // Await the in-flight adoption first: clearing (below) bumps the
       // epoch, and the failure telemetry emitted here must carry the id.
       await correlationAdopted;
-      await tearDownActiveCall(getSender(), "gone");
-      await engine.disconnect();
+      // Media first, protocol second (#1446): release any capture the
+      // partial join grabbed, with the bounded wire teardown running
+      // concurrently in the background — neither stalls the other.
+      const engineDisconnected = engine.disconnect();
+      void tearDownActiveCall(getSender(), "gone").catch(reportCallError);
+      await engineDisconnected.catch(reportCallError);
       reportCallError(err);
       // A connect() failure before a room exists never emits the engine's
       // `disconnected` event, so the disconnected-handler cleanup does not
