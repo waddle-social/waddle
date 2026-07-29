@@ -724,6 +724,56 @@ function cancelCallTimers(): void {
 }
 
 /**
+ * Deadline for each best-effort teardown stanza (#1446). Teardown wire
+ * sends are peer/mixer notifications — they must never hold the local
+ * call slot (or a caller like `hangupActiveCall`) hostage to a server
+ * that withholds its reply.
+ */
+const TEARDOWN_STANZA_TIMEOUT_MS = 10_000;
+let teardownStanzaTimeoutMs = TEARDOWN_STANZA_TIMEOUT_MS;
+
+export function setTeardownStanzaTimeoutMsForTests(timeoutMs: number): () => void {
+  const previous = teardownStanzaTimeoutMs;
+  teardownStanzaTimeoutMs = timeoutMs;
+  return () => {
+    teardownStanzaTimeoutMs = previous;
+  };
+}
+
+class TeardownSendTimeoutError extends Error {
+  constructor() {
+    super("call teardown stanza timed out");
+  }
+}
+
+/**
+ * Race a teardown wire send against the deadline, retrying exactly once
+ * on timeout. A typed error reply from the server is a definitive
+ * answer and is NOT retried — only silence is. The abandoned attempt's
+ * promise is left to settle in the void; its result no longer matters.
+ */
+async function boundedTeardownSend<T>(send: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        send(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new TeardownSendTimeoutError()),
+            teardownStanzaTimeoutMs,
+          );
+        }),
+      ]);
+    } catch (err) {
+      if (!(err instanceof TeardownSendTimeoutError) || attempt >= 1) throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * Surface a wire-send failure into the global error slot. Components
  * subscribe via `$lastCallError` to render an inline error row.
  * Auto-clears after `AUTO_CLEAR_MS` so the row doesn't linger past
@@ -816,6 +866,12 @@ export async function tearDownActiveCall(
   const s = $callState.get();
   if (s.phase !== "idle" && s.phase !== "ended") {
     finishCallAttempt(s.sid, callLifecycleTerminalForTeardown(s.phase, reason));
+    // Go idle BEFORE any wire teardown (#1446): the stanzas below are
+    // best-effort notifications to the peer/mixer, and none of them may
+    // keep the local UI pinned on a dead call while a slow or silent
+    // server withholds its IQ replies. Everything after this line works
+    // from the `s` snapshot.
+    $callState.set({ phase: "idle" });
   }
   if (sender) {
     try {
@@ -824,12 +880,8 @@ export async function tearDownActiveCall(
           if (s.kind === "dm") {
             let terminateAllowsFinish = false;
             try {
-              const outcome = await outboundCalls.sessionTerminateWithOutcome(
-                sender,
-                s.peer,
-                s.sid,
-                reason,
-              );
+              const outcome = await boundedTeardownSend(() =>
+                outboundCalls.sessionTerminateWithOutcome(sender, s.peer, s.sid, reason));
               terminateAllowsFinish = outcome === "ok" || outcome === "orphaned";
               if (outcome === "error") {
                 reportCallError(new Error("call session terminate failed"));
@@ -844,7 +896,7 @@ export async function tearDownActiveCall(
                 // consistently. A classified orphaned Jingle terminate
                 // means the server has already lost the call registry, so
                 // only the message-level bookend can still route.
-                await outboundCalls.finish(sender, s.peer, s.sid);
+                await boundedTeardownSend(() => outboundCalls.finish(sender, s.peer, s.sid));
               } catch (err) {
                 reportCallError(err);
               }
@@ -862,22 +914,25 @@ export async function tearDownActiveCall(
             // try/catch so a single failure (e.g. a stale wasm
             // bundle) can't swallow the other.
             const raw = sender as RawIqSender;
-            if (s.selfNick && raw.update_muji_presence) {
+            const updateMujiPresence = raw.update_muji_presence;
+            const selfNick = s.selfNick;
+            if (selfNick && updateMujiPresence) {
               try {
-                await raw.update_muji_presence(s.peer, s.selfNick, false, false, false, {
-                  handRaised: false,
-                  muted: false, // leaving clears all in-call state
-                });
+                await boundedTeardownSend(() =>
+                  updateMujiPresence(s.peer, selfNick, false, false, false, {
+                    handRaised: false,
+                    muted: false, // leaving clears all in-call state
+                  }));
               } catch (err) {
                 reportCallError(err);
               } finally {
-                clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
+                clearMucCallParticipant(s.peer, selfNick, s.selfFullJid);
                 setSelfRaisedHand(s.peer, false);
               }
             }
             clearLiveCallParticipants(s.peer);
             try {
-              await sendMujiSessionTerminate(raw, s.peer, s.sid);
+              await boundedTeardownSend(() => sendMujiSessionTerminate(raw, s.peer, s.sid));
               forgetMucCallSession({
                 roomJid: s.peer,
                 selfFullJid: s.selfFullJid,
@@ -890,14 +945,14 @@ export async function tearDownActiveCall(
           break;
         case "outgoing":
           try {
-            await outboundCalls.retract(sender, s.to, s.sid);
+            await boundedTeardownSend(() => outboundCalls.retract(sender, s.to, s.sid));
           } finally {
             clearDmCallActivity(s.to, s.sid);
           }
           break;
         case "incoming":
           try {
-            await outboundCalls.reject(sender, s.from, s.sid);
+            await boundedTeardownSend(() => outboundCalls.reject(sender, s.from, s.sid));
           } finally {
             incomingCallAlerts?.stop(s.sid);
             clearDmCallActivity(s.from, s.sid);
@@ -914,25 +969,27 @@ export async function tearDownActiveCall(
             s.selfNick,
             new Error("Muji preparing wait cancelled while clearing call state"),
           );
-          $callState.set({ phase: "idle" });
           {
             const raw = sender as RawIqSender;
-            if (s.selfNick && raw.update_muji_presence) {
+            const updateMujiPresence = raw.update_muji_presence;
+            const selfNick = s.selfNick;
+            if (selfNick && updateMujiPresence) {
               try {
-                await raw.update_muji_presence(s.peer, s.selfNick, false, false, false, {
-                  handRaised: false,
-                  muted: false, // leaving clears all in-call state
-                });
+                await boundedTeardownSend(() =>
+                  updateMujiPresence(s.peer, selfNick, false, false, false, {
+                    handRaised: false,
+                    muted: false, // leaving clears all in-call state
+                  }));
               } catch (err) {
                 reportCallError(err);
               } finally {
-                clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
+                clearMucCallParticipant(s.peer, selfNick, s.selfFullJid);
                 setSelfRaisedHand(s.peer, false);
               }
             }
             if (s.activePresencePublished) {
               try {
-                await sendMujiSessionTerminate(raw, s.peer, s.sid);
+                await boundedTeardownSend(() => sendMujiSessionTerminate(raw, s.peer, s.sid));
                 forgetMucCallSession({
                   roomJid: s.peer,
                   selfFullJid: s.selfFullJid,
@@ -951,7 +1008,6 @@ export async function tearDownActiveCall(
       reportCallError(err);
     }
   }
-  $callState.set({ phase: "idle" });
 }
 
 /**

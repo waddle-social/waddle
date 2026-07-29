@@ -8,6 +8,7 @@ import {
   type RawIqSender,
   scheduleOutgoingTimeout,
   setSessionAcceptTimeoutMsForTests,
+  setTeardownStanzaTimeoutMsForTests,
   tearDownActiveCall,
 } from "../src/lib/calls/call-store";
 import {
@@ -1028,6 +1029,59 @@ describe("tearDownActiveCall", () => {
     expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
     expect(sender.send_call_retract).not.toHaveBeenCalled();
     expect(sender.send_call_reject).not.toHaveBeenCalled();
+  });
+
+  test("goes idle synchronously, before any wire send resolves (#1446)", async () => {
+    const restore = setTeardownStanzaTimeoutMsForTests(10);
+    try {
+      const sender: CallWireSender = {
+        send_call_session_terminate: mock(() => new Promise<void>(() => undefined)),
+        send_call_finish: mock(async () => undefined),
+      };
+      $callState.set({
+        phase: "active",
+        peer: "bob@waddle.test/desktop",
+        sid: "c1",
+        media: audioVideo,
+        join,
+        kind: "dm",
+        initiator: "alice@waddle.test/web",
+      });
+      const teardown = tearDownActiveCall(sender, "success");
+      expect($callState.get()).toEqual({ phase: "idle" });
+      await teardown;
+    } finally {
+      restore();
+    }
+  });
+
+  test("wire send that never resolves is bounded: times out, retries once, still completes (#1446)", async () => {
+    const restore = setTeardownStanzaTimeoutMsForTests(10);
+    try {
+      const sender: CallWireSender = {
+        send_call_session_terminate: mock(() => new Promise<void>(() => undefined)),
+        send_call_finish: mock(async () => undefined),
+      };
+      $callState.set({
+        phase: "active",
+        peer: "bob@waddle.test/desktop",
+        sid: "c1",
+        media: audioVideo,
+        join,
+        kind: "dm",
+        initiator: "alice@waddle.test/web",
+      });
+
+      await tearDownActiveCall(sender, "success");
+
+      // One retry after the deadline, then give up — a timed-out
+      // terminate is not a confirmed one, so no XEP-0353 finish.
+      expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(2);
+      expect(sender.send_call_finish).not.toHaveBeenCalled();
+      expect($lastCallError.get()).not.toBeNull();
+    } finally {
+      restore();
+    }
   });
 
   test("null sender: still clears state without throwing", async () => {
