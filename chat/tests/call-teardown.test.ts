@@ -8,7 +8,6 @@ import {
   type RawIqSender,
   scheduleOutgoingTimeout,
   setSessionAcceptTimeoutMsForTests,
-  setTeardownStanzaTimeoutMsForTests,
   tearDownActiveCall,
 } from "../src/lib/calls/call-store";
 import {
@@ -18,6 +17,7 @@ import {
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
+import { setTeardownStanzaTimeoutMsForTests } from "../src/lib/calls/call-teardown-transport";
 import {
   $mucCallLiveParticipants,
   setLiveCallParticipants,
@@ -1133,6 +1133,9 @@ describe("tearDownActiveCall", () => {
       expect($mucCallLiveParticipants.get()[roomJid]).toBeDefined();
       expect($callState.get()).toMatchObject({ phase: "active", sid: "new-sid" });
       expect(sender.send_muji_session_terminate).not.toHaveBeenCalled();
+      // The old teardown's presence-leave timeout must not surface into
+      // the NEW call's global error slot (#1606 review).
+      expect($lastCallError.get()).toBeNull();
     } finally {
       restore();
       clearCallState();

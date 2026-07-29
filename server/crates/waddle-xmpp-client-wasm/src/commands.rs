@@ -145,8 +145,12 @@ async fn send_iq_roundtrip(
     stanza: Element,
 ) -> Result<Result<Element, ClientError>, JsValue> {
     let mut cmd_tx = command_sender(inner)?;
-    let mut cancel_tx = cmd_tx.clone();
-    let iq_id = stanza.attr("id").map(str::to_string);
+    let cancel_tx = cmd_tx.clone();
+    // Parsed once into the typed correlation id; an absent/empty id
+    // simply means there is nothing to cancel on expiry.
+    let iq_id = stanza
+        .attr("id")
+        .and_then(|value| waddle_xmpp_client::request::StanzaId::new(value).ok());
     let (responder, rx) = oneshot::channel();
     let round_trip = async move {
         if cmd_tx
@@ -167,16 +171,28 @@ async fn send_iq_roundtrip(
         IqReplyWait::DeadlineExpired => {
             // Free the driver's pending-IQ slot (and any deferred copy of
             // the command) so a reply that limps in later has nowhere to
-            // land. Best-effort: on a full command queue the entry falls
-            // to the disconnect sweep instead.
+            // land. Spawned so a momentarily full command queue delays
+            // the cancellation instead of dropping it — the expired
+            // caller must not block on it either way.
             if let Some(id) = iq_id {
-                let (cancel_responder, _cancel_rx) = oneshot::channel();
-                let _ = cancel_tx.try_send(WasmCommand::CancelIq {
-                    id,
-                    responder: cancel_responder,
+                let mut cancel_tx = cancel_tx;
+                wasm_bindgen_futures::spawn_local(async move {
+                    let (cancel_responder, _cancel_rx) = oneshot::channel();
+                    let _ = cancel_tx
+                        .send(WasmCommand::CancelIq {
+                            id,
+                            responder: cancel_responder,
+                        })
+                        .await;
                 });
             }
-            Err(js_error("iq request timed out"))
+            // Typed until the WASM boundary: callers map this like any
+            // other ClientError (send_iq_command stringifies it in
+            // iq_rejection; the stanza-aware/avatar variants at their
+            // own boundary arms).
+            Ok(Err(ClientError::IqTimeout {
+                timeout: std::time::Duration::from_millis(u64::from(IQ_REPLY_DEADLINE_MS)),
+            }))
         }
     }
 }
@@ -247,6 +263,8 @@ pub(crate) async fn cancel_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     id: String,
 ) -> Result<(), JsValue> {
+    let id = waddle_xmpp_client::request::StanzaId::new(id)
+        .map_err(|err| js_error(err.to_string()))?;
     let mut cmd_tx = command_sender(&inner)?;
     let (responder, rx) = oneshot::channel();
     cmd_tx

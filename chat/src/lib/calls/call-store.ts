@@ -17,6 +17,10 @@ import {
   rememberMucCallSession,
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
+import {
+  boundedTeardownSend,
+  TERMINATE_SEND_ATTEMPTS,
+} from "./call-teardown-transport";
 import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
 import { mediaErrorMessage } from "./call-media-issues";
 import {
@@ -724,68 +728,6 @@ function cancelCallTimers(): void {
 }
 
 /**
- * Deadline for each best-effort teardown stanza (#1446). Teardown wire
- * sends are peer/mixer notifications — they must never hold the local
- * call slot (or a caller like `hangupActiveCall`) hostage to a server
- * that withholds its reply.
- */
-const TEARDOWN_STANZA_TIMEOUT_MS = 10_000;
-let teardownStanzaTimeoutMs = TEARDOWN_STANZA_TIMEOUT_MS;
-
-export function setTeardownStanzaTimeoutMsForTests(timeoutMs: number): () => void {
-  const previous = teardownStanzaTimeoutMs;
-  teardownStanzaTimeoutMs = timeoutMs;
-  return () => {
-    teardownStanzaTimeoutMs = previous;
-  };
-}
-
-class TeardownSendTimeoutError extends Error {
-  constructor() {
-    super("call teardown stanza timed out");
-  }
-}
-
-/**
- * XEP-0166 session-terminate is the one teardown stanza worth a second
- * attempt: it is what ends the call for the peer, and re-sending a sid
- * the peer already forgot is harmless. Presence/retract/reject sends
- * stay single-attempt — a duplicate delivered late is not.
- */
-const TERMINATE_SEND_ATTEMPTS = 2;
-
-/**
- * Race a teardown wire send against the deadline, retrying on timeout
- * up to `attempts` total tries. A typed error reply from the server is
- * a definitive answer and is NOT retried — only silence is. The
- * abandoned attempt's promise is left to settle in the void; its
- * result no longer matters.
- */
-async function boundedTeardownSend<T>(
-  send: () => Promise<T>,
-  attempts: number = 1,
-): Promise<T> {
-  for (let attempt = 1; ; attempt += 1) {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    try {
-      return await Promise.race([
-        send(),
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(
-            () => reject(new TeardownSendTimeoutError()),
-            teardownStanzaTimeoutMs,
-          );
-        }),
-      ]);
-    } catch (err) {
-      if (!(err instanceof TeardownSendTimeoutError) || attempt >= attempts) throw err;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-}
-
-/**
  * Whether a NEWER call has already re-occupied `roomJid` while a
  * backgrounded teardown was still in flight (#1446). The old call's
  * teardown must then skip every projection wipe that is not scoped to
@@ -798,6 +740,17 @@ function roomReoccupiedByNewerCall(roomJid: string, sid: string): boolean {
     now.peer === roomJid &&
     now.sid !== sid
   );
+}
+
+/**
+ * Whether ANY newer call now occupies the single call slot. Late
+ * failures from a superseded teardown must not surface into — or
+ * re-arm the auto-clear timer of — the NEW call's global error slot,
+ * nor be attributed to its correlation id.
+ */
+function callSlotReoccupiedByNewerCall(sid: string): boolean {
+  const now = $callState.get();
+  return now.phase !== "idle" && now.phase !== "ended" && now.sid !== sid;
 }
 
 /**
@@ -824,7 +777,7 @@ async function leaveMujiCallPresence(
         muted: false, // leaving clears all in-call state
       }));
   } catch (err) {
-    reportCallError(err);
+    if (!callSlotReoccupiedByNewerCall(s.sid)) reportCallError(err);
   } finally {
     if (!roomReoccupiedByNewerCall(s.peer, s.sid)) {
       clearMucCallParticipant(s.peer, selfNick, s.selfFullJid);
@@ -938,6 +891,13 @@ export async function tearDownActiveCall(
     // from the `s` snapshot.
     $callState.set({ phase: "idle" });
   }
+  // Wire failures below surface through this scoped reporter: the slot
+  // is already idle, so by the time a bounded send fails a NEWER call
+  // may own the global error surface (#1606 review).
+  const reportWireError = (err: unknown): void => {
+    if ("sid" in s && callSlotReoccupiedByNewerCall(s.sid)) return;
+    reportCallError(err);
+  };
   if (sender) {
     try {
       switch (s.phase) {
@@ -951,10 +911,10 @@ export async function tearDownActiveCall(
               );
               terminateAllowsFinish = outcome === "ok" || outcome === "orphaned";
               if (outcome === "error") {
-                reportCallError(new Error("call session terminate failed"));
+                reportWireError(new Error("call session terminate failed"));
               }
             } catch (err) {
-              reportCallError(err);
+              reportWireError(err);
             }
             if (terminateAllowsFinish) {
               try {
@@ -965,7 +925,7 @@ export async function tearDownActiveCall(
                 // only the message-level bookend can still route.
                 await boundedTeardownSend(() => outboundCalls.finish(sender, s.peer, s.sid));
               } catch (err) {
-                reportCallError(err);
+                reportWireError(err);
               }
             }
             clearDmCallActivity(s.peer, s.sid);
@@ -1003,7 +963,7 @@ export async function tearDownActiveCall(
                 sid: s.sid,
               });
             } catch (err) {
-              reportCallError(err);
+              reportWireError(err);
             }
           }
           break;
@@ -1056,7 +1016,7 @@ export async function tearDownActiveCall(
                   sid: s.sid,
                 });
               } catch (err) {
-                reportCallError(err);
+                reportWireError(err);
               }
             }
           }
@@ -1065,7 +1025,7 @@ export async function tearDownActiveCall(
           break;
       }
     } catch (err) {
-      reportCallError(err);
+      reportWireError(err);
     }
   }
 }

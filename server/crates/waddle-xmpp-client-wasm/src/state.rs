@@ -210,7 +210,7 @@ pub(crate) enum WasmCommand {
         responder: oneshot::Sender<DriverResult<InboxPage>>,
     },
     CancelIq {
-        id: String,
+        id: waddle_xmpp_client::request::StanzaId,
         responder: oneshot::Sender<DriverResult<()>>,
     },
     Disconnect {

@@ -180,7 +180,7 @@ impl WasmDriverTask {
                     .await
             }
             Some(WasmCommand::CancelIq { id, responder }) => {
-                self.cancel_iq_command(&id);
+                self.cancel_iq_command(id.as_str());
                 let _ = responder.send(Ok(()));
                 true
             }
