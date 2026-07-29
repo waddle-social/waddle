@@ -17,7 +17,7 @@ import {
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
-import { setTeardownStanzaTimeoutMsForTests } from "../src/lib/calls/call-teardown-transport";
+
 import {
   $mucCallLiveParticipants,
   setLiveCallParticipants,
@@ -1036,60 +1036,89 @@ describe("tearDownActiveCall", () => {
   });
 
   test("goes idle synchronously, before any wire send resolves (#1446)", async () => {
-    const restore = setTeardownStanzaTimeoutMsForTests(10);
-    try {
-      const sender: CallWireSender = {
-        send_call_session_terminate: mock(() => new Promise<void>(() => undefined)),
-        send_call_finish: mock(async () => undefined),
-      };
-      $callState.set({
-        phase: "active",
-        peer: "bob@waddle.test/desktop",
-        sid: "c1",
-        media: audioVideo,
-        join,
-        kind: "dm",
-        initiator: "alice@waddle.test/web",
-      });
-      const teardown = tearDownActiveCall(sender, "success");
-      expect($callState.get()).toEqual({ phase: "idle" });
-      await teardown;
-    } finally {
-      restore();
-    }
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(() => new Promise<void>(() => undefined)),
+      send_call_finish: mock(async () => undefined),
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    const teardown = tearDownActiveCall(sender, "success", { stanzaTimeoutMs: 10 });
+    expect($callState.get()).toEqual({ phase: "idle" });
+    await teardown;
   });
 
   test("wire send that never resolves is bounded: times out, retries once, still completes (#1446)", async () => {
-    const restore = setTeardownStanzaTimeoutMsForTests(10);
-    try {
-      const sender: CallWireSender = {
-        send_call_session_terminate: mock(() => new Promise<void>(() => undefined)),
-        send_call_finish: mock(async () => undefined),
-      };
-      $callState.set({
-        phase: "active",
-        peer: "bob@waddle.test/desktop",
-        sid: "c1",
-        media: audioVideo,
-        join,
-        kind: "dm",
-        initiator: "alice@waddle.test/web",
-      });
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(() => new Promise<void>(() => undefined)),
+      send_call_finish: mock(async () => undefined),
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
 
-      await tearDownActiveCall(sender, "success");
+    await tearDownActiveCall(sender, "success", { stanzaTimeoutMs: 10 });
 
-      // One retry after the deadline, then give up — a timed-out
-      // terminate is not a confirmed one, so no XEP-0353 finish.
-      expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(2);
-      expect(sender.send_call_finish).not.toHaveBeenCalled();
-      expect($lastCallError.get()).not.toBeNull();
-    } finally {
-      restore();
-    }
+    // One retry after the deadline, then give up — a timed-out
+    // terminate is not a confirmed one, so no XEP-0353 finish.
+    expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(2);
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect($lastCallError.get()).not.toBeNull();
+  });
+
+  test("MUC terminate timeout cancels the underlying IQ inside the wasm driver (#1606 review)", async () => {
+    // A stale room-scoped terminate must not linger in the driver's
+    // pending/deferred queues once the JS deadline gives up on it: the
+    // send carries a caller-supplied iq id, and every expired attempt
+    // fires cancel_raw_iq for that exact id.
+    const terminateIds: string[] = [];
+    const cancelledIds: string[] = [];
+    const sender = {
+      update_muji_presence: mock(async () => undefined),
+      send_muji_session_terminate: mock((_room: string, _sid: string, iqId: string) => {
+        terminateIds.push(iqId);
+        return new Promise<void>(() => undefined); // mixer never replies
+      }),
+      cancel_raw_iq: mock(async (id: string) => {
+        cancelledIds.push(id);
+      }),
+    };
+    $callState.set({
+      phase: "active",
+      peer: "room@muc.waddle.test",
+      sid: "muc-1",
+      media: audioVideo,
+      join: { ...join, room: "room@muc.waddle.test" },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+
+    await tearDownActiveCall(
+      sender as unknown as Parameters<typeof tearDownActiveCall>[0],
+      "success",
+      { stanzaTimeoutMs: 10 },
+    );
+
+    // Both attempts share one iq id; each expiry cancelled it.
+    expect(terminateIds.length).toBe(2);
+    expect(new Set(terminateIds).size).toBe(1);
+    expect(cancelledIds).toEqual([terminateIds[0], terminateIds[0]]);
   });
 
   test("backgrounded MUC teardown does not wipe a newer call's state in the same room (#1446)", async () => {
-    const restore = setTeardownStanzaTimeoutMsForTests(10);
     try {
       const sender = {
         update_muji_presence: mock(() => new Promise<void>(() => undefined)),
@@ -1110,6 +1139,7 @@ describe("tearDownActiveCall", () => {
       const teardown = tearDownActiveCall(
         sender as unknown as Parameters<typeof tearDownActiveCall>[0],
         "success",
+        { stanzaTimeoutMs: 10 },
       );
       // While the old teardown is stuck on a silent server, the user
       // starts a NEW call in the same room.
@@ -1137,7 +1167,6 @@ describe("tearDownActiveCall", () => {
       // the NEW call's global error slot (#1606 review).
       expect($lastCallError.get()).toBeNull();
     } finally {
-      restore();
       clearCallState();
       $mucCallLiveParticipants.set({});
     }
@@ -1257,7 +1286,7 @@ describe("leaveRetainedMucCallAction", () => {
 
     expect(sent).toEqual([
       ["presence", "chan@muc.test", "alice", false, false, false, { handRaised: false, muted: false }],
-      ["terminate", "chan@muc.test", "muc-recovered-live"],
+      ["terminate", "chan@muc.test", "muc-recovered-live", expect.any(String)],
     ]);
     expect($mucCallParticipants.get()).toEqual({});
     expect(readMucCallSession({
@@ -1307,6 +1336,7 @@ describe("leaveRetainedMucCallAction", () => {
     expect(sender.send_muji_session_terminate).toHaveBeenCalledWith(
       "chan@muc.test",
       "muc-retry-live",
+      expect.any(String),
     );
     expect($mucCallParticipants.get()).toEqual({});
     expect(readMucCallSession({
@@ -2402,6 +2432,7 @@ describe("MUC group call", () => {
     expect(send_muji_session_terminate).toHaveBeenCalledWith(
       "chan@muc.test",
       attemptSid,
+      expect.any(String),
     );
     expect(update_muji_presence).toHaveBeenLastCalledWith(
       "chan@muc.test",
@@ -2634,6 +2665,7 @@ describe("MUC group call", () => {
     expect(send_muji_session_terminate).toHaveBeenCalledWith(
       "chan@muc.test",
       "muc-attempt",
+      expect.any(String),
     );
     expect(update_muji_presence).toHaveBeenCalledTimes(1);
     expect(update_muji_presence).toHaveBeenCalledWith(

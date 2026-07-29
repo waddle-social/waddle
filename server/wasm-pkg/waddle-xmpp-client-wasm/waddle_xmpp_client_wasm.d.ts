@@ -383,8 +383,14 @@ export class WaddleClient {
      *   </jingle>
      * </iq>
      * ```
+     * `iq_id` is caller-supplied (and validated against the
+     * [`waddle_xmpp_client::request::StanzaId`] invariant) so the JS
+     * side can cancel the still-pending or deferred IQ via
+     * [`WaddleClient::cancel_raw_iq`] when its own teardown deadline
+     * expires — a stale room-scoped terminate must not linger in the
+     * driver after the room has been re-occupied (#1606 review).
      */
-    send_muji_session_terminate(room_jid: string, sid_str: string): Promise<any>;
+    send_muji_session_terminate(room_jid: string, sid_str: string, iq_id: string): Promise<any>;
     /**
      * Publish the user's own presence (RFC 6121 §4.7). `show` is an RFC
      * 6121 `<show>` value (`away` / `xa` / `dnd` / `chat`) or `None` for
