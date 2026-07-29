@@ -226,21 +226,24 @@ impl WasmDriverTask {
         stanza: Element,
         responder: oneshot::Sender<DriverResult<Element>>,
     ) -> bool {
-        let id = stanza.attr("id").map(|value| value.to_string());
+        // Enforce the `StanzaId` invariant at tracking time: an IQ whose
+        // id would not round-trip through the typed cancellation path
+        // (`WasmCommand::CancelIq`) must never become a pending entry,
+        // or a reply-less server would leave it uncancellable until the
+        // disconnect sweep. Reject before the stanza reaches the wire —
+        // an untrackable request IQ is a caller bug, not a send.
+        let Some(id) = trackable_iq_id(&stanza) else {
+            let _ = responder.send(Err(ClientError::EmptyStanzaId));
+            return true;
+        };
         match self
             .send_transport_message(TransportMessage::Element(stanza))
             .await
         {
-            Ok(()) => match id {
-                Some(id) => {
-                    self.pending_iqs.insert(id, responder);
-                    true
-                }
-                None => {
-                    let _ = responder.send(Err(ClientError::Disconnected));
-                    false
-                }
-            },
+            Ok(()) => {
+                self.pending_iqs.insert(id, responder);
+                true
+            }
             Err(err) => {
                 self.emit_error(err.to_string()).await;
                 let _ = responder.send(Err(err));
@@ -621,6 +624,19 @@ fn publish_resume_state_snapshot(
     inner.borrow_mut().resume_state = resume_state;
 }
 
+/// The pending-IQ tracking key for a request stanza, holding the same
+/// non-empty invariant as [`waddle_xmpp_client::request::StanzaId`] so
+/// every entry that can become pending is also cancellable through the
+/// typed [`WasmCommand::CancelIq`] path. Absent, empty, or
+/// whitespace-only ids yield `None`.
+fn trackable_iq_id(stanza: &Element) -> Option<String> {
+    stanza
+        .attr("id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn cancel_raw_iq_state(
     pending_iqs: &mut HashMap<String, oneshot::Sender<DriverResult<Element>>>,
     deferred_commands: &mut VecDeque<DeferredWasmCommand>,
@@ -688,6 +704,28 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
     use waddle_xmpp_client::discovery::DISCO_INFO_NS;
+
+    fn iq_with_id(id: Option<&str>) -> Element {
+        let mut builder = Element::builder("iq", "jabber:client");
+        if let Some(id) = id {
+            builder = builder.attr(minidom::rxml::xml_ncname!("id").to_owned(), id);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn trackable_iq_id_holds_the_stanza_id_invariant() {
+        // Every id that can become a pending entry must round-trip
+        // through the typed CancelIq path (#1606 review): absent,
+        // empty, and whitespace-only ids are untrackable.
+        assert_eq!(
+            trackable_iq_id(&iq_with_id(Some("iq-1"))).as_deref(),
+            Some("iq-1")
+        );
+        assert_eq!(trackable_iq_id(&iq_with_id(None)), None);
+        assert_eq!(trackable_iq_id(&iq_with_id(Some(""))), None);
+        assert_eq!(trackable_iq_id(&iq_with_id(Some("   "))), None);
+    }
 
     fn test_inner() -> Rc<RefCell<WaddleClientInner>> {
         Rc::new(RefCell::new(WaddleClientInner {
