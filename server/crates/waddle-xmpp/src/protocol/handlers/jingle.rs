@@ -1015,6 +1015,13 @@ fn scoped_call_id(initiator_bare: &BareJid, sid: &str) -> Result<CallId, SfuErro
 pub struct UndeliverableNegotiationRollback {
     pub call_id: CallId,
     pub identity: Identity,
+    /// The jti of the join token the bounced stanza carried, when its
+    /// `urn:waddle:transports:livekit:0` transport holds an issued
+    /// credential. Compensation revokes exactly this issuance
+    /// ([`SfuService::revoke_issued_token`]) — never the pair's other
+    /// tokens or its registration, which may belong to a live session
+    /// from an independent, successful negotiation.
+    pub minted_jti: Option<waddle_sfu::Jti>,
 }
 
 /// Derive the rollback pair from the bounced stanza itself. Returns
@@ -1057,7 +1064,44 @@ pub fn undeliverable_negotiation_rollback(iq: &Iq) -> Option<UndeliverableNegoti
     Some(UndeliverableNegotiationRollback {
         call_id,
         identity: Identity::from_jid(to_full),
+        minted_jti: minted_jti_in_payload(payload),
     })
+}
+
+/// The jti of the (single, #1142) server-issued LiveKit token inside a
+/// forwarded negotiation payload, decoded without signature
+/// verification — it only keys the server's own issuance bookkeeping.
+fn minted_jti_in_payload(payload: &Element) -> Option<waddle_sfu::Jti> {
+    payload
+        .children()
+        .flat_map(|content| content.children())
+        .find_map(|elem| match WaddleLiveKitTransport::try_from(elem) {
+            Ok(WaddleLiveKitTransport::Issued(issued)) => issued.token.unverified_jti(),
+            _ => None,
+        })
+}
+
+/// A copy of a bounced Jingle payload that is safe to echo per RFC
+/// 6120 §8.3.1 (#1444): everything the SENDER supplied stays verbatim
+/// — the echo returns their own request — and the only material
+/// removed is the server-injected `urn:waddle:transports:livekit:0`
+/// transport, the sole element that can carry credentials the sender
+/// was never meant to hold.
+pub fn credential_free_jingle_echo(payload: &Element) -> Element {
+    use crate::xep::xep_waddle_livekit_transport::{NS_WADDLE_LIVEKIT_TRANSPORT, TRANSPORT_NAME};
+    let mut echo = payload.clone();
+    for content in echo.children_mut() {
+        while content
+            .remove_child(TRANSPORT_NAME, NS_WADDLE_LIVEKIT_TRANSPORT)
+            .is_some()
+        {}
+    }
+    // Defensive: strip a (malformed) top-level transport too.
+    while echo
+        .remove_child(TRANSPORT_NAME, NS_WADDLE_LIVEKIT_TRANSPORT)
+        .is_some()
+    {}
+    echo
 }
 
 enum RewriteError {

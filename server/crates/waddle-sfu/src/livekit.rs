@@ -786,6 +786,20 @@ impl SfuService for LiveKitSfu {
             .is_some_and(|entry| entry.contains(identity))
     }
 
+    fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti) {
+        let mut exp = None;
+        if let Some(mut issued) = self.issued.get_mut(&(call_id.clone(), identity.clone())) {
+            if let Some(position) = issued.iter().position(|entry| entry.jti == *jti) {
+                exp = Some(issued.remove(position).exp);
+            }
+        }
+        // Not in the issued window (rotated out by the per-participant
+        // FIFO cap, or a claim we never tracked): record the revocation
+        // with a conservative expiry anyway so the sweep reclaims it.
+        let exp = exp.unwrap_or_else(|| Utc::now() + self.config.token_ttl);
+        self.revoked.insert(jti.clone(), exp);
+    }
+
     fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState {
         let ClearOutcome {
             was_present,

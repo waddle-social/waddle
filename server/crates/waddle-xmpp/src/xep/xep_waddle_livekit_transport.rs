@@ -39,7 +39,7 @@ use url::Url;
 use waddle_sfu::{CallId, Identity, JoinToken, Jwt, SfuError, WebsocketUrl};
 
 pub const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
-const TRANSPORT_NAME: &str = "transport";
+pub const TRANSPORT_NAME: &str = "transport";
 const TOKEN_NAME: &str = "token";
 const ATTR_URL: &str = "url";
 const ATTR_ROOM: &str = "room";

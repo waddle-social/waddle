@@ -1017,17 +1017,54 @@ fn deliver_bare_jid_via_ordered_relay<'a>(
 /// the caller's completed hangup look failed. We ack it with an empty
 /// `<iq type='result'/>` instead.
 ///
-/// Every OTHER Jingle payload gets a payload-less error (#1444): the
-/// Jingle handler injects the addressee's freshly minted LiveKit join
-/// token into forwarded negotiation stanzas, so an RFC 6120 §8.3.1
-/// payload echo would hand the callee's credential to the caller. The
-/// same arm revokes the minted token via `sfu` (when supplied) so the
-/// credential does not outlive the failed invite. Non-Jingle request
-/// IQs keep the correlating §8.3.1 echo.
+/// Every OTHER Jingle payload gets a SANITIZED §8.3.1 echo (#1444):
+/// the Jingle handler injects the addressee's freshly minted LiveKit
+/// join token into forwarded negotiation stanzas, so the raw echo
+/// would hand the callee's credential to the caller. The sender gets
+/// their own request back minus the server-injected
+/// `urn:waddle:transports:livekit:0` transport, and the bounce also
+/// revokes exactly the minted issuance via `sfu` (when supplied) so
+/// the credential does not outlive the failed delivery. Non-Jingle
+/// request IQs keep the verbatim echo.
 pub(crate) fn bounce_undeliverable_iq(
     stanza: &Stanza,
     sfu: Option<&dyn waddle_sfu::SfuService>,
 ) -> Option<Stanza> {
+    revoke_credential_minted_into_undeliverable_iq(stanza, sfu);
+    undeliverable_iq_reply(stanza)
+}
+
+/// Compensation half of the bounce (#1444): when the undeliverable
+/// stanza is a forwarded Jingle negotiation carrying a freshly minted
+/// LiveKit credential, revoke exactly that issuance. Targeted on the
+/// stanza's own jti — never `unregister_call_participant` — because
+/// the `(call, identity)` pair may be live in the call through an
+/// independent, successful negotiation (e.g. racing same-sid
+/// initiates), and one failed delivery must not evict it or invalidate
+/// its other tokens. Revocation is process-local JTI bookkeeping; the
+/// mint happened on this node's dispatcher, so this is the right
+/// registry to compensate.
+fn revoke_credential_minted_into_undeliverable_iq(
+    stanza: &Stanza,
+    sfu: Option<&dyn waddle_sfu::SfuService>,
+) {
+    let (Stanza::Iq(iq), Some(sfu)) = (stanza, sfu) else {
+        return;
+    };
+    let Some(rollback) =
+        waddle_xmpp::protocol::handlers::jingle::undeliverable_negotiation_rollback(iq)
+    else {
+        return;
+    };
+    if let Some(jti) = &rollback.minted_jti {
+        sfu.revoke_issued_token(&rollback.call_id, &rollback.identity, jti);
+    }
+}
+
+/// Pure reply half of the bounce — no side effects. See the module
+/// doc above [`bounce_undeliverable_iq`] for the terminate-ack and
+/// credential-scrub rules.
+fn undeliverable_iq_reply(stanza: &Stanza) -> Option<Stanza> {
     let Stanza::Iq(iq) = stanza else {
         return None;
     };
@@ -1059,18 +1096,16 @@ pub(crate) fn bounce_undeliverable_iq(
             payload: None,
         })));
     }
-    if is_jingle {
-        if let Some(sfu) = sfu {
-            if let Some(rollback) =
-                waddle_xmpp::protocol::handlers::jingle::undeliverable_negotiation_rollback(iq)
-            {
-                // Revocation is process-local JTI bookkeeping; the mint
-                // happened on this node's dispatcher, so this is the
-                // right registry to compensate.
-                sfu.unregister_call_participant(&rollback.call_id, &rollback.identity);
-            }
-        }
-    }
+    // RFC 6120 §8.3.1: echo the offending request so the sender can
+    // correlate which stanza failed. For Jingle payloads the echo is
+    // SANITIZED first (#1444): the sender gets their own request back
+    // minus the server-injected LiveKit transport — the one element
+    // that can carry credentials they were never meant to hold.
+    let echoed = if is_jingle {
+        waddle_xmpp::protocol::handlers::jingle::credential_free_jingle_echo(&payload)
+    } else {
+        payload
+    };
     let error = StanzaError::new(
         ErrorType::Cancel,
         DefinedCondition::ServiceUnavailable,
@@ -1082,12 +1117,7 @@ pub(crate) fn bounce_undeliverable_iq(
         to: from,
         id,
         error,
-        // RFC 6120 §8.3.1: echo the offending request so the sender can
-        // correlate which stanza failed — EXCEPT for Jingle payloads,
-        // which may carry server-injected credentials (#1444). A
-        // jingle-namespaced payload that fails typed parsing is still
-        // scrubbed: fail closed, never fail into an echo.
-        payload: if is_jingle { None } else { Some(payload) },
+        payload: Some(echoed),
     })))
 }
 

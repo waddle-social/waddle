@@ -4848,6 +4848,15 @@ impl waddle_sfu::SfuService for RecordingSfu {
         false
     }
 
+    fn revoke_issued_token(
+        &self,
+        _: &waddle_sfu::CallId,
+        _: &waddle_sfu::Identity,
+        _: &waddle_sfu::Jti,
+    ) {
+        unimplemented!("not exercised by these tests")
+    }
+
     fn unregister_call_participant(
         &self,
         call_id: &waddle_sfu::CallId,

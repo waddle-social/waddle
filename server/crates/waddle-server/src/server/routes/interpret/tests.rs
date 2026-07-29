@@ -2758,14 +2758,11 @@ async fn route_to_connection_offline_full_jid_call_iq_returns_service_unavailabl
         error.defined_condition,
         DefinedCondition::ServiceUnavailable
     );
-    // #1444: Jingle payloads are NEVER echoed back — the server injects
-    // freshly minted LiveKit join credentials into forwarded negotiation
-    // stanzas, so an RFC 6120 §8.3.1 echo would hand the addressee's
-    // token to the sender. Correlation rides on the IQ id alone.
-    assert!(
-        payload.is_none(),
-        "undeliverable Jingle IQ error must not echo the payload: {payload:?}"
-    );
+    // #1444: the RFC 6120 §8.3.1 echo survives for Jingle, but
+    // SANITIZED — a credential-free request comes back verbatim.
+    let echoed = payload.expect("service-unavailable echoes the sanitized payload");
+    assert_eq!(echoed.name(), "jingle");
+    assert_eq!(echoed.attr("sid"), Some("offline-sid"));
 }
 
 #[tokio::test]
@@ -2781,10 +2778,19 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     let sfu: Arc<dyn SfuService> = sfu_fixture_for_route_test();
 
     // Mirror what the Jingle handler did before routing: mint the
-    // callee's join token and register both participants.
+    // callee's join token and register both participants. An EARLIER
+    // issuance for the same pair (an independent, successful
+    // negotiation) must survive the bounce untouched.
     let call_id =
         waddle_sfu::CallId::new("alice@example.com::offline-sid".to_string()).expect("call id");
     let bob_identity = waddle_sfu::Identity::from_jid(bob.clone());
+    let earlier_token = sfu
+        .issue_join_token(
+            &call_id,
+            &bob_identity,
+            MediaCapabilities::direct_call_peer(),
+        )
+        .expect("mint earlier");
     let token = sfu
         .issue_join_token(
             &call_id,
@@ -2810,12 +2816,11 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
                 )
                 .attr(minidom::rxml::xml_ncname!("name").to_owned(), "0")
                 .append(
-                    Element::builder("transport", "urn:waddle:transports:livekit:0")
-                        .attr(
-                            minidom::rxml::xml_ncname!("token").to_owned(),
-                            token.jwt.as_str(),
-                        )
-                        .build(),
+                    // The REAL issued wire shape (url/room/identity
+                    // attrs + <token/> child), exactly as the Jingle
+                    // handler injects it.
+                    waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::from_join_token(token.clone())
+                        .to_element(),
                 )
                 .build(),
         )
@@ -2835,8 +2840,9 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     deps.sfu = Some(sfu.as_ref());
     let outcome = interpret(events, &deps).await;
 
-    // The bounce carries no credential material whatsoever: typed, the
-    // error IQ has no payload at all.
+    // The bounce echoes a SANITIZED payload: the sender's own request
+    // minus the server-injected LiveKit transport — no credential
+    // material anywhere in the frame.
     assert_eq!(
         outcome.frames.len(),
         1,
@@ -2848,20 +2854,36 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     let Iq::Error { payload, .. } = bounced else {
         panic!("expected IQ error, got {bounced:?}");
     };
+    let echoed = payload.expect("sanitized echo present");
+    assert_eq!(echoed.name(), "jingle");
+    let has_livekit_transport = echoed
+        .children()
+        .flat_map(|content| content.children())
+        .any(|elem| elem.is("transport", "urn:waddle:transports:livekit:0"));
     assert!(
-        payload.is_none(),
-        "undeliverable session-initiate error must carry no payload: {payload:?}"
+        !has_livekit_transport,
+        "sanitized echo must not carry the LiveKit transport: {echoed:?}"
     );
     assert!(
         !outcome.frames[0].contains(token.jwt.as_str()),
         "bounced error must not contain the minted JWT"
     );
 
-    // ...and the minted token was revoked (JTI moved to the revocation
-    // set) so the credential cannot outlive the failed invite.
+    // Targeted compensation (#1607 review): exactly the issuance the
+    // bounced stanza carried is revoked — the pair's earlier token and
+    // its registration (a possibly live session from an independent
+    // negotiation) survive.
     assert!(
         sfu.is_revoked(&token.jti),
         "undelivered invite must revoke the freshly minted JTI"
+    );
+    assert!(
+        !sfu.is_revoked(&earlier_token.jti),
+        "the pair's earlier issuance must survive the bounce"
+    );
+    assert!(
+        sfu.has_call_participant(&call_id, &bob_identity),
+        "the bounce must not unregister the participant"
     );
 }
 

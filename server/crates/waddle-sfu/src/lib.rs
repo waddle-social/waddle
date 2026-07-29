@@ -99,6 +99,16 @@ pub trait SfuService: Send + Sync + 'static {
     /// for a call the caller does not actually own membership in.
     fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState;
 
+    /// Targeted, bookkeeping-only revocation of ONE issued JWT for
+    /// the pair (#1444): moves `jti` into the revocation set without
+    /// touching the participant's registration, their other
+    /// issuances, or the SFU itself (no `RemoveParticipant`). This is
+    /// the compensation for a single stanza whose delivery failed —
+    /// the pair may simultaneously be live in the call through an
+    /// independent, successful negotiation, and that session must
+    /// survive the bounce.
+    fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti);
+
     /// Local-only cleanup driven by an SFU-originated signal that
     /// `identity` has already left `call_id` (e.g. LiveKit's
     /// `participant_left` webhook). Mirrors the bookkeeping side of
