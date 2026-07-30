@@ -46,6 +46,48 @@ where
     true
 }
 
+/// Send a sequence of XMPP text frames while the admitting generation is
+/// authoritative.
+///
+/// This is for a typed XMPP control exchange that must not be committed to a
+/// superseded socket. A revocation between frames deliberately suppresses the
+/// remaining frame(s), so the old generation cannot commit any additional
+/// control frame after it has lost authority.
+pub(super) async fn send_ws_text_frames_with_authority<S, E, I>(
+    sender: &mut S,
+    frames: I,
+    failure_message: &'static str,
+    authority: (
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    ),
+) -> AuthoritySendOutcome
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+    I: IntoIterator<Item = String>,
+{
+    for frame in frames {
+        debug!(
+            len = frame.len(),
+            "Sending authority-bound XMPP WebSocket response"
+        );
+        match send_ws_message_with_authority(
+            sender,
+            Message::Text(frame.into()),
+            failure_message,
+            Some(authority),
+        )
+        .await
+        {
+            AuthoritySendOutcome::Sent => {}
+            outcome => return outcome,
+        }
+    }
+
+    AuthoritySendOutcome::Sent
+}
+
 pub(super) async fn send_ws_message<S, E>(
     sender: &mut S,
     message: Message,
@@ -104,7 +146,10 @@ where
         return AuthoritySendOutcome::AuthorityRevoked;
     }
 
-    let ready = sender.ready();
+    // `futures::SinkExt` does not expose a portable `ready` future for every
+    // Sink version we support. Poll the required `Sink::poll_ready` directly
+    // so cancellation remains selectable while transport readiness is parked.
+    let ready = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *sender).poll_ready(cx));
     tokio::pin!(ready);
     let ready_result = match authority {
         Some((permit, shutdown)) => tokio::select! {

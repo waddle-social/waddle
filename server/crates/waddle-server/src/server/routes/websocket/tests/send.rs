@@ -1,6 +1,6 @@
 use super::super::send::{
     close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
-    AuthoritySendOutcome,
+    send_ws_text_frames_with_authority, AuthoritySendOutcome,
 };
 use axum::extract::ws::Message;
 use futures::Sink;
@@ -129,6 +129,34 @@ struct RevokeBeforeStartSendSink {
     sent: Vec<Message>,
 }
 
+/// A transport write that has parked in `poll_ready`. Tests explicitly fence
+/// the serving generation while the future is pending, then poll it again to
+/// prove no stale frame reaches the synchronous `start_send` commit point.
+struct PendingReadySink {
+    sent: Vec<Message>,
+}
+
+impl Sink<Message> for PendingReadySink {
+    type Error = &'static str;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.sent.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 impl Sink<Message> for RevokeBeforeStartSendSink {
     type Error = &'static str;
 
@@ -173,6 +201,60 @@ async fn authority_bound_send_does_not_start_after_ready_revokes_its_generation(
     assert!(
         sink.sent.is_empty(),
         "a revoked frame must not reach start_send"
+    );
+}
+
+#[tokio::test]
+async fn force_detach_conflict_frames_are_suppressed_when_revoked_while_ready_is_pending() {
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut sink = PendingReadySink { sent: Vec::new() };
+    let outcome = {
+        let send = send_ws_text_frames_with_authority(
+            &mut sink,
+            vec!["<conflict/>".to_owned(), "<close/>".to_owned()],
+            "force-detach conflict",
+            (&permit, &shutdown),
+        );
+        tokio::pin!(send);
+
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        lifecycle.begin_fenced_recovery();
+        send.await
+    };
+
+    assert!(matches!(outcome, AuthoritySendOutcome::AuthorityRevoked));
+    assert!(
+        sink.sent.is_empty(),
+        "stale conflict frames must not commit"
+    );
+}
+
+#[tokio::test]
+async fn session_init_error_frames_are_suppressed_when_revoked_while_ready_is_pending() {
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut sink = PendingReadySink { sent: Vec::new() };
+    let outcome = {
+        let send = send_ws_text_frames_with_authority(
+            &mut sink,
+            vec!["<internal-server-error/>".to_owned(), "<close/>".to_owned()],
+            "session initialization error",
+            (&permit, &shutdown),
+        );
+        tokio::pin!(send);
+
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        lifecycle.begin_fenced_recovery();
+        send.await
+    };
+
+    assert!(matches!(outcome, AuthoritySendOutcome::AuthorityRevoked));
+    assert!(
+        sink.sent.is_empty(),
+        "stale session-init error frames must not commit"
     );
 }
 

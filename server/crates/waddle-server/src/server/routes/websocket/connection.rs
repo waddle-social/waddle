@@ -11,7 +11,7 @@ use super::{
     replay::drive_interpret_loop,
     send::{
         close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
-        AuthoritySendOutcome,
+        send_ws_text_frames_with_authority, AuthoritySendOutcome,
     },
     session_init::build_internal_server_error_stream_error,
     state::{InboundFrameTerminal, WsConnState},
@@ -570,10 +570,11 @@ async fn handle_xmpp_websocket(
                                 "Cross-node resume: force-detaching this session (<conflict/> close)"
                             );
                             if conn.stream_open_sent {
-                                let _ = send_ws_text_frames(
+                                let _ = send_ws_text_frames_with_authority(
                                     &mut ws_sender,
                                     [build_conflict_stream_error(), websocket_stream_close_xml()],
                                     "Failed to send conflict stream error",
+                                    (&admission_permit, &shutdown_token),
                                 )
                                 .await;
                             }
@@ -1056,10 +1057,11 @@ async fn handle_inbound_text(
             let stream_error = build_internal_server_error_stream_error(
                 "Session initialization failed; please reconnect.",
             );
-            let _ = send_ws_text_frames(
+            let _ = send_ws_text_frames_with_authority(
                 ws_sender,
                 [stream_error, websocket_stream_close_xml()],
                 "Failed to send session-init stream error",
+                (admission_permit, shutdown_token),
             )
             .await;
             let _ = close_ws_connection(
