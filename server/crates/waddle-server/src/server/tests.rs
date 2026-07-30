@@ -733,31 +733,7 @@ async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
     // loop changes. `create_router` finishes startup by arming critical
     // registry supervision and transitioning `Starting` to `Serving`.
     let readiness_handle = state.node_lifecycle.clone();
-    let server_config = ServerConfig::test_homeserver();
-    let test_global_db = crate::db::Database::in_memory("test-mam-global")
-        .await
-        .expect("test global db");
-    let mam_storage = http::create_websocket_mam_storage(None, false, false, &test_global_db)
-        .await
-        .unwrap();
-    let pubsub_database_storage = Arc::new(
-        crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
-            .await
-            .expect("test pubsub storage"),
-    );
-    let app = http::create_router(http::RouterDeps {
-        state,
-        server_config,
-        xmpp_config: test_xmpp_config(),
-        mam_storage,
-        pubsub_database_storage,
-        acme_http01_challenge_service: None,
-        shutdown_handle: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
-            .handle(),
-        drain_complete: std::sync::Arc::new(tokio::sync::Notify::new()),
-    })
-    .await
-    .unwrap();
+    let app = test_app_for_state(state).await;
 
     // A running clustered node loses claim authority: readiness and admission
     // must become non-serving on the already-constructed router.
@@ -798,6 +774,62 @@ async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ready");
+}
+
+#[tokio::test]
+async fn test_router_startup_preserves_a_concurrent_clustering_self_fence() {
+    let state = create_test_state().await;
+    let lifecycle = state.node_lifecycle.clone();
+    lifecycle.begin_fenced_recovery();
+
+    let app = test_app_for_state(state).await;
+
+    let ready_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let ws_response = app
+        .clone()
+        .oneshot(Request::builder().uri("/ws").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(ws_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    lifecycle.serve();
+    let ready_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready_response.status(), StatusCode::OK);
+
+    let ws_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ws")
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ws_response.status(), StatusCode::UPGRADE_REQUIRED);
 }
 
 #[tokio::test]
@@ -990,6 +1022,10 @@ async fn test_seed_fixed_test_account_replaces_existing_credentials() {
 
 async fn test_app() -> Router {
     let state = create_test_state().await;
+    test_app_for_state(state).await
+}
+
+async fn test_app_for_state(state: Arc<AppState>) -> Router {
     let server_config = ServerConfig::test_homeserver();
     let test_global_db = crate::db::Database::in_memory("test-mam-global")
         .await

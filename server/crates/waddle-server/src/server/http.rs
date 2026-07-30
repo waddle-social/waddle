@@ -289,9 +289,20 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 
     spawn_critical_registry_supervisor(&websocket_state);
     // Both critical registries now have lifetime supervision. Only after
-    // that fence is armed may this node transition from `Starting` to
-    // `Serving` and admit WebSocket upgrades.
-    websocket_state.deps.app_state.node_lifecycle.serve();
+    // that fence is armed may a node still in `Starting` transition to
+    // `Serving`. A lease fence/drain/failure that won during slow startup
+    // remains authoritative until its own recovery path explicitly serves.
+    if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
+        .deps
+        .app_state
+        .node_lifecycle
+        .finish_startup()
+    {
+        warn!(
+            ?admission,
+            "HTTP graph completed after node admission left Starting; preserving non-serving state"
+        );
+    }
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_orphan_reaper_janitor(
         &websocket_state,

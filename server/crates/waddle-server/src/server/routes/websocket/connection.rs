@@ -24,6 +24,29 @@ use axum::{
 use futures::stream::{SplitSink, SplitStream};
 use waddle_xmpp::stream_management::SmRequest;
 
+#[derive(Debug, PartialEq, Eq)]
+enum WebSocketAdmissionRevocation {
+    Shutdown,
+    Lifecycle(crate::clustering::NodeAdmissionError),
+}
+
+/// Revalidate immediately before returning the upgrade response, and again
+/// inside the upgrade callback before any XMPP state is created. Axum/Hyper
+/// writes HTTP 101 after the handler returns, so a lifecycle transition in
+/// that final transport-only gap may still result in 101; the callback check
+/// guarantees that socket is then dropped without processing XMPP.
+fn revalidate_websocket_admission(
+    state: &WebSocketState,
+    permit: &crate::clustering::NodeAdmissionPermit,
+) -> Result<(), WebSocketAdmissionRevocation> {
+    if state.deps.shutdown.stop_token().is_cancelled() {
+        return Err(WebSocketAdmissionRevocation::Shutdown);
+    }
+    permit
+        .revalidate()
+        .map_err(WebSocketAdmissionRevocation::Lifecycle)
+}
+
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
     Router::new()
@@ -70,8 +93,22 @@ async fn xmpp_websocket_handler(
         Err(rejection) => return rejection.into_response(),
     };
 
+    if let Err(reason) = revalidate_websocket_admission(&state, &admission_permit) {
+        info!(
+            ?reason,
+            "Rejecting XMPP WebSocket upgrade: admission was revoked"
+        );
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
     ws.protocols(["xmpp"]).on_upgrade(move |socket| async move {
-        let _admission_permit = admission_permit;
+        if let Err(reason) = revalidate_websocket_admission(&state, &admission_permit) {
+            info!(
+                ?reason,
+                "Closing upgraded WebSocket: admission was revoked before XMPP start"
+            );
+            return;
+        }
         handle_xmpp_websocket(socket, state, connection_guard).await;
     })
 }
@@ -259,6 +296,48 @@ async fn handle_xmpp_websocket(
         // starve routed stanzas or dead-peer detection.
         let deferred_pending = !conn.deferred_inbound.is_empty();
         tokio::select! {
+            biased;
+
+            // Process stop is the highest-priority event. If cancellation and
+            // a queued frame/work item are both ready, no further stanza work
+            // starts after the node has begun draining or failed critically.
+            _ = shutdown_token.cancelled() => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Graceful shutdown: closing live session with system-shutdown stream error"
+                );
+                let close_peer = async {
+                    if conn.stream_open_sent {
+                        let _ = send_ws_text_frames(
+                            &mut ws_sender,
+                            [
+                                build_system_shutdown_stream_error(),
+                                websocket_stream_close_xml(),
+                            ],
+                            "Failed to send system-shutdown stream error",
+                        )
+                        .await;
+                    }
+                    let _ = close_ws_connection(
+                        &mut ws_sender,
+                        "Failed to send WebSocket close frame after system-shutdown",
+                    )
+                    .await;
+                };
+                if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close_peer)
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        jid = ?conn.phase.bound_jid(),
+                        timeout_secs = SHUTDOWN_CLOSE_TIMEOUT.as_secs(),
+                        "Graceful shutdown: peer did not accept the close frames in time; \
+                         proceeding to detach without them"
+                    );
+                }
+                break;
+            }
+
             // Process one drain-deferred inbound frame.
             _ = std::future::ready(()), if deferred_pending => {
                 let Some(text) = conn.deferred_inbound.pop_front() else {
@@ -453,57 +532,6 @@ async fn handle_xmpp_websocket(
                 }
             }
 
-            // Graceful shutdown (issue #1091): SIGTERM cancelled the
-            // ecdysis stop token. Close this live session natively —
-            // RFC 6120 §4.9.3.20 <system-shutdown/> stream error, then
-            // the RFC 7395 <close/> frame and the WS close handshake —
-            // and break WITHOUT transitioning to Closing: the cleanup
-            // fork below must still see a resumable phase so an
-            // XEP-0198 session detaches into the SmSessionRegistry,
-            // where the shutdown drain promotes its unacked queue (Q6).
-            //
-            // Stream frames are sent only after the server has answered
-            // the client's <open/>: RFC 6120 §4.9.1.2 forbids a stream
-            // error before the response stream header, so a connection
-            // still in the upgrade-to-open gap gets the WS closing
-            // handshake alone.
-            _ = shutdown_token.cancelled() => {
-                info!(
-                    jid = ?conn.phase.bound_jid(),
-                    "Graceful shutdown: closing live session with system-shutdown stream error"
-                );
-                let close_peer = async {
-                    if conn.stream_open_sent {
-                        let _ = send_ws_text_frames(
-                            &mut ws_sender,
-                            [
-                                build_system_shutdown_stream_error(),
-                                websocket_stream_close_xml(),
-                            ],
-                            "Failed to send system-shutdown stream error",
-                        )
-                        .await;
-                    }
-                    let _ = close_ws_connection(
-                        &mut ws_sender,
-                        "Failed to send WebSocket close frame after system-shutdown",
-                    )
-                    .await;
-                };
-                if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close_peer)
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        jid = ?conn.phase.bound_jid(),
-                        timeout_secs = SHUTDOWN_CLOSE_TIMEOUT.as_secs(),
-                        "Graceful shutdown: peer did not accept the close frames in time; \
-                         proceeding to detach without them"
-                    );
-                }
-                break;
-            }
-
             // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
             // when the state machine armed a timer; the tick is fed
             // back into the machine, whose policy decides: quiet
@@ -616,7 +644,17 @@ async fn handle_xmpp_websocket(
     if superseded {
         super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
     } else {
-        process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+        if shutdown_token.is_cancelled() {
+            let dropped = discard_deferred_inbound(&mut conn);
+            if dropped > 0 {
+                info!(
+                    dropped,
+                    "Dropping deferred inbound frames after process stop; sender may replay them"
+                );
+            }
+        } else {
+            process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+        }
         drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn).await;
     }
 
@@ -726,6 +764,85 @@ mod admission_tests {
                 .expect("response")
                 .status(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_transition_revokes_an_inflight_upgrade_permit() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = &state.deps.app_state.node_lifecycle;
+        let permit = lifecycle.admit().expect("initial serving permit");
+
+        lifecycle.begin_fenced_recovery();
+        assert_eq!(
+            revalidate_websocket_admission(&state, &permit),
+            Err(WebSocketAdmissionRevocation::Lifecycle(
+                crate::clustering::NodeAdmissionError::NotServing(
+                    crate::clustering::NodeAdmission::FencedRecovering
+                )
+            ))
+        );
+
+        lifecycle.serve();
+        assert_eq!(
+            revalidate_websocket_admission(&state, &permit),
+            Err(WebSocketAdmissionRevocation::Lifecycle(
+                crate::clustering::NodeAdmissionError::Revoked
+            ))
+        );
+
+        let recovered_permit = lifecycle.admit().expect("recovered serving permit");
+        lifecycle.fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
+        assert!(matches!(
+            revalidate_websocket_admission(&state, &recovered_permit),
+            Err(WebSocketAdmissionRevocation::Lifecycle(
+                crate::clustering::NodeAdmissionError::NotServing(
+                    crate::clustering::NodeAdmission::Failed(
+                        crate::clustering::CriticalNodeFailure::RoomRegistryTerminated
+                    )
+                )
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_process_stop_revokes_upgrade_without_latching_critical_failure() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let permit = state
+            .deps
+            .app_state
+            .node_lifecycle
+            .admit()
+            .expect("initial serving permit");
+
+        state.deps.shutdown.stop_token().cancel();
+
+        assert_eq!(
+            revalidate_websocket_admission(&state, &permit),
+            Err(WebSocketAdmissionRevocation::Shutdown)
+        );
+        assert_eq!(state.deps.app_state.node_lifecycle.critical_failure(), None);
+    }
+
+    #[tokio::test]
+    async fn biased_connection_select_prefers_cancelled_stop_to_ready_bound_stanza() {
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        let ready_bound_stanza =
+            std::future::ready(Stanza::Message(xmpp_parsers::message::Message::new(Some(
+                "peer@example.com".parse::<jid::Jid>().expect("peer JID"),
+            ))));
+        let mut routed = false;
+
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => {}
+            _ = ready_bound_stanza => routed = true,
+        }
+
+        assert!(
+            !routed,
+            "cancelled process stop must win before stanza work"
         );
     }
 }
@@ -1026,7 +1143,7 @@ async fn process_deferred_inbound_after_transport_loss(
     conn: &mut WsConnState,
 ) {
     if conn.sm_inbound_completion.has_unhandled_hole() {
-        let dropped = discard_deferred_inbound_after_unhandled_hole(conn);
+        let dropped = discard_deferred_inbound(conn);
         if dropped > 0 {
             warn!(
                 dropped,
@@ -1046,7 +1163,7 @@ async fn process_deferred_inbound_after_transport_loss(
         };
         batch_write::record_remaining_for_replay(conn, responses.into_iter(), policy);
         if conn.sm_inbound_completion.has_unhandled_hole() {
-            let dropped = discard_deferred_inbound_after_unhandled_hole(conn);
+            let dropped = discard_deferred_inbound(conn);
             if dropped > 0 {
                 warn!(
                     dropped,
@@ -1058,7 +1175,7 @@ async fn process_deferred_inbound_after_transport_loss(
     }
 }
 
-fn discard_deferred_inbound_after_unhandled_hole(conn: &mut WsConnState) -> usize {
+fn discard_deferred_inbound(conn: &mut WsConnState) -> usize {
     let dropped = conn.deferred_inbound.len();
     conn.deferred_inbound.clear();
     dropped
@@ -1203,7 +1320,7 @@ mod tests {
             axum::extract::ws::Utf8Bytes::from_static("<presence/>"),
         ]);
 
-        assert_eq!(discard_deferred_inbound_after_unhandled_hole(&mut conn), 2);
+        assert_eq!(discard_deferred_inbound(&mut conn), 2);
         assert!(conn.deferred_inbound.is_empty());
         assert_eq!(conn.sm_state.get_inbound_count(), 0);
     }

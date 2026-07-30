@@ -182,17 +182,65 @@ pub enum NodeAdmission {
     Failed(CriticalNodeFailure),
 }
 
-/// A successful, point-in-time admission decision for one socket upgrade.
-/// The Ecdysis connection guard still owns the connection lifetime; this
-/// permit proves the node was serving immediately before the upgrade began.
-#[derive(Clone, Copy, Debug)]
-pub struct NodeAdmissionPermit;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodeAdmissionGeneration(u64);
+
+impl NodeAdmissionGeneration {
+    fn next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NodeLifecycleState {
+    admission: NodeAdmission,
+    generation: NodeAdmissionGeneration,
+}
+
+/// A successful admission decision for one socket upgrade, bound to the
+/// exact serving generation that issued it. Any lifecycle transition revokes
+/// the permit, including a fence followed by recovery back to `Serving`.
+#[derive(Debug)]
+pub struct NodeAdmissionPermit {
+    state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
+    generation: NodeAdmissionGeneration,
+}
+
+impl NodeAdmissionPermit {
+    /// Revalidate at the last safe pre-upgrade boundary. This deliberately
+    /// takes only a short read lock: fencing/readiness transitions must never
+    /// wait for an HTTP/WebSocket handshake.
+    pub fn revalidate(&self) -> Result<(), NodeAdmissionError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(state.admission, NodeAdmission::Serving) {
+            return Err(NodeAdmissionError::NotServing(state.admission.clone()));
+        }
+        if state.generation != self.generation {
+            return Err(NodeAdmissionError::Revoked);
+        }
+        Ok(())
+    }
+}
 
 /// Why an HTTP/XMPP connection was not admitted.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NodeAdmissionError {
     #[error("node is not accepting connections: {0:?}")]
     NotServing(NodeAdmission),
+    #[error("node admission permit was revoked by a lifecycle transition")]
+    Revoked,
+}
+
+/// Result of the one startup-only promotion attempted after every critical
+/// registry supervisor is armed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupServingTransition {
+    Promoted,
+    AlreadyServing,
+    Blocked(NodeAdmission),
 }
 
 /// Cloneable lifecycle state shared by readiness, socket admission, and the
@@ -201,7 +249,7 @@ pub enum NodeAdmissionError {
 /// here rather than by a separate readiness boolean.
 #[derive(Clone)]
 pub struct NodeLifecycle {
-    admission: std::sync::Arc<std::sync::RwLock<NodeAdmission>>,
+    state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     fatal_fence: CancellationToken,
 }
 
@@ -219,22 +267,33 @@ impl NodeLifecycle {
 
     fn with_admission(admission: NodeAdmission) -> Self {
         Self {
-            admission: std::sync::Arc::new(std::sync::RwLock::new(admission)),
+            state: std::sync::Arc::new(std::sync::RwLock::new(NodeLifecycleState {
+                admission,
+                generation: NodeAdmissionGeneration(0),
+            })),
             fatal_fence: CancellationToken::new(),
         }
     }
 
     pub fn admission(&self) -> NodeAdmission {
-        self.admission
+        self.state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .admission
             .clone()
     }
 
     pub fn admit(&self) -> Result<NodeAdmissionPermit, NodeAdmissionError> {
-        match self.admission() {
-            NodeAdmission::Serving => Ok(NodeAdmissionPermit),
-            state => Err(NodeAdmissionError::NotServing(state)),
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.admission {
+            NodeAdmission::Serving => Ok(NodeAdmissionPermit {
+                state: std::sync::Arc::clone(&self.state),
+                generation: state.generation,
+            }),
+            _ => Err(NodeAdmissionError::NotServing(state.admission.clone())),
         }
     }
 
@@ -246,6 +305,25 @@ impl NodeLifecycle {
         self.transition_nonterminal(NodeAdmission::Serving);
     }
 
+    /// Complete startup only if no fence/drain/failure won the race while
+    /// the HTTP graph was being constructed. Recovery is intentionally a
+    /// separate explicit [`Self::serve`] call after the node re-registers.
+    pub fn finish_startup(&self) -> StartupServingTransition {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.admission {
+            NodeAdmission::Starting => {
+                state.admission = NodeAdmission::Serving;
+                state.generation = state.generation.next();
+                StartupServingTransition::Promoted
+            }
+            NodeAdmission::Serving => StartupServingTransition::AlreadyServing,
+            _ => StartupServingTransition::Blocked(state.admission.clone()),
+        }
+    }
+
     pub fn begin_drain(&self) {
         self.transition_nonterminal(NodeAdmission::Draining);
     }
@@ -255,10 +333,16 @@ impl NodeLifecycle {
     }
 
     pub fn fail(&self, failure: CriticalNodeFailure) {
-        *self
-            .admission
+        let mut state = self
+            .state
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = NodeAdmission::Failed(failure);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next = NodeAdmission::Failed(failure);
+        if state.admission != next {
+            state.admission = next;
+            state.generation = state.generation.next();
+        }
+        drop(state);
         self.fatal_fence.cancel();
     }
 
@@ -270,12 +354,13 @@ impl NodeLifecycle {
     }
 
     fn transition_nonterminal(&self, next: NodeAdmission) {
-        let mut current = self
-            .admission
+        let mut state = self
+            .state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !matches!(*current, NodeAdmission::Failed(_)) {
-            *current = next;
+        if !matches!(state.admission, NodeAdmission::Failed(_)) && state.admission != next {
+            state.admission = next;
+            state.generation = state.generation.next();
         }
     }
 
@@ -293,7 +378,10 @@ impl Default for NodeLifecycle {
 
 #[cfg(test)]
 mod readiness_tests {
-    use super::{CriticalNodeFailure, NodeAdmission, NodeLifecycle};
+    use super::{
+        CriticalNodeFailure, NodeAdmission, NodeAdmissionError, NodeLifecycle,
+        StartupServingTransition,
+    };
 
     #[test]
     fn failed_latch_overrides_every_later_nonterminal_transition() {
@@ -314,9 +402,54 @@ mod readiness_tests {
         let lifecycle = NodeLifecycle::starting();
         assert!(lifecycle.admit().is_err());
         lifecycle.serve();
-        assert!(lifecycle.admit().is_ok());
+        let permit = lifecycle.admit().expect("serving permit");
+        assert!(permit.revalidate().is_ok());
         lifecycle.begin_fenced_recovery();
         assert!(lifecycle.admit().is_err());
+        assert_eq!(
+            permit.revalidate(),
+            Err(NodeAdmissionError::NotServing(
+                NodeAdmission::FencedRecovering
+            ))
+        );
+
+        lifecycle.serve();
+        assert_eq!(permit.revalidate(), Err(NodeAdmissionError::Revoked));
+        assert!(lifecycle
+            .admit()
+            .expect("recovered serving permit")
+            .revalidate()
+            .is_ok());
+    }
+
+    #[test]
+    fn startup_promotion_cannot_overwrite_fencing_or_failure() {
+        let lifecycle = NodeLifecycle::starting();
+        assert_eq!(
+            lifecycle.finish_startup(),
+            StartupServingTransition::Promoted
+        );
+        assert_eq!(
+            lifecycle.finish_startup(),
+            StartupServingTransition::AlreadyServing
+        );
+
+        let fenced = NodeLifecycle::starting();
+        fenced.begin_fenced_recovery();
+        assert_eq!(
+            fenced.finish_startup(),
+            StartupServingTransition::Blocked(NodeAdmission::FencedRecovering)
+        );
+        assert_eq!(fenced.admission(), NodeAdmission::FencedRecovering);
+
+        let failed = NodeLifecycle::starting();
+        failed.fail(CriticalNodeFailure::UserRegistryTerminated);
+        assert_eq!(
+            failed.finish_startup(),
+            StartupServingTransition::Blocked(NodeAdmission::Failed(
+                CriticalNodeFailure::UserRegistryTerminated
+            ))
+        );
     }
 }
 
