@@ -444,3 +444,75 @@ async fn delivered_session_initiate_counts_ok() {
         0
     );
 }
+
+#[tokio::test]
+async fn detached_queued_session_initiate_counts_ok() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+
+    // Bob's resource is detached but XEP-0198-resumable: the invite is
+    // queued for replay, which is a deliberate `ok` — the peer picks
+    // it up on resume, so the alert must not read it as a failure.
+    let sm = Arc::new(InMemorySmSessionRegistry::new());
+    sm.store_session(DetachedSession {
+        stream_id: "bob-phone-stream".to_string(),
+        user_id: "bob".to_string(),
+        jid: bob.clone(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    })
+    .await
+    .expect("store detached session");
+
+    let mut deps = Deps::registry_with_user_registry(&registry, &user_registry);
+    deps.sm_session_registry = Some(&sm);
+
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: jid::Jid::from(bob.clone()),
+        stanza: Box::new(Stanza::Iq(Box::new(session_initiate_iq_for_route_test(
+            "call-detached-1",
+            &alice,
+            &bob,
+        )))),
+        call_setup: Some(PendingCallSetupRoute),
+    }];
+
+    let outcome = interpret(events, &deps).await;
+
+    assert!(
+        outcome.frames.is_empty(),
+        "a replay-queued invite produces no caller-facing bounce: {:?}",
+        outcome.frames
+    );
+    assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+    assert_eq!(
+        metrics
+            .counter_sum(
+                "waddle.call.setup.failed",
+                &[("reason", "peer_unavailable")]
+            )
+            .unwrap_or(0),
+        0
+    );
+}

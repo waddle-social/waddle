@@ -255,30 +255,24 @@ async fn route_to_full_jid(
         }
         return route_dm_to_full_jid(deps, full, stanza, recursion_depth).await;
     }
-    let delivery = match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await {
-        Some(outcome) => outcome,
-        None => deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await,
-    };
-    // #1488: close the 1:1 call-setup attempt from the actual route
-    // disposition. `Delivered`, `QueuedDetached` (XEP-0198 replay will
-    // hand it over on resume) and `MaybeCommitted` (ambiguous cluster
-    // relay — may well have reached the peer, so the alert must not
-    // over-read) count `ok`; `Unavailable` (confirmed offline — the
-    // caller gets the undeliverable bounce below) and `Dropped`
-    // (closed channel / replay-buffer failure) count
-    // `failed{reason=peer_unavailable}`.
-    if let Some(ticket) = call_setup {
-        match delivery {
-            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
-                ticket.delivered();
+    // #1488 ticket ownership: the ordered-relay path owns and closes
+    // the call-setup ticket whenever it handles the delivery
+    // (`Some`) — its deferred-handoff branch returns a synthetic
+    // `Delivered` immediately and only learns the real disposition in
+    // a spawned completion task, so the close must happen there, not
+    // here. When the relay declines (`None`), the local delivery path
+    // closes the ticket from its own outcome via the shared
+    // [`close_call_setup_from_outcome`] mapping.
+    let delivery =
+        match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), call_setup).await {
+            Some(outcome) => outcome,
+            None => {
+                let outcome =
+                    deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
+                close_call_setup_from_outcome(call_setup, outcome);
+                outcome
             }
-            #[cfg(feature = "clustering")]
-            FullJidDeliveryOutcome::MaybeCommitted => ticket.delivered(),
-            FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {
-                ticket.undeliverable();
-            }
-        }
-    }
+        };
     if delivery == FullJidDeliveryOutcome::Unavailable {
         // RFC 6121 §8.5.1: a message to a nonexistent LOCAL account is
         // bounced regardless of type (`groupchat` excluded — reflection
@@ -340,7 +334,8 @@ async fn route_dm_to_full_jid(
     // possibly handled, which must suppress local fallback to avoid
     // duplicates), and `Dropped` is the deliberate full-channel /
     // ambiguous-failure drop the legacy path also performed.
-    let relay_outcome = deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await;
+    let relay_outcome =
+        deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), None).await;
     match relay_outcome {
         Some(FullJidDeliveryOutcome::Unavailable) => {
             // Confirmed offline on the owning node → §8.5.3.2.1
@@ -936,10 +931,16 @@ fn bounce_for_nonexistent_account(
     }
 }
 
+/// `call_setup` (#1488): when the relay handles the delivery
+/// (returns `Some`), it also owns closing the call-setup ticket —
+/// see [`RouteBridge::try_deliver_full_jid_remote`]'s deferred
+/// handoff. On `None` the ticket is untouched and the caller closes
+/// it from the local delivery outcome.
 fn deliver_full_jid_via_ordered_relay<'a>(
     deps: &'a Deps<'_>,
     target: &'a jid::FullJid,
     stanza: &'a Stanza,
+    call_setup: Option<PendingCallSetupRoute>,
 ) -> OrderedRelayDeliveryFuture<'a> {
     Box::pin(async move {
         #[cfg(feature = "clustering")]
@@ -953,12 +954,12 @@ fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(target, stanza, origin)
+                .try_deliver_full_jid_remote(target, stanza, origin, call_setup)
                 .await
         }
         #[cfg(not(feature = "clustering"))]
         {
-            let _ = (deps, target, stanza);
+            let _ = (deps, target, stanza, call_setup);
             None
         }
     })

@@ -619,14 +619,24 @@ impl OrderedRelayDeliveryBridge {
     /// Return `Some` only when this exact full-JID target is currently owned
     /// by a fresh foreign `UserActor` claim and an ordered-relay send was
     /// attempted. `None` means the caller must keep the existing local path.
+    /// `call_setup` (#1488): a routed 1:1 call-setup ticket. This
+    /// function owns closing it whenever it returns `Some` — in
+    /// particular the deferred-handoff branch, whose immediate
+    /// `Delivered` is synthetic (it only suppresses local fallback)
+    /// and whose real disposition resolves in the spawned completion
+    /// task. Returning `None` leaves the ticket with the caller.
     pub(crate) fn try_deliver_full_jid_remote<'a>(
         self: &'a Arc<Self>,
         target: &'a jid::FullJid,
         stanza: &'a Stanza,
         origin: &'a OrderedRelayRouteOrigin,
+        call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
     ) -> RemoteDeliveryFuture<'a> {
         Box::pin(async move {
             if let Some(remote_origin) = remote_resource_origin(origin) {
+                // Ticket ownership passes down: `route_remote_resource_origin`
+                // has its own deferred-handoff branch and closes the
+                // ticket from the REAL outcome (#1488).
                 return Arc::clone(self)
                     .route_remote_resource_origin(
                         remote_origin,
@@ -636,6 +646,7 @@ impl OrderedRelayDeliveryBridge {
                         },
                         stanza,
                         origin,
+                        call_setup,
                     )
                     .await;
             }
@@ -721,6 +732,25 @@ impl OrderedRelayDeliveryBridge {
                                 "ordered-relay deferred full-JID delivery outcome"
                             );
                         }
+                        // #1488: this is the point where the deferred
+                        // delivery's REAL disposition is known — the
+                        // `Delivered` returned below is synthetic. Close
+                        // the call-setup ticket here; a `None` outcome
+                        // means the relay never handed the stanza to
+                        // anyone (and there is no local fallback on the
+                        // deferred branch), so the invite is lost.
+                        match delivery_outcome {
+                            Some(outcome) => {
+                                crate::server::routes::interpret::close_call_setup_from_outcome(
+                                    call_setup, outcome,
+                                );
+                            }
+                            None => {
+                                if let Some(ticket) = call_setup {
+                                    ticket.undeliverable();
+                                }
+                            }
+                        }
                         let replies = delivery_outcome
                             .map(|outcome| {
                                 replies_for_origin_handoff(
@@ -744,6 +774,7 @@ impl OrderedRelayDeliveryBridge {
                 ?outcome,
                 "ordered-relay full-JID delivery outcome"
             );
+            crate::server::routes::interpret::close_call_setup_from_outcome(call_setup, outcome);
             Some(outcome)
         })
     }
@@ -768,6 +799,7 @@ impl OrderedRelayDeliveryBridge {
                         },
                         stanza,
                         origin,
+                        None,
                     )
                     .await;
             }
@@ -2006,12 +2038,18 @@ impl OrderedRelayDeliveryBridge {
         RelayRemoteUserSideEffectReply { status }
     }
 
+    /// `call_setup` (#1488): closed here — from the REAL outcome in
+    /// the deferred-handoff spawn (the immediate `Delivered` is
+    /// synthetic), or from the ask outcome inline — whenever this
+    /// function returns `Some`. `None` leaves the ticket with the
+    /// caller's fallback path.
     async fn route_remote_resource_origin(
         self: Arc<Self>,
         remote_origin: RemoteResourceOriginSnapshot,
         target: RemoteResourceRouteTarget,
         origin_stanza: &Stanza,
         origin: &OrderedRelayRouteOrigin,
+        call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
     ) -> Option<FullJidDeliveryOutcome> {
         let outcome_log = route_outcome_log(&target);
         if let Some(handoff) = origin.handoff.clone() {
@@ -2024,6 +2062,9 @@ impl OrderedRelayDeliveryBridge {
                         .await
                         .unwrap_or(FullJidDeliveryOutcome::Dropped);
                     log_remote_resource_route_outcome(&outcome_log, outcome);
+                    crate::server::routes::interpret::close_call_setup_from_outcome(
+                        call_setup, outcome,
+                    );
                     handoff.complete(replies_for_origin_handoff(
                         &origin_stanza,
                         outcome,
@@ -2038,6 +2079,7 @@ impl OrderedRelayDeliveryBridge {
             .await;
         if let Some(outcome) = outcome {
             log_remote_resource_route_outcome(&outcome_log, outcome);
+            crate::server::routes::interpret::close_call_setup_from_outcome(call_setup, outcome);
         }
         outcome
     }
@@ -2234,7 +2276,7 @@ impl OrderedRelayDeliveryBridge {
         match target {
             RemoteResourceRouteTarget::FullJid { target, stanza } => {
                 if let Some(remote) = self
-                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin)
+                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin, None)
                     .await
                 {
                     Some(remote)
@@ -2447,7 +2489,7 @@ impl OrderedRelayDeliveryBridge {
         match msg.target {
             RemoteResourceRouteTarget::FullJid { target, stanza } => {
                 let outcome = if let Some(remote) = self
-                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin)
+                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin, None)
                     .await
                 {
                     remote

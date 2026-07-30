@@ -421,6 +421,40 @@ impl FullJidDeliveryOutcome {
     }
 }
 
+/// #1488: close a routed 1:1 call-setup ticket from a full-JID
+/// delivery disposition — the single mapping shared by the local
+/// delivery path and the ordered-relay path (including the deferred
+/// handoff, which resolves its real outcome in a spawned task).
+///
+/// `Delivered`, `QueuedDetached` (XEP-0198 replay hands the invite
+/// over on resume) and `MaybeCommitted` (ambiguous cluster relay —
+/// may well have reached the peer, so the alert must not over-read)
+/// count `ok`. `Unavailable` (confirmed offline — the caller gets the
+/// undeliverable bounce) and `Dropped` (the invite verifiably never
+/// landed anywhere: recipient backpressure after bounded retries, or
+/// a storage error recording to detached — no bounce is sent) count
+/// `failed{reason=peer_unavailable}`. A `Dropped` spike therefore
+/// means delivery loss, not necessarily an offline peer; the runbook
+/// on `CallSetupFailureRate` covers both readings.
+pub(crate) fn close_call_setup_from_outcome(
+    call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+    outcome: FullJidDeliveryOutcome,
+) {
+    let Some(ticket) = call_setup else {
+        return;
+    };
+    match outcome {
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+            ticket.delivered();
+        }
+        #[cfg(feature = "clustering")]
+        FullJidDeliveryOutcome::MaybeCommitted => ticket.delivered(),
+        FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {
+            ticket.undeliverable();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DetachedDeliveryOutcome {
     Queued,

@@ -532,7 +532,7 @@ pub(in crate::server::routes::websocket::handlers::presence::subscription) async
         };
         remote_presence_outcome_consumed(
             bridge
-                .try_deliver_full_jid_remote(target, stanza, origin)
+                .try_deliver_full_jid_remote(target, stanza, origin, None)
                 .await,
         )
     }
