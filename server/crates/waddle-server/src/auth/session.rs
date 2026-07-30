@@ -363,7 +363,7 @@ fn integer_column(row: &[crate::db::Value], index: usize, name: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, SessionManager};
+    use super::{PrincipalResolution, Session, SessionManager};
     use crate::db::{actor::DbActor, Database, MigrationRunner};
     use kameo::actor::Spawn;
 
@@ -397,5 +397,43 @@ mod tests {
         assert_eq!(loaded.user_jid, "alice@example.com");
         assert_eq!(loaded.username, "alice");
         assert_eq!(loaded.xmpp_localpart, "alice");
+    }
+
+    #[tokio::test]
+    async fn resolves_only_the_exact_live_principal_reference() {
+        let db = Database::in_memory("test-auth-context-resolution")
+            .await
+            .expect("in-memory database");
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let manager = SessionManager::new(DbActor::spawn(DbActor::new(db)), Some(b"test-key"));
+        let session = Session::new("alice@example.com", "alice", "alice");
+        let principal = session
+            .authenticated_principal_ref()
+            .expect("typed principal");
+        manager.create_session(&session).await.expect("create session");
+
+        match manager
+            .resolve_principal(&principal)
+            .await
+            .expect("resolve principal")
+        {
+            PrincipalResolution::Active(resolved) => assert_eq!(resolved.id, session.id),
+            outcome => panic!("expected active principal, got {outcome:?}"),
+        }
+
+        manager
+            .delete_session(&session.id)
+            .await
+            .expect("revoke session");
+        assert!(matches!(
+            manager
+                .resolve_principal(&principal)
+                .await
+                .expect("resolve revoked principal"),
+            PrincipalResolution::Revoked
+        ));
     }
 }
