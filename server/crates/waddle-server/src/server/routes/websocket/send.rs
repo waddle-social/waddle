@@ -149,16 +149,18 @@ where
     // `futures::SinkExt` does not expose a portable `ready` future for every
     // Sink version we support. Poll the required `Sink::poll_ready` directly
     // so cancellation remains selectable while transport readiness is parked.
-    let ready = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *sender).poll_ready(cx));
-    tokio::pin!(ready);
-    let ready_result = match authority {
-        Some((permit, shutdown)) => tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return AuthoritySendOutcome::AuthorityRevoked,
-            _ = permit.revoked() => return AuthoritySendOutcome::AuthorityRevoked,
-            result = tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()) => result,
-        },
-        None => tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()).await,
+    let ready_result = {
+        let ready = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *sender).poll_ready(cx));
+        tokio::pin!(ready);
+        match authority {
+            Some((permit, shutdown)) => tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return AuthoritySendOutcome::AuthorityRevoked,
+                _ = permit.revoked() => return AuthoritySendOutcome::AuthorityRevoked,
+                result = tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()) => result,
+            },
+            None => tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()).await,
+        }
     };
     match ready_result {
         Ok(Ok(())) => {}
@@ -175,8 +177,6 @@ where
             return AuthoritySendOutcome::TransportClosed;
         }
     }
-    drop(ready);
-
     // `poll_ready` may have parked while the generation was revoked, then
     // returned Ready in the same poll that wakes this task. This is the last
     // point at which the pending frame can still be suppressed.
