@@ -97,7 +97,6 @@ async fn handle_xmpp_frame_impl(
         suppress_sm_record_next_batch,
         pending_sm_enable_commit,
         state_machine,
-        stream_open_sent,
         registry_owner,
         ..
     } = conn;
@@ -169,7 +168,7 @@ async fn handle_xmpp_frame_impl(
             let open_element = websocket_stream_open_xml(domain);
             let isr_available = state.deps.isr_available();
             let features_element = build_stream_features_for_phase(phase, isr_available);
-            *stream_open_sent = true;
+            conn.begin_server_stream_open_response();
             vec![open_element, features_element]
         }
 
@@ -178,7 +177,7 @@ async fn handle_xmpp_frame_impl(
             *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
             // The stream is over: no response header remains to hang a
             // graceful-shutdown <stream:error> on.
-            *stream_open_sent = false;
+            conn.reset_stream_open_for_xmpp_lifecycle();
             vec![websocket_stream_close_xml()]
         }
 
@@ -221,7 +220,7 @@ async fn handle_xmpp_frame_impl(
             // exists for the new stream, so the graceful-shutdown arm
             // must not send a <stream:error> (§4.9.1.2).
             if phase.is_authenticated() {
-                *stream_open_sent = false;
+                conn.reset_stream_open_for_xmpp_lifecycle();
             }
             responses
         }
@@ -272,7 +271,7 @@ async fn handle_xmpp_frame_impl(
             // RFC 6120 §6.4.6 / XEP-0388: successful authentication restarts
             // the stream — same rule the SASL1 <auth>/<response> arms apply.
             if phase.is_authenticated() {
-                *stream_open_sent = false;
+                conn.reset_stream_open_for_xmpp_lifecycle();
             }
             responses
         }
@@ -292,7 +291,7 @@ async fn handle_xmpp_frame_impl(
             // SCRAM success no response header exists for the new
             // stream until the next <open/> is answered.
             if phase.is_authenticated() {
-                *stream_open_sent = false;
+                conn.reset_stream_open_for_xmpp_lifecycle();
             }
             responses
         }

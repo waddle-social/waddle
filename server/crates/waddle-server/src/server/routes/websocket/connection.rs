@@ -569,7 +569,7 @@ async fn handle_xmpp_websocket(
                                 jid = ?conn.phase.bound_jid(),
                                 "Cross-node resume: force-detaching this session (<conflict/> close)"
                             );
-                            if conn.stream_open_sent {
+                            if conn.has_committed_live_stream_open() {
                                 let _ = send_ws_text_frames_with_authority(
                                     &mut ws_sender,
                                     [build_conflict_stream_error(), websocket_stream_close_xml()],
@@ -774,12 +774,13 @@ async fn handle_xmpp_websocket(
     info!("XMPP WebSocket connection closed");
 }
 
-async fn close_live_session_for_node_unavailable(
-    ws_sender: &mut SplitSink<WebSocket, Message>,
-    conn: &WsConnState,
-) {
+async fn close_live_session_for_node_unavailable<S, E>(ws_sender: &mut S, conn: &WsConnState)
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
     let close_peer = async {
-        if conn.stream_open_sent {
+        if conn.has_committed_live_stream_open() {
             let _ = send_ws_text_frames(
                 ws_sender,
                 [
@@ -1172,6 +1173,7 @@ async fn handle_inbound_text(
     .await
     {
         BatchWriteOutcome::Continue => {
+            conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
         }
         BatchWriteOutcome::TransportClosed => return false,
@@ -1471,6 +1473,12 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        batch_write::{
+            write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+        },
+        transport_xml::websocket_stream_open_xml,
+    };
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -1512,6 +1520,42 @@ mod tests {
         }
     }
 
+    struct RevokeWhileReadyPendingSink {
+        lifecycle: crate::clustering::NodeLifecycle,
+        start_send_called: bool,
+    }
+
+    impl futures::Sink<Message> for RevokeWhileReadyPendingSink {
+        type Error = &'static str;
+
+        fn poll_ready(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.lifecycle.begin_fenced_recovery();
+            Poll::Pending
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            self.start_send_called = true;
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn post_upgrade_admission_revocation_sends_websocket_close() {
         let mut socket = UpgradeCloseSink::default();
@@ -1520,6 +1564,95 @@ mod tests {
 
         assert_eq!(socket.sent, vec![Message::Close(None)]);
         assert!(socket.closed);
+    }
+
+    #[tokio::test]
+    async fn revocation_while_open_response_is_pending_closes_websocket_without_stream_error() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.begin_server_stream_open_response();
+        let mut sender = RevokeWhileReadyPendingSink {
+            lifecycle,
+            start_send_called: false,
+        };
+        let mut reader = futures::stream::pending::<Result<Message, &'static str>>();
+
+        let outcome = write_response_batch_with_admission(
+            &mut sender,
+            &mut reader,
+            state.as_ref(),
+            &mut conn,
+            vec![websocket_stream_open_xml("example.com")],
+            BatchSmPolicy::Record,
+            BatchAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        )
+        .await;
+
+        assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+        assert!(
+            !sender.start_send_called,
+            "the server <open/> must not reach start_send after revocation"
+        );
+        assert!(
+            !conn.has_committed_live_stream_open(),
+            "an interrupted open batch must not permit a server-first stream error"
+        );
+
+        let mut closing_sender = UpgradeCloseSink::default();
+        close_live_session_for_node_unavailable(&mut closing_sender, &conn).await;
+
+        assert_eq!(closing_sender.sent, vec![]);
+        assert!(closing_sender.closed, "the transport still closes");
+    }
+
+    #[tokio::test]
+    async fn committed_open_keeps_system_shutdown_and_rfc7395_close_on_revocation() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.begin_server_stream_open_response();
+        let mut sender = UpgradeCloseSink::default();
+        let mut reader = futures::stream::pending::<Result<Message, &'static str>>();
+
+        let outcome = write_response_batch_with_admission(
+            &mut sender,
+            &mut reader,
+            state.as_ref(),
+            &mut conn,
+            vec![websocket_stream_open_xml("example.com")],
+            BatchSmPolicy::Record,
+            BatchAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        )
+        .await;
+        assert!(matches!(outcome, BatchWriteOutcome::Continue));
+        conn.commit_server_stream_open_response();
+        assert!(conn.has_committed_live_stream_open());
+
+        let mut closing_sender = UpgradeCloseSink::default();
+        close_live_session_for_node_unavailable(&mut closing_sender, &conn).await;
+
+        assert_eq!(
+            closing_sender.sent,
+            vec![
+                Message::Text(build_system_shutdown_stream_error().into()),
+                Message::Text(websocket_stream_close_xml().into()),
+            ]
+        );
+        assert!(
+            closing_sender.closed,
+            "the transport closes after RFC 7395 close"
+        );
     }
 
     #[tokio::test]
