@@ -563,9 +563,14 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
 async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session() {
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 
-    let state = create_test_websocket_state().await;
+    let registry = Arc::new(
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+            .with_test_principal_persistence(),
+    );
+    let state = create_test_websocket_state_with_sm_registry(registry).await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let session = create_test_session(state.as_ref(), "bob").await;
+    let detached_principal_session = create_test_session(state.as_ref(), "alice").await;
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
     let auth_frame = element_to_xml(
         Element::builder("auth", waddle_xmpp::ns::SASL)
@@ -606,7 +611,12 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         .deps
         .protocol
         .sm_session_registry
-        .store_session(detached.clone())
+        .store_session_with_principal(
+            detached.clone(),
+            detached_principal_session
+                .authenticated_principal_ref()
+                .expect("typed principal"),
+        )
         .await
         .expect("store");
 
