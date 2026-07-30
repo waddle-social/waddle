@@ -565,7 +565,9 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
 
     let registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_test_principal_persistence(),
+            .with_persistence(Arc::new(
+                waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+            )),
     );
     let state = create_test_websocket_state_with_sm_registry(registry).await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -652,7 +654,9 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
 
     let registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_test_principal_persistence(),
+            .with_persistence(Arc::new(
+                waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+            )),
     );
     let state = create_test_websocket_state_with_sm_registry(registry).await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -800,6 +804,143 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
         }),
         "the production MUC dispatcher must authorize a managed-channel member after resume: {muc_responses:?}"
     );
+}
+
+#[tokio::test]
+async fn sm_resume_revoked_between_principal_checks_fails_closed_without_publishing() {
+    use waddle_xmpp::stream_management::{DetachedSession, DetachedUnackedStanza, SmSessionRegistry};
+
+    let registry = Arc::new(
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(
+                waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+            )),
+    );
+    let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+    let domain = state.deps.auth_state.xmpp_domain.clone();
+    let session = create_test_session(state.as_ref(), "bob").await;
+    let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+    let auth_frame = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
+            .append(payload)
+            .build(),
+    );
+    let mut conn = WsConnState::new();
+    assert_eq!(
+        handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await,
+        vec![sasl_success_xml()]
+    );
+    assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+
+    // The resume path must use only its durable principal lookup; retaining
+    // a Session from the preceding SASL frame must never become a fallback.
+    conn.authenticated_session = None;
+    let stream_id = "stream-principal-revoked-before-ready";
+    let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
+    registry
+        .store_session_with_principal(
+            DetachedSession {
+                stream_id: stream_id.to_string(),
+                user_id: format!("bob@{domain}"),
+                jid: detached_jid.clone(),
+                inbound_count: 2,
+                outbound_count: 1,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: vec![DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: "<message xmlns='jabber:client' id='must-not-replay'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                }],
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            },
+            session
+                .authenticated_principal_ref()
+                .expect("typed principal"),
+        )
+        .await
+        .expect("store principal-bound detached session");
+
+    let (reached, release) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    conn.pre_final_principal_recheck_test_hook = Some((reached.clone(), release.clone()));
+    let resume_state = state.clone();
+    let resume_domain = domain.clone();
+    let resume_frame = resume_frame_xml(stream_id, 0);
+    let resume_task = tokio::spawn(async move {
+        let mut resume_conn = conn;
+        let responses = handle_xmpp_frame(
+            &resume_frame,
+            &resume_domain,
+            resume_state.as_ref(),
+            &mut resume_conn,
+        )
+        .await;
+        (resume_conn, responses)
+    });
+
+    reached.notified().await;
+    state
+        .deps
+        .auth_state
+        .session_manager
+        .delete_session(&session.id)
+        .await
+        .expect("revoke session between durable principal checks");
+    release.notify_one();
+    let (conn, responses) = resume_task.await.expect("resume task completes");
+
+    assert_eq!(responses.len(), 1, "no resumed frame or replay may escape");
+    let failed = Element::from_str(&responses[0]).expect("failure xml");
+    assert_eq!(failed.name(), "failed");
+    assert!(failed
+        .get_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+    assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+    assert!(!conn.phase.is_ready());
+    assert!(!conn.phase.is_resumed());
+    assert!(conn.authenticated_session.is_none(), "no Session fallback is installed");
+    assert!(conn.registry_owner.is_none(), "resume never registered a connection");
+    assert!(!state
+        .deps
+        .protocol
+        .connection_registry
+        .is_connected(&detached_jid));
+
+    // Claiming the same snapshot again proves the rejected path released the
+    // exact claim; release this test claim so the detached snapshot remains
+    // recoverable for expiry or a corrected future authorization state.
+    let recovered = registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim query")
+        .expect("rejected resume must leave detached session recoverable");
+    assert_eq!(recovered.jid, detached_jid);
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("release recovery assertion claim");
+    assert!(registry
+        .peek_session(stream_id)
+        .await
+        .expect("peek detached session")
+        .is_some());
 }
 
 #[tokio::test]

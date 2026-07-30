@@ -82,17 +82,17 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         unacked_stanzas: vec![
             DetachedUnackedStanza {
                 sequence: 13,
-                stanza_xml: "<msg1/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='msg1'/>".to_string(),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
                 sequence: 14,
-                stanza_xml: "<msg2/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='msg2'/>".to_string(),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
                 sequence: 15,
-                stanza_xml: "<msg3/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='msg3'/>".to_string(),
                 original_receipt_at: Utc::now(),
             },
         ],
