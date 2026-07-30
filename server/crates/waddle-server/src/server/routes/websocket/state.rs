@@ -1471,6 +1471,9 @@ pub(super) struct WsConnState {
     #[cfg(test)]
     pub(super) post_sm_finalization_test_hook:
         Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    #[cfg(test)]
+    pub(super) pre_final_principal_recheck_test_hook:
+        Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// One-shot flag: when set, the main loop must NOT push the current
@@ -1559,6 +1562,8 @@ impl WsConnState {
             pending_resume_h: None,
             #[cfg(test)]
             post_sm_finalization_test_hook: None,
+            #[cfg(test)]
+            pre_final_principal_recheck_test_hook: None,
             registry_owner: None,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,

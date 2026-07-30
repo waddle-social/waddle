@@ -94,6 +94,8 @@ async fn handle_xmpp_frame_impl(
         pending_resume_stream_id,
         pending_resume_h,
         suppress_sm_record_next_batch,
+        #[cfg(test)]
+        pre_final_principal_recheck_test_hook,
         pending_sm_enable_commit,
         state_machine,
         registry_owner,
@@ -125,6 +127,8 @@ async fn handle_xmpp_frame_impl(
                 pending_resume_stream_id,
                 pending_resume_h,
                 suppress_sm_record_next_batch,
+                #[cfg(test)]
+                pre_final_principal_recheck_test_hook,
                 roster_interested,
                 blocklist_interested,
                 pending_sm_enable_commit,

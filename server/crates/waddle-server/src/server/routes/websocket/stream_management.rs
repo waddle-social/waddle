@@ -300,6 +300,9 @@ pub(super) struct SmCtx<'a> {
     /// the responses it returns — those are replay stanzas already tracked
     /// in the unacked queue.
     pub(super) suppress_sm_record_next_batch: &'a mut bool,
+    #[cfg(test)]
+    pub(super) pre_final_principal_recheck_test_hook:
+        &'a mut Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     pub(super) roster_interested: &'a mut bool,
     pub(super) blocklist_interested: &'a mut bool,
     pub(super) pending_sm_enable_commit: &'a mut Option<SmEnableCommit>,
@@ -662,6 +665,8 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         pending_resume_stream_id,
         pending_resume_h,
         suppress_sm_record_next_batch,
+        #[cfg(test)]
+        pre_final_principal_recheck_test_hook,
         roster_interested,
         blocklist_interested,
         pending_sm_enable_commit: _,
@@ -925,6 +930,11 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // Last authority check: nothing may publish the resumed connection,
     // transition to Ready, or replay a stanza after this point unless the
     // exact durable principal reference is still active under this claim.
+    #[cfg(test)]
+    if let Some((reached, release)) = pre_final_principal_recheck_test_hook.take() {
+        reached.notify_one();
+        release.notified().await;
+    }
     let resumed_session = match state
         .deps
         .auth_state
