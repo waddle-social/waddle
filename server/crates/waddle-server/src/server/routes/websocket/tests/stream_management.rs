@@ -739,6 +739,57 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
         }),
         "the production IQ dispatcher must retain the resolved principal after resume"
     );
+
+    let room_jid: BareJid = "resume-private@muc.example.com".parse().expect("room jid");
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "resume-private".to_string(),
+            name: "Resume Private".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("managed channel");
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(crate::permissions::WriteTuple {
+            tuple: crate::permissions::Tuple::new(
+                crate::permissions::Object::new(
+                    crate::permissions::ObjectType::Channel,
+                    "resume-private",
+                ),
+                crate::permissions::Relation::new("member"),
+                crate::permissions::Subject::user(&session.user_jid),
+            ),
+        })
+        .await
+        .expect("managed channel member");
+    let muc_join = element_to_xml(
+        Element::builder("presence", waddle_xmpp::protocol::frame::CLIENT_STANZA_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                "resume-private@muc.example.com/bob",
+            )
+            .append(Element::builder("x", "http://jabber.org/protocol/muc").build())
+            .build(),
+    );
+    let muc_responses = handle_xmpp_frame(&muc_join, &domain, state.as_ref(), &mut conn).await;
+    assert!(
+        muc_responses.iter().any(|response| {
+            response.contains("affiliation='member'")
+                || response.contains(r#"affiliation="member""#)
+        }),
+        "the production MUC dispatcher must authorize a managed-channel member after resume: {muc_responses:?}"
+    );
 }
 
 #[tokio::test]
