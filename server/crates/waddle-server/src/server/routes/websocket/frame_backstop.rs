@@ -296,6 +296,11 @@ where
         }
         None => dispatch.await,
     };
+    if let Some((permit, shutdown)) = admission {
+        if shutdown.is_cancelled() || permit.revalidate().is_err() {
+            return Err(StanzaTimeout::AdmissionRevoked);
+        }
+    }
     match result {
         Ok(responses) => {
             metrics::record_stanza(kind, "inbound");

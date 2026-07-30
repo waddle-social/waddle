@@ -1466,6 +1466,9 @@ pub(super) struct WsConnState {
     /// registered, closing the take-before-register fanout gap.
     pub(super) pending_resume_stream_id: Option<String>,
     pub(super) pending_resume_h: Option<u32>,
+    #[cfg(test)]
+    pub(super) post_sm_finalization_test_hook:
+        Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// One-shot flag: when set, the main loop must NOT push the current
@@ -1555,6 +1558,8 @@ impl WsConnState {
             pending_subscribes_flushed: false,
             pending_resume_stream_id: None,
             pending_resume_h: None,
+            #[cfg(test)]
+            post_sm_finalization_test_hook: None,
             registry_owner: None,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,

@@ -7,7 +7,9 @@
 
 use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
 use super::super::{
-    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
+    batch_write::{
+        write_response_batch, write_response_batch_with_admission, BatchSmPolicy, BatchWriteOutcome,
+    },
     state::WsConnState,
 };
 use super::create_test_websocket_state;
@@ -54,6 +56,68 @@ fn ack_frame(h: u32) -> Message {
 #[derive(Default)]
 struct CollectSink {
     sent: Vec<Message>,
+}
+
+struct RevokeAfterFirstSink {
+    sent: Vec<Message>,
+    lifecycle: crate::clustering::NodeLifecycle,
+}
+
+impl Sink<Message> for RevokeAfterFirstSink {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.sent.push(item);
+        if self.sent.len() == 1 {
+            self.lifecycle.begin_fenced_recovery();
+        }
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn authority_revocation_stops_batch_before_next_record_or_write() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("authority-batch".to_string(), true, Some(300));
+    let mut sink = RevokeAfterFirstSink {
+        sent: Vec::new(),
+        lifecycle,
+    };
+    let mut reader = reader_with(vec![]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![countable_message(1), countable_message(2)],
+        BatchSmPolicy::Record,
+        &permit,
+        &shutdown,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(sink.sent.len(), 1);
+    assert_eq!(conn.sm_state.outbound_count, 1);
+    assert_eq!(conn.sm_state.queue_len(), 1);
 }
 
 impl Sink<Message> for CollectSink {

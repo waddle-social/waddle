@@ -2,13 +2,53 @@ use super::super::{
     frame::handle_xmpp_frame,
     registration::{
         publish_stream_id_and_presence, register_bound_connection_after_frame,
-        RegistrationAfterFrame,
+        register_bound_connection_after_frame_with_admission, RegistrationAfterFrame,
     },
     session_init::load_blocklist_for_bind,
     state::WsConnState,
     stream_management::SmRegistrationFinalization,
     transport_xml::element_to_xml,
 };
+
+#[tokio::test]
+async fn revoked_authority_cannot_publish_a_bound_connection() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    lifecycle.begin_fenced_recovery();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+
+    let outcome = register_bound_connection_after_frame_with_admission(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+        &permit,
+        &shutdown,
+    )
+    .await;
+
+    assert!(matches!(outcome, RegistrationAfterFrame::AuthorityRevoked));
+    assert!(
+        pending_tx.is_some(),
+        "revoked registration consumes no sender"
+    );
+    assert!(conn.registry_owner.is_none());
+    assert!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .is_none(),
+        "revoked registration publishes no local routing entry"
+    );
+}
 use super::{create_test_session, create_test_websocket_state};
 use jid::{BareJid, FullJid};
 use std::sync::Arc;
@@ -273,6 +313,126 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     assert_eq!(presence.show.as_deref(), Some("chat"));
     assert_eq!(presence.status.as_deref(), Some("back"));
     assert_eq!(presence.priority, 5);
+}
+
+#[tokio::test]
+async fn authority_revoked_after_resume_finalization_restores_detached_session_on_cleanup() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = "registration-resume-revoked-after-finalization".to_string();
+    let session = create_test_session(state.as_ref(), "alice").await;
+    state
+        .deps
+        .protocol
+        .resumable_sessions
+        .insert(stream_id.clone(), session.clone());
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: stream_id.clone(),
+            user_id: session.user_jid.clone(),
+            jid: jid.clone(),
+            inbound_count: 4,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store detached session");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    conn.authenticated_session = Some(session);
+    let resume_frame = element_to_xml(
+        Element::builder("resume", SM_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("previd").to_owned(),
+                stream_id.as_str(),
+            )
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+            .build(),
+    );
+    let _ = handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    conn.post_sm_finalization_test_hook = Some((reached.clone(), release.clone()));
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+    let registration_state = state.clone();
+    let registration = tokio::spawn(async move {
+        let outcome = register_bound_connection_after_frame_with_admission(
+            registration_state.as_ref(),
+            "example.com",
+            &mut conn,
+            &mut pending_tx,
+            &permit,
+            &shutdown,
+        )
+        .await;
+        (outcome, conn)
+    });
+
+    reached.notified().await;
+    lifecycle.begin_fenced_recovery();
+    release.notify_one();
+    let (outcome, mut conn) = registration.await.expect("registration task");
+    assert!(matches!(
+        outcome,
+        RegistrationAfterFrame::AuthorityRevokedAfterSmFinalization
+    ));
+    assert!(
+        conn.registry_owner.is_some(),
+        "post-finalization revocation retains cleanup authority"
+    );
+
+    let _ = super::super::cleanup::cleanup_connection_shutdown(
+        state.as_ref(),
+        &mut rx,
+        &mut conn,
+        false,
+    )
+    .await;
+
+    assert!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .is_none(),
+        "cleanup removes the live routing entry"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .claim_session(&stream_id)
+            .await
+            .expect("claim restored session")
+            .is_some(),
+        "cleanup restores the finalized live SM state as a resumable session"
+    );
 }
 
 #[tokio::test]

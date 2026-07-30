@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
+    batch_write::{write_response_batch_with_admission, BatchSmPolicy, BatchWriteOutcome},
     frame::ordered_relay_origin_from_sm,
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
@@ -19,6 +19,8 @@ pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
     conn: &mut WsConnState,
     timers: &mut TransportTimers,
     outbound_stanza: OutboundStanza,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
 ) -> bool
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -26,6 +28,10 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    let authoritative = || !shutdown.is_cancelled() && permit.revalidate().is_ok();
+    if !authoritative() {
+        return false;
+    }
     debug!(kind = ?outbound_stanza.kind, "Received outbound stanza from registry");
     match outbound_stanza.kind {
         DeliveryKind::DirectFrame => {
@@ -101,6 +107,9 @@ where
                     }
                 }
             }
+            if !authoritative() {
+                return false;
+            }
             let sent = send_ws_message(
                 sender,
                 Message::Text(xml.into()),
@@ -112,16 +121,19 @@ where
             // client knows to send `<a h='N'/>`. The wasm client never
             // acks proactively, so without this nudge the unacked queue
             // grows unbounded until eviction permanently breaks resume.
-            if sent
-                && request_ack_after
-                && !send_ws_message(
+            if sent && request_ack_after {
+                if !authoritative() {
+                    return false;
+                }
+                if !send_ws_message(
                     sender,
                     Message::Text(SmRequest::to_xml().into()),
                     "Failed to send SM <r/> request",
                 )
                 .await
-            {
-                return false;
+                {
+                    return false;
+                }
             }
             sent
         }
@@ -145,12 +157,18 @@ where
                 build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref())
                     .with_ordered_relay_origin(ordered_relay_origin);
             let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+            if !authoritative() {
+                return false;
+            }
             // Timer/keepalive effects can't arise from a StanzaFromPeer
             // dispatch today (only TransportReady/Tick produce them),
             // but honour them anyway so a future policy change can't
             // silently drop effects on this path.
             timers.apply(drive.timer_commands);
             for _ in 0..drive.keepalive_probes {
+                if !authoritative() {
+                    return false;
+                }
                 if !send_ws_message(
                     sender,
                     Message::Ping(axum::body::Bytes::new()),
@@ -172,18 +190,21 @@ where
             // already-arrived inbound `<a/>` acks after each `<r/>` so
             // a large outbound frame batch can't pin the unacked queue
             // at capacity.
-            match write_response_batch(
+            match write_response_batch_with_admission(
                 sender,
                 reader,
                 state.as_ref(),
                 conn,
                 drive.frames,
                 BatchSmPolicy::Record,
+                permit,
+                shutdown,
             )
             .await
             {
                 BatchWriteOutcome::Continue => {}
                 BatchWriteOutcome::TransportClosed => return false,
+                BatchWriteOutcome::AuthorityRevoked => return false,
             }
             if close {
                 info!("PeerStanza dispatch requested transport close");

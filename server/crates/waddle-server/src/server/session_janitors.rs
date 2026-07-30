@@ -1098,7 +1098,7 @@ async fn clustered_test_state_for_critical_registry_watch() -> Arc<WebSocketStat
 #[cfg(test)]
 async fn assert_room_registry_death_is_critical(state: Arc<WebSocketState>) {
     let process_stop = state.deps.shutdown.stop_token();
-    spawn_critical_registry_supervisor(&state);
+    spawn_critical_registry_supervisor(&state).await;
     state.deps.protocol.room_registry.kill();
     state.deps.protocol.room_registry.wait_for_shutdown().await;
     tokio::task::yield_now().await;
@@ -1114,7 +1114,7 @@ async fn assert_room_registry_death_is_critical(state: Arc<WebSocketState>) {
 #[cfg(test)]
 async fn assert_user_registry_death_is_critical(state: Arc<WebSocketState>) {
     let process_stop = state.deps.shutdown.stop_token();
-    spawn_critical_registry_supervisor(&state);
+    spawn_critical_registry_supervisor(&state).await;
     state.deps.protocol.user_registry.kill();
     state.deps.protocol.user_registry.wait_for_shutdown().await;
     tokio::task::yield_now().await;
@@ -1130,7 +1130,7 @@ async fn assert_user_registry_death_is_critical(state: Arc<WebSocketState>) {
 #[cfg(test)]
 async fn assert_ordinary_shutdown_is_not_critical(state: Arc<WebSocketState>) {
     let process_stop = state.deps.shutdown.stop_token();
-    spawn_critical_registry_supervisor(&state);
+    spawn_critical_registry_supervisor(&state).await;
     process_stop.cancel();
     tokio::task::yield_now().await;
 
@@ -1164,6 +1164,70 @@ async fn single_node_ordinary_shutdown_is_not_critical() {
     .await;
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn already_dead_room_registry_blocks_startup_promotion() {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::starting();
+    let stop = tokio_util::sync::CancellationToken::new();
+    state.deps.protocol.room_registry.kill();
+    state.deps.protocol.room_registry.wait_for_shutdown().await;
+
+    let outcome = spawn_room_registry_lifetime_watch(
+        state.deps.protocol.room_registry.clone(),
+        lifecycle.clone(),
+        stop.clone(),
+    )
+    .await
+    .expect("room watcher arm outcome");
+
+    assert_eq!(
+        outcome,
+        CriticalRegistryArm::Failed(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated)
+    );
+    assert!(stop.is_cancelled());
+    assert!(matches!(
+        lifecycle.finish_startup(),
+        crate::clustering::StartupServingTransition::Blocked(
+            crate::clustering::NodeAdmission::Failed(
+                crate::clustering::CriticalNodeFailure::RoomRegistryTerminated
+            )
+        )
+    ));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn already_dead_user_registry_blocks_startup_promotion() {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::starting();
+    let stop = tokio_util::sync::CancellationToken::new();
+    state.deps.protocol.user_registry.kill();
+    state.deps.protocol.user_registry.wait_for_shutdown().await;
+
+    let outcome = spawn_user_registry_lifetime_watch(
+        state.deps.protocol.user_registry.clone(),
+        lifecycle.clone(),
+        stop.clone(),
+    )
+    .await
+    .expect("user watcher arm outcome");
+
+    assert_eq!(
+        outcome,
+        CriticalRegistryArm::Failed(crate::clustering::CriticalNodeFailure::UserRegistryTerminated)
+    );
+    assert!(stop.is_cancelled());
+    assert!(matches!(
+        lifecycle.finish_startup(),
+        crate::clustering::StartupServingTransition::Blocked(
+            crate::clustering::NodeAdmission::Failed(
+                crate::clustering::CriticalNodeFailure::UserRegistryTerminated
+            )
+        )
+    ));
+}
+
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
 async fn clustered_room_registry_death_is_critical() {
@@ -1191,33 +1255,86 @@ async fn clustered_ordinary_shutdown_is_not_critical() {
     .await;
 }
 
-pub(crate) fn spawn_critical_registry_supervisor(websocket_state: &Arc<WebSocketState>) {
+pub(crate) async fn spawn_critical_registry_supervisor(websocket_state: &Arc<WebSocketState>) {
     let node_lifecycle = websocket_state.deps.app_state.node_lifecycle.clone();
     let process_stop = websocket_state.deps.shutdown.stop_token();
     let room_registry = websocket_state.deps.protocol.room_registry.clone();
     let user_registry = websocket_state.deps.protocol.user_registry.clone();
-    let _room_watch = spawn_room_registry_lifetime_watch(
+    let room_registry_liveness = room_registry.clone();
+    let user_registry_liveness = user_registry.clone();
+    let room_armed = spawn_room_registry_lifetime_watch(
         room_registry,
         node_lifecycle.clone(),
         process_stop.clone(),
     );
-    let _user_watch =
+    let user_armed =
         spawn_user_registry_lifetime_watch(user_registry, node_lifecycle, process_stop);
+    let (room_arm, user_arm) = tokio::join!(room_armed, user_armed);
+    for outcome in [
+        room_arm.unwrap_or(CriticalRegistryArm::Failed(
+            crate::clustering::CriticalNodeFailure::RoomRegistryTerminated,
+        )),
+        user_arm.unwrap_or(CriticalRegistryArm::Failed(
+            crate::clustering::CriticalNodeFailure::UserRegistryTerminated,
+        )),
+    ] {
+        if let CriticalRegistryArm::Failed(failure) = outcome {
+            websocket_state.deps.app_state.node_lifecycle.fail(failure);
+            websocket_state.deps.shutdown.stop_token().cancel();
+        }
+    }
+    // Close the arm-to-promotion gap synchronously. A registry that died
+    // after its shutdown future was first polled but before this barrier is
+    // failed before `finish_startup` can linearize Starting -> Serving.
+    if !room_registry_liveness.is_alive() {
+        websocket_state
+            .deps
+            .app_state
+            .node_lifecycle
+            .fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
+        websocket_state.deps.shutdown.stop_token().cancel();
+    }
+    if !user_registry_liveness.is_alive() {
+        websocket_state
+            .deps
+            .app_state
+            .node_lifecycle
+            .fail(crate::clustering::CriticalNodeFailure::UserRegistryTerminated);
+        websocket_state.deps.shutdown.stop_token().cancel();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CriticalRegistryArm {
+    Armed,
+    Failed(crate::clustering::CriticalNodeFailure),
 }
 
 fn spawn_room_registry_lifetime_watch(
     room_registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
     node_lifecycle: crate::clustering::NodeLifecycle,
     process_stop: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::sync::oneshot::Receiver<CriticalRegistryArm> {
+    let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let shutdown = room_registry.wait_for_shutdown();
+        tokio::pin!(shutdown);
+        if futures::poll!(shutdown.as_mut()).is_ready() {
+            node_lifecycle.fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
+            process_stop.cancel();
+            let _ = armed_tx.send(CriticalRegistryArm::Failed(
+                crate::clustering::CriticalNodeFailure::RoomRegistryTerminated,
+            ));
+            return;
+        }
+        let _ = armed_tx.send(CriticalRegistryArm::Armed);
         tokio::select! {
             biased;
             // Ordered process shutdown is the sole non-fatal exit. Keeping it
             // first means a registry that terminates as part of that shutdown
             // cannot race into a terminal failure latch.
             _ = process_stop.cancelled() => {}
-            _ = room_registry.wait_for_shutdown() => {
+            _ = shutdown => {
                 // Room ownership retry state is actor-local. Losing the
                 // registry while this node's lease remains fresh can strand
                 // every retained exact fence, even while idle, so registry
@@ -1226,19 +1343,32 @@ fn spawn_room_registry_lifetime_watch(
                 process_stop.cancel();
             }
         }
-    })
+    });
+    armed_rx
 }
 
 fn spawn_user_registry_lifetime_watch(
     user_registry: kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     node_lifecycle: crate::clustering::NodeLifecycle,
     process_stop: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::sync::oneshot::Receiver<CriticalRegistryArm> {
+    let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let shutdown = user_registry.wait_for_shutdown();
+        tokio::pin!(shutdown);
+        if futures::poll!(shutdown.as_mut()).is_ready() {
+            node_lifecycle.fail(crate::clustering::CriticalNodeFailure::UserRegistryTerminated);
+            process_stop.cancel();
+            let _ = armed_tx.send(CriticalRegistryArm::Failed(
+                crate::clustering::CriticalNodeFailure::UserRegistryTerminated,
+            ));
+            return;
+        }
+        let _ = armed_tx.send(CriticalRegistryArm::Armed);
         tokio::select! {
             biased;
             _ = process_stop.cancelled() => {}
-            _ = user_registry.wait_for_shutdown() => {
+            _ = shutdown => {
                 // UserActor claim/retry state is registry-local. Continuing
                 // to advertise this node after it dies would accept sockets
                 // whose logical owners cannot be activated safely.
@@ -1246,7 +1376,8 @@ fn spawn_user_registry_lifetime_watch(
                 process_stop.cancel();
             }
         }
-    })
+    });
+    armed_rx
 }
 
 #[cfg(feature = "clustering")]
@@ -2641,11 +2772,12 @@ async fn idle_room_registry_death_self_fences_the_node() {
     );
     let node_lifecycle = crate::clustering::NodeLifecycle::new();
     let process_stop = tokio_util::sync::CancellationToken::new();
-    let watcher = spawn_room_registry_lifetime_watch(
+    let armed = spawn_room_registry_lifetime_watch(
         registry.actor_ref().clone(),
         node_lifecycle.clone(),
         process_stop.clone(),
     );
+    armed.await.expect("registry lifetime watcher armed");
 
     registry.actor_ref().kill();
     registry.actor_ref().wait_for_shutdown().await;
@@ -2656,7 +2788,6 @@ async fn idle_room_registry_death_self_fences_the_node() {
         node_lifecycle.critical_failure(),
         Some(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated)
     );
-    watcher.await.expect("registry lifetime watcher");
 }
 
 #[cfg(all(test, feature = "clustering"))]

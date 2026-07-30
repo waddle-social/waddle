@@ -51,6 +51,8 @@ pub(super) enum BatchWriteOutcome {
     /// must break the connection loop; the SM unacked queue already
     /// holds every replayable countable frame of the batch.
     TransportClosed,
+    /// The node serving generation changed before the next record/write.
+    AuthorityRevoked,
 }
 
 /// Upper bound on frames the mid-batch drain may park in
@@ -93,6 +95,17 @@ enum SendWindowOutcome {
     TimedOut,
     /// The transport went away while paused.
     TransportClosed,
+    AuthorityRevoked,
+}
+
+fn batch_authoritative(
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) -> bool {
+    authority
+        .is_none_or(|(permit, shutdown)| !shutdown.is_cancelled() && permit.revalidate().is_ok())
 }
 
 /// Write a response batch to the WebSocket, recording countable
@@ -117,6 +130,58 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    write_response_batch_impl(sender, reader, state, conn, frames, policy, None).await
+}
+
+pub(super) async fn write_response_batch_with_admission<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    frames: Vec<String>,
+    policy: BatchSmPolicy,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> BatchWriteOutcome
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    write_response_batch_impl(
+        sender,
+        reader,
+        state,
+        conn,
+        frames,
+        policy,
+        Some((permit, shutdown)),
+    )
+    .await
+}
+
+async fn write_response_batch_impl<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    frames: Vec<String>,
+    policy: BatchSmPolicy,
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) -> BatchWriteOutcome
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    if !batch_authoritative(authority) {
+        return BatchWriteOutcome::AuthorityRevoked;
+    }
     let mut frames = frames.into_iter();
     // Send-window pacing applies ONLY to batches that actually grow the SM
     // unacked queue (issue #1219 review). A `ReplaySuppressed` batch is the
@@ -142,21 +207,28 @@ where
     // `record_outbound` could evict from an already-full queue and re-poison
     // resume. Await recovery before recording anything.
     if pacing && conn.sm_state.needs_send_pause() {
-        match await_send_window_recovery(sender, reader, state, conn).await {
+        match await_send_window_recovery(sender, reader, state, conn, authority).await {
             SendWindowOutcome::Recovered => {}
             SendWindowOutcome::DeferredCapReached => send_window_degraded = true,
             SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
                 record_remaining_for_replay(conn, frames, policy);
                 return BatchWriteOutcome::TransportClosed;
             }
+            SendWindowOutcome::AuthorityRevoked => return BatchWriteOutcome::AuthorityRevoked,
         }
     }
     while let Some(frame) = frames.next() {
+        if !batch_authoritative(authority) {
+            return BatchWriteOutcome::AuthorityRevoked;
+        }
         let request_ack = if should_record(conn, &frame, policy) {
             conn.sm_state.record_outbound(frame.clone()).request_ack
         } else {
             false
         };
+        if !batch_authoritative(authority) {
+            return BatchWriteOutcome::AuthorityRevoked;
+        }
         if !send_ws_message(
             sender,
             Message::Text(frame.into()),
@@ -168,6 +240,9 @@ where
             return BatchWriteOutcome::TransportClosed;
         }
         if request_ack {
+            if !batch_authoritative(authority) {
+                return BatchWriteOutcome::AuthorityRevoked;
+            }
             if !send_ws_message(
                 sender,
                 Message::Text(SmRequest::to_xml().into()),
@@ -181,12 +256,15 @@ where
             // Give already-arrived inbound frames a chance to land:
             // `<a/>` acks shrink the unacked queue mid-flood instead
             // of waiting for the whole batch to finish.
-            if matches!(
-                drain_ready_inbound(sender, reader, state, conn).await,
-                DrainSignal::TransportClosed
-            ) {
-                record_remaining_for_replay(conn, frames, policy);
-                return BatchWriteOutcome::TransportClosed;
+            match drain_ready_inbound(sender, reader, state, conn, authority).await {
+                DrainSignal::Idle => {}
+                DrainSignal::TransportClosed => {
+                    record_remaining_for_replay(conn, frames, policy);
+                    return BatchWriteOutcome::TransportClosed;
+                }
+                DrainSignal::AuthorityRevoked => {
+                    return BatchWriteOutcome::AuthorityRevoked;
+                }
             }
         }
         // Send-window pacing (issue #1219): if recording this frame pushed
@@ -197,7 +275,7 @@ where
         // ack at any time and is under no obligation to transmit queued
         // stanzas immediately (xep-0198.xml:307/357).
         if pacing && !send_window_degraded && conn.sm_state.needs_send_pause() {
-            match await_send_window_recovery(sender, reader, state, conn).await {
+            match await_send_window_recovery(sender, reader, state, conn, authority).await {
                 SendWindowOutcome::Recovered => {}
                 SendWindowOutcome::DeferredCapReached => {
                     // Cannot read the awaited ack in order behind 64 parked
@@ -219,6 +297,9 @@ where
                     record_remaining_for_replay(conn, frames, policy);
                     return BatchWriteOutcome::TransportClosed;
                 }
+                SendWindowOutcome::AuthorityRevoked => {
+                    return BatchWriteOutcome::AuthorityRevoked;
+                }
             }
         }
     }
@@ -238,6 +319,10 @@ async fn await_send_window_recovery<S, SE, R, RE>(
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
 ) -> SendWindowOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -245,6 +330,9 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    if !batch_authoritative(authority) {
+        return SendWindowOutcome::AuthorityRevoked;
+    }
     waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
     let deadline = tokio::time::Instant::now() + SEND_WINDOW_PAUSE_DEADLINE;
     // Elicit an ack immediately — nothing more is being written until the
@@ -259,6 +347,9 @@ where
         return SendWindowOutcome::TransportClosed;
     }
     loop {
+        if !batch_authoritative(authority) {
+            return SendWindowOutcome::AuthorityRevoked;
+        }
         if conn.sm_state.send_window_recovered() {
             return SendWindowOutcome::Recovered;
         }
@@ -280,6 +371,9 @@ where
                 return SendWindowOutcome::TimedOut;
             }
         };
+        if !batch_authoritative(authority) {
+            return SendWindowOutcome::AuthorityRevoked;
+        }
         match next {
             Some(Ok(Message::Text(text))) => {
                 conn.note_transport_activity();
@@ -292,7 +386,13 @@ where
                 } else if let Some(h) = parse_sm_ack_h(text.as_str()) {
                     let responses =
                         apply_sm_ack(state, &mut conn.sm_state, &mut conn.phase, h).await;
+                    if !batch_authoritative(authority) {
+                        return SendWindowOutcome::AuthorityRevoked;
+                    }
                     for response in responses {
+                        if !batch_authoritative(authority) {
+                            return SendWindowOutcome::AuthorityRevoked;
+                        }
                         if !send_ws_message(
                             sender,
                             Message::Text(response.into()),
@@ -310,15 +410,19 @@ where
                     // latch clears once it reaches the low watermark). If it
                     // is not recovered yet, re-request so the client keeps
                     // acking — it does not ack unprompted.
-                    if !conn.sm_state.send_window_recovered()
-                        && !send_ws_message(
+                    if !conn.sm_state.send_window_recovered() {
+                        if !batch_authoritative(authority) {
+                            return SendWindowOutcome::AuthorityRevoked;
+                        }
+                        if !send_ws_message(
                             sender,
                             Message::Text(SmRequest::to_xml().into()),
                             "Failed to re-send SM <r/> during send-window pause",
                         )
                         .await
-                    {
-                        return SendWindowOutcome::TransportClosed;
+                        {
+                            return SendWindowOutcome::TransportClosed;
+                        }
                     }
                 } else {
                     conn.deferred_inbound.push_back(text);
@@ -390,6 +494,7 @@ enum DrainSignal {
     /// Peer closed (WS close frame, stream end, or read error). The
     /// batch must stop and the connection loop must exit.
     TransportClosed,
+    AuthorityRevoked,
 }
 
 /// Non-blockingly pull already-buffered inbound frames off the
@@ -405,6 +510,10 @@ async fn drain_ready_inbound<S, SE, R, RE>(
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
 ) -> DrainSignal
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -413,6 +522,9 @@ where
     RE: std::fmt::Display,
 {
     loop {
+        if !batch_authoritative(authority) {
+            return DrainSignal::AuthorityRevoked;
+        }
         if conn.deferred_inbound.len() >= DEFERRED_INBOUND_CAP {
             return DrainSignal::Idle;
         }
@@ -453,7 +565,13 @@ where
                     // batch — the connection is terminating.
                     let responses =
                         apply_sm_ack(state, &mut conn.sm_state, &mut conn.phase, h).await;
+                    if !batch_authoritative(authority) {
+                        return DrainSignal::AuthorityRevoked;
+                    }
                     for response in responses {
+                        if !batch_authoritative(authority) {
+                            return DrainSignal::AuthorityRevoked;
+                        }
                         if !send_ws_message(
                             sender,
                             Message::Text(response.into()),

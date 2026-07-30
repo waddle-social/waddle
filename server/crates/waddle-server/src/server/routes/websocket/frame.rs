@@ -41,6 +41,26 @@ pub(super) async fn handle_xmpp_frame_with_admission(
     handle_xmpp_frame_impl(frame, domain, state, conn, Some((permit, shutdown))).await
 }
 
+async fn await_control_stage<T>(
+    admission: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, InboundFrameTerminal> {
+    // Control/auth/session futures own exact claim and rollback guards at
+    // internal await boundaries. Let the stage reach its defined completion
+    // boundary, then reject its response/publication if the generation moved;
+    // dropping these futures mid-commit could leak a claim.
+    let output = work.await;
+    if let Some((permit, shutdown)) = admission {
+        if shutdown.is_cancelled() || permit.revalidate().is_err() {
+            return Err(InboundFrameTerminal::AuthorityRevoked);
+        }
+    }
+    Ok(output)
+}
+
 async fn handle_xmpp_frame_impl(
     frame: &str,
     domain: &str,
@@ -81,6 +101,12 @@ async fn handle_xmpp_frame_impl(
         registry_owner,
         ..
     } = conn;
+    if let Some((permit, shutdown)) = admission {
+        if shutdown.is_cancelled() || permit.revalidate().is_err() {
+            *inbound_frame_terminal = Some(InboundFrameTerminal::AuthorityRevoked);
+            return Vec::new();
+        }
+    }
     let muc_domain = state.deps.service_domains.muc.clone();
 
     // SM nonzas (enable/resume/r/a) are not part of the parse_frame typed
@@ -105,7 +131,13 @@ async fn handle_xmpp_frame_impl(
                 blocklist_interested,
                 pending_sm_enable_commit,
             };
-            return handle_sm_stanza(sm, state, ctx).await;
+            return match await_control_stage(admission, handle_sm_stanza(sm, state, ctx)).await {
+                Ok(responses) => responses,
+                Err(terminal) => {
+                    *inbound_frame_terminal = Some(terminal);
+                    Vec::new()
+                }
+            };
         }
     }
 
@@ -162,16 +194,26 @@ async fn handle_xmpp_frame_impl(
                 }
                 return vec![sasl_failure_xml("not-authorized")];
             }
-            let responses = match mechanism.as_str() {
-                "SCRAM-SHA-256" => {
-                    handle_sasl_scram_client_first(&data, domain, state, phase).await
+            let responses = match await_control_stage(admission, async {
+                match mechanism.as_str() {
+                    "SCRAM-SHA-256" => {
+                        handle_sasl_scram_client_first(&data, domain, state, phase).await
+                    }
+                    "OAUTHBEARER" => {
+                        handle_sasl_oauthbearer(&data, state, authenticated_session, phase).await
+                    }
+                    other => {
+                        warn!(mechanism = %other, "Unsupported SASL mechanism");
+                        vec![sasl_failure_xml("invalid-mechanism")]
+                    }
                 }
-                "OAUTHBEARER" => {
-                    handle_sasl_oauthbearer(&data, state, authenticated_session, phase).await
-                }
-                other => {
-                    warn!(mechanism = %other, "Unsupported SASL mechanism");
-                    vec![sasl_failure_xml("invalid-mechanism")]
+            })
+            .await
+            {
+                Ok(responses) => responses,
+                Err(terminal) => {
+                    *inbound_frame_terminal = Some(terminal);
+                    return Vec::new();
                 }
             };
             // RFC 6120 §6.4.6: SASL success restarts the stream. Until
@@ -215,9 +257,18 @@ async fn handle_xmpp_frame_impl(
                 blocklist_interested,
                 pending_sm_enable_commit,
             };
-            let responses =
-                handle_isr_resume_authenticate(mechanism, initial_response, resume, state, ctx)
-                    .await;
+            let responses = match await_control_stage(
+                admission,
+                handle_isr_resume_authenticate(mechanism, initial_response, resume, state, ctx),
+            )
+            .await
+            {
+                Ok(responses) => responses,
+                Err(terminal) => {
+                    *inbound_frame_terminal = Some(terminal);
+                    return Vec::new();
+                }
+            };
             // RFC 6120 §6.4.6 / XEP-0388: successful authentication restarts
             // the stream — same rule the SASL1 <auth>/<response> arms apply.
             if phase.is_authenticated() {
@@ -247,22 +298,9 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::Stanza(stanza) => {
-            let reserved_inbound_for_sm = sm_state
-                .enabled
-                .then(|| sm_inbound_completion.reserve(sm_state));
-            let ordered_relay_origin = ordered_relay_origin_for_inbound_stanza(
-                state,
-                sm_state,
-                phase.bound_jid(),
-                registry_owner.as_ref(),
-                reserved_inbound_for_sm,
-                ordered_relay_handoff_tx.as_ref(),
-            )
-            .await;
-
-            // Resource binding is stream setup, not request processing: handle
-            // it inline and return BEFORE the wedge backstop (#808 ADR-008 scope
-            // guard). It must never be subject to, or delayed by, the timeout.
+            // Resource binding is stream setup, not a countable request. Keep
+            // it before SM reservation and the ordered-relay lookup so a
+            // lifecycle cancellation cannot leave an unsettled inbound slot.
             if let Stanza::Iq(iq) = &*stanza {
                 let is_bind = matches!(
                     &**iq,
@@ -271,13 +309,35 @@ async fn handle_xmpp_frame_impl(
                         if e.ns() == waddle_xmpp::ns::BIND
                 );
                 if is_bind {
-                    let responses = handle_resource_binding(iq, domain, phase);
-                    if let Some(inbound_sequence) = reserved_inbound_for_sm {
-                        sm_inbound_completion.complete(inbound_sequence, sm_state);
-                    }
-                    return responses;
+                    return handle_resource_binding(iq, domain, phase);
                 }
             }
+
+            let reserved_inbound_for_sm = sm_state
+                .enabled
+                .then(|| sm_inbound_completion.reserve(sm_state));
+            let ordered_relay_origin = match await_control_stage(
+                admission,
+                ordered_relay_origin_for_inbound_stanza(
+                    state,
+                    sm_state,
+                    phase.bound_jid(),
+                    registry_owner.as_ref(),
+                    reserved_inbound_for_sm,
+                    ordered_relay_handoff_tx.as_ref(),
+                ),
+            )
+            .await
+            {
+                Ok(origin) => origin,
+                Err(terminal) => {
+                    if let Some(inbound_sequence) = reserved_inbound_for_sm {
+                        sm_inbound_completion.abandon(inbound_sequence);
+                    }
+                    *inbound_frame_terminal = Some(terminal);
+                    return Vec::new();
+                }
+            };
 
             // #808: capture the conformant-reply metadata before the stanza is
             // moved into the dispatch future, then run dispatch under the

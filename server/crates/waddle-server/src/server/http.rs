@@ -287,7 +287,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         });
     }
 
-    spawn_critical_registry_supervisor(&websocket_state);
+    spawn_critical_registry_supervisor(&websocket_state).await;
     // Both critical registries now have lifetime supervision. Only after
     // that fence is armed may a node still in `Starting` transition to
     // `Serving`. A lease fence/drain/failure that won during slow startup

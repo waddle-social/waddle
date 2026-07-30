@@ -11,6 +11,66 @@ pub(super) enum RegistrationAfterFrame {
     Unchanged,
     Registered(SmRegistrationFinalization),
     SessionInitializationFailed,
+    AuthorityRevoked,
+    /// Resume finalization has moved the durable detached snapshot into the
+    /// live connection. Retain registry ownership so normal shutdown cleanup
+    /// can store that exact live SM state before unregistering.
+    AuthorityRevokedAfterSmFinalization,
+}
+
+fn registration_authoritative(
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> bool {
+    !shutdown.is_cancelled() && permit.revalidate().is_ok()
+}
+
+async fn rollback_registered_connection(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    conn: &mut WsConnState,
+) {
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .unregister_if_owner(jid, owner);
+    crate::server::dual_registration::mirror_unregister(
+        &state.deps.protocol.user_registry,
+        jid,
+        Some(owner.clone()),
+    )
+    .await;
+    unregister_remote_clustered_resource_if_owner(state, jid, owner).await;
+    conn.registry_owner = None;
+}
+
+#[cfg(feature = "clustering")]
+async fn unregister_remote_clustered_resource_if_owner(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    if let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        bridge
+            .unregister_remote_user_resource_if_owner(jid, owner)
+            .await;
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+async fn unregister_remote_clustered_resource_if_owner(
+    _state: &WebSocketState,
+    _jid: &FullJid,
+    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
 }
 
 /// Single choke point for a failed post-auth session initialization (#1454).
@@ -134,18 +194,39 @@ pub(super) fn publish_stream_id_and_presence(
     }
 }
 
+#[cfg(test)]
 pub(super) async fn register_bound_connection_after_frame(
     state: &WebSocketState,
     domain: &str,
     conn: &mut WsConnState,
     pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
 ) -> RegistrationAfterFrame {
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("fresh serving lifecycle");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    register_bound_connection_after_frame_with_admission(
+        state, domain, conn, pending_tx, &permit, &shutdown,
+    )
+    .await
+}
+
+pub(super) async fn register_bound_connection_after_frame_with_admission(
+    state: &WebSocketState,
+    domain: &str,
+    conn: &mut WsConnState,
+    pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> RegistrationAfterFrame {
+    if !registration_authoritative(permit, shutdown) {
+        return RegistrationAfterFrame::AuthorityRevoked;
+    }
     let Some(jid) = conn.phase.bound_jid().cloned() else {
         return RegistrationAfterFrame::Unchanged;
     };
-    let Some(tx) = pending_tx.take() else {
+    if pending_tx.is_none() {
         return RegistrationAfterFrame::Unchanged;
-    };
+    }
 
     // Mirror the bind transition into the per-connection state machine (#229
     // PR11). The SM stays `None` until here so unauthenticated traffic can't
@@ -166,6 +247,9 @@ pub(super) async fn register_bound_connection_after_frame(
         match load_blocklist_for_bind(&state.deps.app_state.db_pool, &jid).await {
             Ok(blocklist) => blocklist,
             Err(error) => {
+                if !registration_authoritative(permit, shutdown) {
+                    return RegistrationAfterFrame::AuthorityRevoked;
+                }
                 // Fail the bind rather than run the session with an empty
                 // blocklist (a session-long XEP-0191 fail-open). The choke
                 // point below is the single log line for this failure —
@@ -181,6 +265,10 @@ pub(super) async fn register_bound_connection_after_frame(
         }
     };
 
+    if !registration_authoritative(permit, shutdown) {
+        return RegistrationAfterFrame::AuthorityRevoked;
+    }
+
     conn.ensure_state_machine(
         domain,
         &state.deps.protocol.dispatcher,
@@ -188,6 +276,10 @@ pub(super) async fn register_bound_connection_after_frame(
         resumed,
         blocklist,
     );
+
+    let Some(tx) = pending_tx.take() else {
+        return RegistrationAfterFrame::Unchanged;
+    };
 
     let owner = state
         .deps
@@ -208,6 +300,11 @@ pub(super) async fn register_bound_connection_after_frame(
     // `publish_stream_id_and_presence`'s doc comment for the full
     // "run before the authoritative mirror ask" rationale).
     publish_stream_id_and_presence(state, &jid, &owner, conn);
+
+    if !registration_authoritative(permit, shutdown) {
+        rollback_registered_connection(state, &jid, &owner, conn).await;
+        return RegistrationAfterFrame::AuthorityRevoked;
+    }
 
     if resumed && conn.pending_subscribes_flushed {
         // XEP-0198 §5: a resumed stream is the SAME session. The
@@ -268,6 +365,10 @@ pub(super) async fn register_bound_connection_after_frame(
             }
             crate::server::dual_registration::MirrorRegisterOutcome::Failed => false,
         };
+        if !registration_authoritative(permit, shutdown) {
+            rollback_registered_connection(state, &jid, &owner, conn).await;
+            return RegistrationAfterFrame::AuthorityRevoked;
+        }
         if !registered {
             // Rollback also clears the presence_states published above.
             state
@@ -301,6 +402,19 @@ pub(super) async fn register_bound_connection_after_frame(
     }
 
     let sm_finalization = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
+    #[cfg(test)]
+    if let Some((reached, release)) = conn.post_sm_finalization_test_hook.take() {
+        reached.notify_one();
+        release.notified().await;
+    }
+    if !registration_authoritative(permit, shutdown) {
+        // `complete_pending_resume_claim` persist-deletes the detached
+        // snapshot after restoring it into `conn.sm_state`. Clearing the
+        // registry owner here would make outer shutdown cleanup skip detach
+        // and lose that recovered queue. Preserve the owner and let the
+        // normal cleanup path re-store the live session before unregister.
+        return RegistrationAfterFrame::AuthorityRevokedAfterSmFinalization;
+    }
     info!(
         jid = %jid,
         resumed = conn.phase.is_resumed(),
