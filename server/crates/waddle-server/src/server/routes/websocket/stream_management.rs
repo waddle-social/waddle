@@ -995,6 +995,69 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         }
     };
 
+    // A claimed SM snapshot carries only a durable, non-secret principal
+    // reference. Resolve the exact bare-JID/context/version/epoch from the
+    // database authority before changing connection state or replaying any
+    // stanza; a local cached Session is never an authorization fallback.
+    let principal = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .session_principal(&resume.previd)
+        .await
+    {
+        Ok(Some(principal)) => principal,
+        Ok(None) => {
+            let _ = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .release_claim(&resume.previd)
+                .await;
+            return vec![SmFailed::with_condition("item-not-found").to_xml()];
+        }
+        Err(error) => {
+            warn!(stream_id = %resume.previd, %error, "SM resume principal lookup unavailable");
+            let _ = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .release_claim(&resume.previd)
+                .await;
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    };
+    let resumed_session = match state
+        .deps
+        .auth_state
+        .session_manager
+        .resolve_principal(&principal)
+        .await
+    {
+        Ok(crate::auth::PrincipalResolution::Active(session)) => session,
+        Ok(crate::auth::PrincipalResolution::Mismatch
+            | crate::auth::PrincipalResolution::Revoked
+            | crate::auth::PrincipalResolution::Expired) => {
+                let _ = state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .release_claim(&resume.previd)
+                    .await;
+                return vec![SmFailed::with_condition("not-authorized").to_xml()];
+            }
+        Err(error) => {
+            warn!(stream_id = %resume.previd, %error, "SM resume auth-context resolver unavailable");
+            let _ = state
+                .deps
+                    .protocol
+                    .sm_session_registry
+                    .release_claim(&resume.previd)
+                    .await;
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    };
+
     if let ConnectionPhase::Authenticated { bare_jid } = phase {
         if detached.jid.to_bare() != *bare_jid {
             warn!(
@@ -1014,8 +1077,6 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             return vec![SmFailed::with_condition("not-authorized").to_xml()];
         }
     }
-
-    let preserve_authenticated_session = matches!(phase, ConnectionPhase::Authenticated { .. });
 
     // Ordering matters, mirroring the live ack path:
     // `handled_count_exceeds_outbound` is an exact mod-2^32 window
@@ -1076,32 +1137,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // handled. Acknowledge up to that point so the replay set is minimal.
     sm_state.acknowledge(resume.h);
 
-    // Restore authentication identity. If the detached sidecar has no
-    // matching Session (TTL expired / crash), the authenticated resume keeps
-    // the fresh transport's current Session context.
-    let restored_session = state
-        .deps
-        .protocol
-        .resumable_sessions
-        .get(&resume.previd)
-        .map(|s| s.clone());
-    if restored_session.is_none() && preserve_authenticated_session {
-        warn!(
-            stream_id = %resume.previd,
-            jid = %detached.jid,
-            "SM resumed without cached detached Session; preserving current authenticated Session"
-        );
-    }
-
-    let resumed_session = restored_session.or_else(|| {
-        if preserve_authenticated_session {
-            authenticated_session.clone()
-        } else {
-            None
-        }
-    });
-
-    *authenticated_session = resumed_session;
+    *authenticated_session = Some(resumed_session);
     *carbons_enabled = detached.carbons_enabled;
     *roster_interested = detached.roster_interested;
     *blocklist_interested = detached.blocklist_interested;

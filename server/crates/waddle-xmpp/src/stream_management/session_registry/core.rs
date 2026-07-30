@@ -935,6 +935,22 @@ impl InMemorySmSessionRegistry {
         result
     }
 
+    /// Read the durable principal binding for a claimed SM session. This is
+    /// intentionally a storage read, never a reconstruction from `user_id`
+    /// or a process-local Session cache.
+    pub async fn session_principal(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<crate::auth::AuthenticatedPrincipalRef>, SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(None);
+        };
+        storage
+            .get_session_principal(&crate::pending_delivery::SmSessionId::new(stream_id.to_string()))
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))
+    }
+
     /// Inject a `ClaimStore`/live-identity pair other than the single-node
     /// [`InProcessClaimStore`] default (ADR-0017 Phase 3, Q2). Must be
     /// called once at construction time before the registry is wrapped in
