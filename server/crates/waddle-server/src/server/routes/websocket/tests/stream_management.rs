@@ -640,7 +640,11 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
 async fn sm_resume_matching_authenticated_identity_preserves_current_session_without_sidecar() {
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 
-    let state = create_test_websocket_state().await;
+    let registry = Arc::new(
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+            .with_test_principal_persistence(),
+    );
+    let state = create_test_websocket_state_with_sm_registry(registry).await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let session = create_test_session(state.as_ref(), "bob").await;
     let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
@@ -663,27 +667,32 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
         .deps
         .protocol
         .sm_session_registry
-        .store_session(DetachedSession {
-            stream_id: "stream-auth-match".to_string(),
-            user_id: format!("bob@{domain}"),
-            jid: detached_jid.clone(),
-            inbound_count: 2,
-            outbound_count: 3,
-            last_acked: 3,
-            replay_gap_through: None,
-            unacked_stanzas: Vec::new(),
-            max_resume_time: Some(300),
-            detached_at: std::time::Instant::now(),
-            carbons_enabled: true,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-            pending_subscribes_flushed: false,
-        })
+        .store_session_with_principal(
+            DetachedSession {
+                stream_id: "stream-auth-match".to_string(),
+                user_id: format!("bob@{domain}"),
+                jid: detached_jid.clone(),
+                inbound_count: 2,
+                outbound_count: 3,
+                last_acked: 3,
+                replay_gap_through: None,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: true,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            },
+            session
+                .authenticated_principal_ref()
+                .expect("typed principal"),
+        )
         .await
         .expect("store");
 
