@@ -6,6 +6,9 @@ use chrono::Utc;
 use jid::FullJid;
 use xmpp_parsers::presence::Show;
 
+use crate::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 use crate::Stanza;
 
 fn make_test_jid() -> FullJid {
@@ -42,6 +45,29 @@ fn message_stanza_xml_with_id(id: String) -> String {
 
 fn make_test_session(stream_id: &str) -> DetachedSession {
     make_test_session_for_jid(stream_id, make_test_jid())
+}
+
+#[tokio::test]
+async fn test_principal_persistence_binds_only_explicit_typed_snapshot() {
+    let registry = InMemorySmSessionRegistry::new().with_test_principal_persistence();
+    let principal = AuthenticatedPrincipalRef::new(
+        bare("user@example.com"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    );
+    registry
+        .store_session_with_principal(make_test_session("typed-principal"), principal.clone())
+        .await
+        .expect("store test snapshot with explicit principal");
+
+    assert_eq!(
+        registry
+            .session_principal("typed-principal")
+            .await
+            .expect("load test principal"),
+        Some(principal)
+    );
 }
 
 fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {

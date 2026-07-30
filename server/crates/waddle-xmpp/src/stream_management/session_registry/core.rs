@@ -915,6 +915,18 @@ impl InMemorySmSessionRegistry {
         self
     }
 
+    /// Test-only durable principal binding for pure state-machine fixtures.
+    ///
+    /// Production registries must use fenced Postgres storage; this helper is
+    /// compiled only into unit-test binaries and cannot become a runtime
+    /// authorization fallback.
+    #[cfg(test)]
+    pub fn with_test_principal_persistence(self) -> Self {
+        self.with_persistence(std::sync::Arc::new(
+            super::super::persistence::InMemorySmPersistence::new(),
+        ))
+    }
+
     /// Store a detached snapshot with the authenticated principal reference
     /// in the same durable operation. The reference is staged only across
     /// the existing store call; it never becomes local correctness state.

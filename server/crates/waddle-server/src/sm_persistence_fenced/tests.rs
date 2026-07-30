@@ -300,7 +300,7 @@ async fn store_session_atomic_also_applies_divergence_a() {
         PrincipalAuthEpoch::INITIAL,
     );
     f.fenced
-        .store_session_atomic_with_principal(session.clone(), unacked, principal.clone())
+        .store_session_atomic_with_principal(&principal, session.clone(), unacked)
         .await
         .expect("store_session_atomic_with_principal");
 

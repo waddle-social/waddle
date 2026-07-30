@@ -452,6 +452,8 @@ struct InMemoryState {
     sessions: std::collections::HashMap<SmSessionId, PersistedSession>,
     // Per-session unacked queue keyed by stream_id.
     unacked: std::collections::HashMap<SmSessionId, Vec<PersistedUnackedStanza>>,
+    #[cfg(test)]
+    principals: std::collections::HashMap<SmSessionId, AuthenticatedPrincipalRef>,
 }
 
 impl InMemorySmPersistence {
@@ -469,6 +471,35 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         guard.sessions.insert(session.stream_id.clone(), session);
         Ok(())
+    }
+
+    #[cfg(test)]
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        let stream_id = session.stream_id.clone();
+        self.store_session_atomic(session, unacked).await?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        guard.principals.insert(stream_id, principal.clone());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn get_session_principal(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard.principals.get(stream_id).cloned())
     }
 
     async fn get_session(
