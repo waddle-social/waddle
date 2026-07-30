@@ -28,6 +28,9 @@ use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
 use waddle_server::sm_persistence_fenced::PostgresFencedSmPersistence;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, NodeIdentity,
     ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
@@ -293,6 +296,47 @@ async fn detached_owned_elsewhere_steals_and_hydrates_with_h_counter_integrity()
         "unacked queue survives the steal intact"
     );
     assert_eq!(resumed.jid, full);
+}
+
+#[tokio::test]
+async fn cross_node_resume_retains_the_fenced_principal_binding() {
+    let _guard = serial_lock().lock().await;
+    let Some(db) = clean_db().await else {
+        return;
+    };
+    let (bare, full) = alice_jid();
+    let (registry_a, _identity_a) = node_registry(&db, node_identity(), None).await;
+    let (registry_b, _identity_b) = node_registry(&db, node_identity(), None).await;
+    let principal = AuthenticatedPrincipalRef::new(
+        bare.clone(),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    );
+
+    registry_a
+        .store_session_with_principal(
+            detached_session("stream-principal", &full),
+            principal.clone(),
+        )
+        .await
+        .expect("node A atomically stores detached state and principal binding");
+
+    assert!(matches!(
+        registry_b
+            .attempt_cross_node_resume("stream-principal", &bare, HANDSHAKE_BUDGET)
+            .await
+            .expect("cross-node resume"),
+        CrossNodeResumeOutcome::Claimed(_)
+    ));
+    assert_eq!(
+        registry_b
+            .session_principal("stream-principal")
+            .await
+            .expect("load durable principal binding"),
+        Some(principal),
+        "the resuming node must authorize from the fenced durable binding"
+    );
 }
 
 #[tokio::test]
