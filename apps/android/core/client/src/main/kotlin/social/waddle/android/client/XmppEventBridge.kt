@@ -4,18 +4,14 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleEventListener
-import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
  * FFI listener → domain event bridge. Callbacks arrive on Rust/tokio
  * threads via JNA and must never block: every event maps to an
  * [XmppEvent] and is `trySend`-ed into an unbounded channel (the Kotlin
- * analog of Apple's unbounded `AsyncStream`), except resume snapshots
- * which go straight to [onResumeStateChanged] for persistence.
+ * analog of Apple's unbounded `AsyncStream`).
  */
-class XmppEventBridge(
-    private val onResumeStateChanged: (WaddleSmResumeState?) -> Unit,
-) : WaddleEventListener {
+class XmppEventBridge : WaddleEventListener {
     private val channel = Channel<XmppEvent>(Channel.UNLIMITED)
 
     /** Single-consumer stream drained by `XmppSessionManager`. */
@@ -42,7 +38,6 @@ class XmppEventBridge(
             is WaddleClientEvent.DeliveryFailed -> channel.trySend(XmppEvent.DeliveryFailed(event.stanzaId))
             is WaddleClientEvent.Call -> channel.trySend(XmppEvent.Call(event.event))
             is WaddleClientEvent.InboxPush -> channel.trySend(XmppEvent.InboxPush(event.entry))
-            is WaddleClientEvent.ResumeStateChanged -> onResumeStateChanged(event.state)
             is WaddleClientEvent.AuthenticationFailed ->
                 channel.trySend(XmppEvent.AuthenticationFailed(event.condition))
             is WaddleClientEvent.Error -> channel.trySend(XmppEvent.Error(event.description))

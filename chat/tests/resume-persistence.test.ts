@@ -14,11 +14,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import { BrowserXmppClient } from "../src/lib/xmpp/client";
 import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection";
-import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
+import { enqueueQueuedMessage, listQueuedDmMessages, removeQueuedMessage } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
   createLocalStorageResumePersistence,
   nullResumePersistence,
+  resumeOwnerLifecycleSnapshotForTests,
   type PersistedReconnectCatchup,
   type PersistedSmResumeState,
   type ResumePersistence,
@@ -79,6 +80,85 @@ afterEach(() => {
   }
 });
 
+function installNavigationTiming(type: string | null): () => void {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "performance");
+  Object.defineProperty(globalThis, "performance", {
+    configurable: true,
+    value: type === null
+      ? undefined
+      : { getEntriesByType: () => [{ type }] },
+  });
+  return () => {
+    if (original) {
+      Object.defineProperty(globalThis, "performance", original);
+    } else {
+      Reflect.deleteProperty(globalThis, "performance");
+    }
+  };
+}
+
+function seedCopiedOwnerHandoff(
+  ownerId: string,
+  state: PersistedSmResumeState,
+  handoffInstanceId = "previous-page",
+): void {
+  createLocalStorageResumePersistence("alice@example.com", ownerId).saveSm(state);
+  window.sessionStorage.setItem("waddle.chat.sm-resume.owner", ownerId);
+  window.localStorage.setItem(
+    ownerLeaseKey("alice@example.com", ownerId),
+    JSON.stringify({ ownerId, instanceId: "previous-page", updatedAt: Date.now() }),
+  );
+  window.localStorage.setItem(
+    ownerHandoffKey("alice@example.com", ownerId),
+    JSON.stringify({ ownerId, instanceId: handoffInstanceId, expiresAt: Date.now() + 45_000 }),
+  );
+}
+
+function ownerRegistryKey(accountKey: string, ownerId: string): string {
+  return `${accountKey.length}:${accountKey}.${ownerId.length}:${ownerId}`;
+}
+
+function ownerLeaseKey(accountKey: string, ownerId: string): string {
+  return `waddle.chat.sm-resume.owner-lease.${ownerRegistryKey(accountKey, ownerId)}`;
+}
+
+function ownerHandoffKey(accountKey: string, ownerId: string): string {
+  return `waddle.chat.sm-resume.owner-handoff.${ownerRegistryKey(accountKey, ownerId)}`;
+}
+
+function smOwnerKey(accountKey: string, ownerId: string): string {
+  return `waddle.chat.sm-resume.${accountKey.length}:${accountKey}.${ownerId.length}:${ownerId}`;
+}
+
+function smConsumedKey(accountKey: string, ownerId: string): string {
+  return `${smOwnerKey(accountKey, ownerId)}.consumed`;
+}
+
+function ownerTimerHarness() {
+  const callbacks = new Map<number, () => void>();
+  let nextId = 0;
+  return {
+    driver: {
+      setInterval: (callback: () => void) => {
+        const id = ++nextId;
+        callbacks.set(id, callback);
+        return id as unknown as ReturnType<typeof setInterval>;
+      },
+      clearInterval: (timer: ReturnType<typeof setInterval>) => {
+        callbacks.delete(timer as unknown as number);
+      },
+    },
+    activeCount: () => callbacks.size,
+    callbacks: () => [...callbacks.values()],
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
 /** In-memory persistence for tests — same shape as the real adapter
  * but without touching localStorage. */
 function inMemoryPersistence(): ResumePersistence & {
@@ -92,6 +172,7 @@ function inMemoryPersistence(): ResumePersistence & {
   let joinedRooms: string[] = [];
   let smClears = 0;
   return {
+    dispose: () => undefined,
     loadCatchup: () => catchup,
     saveCatchup: (snapshot) => { catchup = snapshot; },
     clearCatchup: () => { catchup = null; },
@@ -291,8 +372,8 @@ describe("applyResumeStateToWasmConfig", () => {
 
   test("uses max-aware stanza resume when both unhandled stanzas and max are available", () => {
     const { config, calls } = configWith([
-      "with_resume_state_stanzas_with_max",
-      "with_resume_state_stanzas",
+      "with_resume_state_entries_with_max",
+      "with_resume_state_entries",
       "with_resume_state_with_max",
       "with_resume_state",
     ]);
@@ -302,13 +383,32 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 7,
       outboundH: 11,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message/>"],
+      unhandledOutboundEntries: [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas_with_max",
-        args: ["prev-1", 7, 11, ["<message/>"], 300],
+        method: "with_resume_state_entries_with_max",
+        args: ["prev-1", 7, 11, [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z" }], 300],
+      },
+    ]);
+  });
+
+  test("restores a pagehide fresh-stream retry tail without permitting XEP-0198 resume", () => {
+    const { config, calls } = configWith(["with_fresh_stream_retry_state_entries", "with_resume_state_entries"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "declined-sm-stream",
+      resumable: false,
+      inboundH: 0,
+      outboundH: 0,
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }],
+    });
+
+    expect(calls).toEqual([
+      {
+        method: "with_fresh_stream_retry_state_entries",
+        args: ["declined-sm-stream", 0, 0, [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }]],
       },
     ]);
   });
@@ -331,23 +431,37 @@ describe("applyResumeStateToWasmConfig", () => {
     ]);
   });
 
-  test("falls back to old stanza resume when generated WASM lacks max-aware stanza support", () => {
-    const { config, calls } = configWith(["with_resume_state_stanzas", "with_resume_state"]);
+  test("uses entry resume when generated WASM lacks max-aware entry support", () => {
+    const { config, calls } = configWith(["with_resume_state_entries", "with_resume_state"]);
 
     applyResumeStateToWasmConfig(config, {
       previd: "prev-3",
       inboundH: 1,
       outboundH: 2,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<presence/>"],
+      unhandledOutboundEntries: [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas",
-        args: ["prev-3", 1, 2, ["<presence/>"]],
+        method: "with_resume_state_entries",
+        args: ["prev-3", 1, 2, [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z" }]],
       },
     ]);
+  });
+
+  test("does not configure a legacy resume API when sender-owned entries are present", () => {
+    const { config, calls } = configWith(["with_resume_state_with_max", "with_resume_state"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-legacy",
+      inboundH: 1,
+      outboundH: 2,
+      maxResumeSeconds: 300,
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+    });
+
+    expect(calls).toEqual([]);
   });
 
   test("falls back to old plain resume when generated WASM has only the legacy method", () => {
@@ -369,7 +483,332 @@ describe("applyResumeStateToWasmConfig", () => {
   });
 });
 
+describe("malformed persisted SM snapshots", () => {
+  test("BrowserXmppClient discards only the SM snapshot and reconnects with a clean config", async () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({
+      previd: "corrupt-sm",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{ xml: "<not-xml", sentAt: "not-a-timestamp" }],
+    });
+    let configs = 0;
+    let connected = 0;
+    class StubConfig {
+      constructor(..._args: unknown[]) { configs += 1; }
+      with_resume_state_entries() { throw new Error("invalid resume stanza XML"); }
+    }
+    class StubClient {
+      async connect() { connected += 1; }
+    }
+    const client = new BrowserXmppClient(
+      {
+        jid: "alice@example.com",
+        username: "alice",
+        session_id: "token",
+        xmpp_websocket_url: "wss://xmpp.example/ws",
+      } as WaddleSession,
+      persistence,
+    );
+    const state = client as unknown as {
+      loadModule: () => Promise<unknown>;
+      doConnect: () => Promise<void>;
+    };
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+
+    await state.doConnect();
+
+    expect(configs).toBe(2);
+    expect(connected).toBe(1);
+    expect(persistence.smSnapshot()).toBeNull();
+  });
+});
+
 describe("createLocalStorageResumePersistence — localStorage adapter", () => {
+  test("ref-counts owner heartbeats and drains all live ownership on terminal disposal", () => {
+    const timers = ownerTimerHarness();
+    const baseline = resumeOwnerLifecycleSnapshotForTests();
+    const first = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    const second = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual({
+      registrations: baseline.registrations + 1,
+      activeTimers: baseline.activeTimers + 1,
+      ownerInstances: baseline.ownerInstances + 1,
+    });
+
+    first.dispose();
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests().registrations).toBe(baseline.registrations + 1);
+
+    second.dispose();
+    expect(timers.activeCount()).toBe(0);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+  });
+
+  test("a throwing owner scheduler rolls back only its provisional lease and permits reacquisition", () => {
+    const baseline = resumeOwnerLifecycleSnapshotForTests();
+    const throwingDriver = {
+      setInterval: () => { throw new Error("scheduler unavailable"); },
+      clearInterval: () => undefined,
+    };
+
+    expect(() => createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: throwingDriver,
+    })).toThrow("scheduler unavailable");
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+
+    const timers = ownerTimerHarness();
+    const recovered = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual({
+      registrations: baseline.registrations + 1,
+      activeTimers: baseline.activeTimers + 1,
+      ownerInstances: baseline.ownerInstances + 1,
+    });
+    recovered.dispose();
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+  });
+
+  test("a re-entrant throwing scheduler leaves its live successor's owner lease intact", () => {
+    const baseline = resumeOwnerLifecycleSnapshotForTests();
+    const timers = ownerTimerHarness();
+    let successor: ResumePersistence | null = null;
+    const reentrantThrowingDriver = {
+      setInterval: () => {
+        successor = createLocalStorageResumePersistence("alice@example.com", undefined, {
+          ownerTimerDriver: timers.driver,
+        });
+        throw new Error("outer scheduler unavailable");
+      },
+      clearInterval: () => undefined,
+    };
+
+    expect(() => createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: reentrantThrowingDriver,
+    })).toThrow("outer scheduler unavailable");
+    if (!successor) throw new Error("re-entrant scheduler did not retain a successor");
+
+    const ownerId = window.sessionStorage.getItem("waddle.chat.sm-resume.owner");
+    expect(ownerId).not.toBeNull();
+    const leaseKey = ownerLeaseKey("alice@example.com", ownerId!);
+    const successorLease = window.localStorage.getItem(leaseKey);
+    expect(successorLease).not.toBeNull();
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual({
+      registrations: baseline.registrations + 1,
+      activeTimers: baseline.activeTimers + 1,
+      ownerInstances: baseline.ownerInstances + 1,
+    });
+
+    const sharedSuccessor = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    successor.dispose();
+    expect(timers.activeCount()).toBe(1);
+    expect(window.sessionStorage.getItem("waddle.chat.sm-resume.owner")).toBe(ownerId);
+    expect(window.localStorage.getItem(leaseKey)).toBe(successorLease);
+
+    sharedSuccessor.dispose();
+    expect(timers.activeCount()).toBe(0);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+
+    const reacquired = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    expect(timers.activeCount()).toBe(1);
+    reacquired.dispose();
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+  });
+
+  test("a failed nested scheduler cannot suppress its still-scheduling parent", () => {
+    const baseline = resumeOwnerLifecycleSnapshotForTests();
+    const timers = ownerTimerHarness();
+    let nested = false;
+    const innerFailure = {
+      setInterval: () => { throw new Error("inner scheduler unavailable"); },
+      clearInterval: () => undefined,
+    };
+    const outerDriver = {
+      setInterval: (callback: () => void) => {
+        if (!nested) {
+          nested = true;
+          expect(() => createLocalStorageResumePersistence("alice@example.com", undefined, {
+            ownerTimerDriver: innerFailure,
+          })).toThrow("inner scheduler unavailable");
+        }
+        return timers.driver.setInterval(callback, 0);
+      },
+      clearInterval: timers.driver.clearInterval,
+    };
+
+    const outer = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: outerDriver,
+    });
+    const ownerId = window.sessionStorage.getItem("waddle.chat.sm-resume.owner");
+    expect(ownerId).not.toBeNull();
+    const leaseKey = ownerLeaseKey("alice@example.com", ownerId!);
+    expect(window.localStorage.getItem(leaseKey)).not.toBeNull();
+    expect(timers.activeCount()).toBe(1);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual({
+      registrations: baseline.registrations + 1,
+      activeTimers: baseline.activeTimers + 1,
+      ownerInstances: baseline.ownerInstances + 1,
+    });
+
+    // The outer registration is real ownership, not a discarded stale
+    // closure: sharing, terminal release, and a fresh acquisition all work.
+    const shared = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    outer.dispose();
+    expect(timers.activeCount()).toBe(1);
+    expect(window.localStorage.getItem(leaseKey)).not.toBeNull();
+    shared.dispose();
+    expect(timers.activeCount()).toBe(0);
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+
+    const reacquired = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    expect(timers.activeCount()).toBe(1);
+    reacquired.dispose();
+    expect(resumeOwnerLifecycleSnapshotForTests()).toEqual(baseline);
+  });
+
+  test("a disposed owner cannot mutate persistence, even if a captured heartbeat ticks", () => {
+    const timers = ownerTimerHarness();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    const capturedTick = timers.callbacks()[0];
+    persistence.saveSm({ previd: "tail", inboundH: 1, outboundH: 2 });
+    persistence.dispose();
+    const afterDispose = [...Array(window.localStorage.length)].map((_, index) => [
+      window.localStorage.key(index),
+      window.localStorage.getItem(window.localStorage.key(index) ?? ""),
+    ]);
+
+    capturedTick?.();
+    persistence.saveSm({ previd: "new-tail", inboundH: 3, outboundH: 4 });
+    persistence.saveCatchup({ dmLastSeen: [], roomLastSeen: [] });
+    persistence.clearSm();
+    persistence.clearCatchup();
+    persistence.clearJoinedRooms();
+    persistence.preparePagehideHandoff();
+
+    expect(persistence.loadSm()).toBeNull();
+    expect(persistence.consumeSm()).toBeNull();
+    expect(persistence.loadCatchup()).toBeNull();
+    expect(persistence.loadJoinedRooms()).toEqual([]);
+    expect([...Array(window.localStorage.length)].map((_, index) => [
+      window.localStorage.key(index),
+      window.localStorage.getItem(window.localStorage.key(index) ?? ""),
+    ])).toEqual(afterDispose);
+  });
+
+  test("a stale disposed owner cannot remove a replacement lease, handoff, or SM tail", () => {
+    const firstTimers = ownerTimerHarness();
+    const first = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: firstTimers.driver,
+    });
+    const ownerId = window.sessionStorage.getItem("waddle.chat.sm-resume.owner")!;
+    const leaseKey = ownerLeaseKey("alice@example.com", ownerId);
+    const handoffKey = ownerHandoffKey("alice@example.com", ownerId);
+    const tailKey = smOwnerKey("alice@example.com", ownerId);
+    const replacementInstanceId = "replacement-generation";
+    window.localStorage.setItem(leaseKey, JSON.stringify({
+      ownerId,
+      instanceId: replacementInstanceId,
+      updatedAt: Date.now(),
+    }));
+    window.localStorage.setItem(handoffKey, JSON.stringify({
+      ownerId,
+      instanceId: replacementInstanceId,
+      expiresAt: Date.now() + 45_000,
+    }));
+    window.localStorage.setItem(tailKey, JSON.stringify({
+      previd: "replacement-tail",
+      inboundH: 5,
+      outboundH: 6,
+      savedAt: Date.now(),
+      ownerId,
+      ownerInstanceId: replacementInstanceId,
+    }));
+    const expectedLease = window.localStorage.getItem(leaseKey);
+    const expectedHandoff = window.localStorage.getItem(handoffKey);
+    const expectedTail = window.localStorage.getItem(tailKey);
+
+    first.dispose();
+
+    expect(window.localStorage.getItem(leaseKey)).toBe(expectedLease);
+    expect(window.localStorage.getItem(handoffKey)).toBe(expectedHandoff);
+    expect(window.localStorage.getItem(tailKey)).toBe(expectedTail);
+  });
+
+  test("only terminal BrowserXmppClient disposal releases the persistence owner exactly once", async () => {
+    const persistence = inMemoryPersistence();
+    let disposeCalls = 0;
+    persistence.dispose = () => { disposeCalls += 1; };
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+
+    await client.disconnect();
+    expect(disposeCalls).toBe(0);
+    await client.dispose();
+    await client.dispose();
+
+    expect(disposeCalls).toBe(1);
+    await expect(client.connect()).rejects.toThrow("XMPP client is disposed");
+    await expect(client.sendDirectMessage("bob@example.com", "after disposal")).rejects.toThrow("XMPP client is disposed");
+  });
+
+  test("terminal disposal releases ownership before a stalled socket can repersist pagehide state", async () => {
+    const timers = ownerTimerHarness();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", undefined, {
+      ownerTimerDriver: timers.driver,
+    });
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const socketClose = deferred<void>();
+    let acknowledgementRequests = 0;
+    (client as unknown as {
+      xmpp: {
+        disconnect: () => Promise<void>;
+        get_resume_state: () => PersistedSmResumeState;
+        try_request_stream_management_ack_for_pagehide: () => "accepted";
+      };
+    }).xmpp = {
+      disconnect: () => socketClose.promise,
+      get_resume_state: () => ({ previd: "must-not-persist", inboundH: 1, outboundH: 1 }),
+      try_request_stream_management_ack_for_pagehide: () => {
+        acknowledgementRequests += 1;
+        return "accepted";
+      },
+    };
+
+    const disposing = client.dispose();
+    client.prepareForPageHide();
+
+    expect(timers.activeCount()).toBe(0);
+    expect(acknowledgementRequests).toBe(0);
+    expect(persistence.loadSm()).toBeNull();
+
+    socketClose.resolve();
+    await disposing;
+  });
+
   test("round-trips a catchup snapshot through localStorage", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
     const snapshot: PersistedReconnectCatchup = {
@@ -386,12 +825,73 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='m1'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     };
     persistence.saveSm(state);
     // Round-trip strips the internal `savedAt` so the caller gets
     // the same shape it passed in.
     expect(persistence.loadSm()).toEqual(state);
+  });
+
+  test("localStorage consume preserves a nonresumable fresh-stream tail for config application", () => {
+    const owner = "fresh-stream-owner";
+    const writer = createLocalStorageResumePersistence("alice@example.com", owner);
+    const state: PersistedSmResumeState = {
+      previd: "declined-sm-stream",
+      resumable: false,
+      inboundH: 0,
+      outboundH: 0,
+      unhandledOutboundEntries: [
+        {
+          xml: "<message xmlns='jabber:client' id='message-retry'><origin-id xmlns='urn:xmpp:sid:0' id='message-origin'/><delay xmlns='urn:xmpp:delay' stamp='2026-07-28T10:11:12.000Z'/></message>",
+          sentAt: "2026-07-28T10:11:12.000Z",
+        },
+        {
+          xml: "<presence xmlns='jabber:client' id='presence-retry'><delay xmlns='urn:xmpp:delay' stamp='2026-07-28T10:11:12.000Z'/></presence>",
+          sentAt: "2026-07-28T10:11:12.000Z",
+        },
+      ],
+    };
+    writer.saveSm(state);
+    const reader = createLocalStorageResumePersistence("alice@example.com", owner);
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const config = {
+      with_fresh_stream_retry_state_entries: (...args: unknown[]) => {
+        calls.push({ method: "fresh-stream", args });
+      },
+      with_resume_state_entries: (...args: unknown[]) => {
+        calls.push({ method: "resume", args });
+      },
+    };
+
+    try {
+      expect(reader.loadSm()).toEqual(state);
+      const consumed = reader.consumeSm();
+      expect(consumed).toEqual(state);
+      applyResumeStateToWasmConfig(config, consumed!);
+      expect(calls).toEqual([{
+        method: "fresh-stream",
+        args: [state.previd, state.inboundH, state.outboundH, state.unhandledOutboundEntries],
+      }]);
+      expect(reader.consumeSm()).toBeNull();
+    } finally {
+      reader.dispose();
+      writer.dispose();
+    }
+  });
+
+  test("fails closed for a legacy nonempty stanza snapshot", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "legacy-owner");
+    window.localStorage.setItem(smOwnerKey("alice@example.com", "legacy-owner"), JSON.stringify({
+      previd: "legacy",
+      inboundH: 1,
+      outboundH: 2,
+      savedAt: Date.now(),
+      ownerId: "unowned",
+      unhandledOutboundStanzas: ["<message id='m1'/>"] ,
+    }));
+
+    expect(persistence.loadSm()).toBeNull();
   });
 
   test("round-trips the bound resource with SM resume state", () => {
@@ -437,6 +937,214 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(tabA.consumeSm()).toBeNull();
   });
 
+  test("a duplicate tab's lifecycle writes cannot replace the live owner's reload handoff", () => {
+    const account = "alice@example.com";
+    const ownerA = "handoff-owner-a";
+    const ownerB = "duplicate-owner-b";
+    const aState = { previd: "resume-a", inboundH: 11, outboundH: 12, resource: "web-a" };
+    const bState = { previd: "resume-b", inboundH: 21, outboundH: 22, resource: "web-b" };
+    createLocalStorageResumePersistence(account, ownerA).saveSm(aState);
+    window.sessionStorage.setItem("waddle.chat.sm-resume.owner", ownerA);
+    window.localStorage.setItem(
+      ownerLeaseKey(account, ownerA),
+      JSON.stringify({ ownerId: ownerA, instanceId: "before-reload", updatedAt: Date.now() }),
+    );
+    window.localStorage.setItem(
+      ownerHandoffKey(account, ownerA),
+      JSON.stringify({ ownerId: ownerA, instanceId: "before-reload", expiresAt: Date.now() + 45_000 }),
+    );
+
+    const duplicate = createLocalStorageResumePersistence(account, ownerB);
+    duplicate.saveSm(bState);
+    duplicate.preparePagehideHandoff();
+    duplicate.clearSm();
+
+    const restoreNavigation = installNavigationTiming("reload");
+    try {
+      const reloadedA = createLocalStorageResumePersistence(account);
+      expect(reloadedA.loadSm()).toEqual(aState);
+      expect(reloadedA.consumeSm()).toEqual(aState);
+      expect(reloadedA.consumeSm()).toBeNull();
+      expect(createLocalStorageResumePersistence(account, ownerB).loadSm()).toBeNull();
+    } finally {
+      restoreNavigation();
+    }
+  });
+
+  test("concurrent owner clears and consumed markers stay isolated", () => {
+    const account = "alice@example.com";
+    const ownerA = createLocalStorageResumePersistence(account, "clear-owner-a");
+    const ownerB = createLocalStorageResumePersistence(account, "clear-owner-b");
+    const aState = { previd: "clear-a", inboundH: 1, outboundH: 2 };
+    const bState = { previd: "clear-b", inboundH: 3, outboundH: 4 };
+    ownerA.saveSm(aState);
+    ownerB.saveSm(bState);
+
+    ownerA.clearSm();
+    expect(ownerA.loadSm()).toBeNull();
+    expect(ownerB.loadSm()).toEqual(bState);
+    expect(ownerB.consumeSm()).toEqual(bState);
+    expect(window.localStorage.getItem(smConsumedKey(account, "clear-owner-a"))).toBeNull();
+    expect(window.localStorage.getItem(smConsumedKey(account, "clear-owner-b"))).not.toBeNull();
+  });
+
+  test("a damaged consume marker fails closed without exposing the replay tail", () => {
+    const account = "alice@example.com";
+    const owner = "damaged-marker-owner";
+    const persistence = createLocalStorageResumePersistence(account, owner);
+    persistence.saveSm({ previd: "must-not-resume", inboundH: 1, outboundH: 2, resource: "web-owned" });
+    window.localStorage.setItem(smConsumedKey(account, owner), "{damaged");
+
+    expect(persistence.loadSm()).toBeNull();
+    expect(persistence.consumeSm()).toBeNull();
+    expect(window.localStorage.getItem(smOwnerKey(account, owner))).toBeNull();
+    expect(window.localStorage.getItem(smConsumedKey(account, owner))).toBeNull();
+  });
+
+  test("a mismatched consume marker and snapshot fail closed on direct consume", () => {
+    const account = "alice@example.com";
+    const owner = "mismatched-marker-owner";
+    const persistence = createLocalStorageResumePersistence(account, owner);
+    persistence.saveSm({ previd: "must-not-resume", inboundH: 1, outboundH: 2 });
+    window.localStorage.setItem(
+      smConsumedKey(account, owner),
+      JSON.stringify({ marker: "different-snapshot", savedAt: Date.now() }),
+    );
+
+    expect(persistence.consumeSm()).toBeNull();
+    expect(window.localStorage.getItem(smOwnerKey(account, owner))).toBeNull();
+    expect(window.localStorage.getItem(smConsumedKey(account, owner))).toBeNull();
+  });
+
+  test("owner-slot GC removes expired tails but never a live owner tail", () => {
+    const account = "alice@example.com";
+    const active = createLocalStorageResumePersistence(account, "active-owner");
+    const staleOwner = "stale-owner";
+    const activeState = { previd: "active", inboundH: 5, outboundH: 6 };
+    active.saveSm(activeState);
+    window.localStorage.setItem(
+      smOwnerKey(account, staleOwner),
+      JSON.stringify({
+        previd: "stale",
+        inboundH: 7,
+        outboundH: 8,
+        ownerId: staleOwner,
+        savedAt: Date.now() - 301_000,
+      }),
+    );
+    window.localStorage.setItem(
+      smConsumedKey(account, staleOwner),
+      JSON.stringify({ marker: "stale", savedAt: Date.now() - 301_000 }),
+    );
+
+    createLocalStorageResumePersistence(account, "gc-trigger-owner").saveSm({ previd: "trigger", inboundH: 9, outboundH: 10 });
+
+    expect(active.loadSm()).toEqual(activeState);
+    expect(window.localStorage.getItem(smOwnerKey(account, staleOwner))).toBeNull();
+    expect(window.localStorage.getItem(smConsumedKey(account, staleOwner))).toBeNull();
+  });
+
+  test("a full owner window preserves existing tails and fails closed for a new owner", () => {
+    const account = "alice@example.com";
+    const current = createLocalStorageResumePersistence(account, "bounded-current");
+    current.saveSm({ previd: "before-update", inboundH: 1, outboundH: 2 });
+    for (let index = 1; index < 64; index += 1) {
+      createLocalStorageResumePersistence(account, `bounded-${index}`).saveSm({
+        previd: `tail-${index}`,
+        inboundH: index,
+        outboundH: index,
+      });
+    }
+
+    current.saveSm({ previd: "after-update", inboundH: 3, outboundH: 4 });
+    const overflow = createLocalStorageResumePersistence(account, "bounded-overflow");
+    overflow.saveSm({ previd: "must-not-persist", inboundH: 5, outboundH: 6 });
+
+    expect(current.loadSm()).toEqual({ previd: "after-update", inboundH: 3, outboundH: 4 });
+    expect(overflow.loadSm()).toBeNull();
+    expect(window.localStorage.length).toBe(64);
+  });
+
+  test("consumed owner markers share the bounded owner window and preserve live tails", () => {
+    const account = "alice@example.com";
+    const live = createLocalStorageResumePersistence(account, "live-owner");
+    const liveState = { previd: "live-stream", inboundH: 1, outboundH: 2 };
+    live.saveSm(liveState);
+
+    for (let index = 1; index < 64; index += 1) {
+      const consumed = createLocalStorageResumePersistence(account, `consumed-${index}`);
+      const state = { previd: `consumed-stream-${index}`, inboundH: index, outboundH: index };
+      consumed.saveSm(state);
+      expect(consumed.consumeSm()).toEqual(state);
+    }
+
+    const overflow = createLocalStorageResumePersistence(account, "consumed-overflow");
+    overflow.saveSm({ previd: "must-not-persist", inboundH: 5, outboundH: 6 });
+
+    expect(live.loadSm()).toEqual(liveState);
+    expect(overflow.loadSm()).toBeNull();
+    expect(window.localStorage.length).toBe(64);
+  });
+
+  test("GC removes noncanonical owner keys before they can consume the owner window", () => {
+    const account = "alice@example.com";
+    const corruptKey = `waddle.chat.sm-resume.${account.length}:${account}.01:x`;
+    window.localStorage.setItem(
+      corruptKey,
+      JSON.stringify({
+        previd: "corrupt-stream",
+        inboundH: 1,
+        outboundH: 2,
+        ownerId: "x",
+        savedAt: Date.now(),
+      }),
+    );
+
+    const valid = createLocalStorageResumePersistence(account, "valid-owner");
+    const validState = { previd: "valid-stream", inboundH: 3, outboundH: 4 };
+    valid.saveSm(validState);
+
+    expect(window.localStorage.getItem(corruptKey)).toBeNull();
+    expect(valid.loadSm()).toEqual(validState);
+  });
+
+  test("GC drops interrupted claims so they cannot exhaust the owner window", () => {
+    const account = "alice@example.com";
+    for (let index = 0; index < 64; index += 1) {
+      const ownerId = `interrupted-${index}`;
+      window.localStorage.setItem(
+        smOwnerKey(account, ownerId),
+        JSON.stringify({
+          previd: `interrupted-stream-${index}`,
+          inboundH: index,
+          outboundH: index,
+          ownerId,
+          claimId: `claim-${index}`,
+          savedAt: Date.now(),
+        }),
+      );
+    }
+
+    const recovered = createLocalStorageResumePersistence(account, "recovered-owner");
+    recovered.saveSm({ previd: "recovered-stream", inboundH: 1, outboundH: 2 });
+
+    expect(recovered.loadSm()).toEqual({ previd: "recovered-stream", inboundH: 1, outboundH: 2 });
+    expect(window.localStorage.length).toBe(1);
+  });
+
+  test("an owner ID ending in consumed retains its snapshot and marker boundary", () => {
+    const account = "alice@example.com";
+    const owner = "tab.consumed";
+    const persistence = createLocalStorageResumePersistence(account, owner);
+    const state = { previd: "suffix-owner", inboundH: 1, outboundH: 2 };
+    persistence.saveSm(state);
+
+    expect(persistence.loadSm()).toEqual(state);
+    expect(persistence.consumeSm()).toEqual(state);
+    expect(window.localStorage.getItem(smOwnerKey(account, owner))).toBeNull();
+    expect(window.localStorage.getItem(smConsumedKey(account, owner))).not.toBeNull();
+  });
+
   test("a duplicated tab rotates a copied live owner before it can claim SM state", () => {
     const copiedOwner = "copied-live-owner";
     const state = {
@@ -448,7 +1156,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     createLocalStorageResumePersistence("alice@example.com", copiedOwner).saveSm(state);
     window.sessionStorage.setItem("waddle.chat.sm-resume.owner", copiedOwner);
     window.localStorage.setItem(
-      `waddle.chat.sm-resume.owner-lease.${copiedOwner}`,
+      ownerLeaseKey("alice@example.com", copiedOwner),
       JSON.stringify({
         ownerId: copiedOwner,
         instanceId: "original-live-tab",
@@ -462,7 +1170,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(createLocalStorageResumePersistence("alice@example.com", copiedOwner).consumeSm()).toEqual(state);
   });
 
-  test("a pagehide handoff keeps the copied owner for same-tab reload consumption", () => {
+  test("a matching pagehide handoff keeps the owner only for a confirmed same-tab reload", () => {
     const reloadOwner = "reload-owner";
     const state = {
       previd: "abc-123",
@@ -470,58 +1178,114 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       outboundH: 7,
       resource: "web-existing-resource",
     };
-    const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
-    previousPage.saveSm(state);
-    previousPage.preparePagehideHandoff();
-    window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
-    window.localStorage.setItem(
-      `waddle.chat.sm-resume.owner-lease.${reloadOwner}`,
-      JSON.stringify({
-        ownerId: reloadOwner,
-        instanceId: "previous-page",
-        updatedAt: Date.now(),
-      }),
-    );
-
-    const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
-
-    expect(reloadedPage.consumeSm()).toEqual(state);
-  });
-
-  test("a slow same-tab reload keeps the owner until the prior lease expires", () => {
-    const realNow = Date.now;
-    let now = 1_000_000;
-    Date.now = () => now;
-
+    seedCopiedOwnerHandoff(reloadOwner, state);
+    const restoreNavigation = installNavigationTiming("reload");
     try {
-      const reloadOwner = "slow-reload-owner";
-      const state = {
-        previd: "abc-123",
-        inboundH: 42,
-        outboundH: 7,
-        resource: "web-existing-resource",
-      };
-      const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
-      previousPage.saveSm(state);
-      previousPage.saveJoinedRooms(["general@conference.example.com"]);
-      previousPage.preparePagehideHandoff();
-      window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
-      window.localStorage.setItem(
-        `waddle.chat.sm-resume.owner-lease.${reloadOwner}`,
-        JSON.stringify({
-          ownerId: reloadOwner,
-          instanceId: "previous-page",
-          updatedAt: now,
-        }),
-      );
-
-      now += 15_000;
       const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
 
-      expect(reloadedPage.loadJoinedRooms()).toEqual(["general@conference.example.com"]);
+      expect(reloadedPage.loadSm()).toEqual(state);
       expect(reloadedPage.consumeSm()).toEqual(state);
     } finally {
-      Date.now = realNow;
+      restoreNavigation();
+    }
+  });
+
+  test("a navigate clone with a valid handoff rotates and cannot load or consume SM state", () => {
+    const ownerId = "navigate-clone-owner";
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    seedCopiedOwnerHandoff(ownerId, state);
+    const restoreNavigation = installNavigationTiming("navigate");
+    try {
+      const duplicate = createLocalStorageResumePersistence("alice@example.com");
+
+      expect(duplicate.loadSm()).toBeNull();
+      expect(duplicate.consumeSm()).toBeNull();
+    } finally {
+      restoreNavigation();
+    }
+  });
+
+  test("unknown or unavailable navigation timing fails closed", () => {
+    for (const type of ["unknown", null]) {
+      const ownerId = `closed-navigation-${type ?? "unavailable"}`;
+      const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
+      seedCopiedOwnerHandoff(ownerId, state);
+      const restoreNavigation = installNavigationTiming(type);
+      try {
+        const duplicate = createLocalStorageResumePersistence("alice@example.com");
+        expect(duplicate.loadSm()).toBeNull();
+        expect(duplicate.consumeSm()).toBeNull();
+      } finally {
+        restoreNavigation();
+      }
+    }
+  });
+
+  test("history, prerender, and unknown copied-owner navigations never consume the handoff", () => {
+    for (const type of ["navigate", "back_forward", "prerender", "unknown", null]) {
+      const ownerId = `copied-owner-${type ?? "unavailable"}`;
+      const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
+      seedCopiedOwnerHandoff(ownerId, state);
+      const restoreNavigation = installNavigationTiming(type);
+      try {
+        const copiedDocument = createLocalStorageResumePersistence("alice@example.com");
+        expect(copiedDocument.loadSm()).toBeNull();
+        expect(copiedDocument.consumeSm()).toBeNull();
+        expect(createLocalStorageResumePersistence("alice@example.com", ownerId).consumeSm()).toEqual(state);
+      } finally {
+        restoreNavigation();
+      }
+    }
+  });
+
+  test("reload rotates copied ownership without a current matching lease", () => {
+    for (const scenario of ["missing", "expired", "mismatched"] as const) {
+      const ownerId = `reload-${scenario}-lease-owner`;
+      const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
+      seedCopiedOwnerHandoff(ownerId, state);
+      const leaseKey = ownerLeaseKey("alice@example.com", ownerId);
+      if (scenario === "missing") {
+        window.localStorage.removeItem(leaseKey);
+      } else if (scenario === "expired") {
+        window.localStorage.setItem(
+          leaseKey,
+          JSON.stringify({ ownerId, instanceId: "previous-page", updatedAt: Date.now() - 45_001 }),
+        );
+      } else {
+        window.localStorage.setItem(
+          leaseKey,
+          JSON.stringify({ ownerId: "another-owner", instanceId: "previous-page", updatedAt: Date.now() }),
+        );
+      }
+
+      const restoreNavigation = installNavigationTiming("reload");
+      try {
+        const copiedDocument = createLocalStorageResumePersistence("alice@example.com");
+        expect(copiedDocument.loadSm()).toBeNull();
+        expect(copiedDocument.consumeSm()).toBeNull();
+        expect(createLocalStorageResumePersistence("alice@example.com", ownerId).consumeSm()).toEqual(state);
+      } finally {
+        restoreNavigation();
+      }
+    }
+  });
+
+  test("a reload rejects a handoff that does not belong to the active lease", () => {
+    const ownerId = "mismatched-handoff-owner";
+    const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
+    seedCopiedOwnerHandoff(ownerId, state, "other-page");
+    const restoreNavigation = installNavigationTiming("reload");
+    try {
+      const duplicate = createLocalStorageResumePersistence("alice@example.com");
+      expect(duplicate.loadSm()).toBeNull();
+      expect(duplicate.consumeSm()).toBeNull();
+    } finally {
+      restoreNavigation();
     }
   });
 
@@ -588,7 +1352,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           outboundH: number;
           maxResumeSeconds: number;
           hasUnackedOutbound: boolean;
-          unhandledOutboundStanzas: string[];
+          unhandledOutboundEntries: Array<{ xml: string; sentAt: string }>;
         };
       };
     }).xmpp = {
@@ -598,7 +1362,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         outboundH: 9,
         maxResumeSeconds: 300,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+        unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
       }),
     };
 
@@ -609,7 +1373,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       inboundH: 4,
       outboundH: 9,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
   });
 
@@ -619,7 +1383,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -639,13 +1403,55 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
-  test("BrowserXmppClient removes restored SM queue entries when native fallback retry owns resend", () => {
+  test("a navigation clone cannot take the durable queue entry or its SM replay tail", () => {
+    const ownerId = "queue-tail-owner";
+    const messageId = "dm-owned-sm-tail";
+    const state = {
+      previd: "live-sm-id",
+      inboundH: 4,
+      outboundH: 9,
+      resource: "web-original-resource",
+      unhandledOutboundEntries: [{
+        xml: `<message xmlns='jabber:client' id='${messageId}'/>`,
+        sentAt: "2026-07-26T12:34:56.789Z",
+      }],
+    };
+    seedCopiedOwnerHandoff(ownerId, state);
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: messageId,
+      createdAt: new Date().toISOString(),
+      peerJid: "bob@example.com",
+      body: "still owned by the original tab",
+    });
+    const restoreNavigation = installNavigationTiming("navigate");
+
+    try {
+      const duplicate = createLocalStorageResumePersistence("alice@example.com");
+      const client = new BrowserXmppClient(
+        { jid: "alice@example.com", username: "alice" } as WaddleSession,
+        duplicate,
+      );
+
+      expect(duplicate.loadSm()).toBeNull();
+      expect(duplicate.consumeSm()).toBeNull();
+      expect(client.fullJid).not.toBe("alice@example.com/web-original-resource");
+      expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+        .toContain(messageId);
+      expect(createLocalStorageResumePersistence("alice@example.com", ownerId).consumeSm()).toEqual(state);
+    } finally {
+      restoreNavigation();
+      removeQueuedMessage("alice@example.com", messageId);
+    }
+  });
+
+  test("BrowserXmppClient retains restored SM queue entries through native replay failure until ack", () => {
     const persistence = inMemoryPersistence();
     persistence.saveSm({
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -662,6 +1468,11 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
 
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id)).toEqual([
+      "dm-live-1",
+    ]);
+
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
@@ -753,8 +1564,8 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   });
 
   test("consumeSm rejects a delayed claimant that observed the same original resource", () => {
-    const first = createLocalStorageResumePersistence("alice@example.com");
-    const second = createLocalStorageResumePersistence("alice@example.com");
+    const first = createLocalStorageResumePersistence("alice@example.com", "shared-owner");
+    const second = createLocalStorageResumePersistence("alice@example.com", "shared-owner");
     const state: PersistedSmResumeState = {
       previd: "abc-123",
       inboundH: 42,
@@ -770,7 +1581,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     let secondResult: PersistedSmResumeState | null | undefined;
     storage.setItem = ((key: string, value: string) => {
       if (
-        key === "waddle.chat.sm-resume.alice@example.com"
+        key === smOwnerKey("alice@example.com", "shared-owner")
         && value.includes('"claimId"')
         && !reentered
       ) {
@@ -793,63 +1604,66 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   });
 
   test("SM TTL: an old envelope without advertised max uses the default resume window", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "ttl-default-owner");
     const justOverDefaultResumeWindow = Date.now() - 301_000;
     window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
-      JSON.stringify({ previd: "stale", inboundH: 1, outboundH: 1, savedAt: justOverDefaultResumeWindow }),
+      smOwnerKey("alice@example.com", "ttl-default-owner"),
+      JSON.stringify({ previd: "stale", inboundH: 1, outboundH: 1, savedAt: justOverDefaultResumeWindow, ownerId: "ttl-default-owner" }),
     );
     expect(persistence.loadSm()).toBeNull();
     // Stale entries are pruned on read so the next load doesn't
     // pay the validation cost again.
-    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+    expect(window.localStorage.getItem(smOwnerKey("alice@example.com", "ttl-default-owner"))).toBeNull();
   });
 
   test("SM TTL: advertised maxResumeSeconds controls persisted resume expiry", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "ttl-advertised-owner");
     const twoSecondsAgo = Date.now() - 2_000;
     window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
+      smOwnerKey("alice@example.com", "ttl-advertised-owner"),
       JSON.stringify({
         previd: "stale",
         inboundH: 1,
         outboundH: 1,
         maxResumeSeconds: 1,
         savedAt: twoSecondsAgo,
+        ownerId: "ttl-advertised-owner",
       }),
     );
 
     expect(persistence.consumeSm()).toBeNull();
-    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+    expect(window.localStorage.getItem(smOwnerKey("alice@example.com", "ttl-advertised-owner"))).toBeNull();
   });
 
   test("SM TTL: future-dated envelopes fail closed and are pruned", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "ttl-future-owner");
     const farFuture = Date.now() + 120_000;
     window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
+      smOwnerKey("alice@example.com", "ttl-future-owner"),
       JSON.stringify({
         previd: "from-the-future",
         inboundH: 1,
         outboundH: 1,
         maxResumeSeconds: 300,
         savedAt: farFuture,
+        ownerId: "ttl-future-owner",
       }),
     );
 
     expect(persistence.loadSm()).toBeNull();
-    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+    expect(window.localStorage.getItem(smOwnerKey("alice@example.com", "ttl-future-owner"))).toBeNull();
   });
 
   test("SM state rejects non-u32 stanza counters", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "bad-counter-owner");
     window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
+      smOwnerKey("alice@example.com", "bad-counter-owner"),
       JSON.stringify({
         previd: "bad-counter",
         inboundH: 1.5,
         outboundH: 1,
         savedAt: Date.now(),
+        ownerId: "bad-counter-owner",
       }),
     );
 

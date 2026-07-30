@@ -1,7 +1,7 @@
 import type { CallEvent } from "@/lib/calls/types";
 
 /** TypeScript interfaces for Rust/WASM callback payload shapes.
- * All fields are snake_case (serde serialization convention).
+ * Field casing follows the Rust serde attributes for each exposed type.
  */
 
 interface WasmMarkupSpan {

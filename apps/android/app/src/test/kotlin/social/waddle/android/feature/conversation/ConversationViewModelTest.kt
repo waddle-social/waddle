@@ -194,7 +194,7 @@ class ConversationViewModelTest {
     }
 
     @Test
-    fun `optimistic send dedupes against the room echo by origin id`() = runTest {
+    fun `optimistic send keeps delivery state over the room echo until ack`() = runTest {
         // Realistic MUC reflection: the room stamps a FRESH XEP-0359
         // stanza-id; only the origin-id round-trips the client id the
         // send returned. Matching on the collapsed timeline key alone
@@ -224,8 +224,15 @@ class ConversationViewModelTest {
         runCurrent()
 
         val rows = viewModel.uiState.value.rows
-        assertEquals("echo replaces the pending row", 1, rows.size)
-        assertTrue(rows.single() is ConversationRow.Stored)
+        assertEquals("the echo cannot falsely mark an unacked send delivered", 1, rows.size)
+        val pending = rows.single() as ConversationRow.Unconfirmed
+        assertEquals("client-origin-id", pending.message.stanzaId)
+        assertFalse(pending.message.acked)
+
+        events.emit(XmppEvent.DeliveryAcked("client-origin-id"))
+        runCurrent()
+
+        assertTrue(viewModel.uiState.value.rows.single() is ConversationRow.Stored)
     }
 
     @Test
@@ -346,7 +353,7 @@ class ConversationViewModelTest {
     }
 
     @Test
-    fun `queued send renders as queued and reconciles with the replayed echo`() = runTest {
+    fun `queued send stays queued over the replayed echo until ack`() = runTest {
         // The manager persisted the offline send under "q-1"; the queue
         // replay reuses that id as the XEP-0359 origin-id.
         io.sendResult = SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "q-1")
@@ -375,8 +382,14 @@ class ConversationViewModelTest {
         runCurrent()
 
         val rows = viewModel.uiState.value.rows
-        assertEquals("echo replaces the queued row", 1, rows.size)
-        assertTrue(rows.single() is ConversationRow.Stored)
+        assertEquals("the replayed echo cannot replace an unacked durable queue row", 1, rows.size)
+        val stillQueued = rows.single() as ConversationRow.Unconfirmed
+        assertTrue(stillQueued.message.queued)
+
+        events.emit(XmppEvent.DeliveryAcked("q-1"))
+        runCurrent()
+
+        assertTrue(viewModel.uiState.value.rows.single() is ConversationRow.Stored)
     }
 
     @Test

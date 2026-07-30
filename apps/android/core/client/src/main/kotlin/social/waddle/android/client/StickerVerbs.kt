@@ -26,20 +26,30 @@ internal class StickerVerbs(
      */
     suspend fun loadStickerPacks() {
         if (stores.stickerPackStore.isLoaded) return
-        val client = activeSession.client
-        if (client == null) {
-            stores.stickerPackStore.applyUnavailable()
-            return
-        }
+        val lease = activeSession.captureOwnerLease() ?: return
+        loadStickerPacks(lease)
+    }
+
+    /** Exact-attempt entry point for the ready/catch-up pipeline and tests. */
+    internal suspend fun loadStickerPacks(lease: ActiveSession.OwnerLease) {
+        if (stores.stickerPackStore.isLoaded) return
         val packs = try {
-            client.fetchStickerPacks(null)
+            when (val result = activeSession.invokeIfCurrent(lease) { it.fetchStickerPacks(null) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> {
+                    activeSession.applyIfCurrent(lease) { stores.stickerPackStore.applyUnavailable() }
+                    return
+                }
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
-            stores.stickerPackStore.applyUnavailable()
+            activeSession.applyIfCurrent(lease) { stores.stickerPackStore.applyUnavailable() }
             return
         }
-        stores.stickerPackStore.applyLoaded(packs.map { it.toDomain() })
+        activeSession.applyIfCurrent(lease) { stores.stickerPackStore.applyLoaded(packs.map { it.toDomain() }) }
     }
 
     /**
@@ -50,7 +60,7 @@ internal class StickerVerbs(
      */
     suspend fun publishPack(name: String, summary: String?, items: List<StickerItem>): VerbResult {
         if (items.isEmpty()) return VerbResult.NotReady
-        val client = activeSession.client ?: return VerbResult.NotConnected
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
         val pack = WaddleStickerPack(
             // Display-state only: the FFI derives the real id from content.
             id = "",
@@ -60,7 +70,12 @@ internal class StickerVerbs(
             stickers = items.map { it.toFfi() },
         )
         val packId = try {
-            client.publishStickerPack(pack)
+            when (val result = activeSession.invokeIfCurrent(lease) { it.publishStickerPack(pack) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: WaddleException.NotConnected) {
@@ -68,23 +83,34 @@ internal class StickerVerbs(
         } catch (_: Throwable) {
             return VerbResult.Rejected
         }
-        stores.stickerPackStore.applyPublished(
-            StickerPack(
-                id = packId,
-                name = pack.name,
-                summary = pack.summary,
-                restricted = false,
-                stickers = items,
-            ),
-        )
-        return VerbResult.Ok
+        return if (activeSession.applyIfCurrent(lease) {
+                stores.stickerPackStore.applyPublished(
+                    StickerPack(
+                        id = packId,
+                        name = pack.name,
+                        summary = pack.summary,
+                        restricted = false,
+                        stickers = items,
+                    ),
+                )
+            }
+        ) {
+            VerbResult.Ok
+        } else {
+            VerbResult.NotConnected
+        }
     }
 
     /** Retract the pack item [packId]; drops it from the store on Ok. */
     suspend fun removePack(packId: String): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
         val retracted = try {
-            client.retractStickerPack(packId)
+            when (val result = activeSession.invokeIfCurrent(lease) { it.retractStickerPack(packId) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: WaddleException.NotConnected) {
@@ -93,7 +119,13 @@ internal class StickerVerbs(
             return VerbResult.Rejected
         }
         if (!retracted) return VerbResult.Rejected
-        stores.stickerPackStore.applyRemoved(packId)
-        return VerbResult.Ok
+        return if (activeSession.applyIfCurrent(lease) {
+                stores.stickerPackStore.applyRemoved(packId)
+            }
+        ) {
+            VerbResult.Ok
+        } else {
+            VerbResult.NotConnected
+        }
     }
 }

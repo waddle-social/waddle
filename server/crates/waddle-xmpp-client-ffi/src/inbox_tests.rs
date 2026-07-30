@@ -51,7 +51,6 @@ fn test_client() -> Arc<WaddleClient> {
             jid: ACCOUNT.to_string(),
             access_token: "token".to_string(),
             resource: "test".to_string(),
-            resume_state: None,
         },
         listener: Arc::new(Box::new(RecordingListener::default()) as Box<dyn WaddleEventListener>),
         handle: tokio::sync::Mutex::new(None),

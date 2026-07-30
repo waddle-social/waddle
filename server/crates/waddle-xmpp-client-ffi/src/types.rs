@@ -6,33 +6,6 @@ pub struct WaddleConfig {
     pub jid: String,
     pub access_token: String,
     pub resource: String,
-    /// XEP-0198 resume snapshot from a previous session. When present
-    /// the runtime attempts `<resume/>` before resource binding and
-    /// replays the queued outbound stanzas the server never acked.
-    pub resume_state: Option<WaddleSmResumeState>,
-}
-
-/// XEP-0198 client resume snapshot crossing the FFI as an opaque
-/// persistence round-trip: the Swift app stores it on disconnect and
-/// feeds it back through [`WaddleConfig`] on the next connect. Queued
-/// outbound stanzas travel as serialized XML strings — the message
-/// stanza-id is re-derived from the element's `id` attribute on
-/// restore, and the original enqueue instant survives only when the
-/// element already carries a `<delay/>` stamp (identical semantics to
-/// the wasm client's localStorage persistence of the same snapshot).
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct WaddleSmResumeState {
-    /// SM resumption token from `<enabled id='…'/>`.
-    pub previd: String,
-    /// Count of inbound stanzas handled by this client.
-    pub inbound_h: u32,
-    /// Count of outbound stanzas sent by this client.
-    pub outbound_h: u32,
-    /// Server-advertised resumption window in seconds, when supplied.
-    pub max_resume_seconds: Option<u32>,
-    /// Outbound stanzas the server had not acked at snapshot time,
-    /// serialized to XML in send order for lossless replay.
-    pub queued_stanzas_xml: Vec<String>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -1271,11 +1244,6 @@ pub enum WaddleClientEvent {
     /// bound resource. The Swift app surfaces it as the ringing UI,
     /// the in-call HUD, and the hang-up handler.
     Call { event: WaddleCallEvent },
-    /// XEP-0198 resume snapshot changed. `None` after an explicit
-    /// disconnect or when the session carries no resumable state;
-    /// persist `Some(state)` and feed it back via
-    /// `WaddleConfig.resume_state` on the next connect.
-    ResumeStateChanged { state: Option<WaddleSmResumeState> },
     /// RFC 6120 §6.5 SASL failure during connect. Terminal for the
     /// presented credentials — apps must not blindly retry with the
     /// same token (web #1164: surface "sign in again", never an

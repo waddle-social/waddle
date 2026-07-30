@@ -15,6 +15,7 @@ use crate::command::XmppCommand;
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::error::ClientError;
 use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent};
+use crate::state::StreamId;
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
 use crate::stream_management::{SmResumeState, NS_SM};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
@@ -37,7 +38,7 @@ fn config() -> ClientConfig {
 fn config_with_resume_state() -> ClientConfig {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("prev-stream", 0, 0).unwrap());
+        Some(SmResumeState::new(StreamId::new("prev-stream"), 0, 0).unwrap());
     config
 }
 
@@ -76,6 +77,23 @@ fn make_driver_task_with_config(
         last_resume_state: None,
     };
     (task, cmd_tx, evt_rx)
+}
+
+async fn confirm_latest_enable_sent(task: &mut DriverTask, shared: &MockTransportShared) {
+    let enable = shared
+        .sent_messages()
+        .into_iter()
+        .rev()
+        .find(|message| {
+            matches!(
+                message,
+                TransportMessage::Element(element)
+                    if element.name() == "enable" && element.ns() == NS_SM
+            )
+        })
+        .expect("transport sent stream-management enable");
+    task.apply_transport_event(TransportEvent::MessageSent(enable))
+        .await;
 }
 
 // ── IQ correlation unit tests ─────────────────────────────────────────────
@@ -160,6 +178,28 @@ async fn driver_ignores_iq_with_unknown_id() {
         element: result_el,
     });
     // No panic, no hang: test passes.
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn driver_cancels_unreplayable_iq_after_fresh_stream_fallback() {
+    let (mut task, _cmd_tx, _rx) = make_driver_task(MockTransport::new(
+        vec![],
+        vec![],
+        MockTransportShared::default(),
+    ));
+    let (iq_tx, iq_rx) = oneshot::channel();
+    task.pending_iqs
+        .insert("unreplayable-iq".to_string(), iq_tx);
+
+    task.dispatch_client_event(ClientEvent::IqCancelled {
+        stanza_id: StanzaId::new("unreplayable-iq").unwrap(),
+    });
+
+    assert!(!task.pending_iqs.contains_key("unreplayable-iq"));
+    assert!(matches!(
+        iq_rx.await.expect("cancelled IQ caller completes"),
+        Err(ClientError::RequestCancelled)
+    ));
 }
 
 // ── send_iq round-trip through mock ───────────────────────────────────────
@@ -280,6 +320,7 @@ async fn driver_keeps_deferred_stanzas_behind_fresh_fallback_sm_enable() {
         bind_result("bind-1"),
     )))
     .await;
+    confirm_latest_enable_sent(&mut task, &shared).await;
 
     assert!(
         !shared
@@ -323,6 +364,7 @@ async fn driver_flushes_deferred_stanzas_when_fresh_sm_enable_fails() {
         bind_result("bind-1"),
     )))
     .await;
+    confirm_latest_enable_sent(&mut task, &shared).await;
 
     assert!(
         !shared
@@ -382,6 +424,7 @@ async fn driver_broadcasts_resume_state_transitions() {
         bind_result("bind-1"),
     )))
     .await;
+    confirm_latest_enable_sent(&mut task, &shared).await;
     task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
         enabled_sm("new-stream"),
     )))
@@ -401,7 +444,7 @@ async fn driver_broadcasts_resume_state_transitions() {
     let state = snapshots[0]
         .clone()
         .expect("resumable snapshot after <enabled/>");
-    assert_eq!(state.previd(), "new-stream");
+    assert_eq!(state.previd().as_str(), "new-stream");
 
     task.handle_command(XmppCommand::Disconnect).await;
 
@@ -830,4 +873,76 @@ async fn drive_task_to_resume_attempt(task: &mut DriverTask) {
     )))
     .await;
     assert_eq!(task.runtime.snapshot().phase, SessionPhase::Resuming);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_driver_routes_stream_management_clock_retries_timeout_and_terminal_close() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) = make_driver_task_with_config(
+        config_with_resume_state(),
+        MockTransport::new(vec![], vec![], shared.clone()),
+    );
+    drive_task_to_resume_attempt(&mut task).await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        resumed("prev-stream", 0),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+        message_stanza("clocked"),
+    )))
+    .await;
+    let now = chrono::Utc::now();
+
+    assert!(
+        task.poll_stream_management_clock_at(now + chrono::Duration::milliseconds(250))
+            .await
+    );
+    assert!(
+        task.poll_stream_management_clock_at(now + chrono::Duration::seconds(5))
+            .await
+    );
+    assert!(
+        task.poll_stream_management_clock_at(now + chrono::Duration::seconds(30))
+            .await
+    );
+
+    let sent = shared.sent_messages();
+    assert_eq!(
+        sent.iter()
+            .filter(|message| matches!(
+                message,
+                TransportMessage::Element(element) if element.name() == "r" && element.ns() == NS_SM
+            ))
+            .count(),
+        3,
+    );
+    assert_eq!(shared.close_count(), 1);
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequestTimedOut
+            ))
+        ))
+    );
+
+    assert!(
+        task.poll_stream_management_clock_at(now + chrono::Duration::seconds(35))
+            .await
+    );
+    assert_eq!(shared.sent_messages().len(), sent.len());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_driver_drops_its_stream_management_clock_on_teardown() {
+    let shared = MockTransportShared::default();
+    let (task, command_sender, _events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+
+    drop(command_sender);
+    task.run().await;
+
+    // No detached timer owns the transport after DriverTask exits.
+    assert!(shared.sent_messages().is_empty());
+    assert_eq!(shared.close_count(), 0);
 }

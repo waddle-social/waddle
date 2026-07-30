@@ -24,7 +24,6 @@ import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddlePresenceHat
 import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleSharedFile
-import social.waddle.client.ffi.WaddleSmResumeState
 import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleVCard4
 
@@ -335,16 +334,4 @@ fun testInboxResult(
     unread = unread,
     allUnread = allUnread,
     conversations = conversations,
-)
-
-fun testResumeState(
-    previd: String = "prev-1",
-    inboundH: UInt = 5u,
-    outboundH: UInt = 7u,
-): WaddleSmResumeState = WaddleSmResumeState(
-    previd = previd,
-    inboundH = inboundH,
-    outboundH = outboundH,
-    maxResumeSeconds = 300u,
-    queuedStanzasXml = listOf("<message/>"),
 )

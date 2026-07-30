@@ -84,6 +84,8 @@ pub enum ClientError {
     UnsupportedWebSocketMessage,
     #[error("websocket transport is already closed")]
     TransportClosed,
+    #[error("stream management acknowledgement timer is unavailable")]
+    StreamManagementClockUnavailable,
     #[error("request was cancelled")]
     RequestCancelled,
     #[error("the XMPP session is disconnected")]

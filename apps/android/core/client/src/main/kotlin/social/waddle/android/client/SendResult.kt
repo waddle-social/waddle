@@ -5,12 +5,10 @@ import social.waddle.client.ffi.WaddleSendOptions
 
 /**
  * Manager-level send outcome: the raw FFI [WaddleSendMessageOutcome]
- * (unchanged — it is the FFI contract) plus the outbound-queue handle
- * when the send could not reach a live session. [queuedId] is the
- * client stanza id the message was persisted under; the queue replays
- * with the SAME id (XEP-0359 origin-id), so callers treat it exactly
- * like the id of a `Sent` outcome: the eventual echo collapses the
- * optimistic row and `DeliveryAcked`/`DeliveryFailed` target it.
+ * plus the durable outbound-intent handle. [queuedId] is present once
+ * persistence succeeds, before any transport attempt; it is absent when
+ * persistence/capacity fails or a synchronous permanent rejection removes
+ * the row. Replay uses the SAME XEP-0359 origin-id.
  */
 data class SendResult(
     val outcome: WaddleSendMessageOutcome,

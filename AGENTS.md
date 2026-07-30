@@ -12,6 +12,11 @@
     - If ./xeps doesn't exist, clone xsf/xeps into ./xeps
 - Divide work up, use sub-agents and role specific agents to achieve our task.
 - After you are finished, use multiple adverserial personas subagents to review our changes; repeat until they find no real and actionable issues.
+- High-value adversarial review hard rule:
+  - Report only real, in-scope, actionable defects with a concrete reachable failure path, material correctness, security, durability, protocol, operations, or maintainability impact, and code, test, or specification evidence. Verify each finding against actual call sites, existing tests, explicit plans or requirements, and the relevant XEP; actively try to disprove it.
+  - Omit style or naming preferences, speculative unreachable hypotheticals, duplicates, already-covered behavior, future architecture suggestions, and low-value nits. There is no finding quota: prefer `CLEAN` when no material defect exists.
+  - Clearly label uncertain or non-blocking ideas as questions; they never fail acceptance. Calibrate severity: only actionable Critical, High, or Medium flaws block acceptance. Record a genuine Low security or correctness concern only when repository convention requires it, without promoting it to a blocker.
+  - Prioritize the existing XEP-conformance, typed-payload, security, durability, and operational hard rules. Review efficiently and stop once the requested lenses are covered and evidence supports `CLEAN`.
 - Always update the PR title and desc to desc the complete work done, with the plan; and remove draft status
 - Our job doesn't stop after we push, we always monitor CI and fix it until all checks are green
 - XMPP Native, Never use out of band non-XMPP APIs.

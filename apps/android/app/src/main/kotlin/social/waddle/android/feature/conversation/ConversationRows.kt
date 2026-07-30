@@ -18,9 +18,10 @@ fun storedIdentityIdsOf(items: List<TimelineItem>): Set<String> {
 }
 
 /**
- * The rendered rows: stored history filtered to the feed or to
- * [threadId], followed by the optimistic pending rows that have not
- * echoed back yet.
+ * The rendered rows: stored history filtered to the feed or to [threadId],
+ * plus optimistic pending rows. A pending row owns the visible delivery state
+ * through its exact XEP-0198 acknowledgement, even when the local DM echo
+ * reached storage first.
  */
 fun visibleRows(
     items: List<TimelineItem>,
@@ -29,8 +30,6 @@ fun visibleRows(
 ): List<ConversationRow> {
     val storedIds = storedIdentityIdsOf(items)
     val visiblePending = pending.filter { message ->
-        message.stanzaId == null || message.stanzaId !in storedIds
-    }.filter { message ->
         // Feed mode hides thread-targeted pending rows (their stored
         // echo will be feed-hidden); a thread screen shows only its own
         // thread's sends.
@@ -41,9 +40,21 @@ fun visibleRows(
         items.filter { it.threadId == threadId || threadId in it.identityIds }
     } else {
         items.filter { it.isFeedVisible }
+    }.filterNot { item ->
+        // A stored echo is not a delivery receipt. Until the pending row's
+        // exact acknowledgement, suppress the echo and keep the optimistic
+        // state (Sending, Queued, or retryable failure) visible.
+        pending.any { message ->
+            !message.acked && message.stanzaId != null && message.stanzaId in item.identityIds
+        }
     }
     return visibleItems.map { ConversationRow.Stored(it) } +
-        visiblePending.map { ConversationRow.Unconfirmed(it) }
+        visiblePending.filter { message ->
+            // An acked pending row with a stored echo has handed display
+            // authority back to storage. DMs have no self-reflection and
+            // therefore keep their acked optimistic row.
+            !message.acked || message.stanzaId == null || message.stanzaId !in storedIds
+        }.map { ConversationRow.Unconfirmed(it) }
 }
 
 /**

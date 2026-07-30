@@ -170,43 +170,7 @@ class XmppSessionManagerCatchupTest {
     }
 
     @Test
-    fun `a resumed stream skips catch-up`() = runTest {
-        val harness = Harness(this)
-        harness.prefs.setJoinedRooms(setOf("general@muc.waddle.test"))
-        harness.manager.login(testSessionInfo())
-        runCurrent()
-
-        harness.factory.emit(WaddleClientEvent.Connected)
-        runCurrent()
-        assertEquals(
-            "first session of the process catches up",
-            1,
-            harness.factory.clients.single().fetchHistoryCalls.size,
-        )
-
-        // Persist a resume snapshot, drop, and reconnect: the next
-        // attempt presents the snapshot, so the manager assumes the
-        // stream resumed and 0198 replay covered the gap.
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(testResumeState()))
-        runCurrent()
-        harness.factory.emit(WaddleClientEvent.Disconnected)
-        runCurrent()
-        advanceTimeBy(1_000L)
-        runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
-        runCurrent()
-
-        assertEquals(2, harness.factory.clients.size)
-        assertTrue(
-            "resumed session must not refetch",
-            harness.factory.clients.last().fetchHistoryCalls.isEmpty(),
-        )
-
-        harness.manager.logout()
-    }
-
-    @Test
-    fun `a fresh stream without a snapshot reruns catch-up`() = runTest {
+    fun `each native stream reruns catch-up`() = runTest {
         val harness = Harness(this)
         harness.prefs.setJoinedRooms(setOf("general@muc.waddle.test"))
         harness.manager.login(testSessionInfo())
@@ -215,10 +179,6 @@ class XmppSessionManagerCatchupTest {
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
 
-        // The FFI cleared the resume state (rejected/expired): the next
-        // attempt carries no snapshot and is definitely a fresh stream.
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(null))
-        runCurrent()
         harness.factory.emit(WaddleClientEvent.Disconnected)
         runCurrent()
         advanceTimeBy(1_000L)
@@ -228,7 +188,7 @@ class XmppSessionManagerCatchupTest {
 
         assertEquals(2, harness.factory.clients.size)
         assertEquals(
-            "fresh stream refetches the joined room",
+            "each native stream refetches the joined room",
             listOf(Triple("general@muc.waddle.test", XmppSessionManager.CATCHUP_PAGE_SIZE, null as String?)),
             harness.factory.clients.last().fetchHistoryCalls,
         )
@@ -347,7 +307,7 @@ class XmppSessionManagerCatchupTest {
     }
 
     @Test
-    fun `a resumed stream skips the notify-settings refetch`() = runTest {
+    fun `each native stream refetches notify settings`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
@@ -355,8 +315,6 @@ class XmppSessionManagerCatchupTest {
         runCurrent()
         assertEquals(1, harness.factory.clients.single().fetchUserBookmarksCalls)
 
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(testResumeState()))
-        runCurrent()
         harness.factory.emit(WaddleClientEvent.Disconnected)
         runCurrent()
         advanceTimeBy(1_000L)
@@ -366,8 +324,8 @@ class XmppSessionManagerCatchupTest {
 
         assertEquals(2, harness.factory.clients.size)
         assertEquals(
-            "resumed session must not refetch bookmarks",
-            0,
+            "each native stream refetches bookmarks",
+            1,
             harness.factory.clients.last().fetchUserBookmarksCalls,
         )
         harness.manager.logout()

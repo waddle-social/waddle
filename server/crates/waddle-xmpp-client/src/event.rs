@@ -10,7 +10,7 @@ use crate::pep::PepItem;
 use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
-use crate::state::{SessionBinding, SessionSnapshot};
+use crate::state::{SessionBinding, SessionSnapshot, StreamId};
 use crate::stream_management::SmResumeState;
 use crate::transport::{StreamOpen, TransportEvent, TransportMessage};
 
@@ -70,6 +70,12 @@ pub enum ClientEvent {
         id: String,
         element: Element,
     },
+    /// A persisted XEP-0198 tail cannot safely replay this IQ on a fresh
+    /// stream. Drivers must complete the matching caller instead of leaving
+    /// its correlation responder pending indefinitely.
+    IqCancelled {
+        stanza_id: StanzaId,
+    },
     /// Post-bootstrap stanza that no built-in handler claimed.
     UnhandledStanza(Element),
 }
@@ -105,11 +111,26 @@ pub enum ConnectionEvent {
 /// XEP-0198 stream management lifecycle notifications.
 #[derive(Debug, Clone)]
 pub enum StreamManagementEvent {
-    Enabled { previd: Option<String> },
-    AckReceived { h: u32 },
-    AckRequested,
+    Enabled { previd: Option<StreamId> },
+    AckReceived { h: u32, progressed: bool },
+    AckRequested { reason: SmAckRequestReason },
+    AckRetry { attempt: u8 },
+    AckRequestTimedOut,
+    ReconnectRequired,
     Resumed { h: u32 },
     Failed,
+}
+
+/// Why this endpoint emitted a typed XEP-0198 acknowledgement request.
+///
+/// This stays a closed protocol value: hosts must not infer protocol state
+/// from XML, counters, or transport diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmAckRequestReason {
+    OutboundStanza,
+    ResumedUnackedTail,
+    PeerRequest,
+    Pagehide,
 }
 
 /// Typed stream-error extension detail carried alongside the RFC 6120
