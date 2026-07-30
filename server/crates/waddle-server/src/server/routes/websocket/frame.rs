@@ -21,6 +21,7 @@ use super::{
 use crate::server::routes::auth_telemetry::AuthFailure;
 
 /// Handle an XMPP frame per RFC 7395
+#[cfg(test)]
 pub(super) async fn handle_xmpp_frame(
     frame: &str,
     domain: &str,
