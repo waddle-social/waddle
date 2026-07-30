@@ -1083,28 +1083,6 @@ mod orphan_sweep_supervision_tests {
 }
 
 #[cfg(all(test, feature = "clustering"))]
-#[tokio::test]
-async fn clustering_disabled_orphan_reaper_does_not_bind_process_shutdown() {
-    let state =
-        crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
-            crate::clustering::ClusteringHandles::default(),
-            Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
-        )
-        .await;
-    let shutdown = state.deps.shutdown.stop_token();
-
-    spawn_orphan_reaper_janitor(&state, Duration::from_millis(1));
-    state.deps.protocol.room_registry.kill();
-    state.deps.protocol.room_registry.wait_for_shutdown().await;
-    tokio::task::yield_now().await;
-
-    assert!(
-        !shutdown.is_cancelled(),
-        "runtime-disabled clustering must not turn RoomRegistry death into process shutdown"
-    );
-}
-
-#[cfg(all(test, feature = "clustering"))]
 async fn clustered_test_state_for_critical_registry_watch() -> Arc<WebSocketState> {
     let handles = crate::clustering::ClusteringHandles {
         stop_token: Some(tokio_util::sync::CancellationToken::new()),
@@ -1117,10 +1095,8 @@ async fn clustered_test_state_for_critical_registry_watch() -> Arc<WebSocketStat
     .await
 }
 
-#[cfg(all(test, feature = "clustering"))]
-#[tokio::test]
-async fn room_registry_death_fences_admission_and_stops_the_process() {
-    let state = clustered_test_state_for_critical_registry_watch().await;
+#[cfg(test)]
+async fn assert_room_registry_death_is_critical(state: Arc<WebSocketState>) {
     let process_stop = state.deps.shutdown.stop_token();
     spawn_critical_registry_supervisor(&state);
     state.deps.protocol.room_registry.kill();
@@ -1135,10 +1111,8 @@ async fn room_registry_death_fences_admission_and_stops_the_process() {
     assert!(state.deps.app_state.node_lifecycle.admit().is_err());
 }
 
-#[cfg(all(test, feature = "clustering"))]
-#[tokio::test]
-async fn user_registry_death_fences_admission_and_stops_the_process() {
-    let state = clustered_test_state_for_critical_registry_watch().await;
+#[cfg(test)]
+async fn assert_user_registry_death_is_critical(state: Arc<WebSocketState>) {
     let process_stop = state.deps.shutdown.stop_token();
     spawn_critical_registry_supervisor(&state);
     state.deps.protocol.user_registry.kill();
@@ -1153,10 +1127,8 @@ async fn user_registry_death_fences_admission_and_stops_the_process() {
     assert!(state.deps.app_state.node_lifecycle.admit().is_err());
 }
 
-#[cfg(all(test, feature = "clustering"))]
-#[tokio::test]
-async fn ordinary_shutdown_does_not_latch_a_critical_registry_failure() {
-    let state = clustered_test_state_for_critical_registry_watch().await;
+#[cfg(test)]
+async fn assert_ordinary_shutdown_is_not_critical(state: Arc<WebSocketState>) {
     let process_stop = state.deps.shutdown.stop_token();
     spawn_critical_registry_supervisor(&state);
     process_stop.cancel();
@@ -1165,48 +1137,86 @@ async fn ordinary_shutdown_does_not_latch_a_critical_registry_failure() {
     assert_eq!(state.deps.app_state.node_lifecycle.critical_failure(), None);
 }
 
-#[cfg(feature = "clustering")]
+#[cfg(test)]
+#[tokio::test]
+async fn single_node_room_registry_death_is_critical() {
+    assert_room_registry_death_is_critical(
+        crate::server::routes::websocket::tests::create_test_websocket_state().await,
+    )
+    .await;
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn single_node_user_registry_death_is_critical() {
+    assert_user_registry_death_is_critical(
+        crate::server::routes::websocket::tests::create_test_websocket_state().await,
+    )
+    .await;
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn single_node_ordinary_shutdown_is_not_critical() {
+    assert_ordinary_shutdown_is_not_critical(
+        crate::server::routes::websocket::tests::create_test_websocket_state().await,
+    )
+    .await;
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test]
+async fn clustered_room_registry_death_is_critical() {
+    assert_room_registry_death_is_critical(
+        clustered_test_state_for_critical_registry_watch().await,
+    )
+    .await;
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test]
+async fn clustered_user_registry_death_is_critical() {
+    assert_user_registry_death_is_critical(
+        clustered_test_state_for_critical_registry_watch().await,
+    )
+    .await;
+}
+
+#[cfg(all(test, feature = "clustering"))]
+#[tokio::test]
+async fn clustered_ordinary_shutdown_is_not_critical() {
+    assert_ordinary_shutdown_is_not_critical(
+        clustered_test_state_for_critical_registry_watch().await,
+    )
+    .await;
+}
+
 pub(crate) fn spawn_critical_registry_supervisor(websocket_state: &Arc<WebSocketState>) {
-    let Some(stop) = websocket_state
-        .deps
-        .app_state
-        .clustering_claims
-        .stop_token
-        .clone()
-    else {
-        // Clustering support may be compiled while the runtime is deliberately
-        // single-node. In that mode these actor deaths are not cluster fencing
-        // failures and must not turn an ordinary test/deploy shutdown fatal.
-        return;
-    };
     let node_lifecycle = websocket_state.deps.app_state.node_lifecycle.clone();
     let process_stop = websocket_state.deps.shutdown.stop_token();
     let room_registry = websocket_state.deps.protocol.room_registry.clone();
     let user_registry = websocket_state.deps.protocol.user_registry.clone();
     let _room_watch = spawn_room_registry_lifetime_watch(
         room_registry,
-        stop.clone(),
         node_lifecycle.clone(),
         process_stop.clone(),
     );
     let _user_watch =
-        spawn_user_registry_lifetime_watch(user_registry, stop, node_lifecycle, process_stop);
+        spawn_user_registry_lifetime_watch(user_registry, node_lifecycle, process_stop);
 }
 
-#[cfg(not(feature = "clustering"))]
-pub(crate) fn spawn_critical_registry_supervisor(_websocket_state: &Arc<WebSocketState>) {}
-
-#[cfg(feature = "clustering")]
 fn spawn_room_registry_lifetime_watch(
     room_registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    stop: tokio_util::sync::CancellationToken,
     node_lifecycle: crate::clustering::NodeLifecycle,
     process_stop: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tokio::select! {
             biased;
-            _ = stop.cancelled() => {}
+            // Ordered process shutdown is the sole non-fatal exit. Keeping it
+            // first means a registry that terminates as part of that shutdown
+            // cannot race into a terminal failure latch.
+            _ = process_stop.cancelled() => {}
             _ = room_registry.wait_for_shutdown() => {
                 // Room ownership retry state is actor-local. Losing the
                 // registry while this node's lease remains fresh can strand
@@ -1219,17 +1229,15 @@ fn spawn_room_registry_lifetime_watch(
     })
 }
 
-#[cfg(feature = "clustering")]
 fn spawn_user_registry_lifetime_watch(
     user_registry: kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
-    stop: tokio_util::sync::CancellationToken,
     node_lifecycle: crate::clustering::NodeLifecycle,
     process_stop: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tokio::select! {
             biased;
-            _ = stop.cancelled() => {}
+            _ = process_stop.cancelled() => {}
             _ = user_registry.wait_for_shutdown() => {
                 // UserActor claim/retry state is registry-local. Continuing
                 // to advertise this node after it dies would accept sockets
@@ -2631,12 +2639,10 @@ async fn idle_room_registry_death_self_fences_the_node() {
         .expect("secret"),
         None,
     );
-    let stop = tokio_util::sync::CancellationToken::new();
     let node_lifecycle = crate::clustering::NodeLifecycle::new();
     let process_stop = tokio_util::sync::CancellationToken::new();
     let watcher = spawn_room_registry_lifetime_watch(
         registry.actor_ref().clone(),
-        stop,
         node_lifecycle.clone(),
         process_stop.clone(),
     );

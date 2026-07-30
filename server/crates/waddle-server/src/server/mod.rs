@@ -387,7 +387,7 @@ pub async fn start_with_config(
     info!("Graceful shutdown complete");
     match node_lifecycle.critical_failure() {
         Some(failure) => Err(anyhow::anyhow!(
-            "critical clustered service terminated; node fenced and drained: {failure:?}"
+            "critical actor service terminated; node fenced and drained: {failure:?}"
         )),
         None => result.map(|()| metrics_flush),
     }

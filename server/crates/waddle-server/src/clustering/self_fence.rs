@@ -1301,6 +1301,12 @@ pub async fn run_node_lease<L>(
             }
         }
 
+        // Revoke readiness and every admitted transport synchronously before
+        // asking any actor for its ownership snapshot. Those asks and the
+        // following demotions are best-effort and may stall; a node whose
+        // lease is no longer proven must stop serving first.
+        readiness.begin_fenced_recovery();
+
         // Fatal recovery ambiguity is terminal for this clustering lifetime.
         // Disable the shared identity before taking the final ownership
         // snapshot: `rotate` waits for every old-identity publication guard,
@@ -1309,7 +1315,6 @@ pub async fn run_node_lease<L>(
         // demotion sweep complete even while recovery workers are winding
         // down.
         if terminal_fence {
-            readiness.begin_fenced_recovery();
             stop_token.cancel();
             let superseded_identity = identity.clone();
             live_identity.disable().await;
@@ -1321,7 +1326,6 @@ pub async fn run_node_lease<L>(
         for entity in local_claims.owned().await {
             local_claims.demote(&entity).await;
         }
-        readiness.begin_fenced_recovery();
         isolation.reset();
 
         // FIX 1(b): best-effort mark the just-fenced identity's row
@@ -2070,6 +2074,65 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn fencing_revokes_readiness_and_socket_admission_before_claim_inventory_stalls() {
+        let interval = Duration::from_millis(50);
+        let readiness = NodeLifecycle::new();
+        let old_permit = readiness.admit().expect("initial serving permit");
+        let owned_started = Arc::new(tokio::sync::Notify::new());
+        let owned_release = Arc::new(tokio::sync::Notify::new());
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            FakeLease::new(Box::new(|| Ok(false))),
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 3,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(BlockingOwnedLocalClaims {
+                    owned_started: Arc::clone(&owned_started),
+                    owned_release: Arc::clone(&owned_release),
+                    block_once: AtomicBool::new(false),
+                }),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        tokio::time::advance(interval).await;
+        owned_started.notified().await;
+
+        assert_eq!(
+            readiness.admission(),
+            crate::clustering::NodeAdmission::FencedRecovering
+        );
+        assert!(!readiness.is_ready(), "/ready must close before actor asks");
+        assert!(
+            readiness.admit().is_err(),
+            "/ws must reject before actor asks"
+        );
+        tokio::time::timeout(Duration::from_millis(1), old_permit.revoked())
+            .await
+            .expect("established socket generation must revoke before actor asks");
+
+        stop_token.cancel();
+        owned_release.notify_one();
+        task.await.expect("lease worker exits");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn node_lease_re_registers_and_restores_readiness_after_a_fence() {
         let interval = Duration::from_millis(50);
         let lease_ttl = Duration::from_millis(150);
@@ -2598,6 +2661,29 @@ mod tests {
         seal_started: Arc<tokio::sync::Notify>,
         seal_release: Arc<tokio::sync::Notify>,
         exact_demoted_owners: Arc<std::sync::Mutex<Vec<NodeIdentity>>>,
+    }
+
+    struct BlockingOwnedLocalClaims {
+        owned_started: Arc<tokio::sync::Notify>,
+        owned_release: Arc<tokio::sync::Notify>,
+        block_once: AtomicBool,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for BlockingOwnedLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            if !self.block_once.swap(true, Ordering::SeqCst) {
+                self.owned_started.notify_one();
+                self.owned_release.notified().await;
+            }
+            Vec::new()
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
     }
 
     #[async_trait]

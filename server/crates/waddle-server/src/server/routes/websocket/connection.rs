@@ -47,6 +47,24 @@ fn revalidate_websocket_admission(
         .map_err(WebSocketAdmissionRevocation::Lifecycle)
 }
 
+async fn close_revoked_upgraded_socket<S, E>(socket: &mut S)
+where
+    S: futures::Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    let _ = send_ws_message(
+        socket,
+        Message::Close(None),
+        "Failed to send WebSocket close frame after admission revocation",
+    )
+    .await;
+    let _ = close_ws_connection(
+        socket,
+        "Failed to close WebSocket after admission revocation",
+    )
+    .await;
+}
+
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
     Router::new()
@@ -101,16 +119,21 @@ async fn xmpp_websocket_handler(
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
-    ws.protocols(["xmpp"]).on_upgrade(move |socket| async move {
-        if let Err(reason) = revalidate_websocket_admission(&state, &admission_permit) {
-            info!(
-                ?reason,
-                "Closing upgraded WebSocket: admission was revoked before XMPP start"
-            );
-            return;
-        }
-        handle_xmpp_websocket(socket, state, connection_guard).await;
-    })
+    ws.protocols(["xmpp"])
+        .on_upgrade(move |mut socket| async move {
+            if let Err(reason) = revalidate_websocket_admission(&state, &admission_permit) {
+                info!(
+                    ?reason,
+                    "Closing upgraded WebSocket: admission was revoked before XMPP start"
+                );
+                // HTTP 101 is already on the wire. RFC 7395 therefore requires a
+                // WebSocket close handshake rather than silently dropping the
+                // upgraded TCP stream; no XMPP stream exists at this boundary.
+                close_revoked_upgraded_socket(&mut socket).await;
+                return;
+            }
+            handle_xmpp_websocket(socket, state, connection_guard, admission_permit).await;
+        })
 }
 
 /// Size of the outbound message channel buffer
@@ -177,6 +200,7 @@ async fn handle_xmpp_websocket(
     // been closed AND its SM state handed to the session registry for
     // Q6 promotion.
     _connection_guard: waddle_ecdysis::ConnectionGuard,
+    admission_permit: crate::clustering::NodeAdmissionPermit,
 ) {
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let shutdown_token = state.deps.shutdown.stop_token();
@@ -298,6 +322,19 @@ async fn handle_xmpp_websocket(
         tokio::select! {
             biased;
 
+            // The exact serving generation that admitted this socket is its
+            // authority. Revoke it ahead of every queued frame, outbound item,
+            // and deferred stanza; recovery mints a new generation and can
+            // never resurrect this transport.
+            _ = admission_permit.revoked() => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Node lifecycle changed: closing live session"
+                );
+                close_live_session_for_node_unavailable(&mut ws_sender, &conn).await;
+                break;
+            }
+
             // Process stop is the highest-priority event. If cancellation and
             // a queued frame/work item are both ready, no further stanza work
             // starts after the node has begun draining or failed critically.
@@ -306,35 +343,7 @@ async fn handle_xmpp_websocket(
                     jid = ?conn.phase.bound_jid(),
                     "Graceful shutdown: closing live session with system-shutdown stream error"
                 );
-                let close_peer = async {
-                    if conn.stream_open_sent {
-                        let _ = send_ws_text_frames(
-                            &mut ws_sender,
-                            [
-                                build_system_shutdown_stream_error(),
-                                websocket_stream_close_xml(),
-                            ],
-                            "Failed to send system-shutdown stream error",
-                        )
-                        .await;
-                    }
-                    let _ = close_ws_connection(
-                        &mut ws_sender,
-                        "Failed to send WebSocket close frame after system-shutdown",
-                    )
-                    .await;
-                };
-                if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close_peer)
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        jid = ?conn.phase.bound_jid(),
-                        timeout_secs = SHUTDOWN_CLOSE_TIMEOUT.as_secs(),
-                        "Graceful shutdown: peer did not accept the close frames in time; \
-                         proceeding to detach without them"
-                    );
-                }
+                close_live_session_for_node_unavailable(&mut ws_sender, &conn).await;
                 break;
             }
 
@@ -644,12 +653,12 @@ async fn handle_xmpp_websocket(
     if superseded {
         super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
     } else {
-        if shutdown_token.is_cancelled() {
+        if shutdown_token.is_cancelled() || admission_permit.revalidate().is_err() {
             let dropped = discard_deferred_inbound(&mut conn);
             if dropped > 0 {
                 info!(
                     dropped,
-                    "Dropping deferred inbound frames after process stop; sender may replay them"
+                    "Dropping deferred inbound frames after node authority revocation; sender may replay them"
                 );
             }
         } else {
@@ -696,6 +705,41 @@ async fn handle_xmpp_websocket(
     }
 
     info!("XMPP WebSocket connection closed");
+}
+
+async fn close_live_session_for_node_unavailable(
+    ws_sender: &mut SplitSink<WebSocket, Message>,
+    conn: &WsConnState,
+) {
+    let close_peer = async {
+        if conn.stream_open_sent {
+            let _ = send_ws_text_frames(
+                ws_sender,
+                [
+                    build_system_shutdown_stream_error(),
+                    websocket_stream_close_xml(),
+                ],
+                "Failed to send system-shutdown stream error",
+            )
+            .await;
+        }
+        let _ = close_ws_connection(
+            ws_sender,
+            "Failed to send WebSocket close frame after node became unavailable",
+        )
+        .await;
+    };
+    if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close_peer)
+        .await
+        .is_err()
+    {
+        warn!(
+            jid = ?conn.phase.bound_jid(),
+            timeout_secs = SHUTDOWN_CLOSE_TIMEOUT.as_secs(),
+            "Node unavailable: peer did not accept the close frames in time; \
+             proceeding to detach without them"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1204,6 +1248,56 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    #[derive(Default)]
+    struct UpgradeCloseSink {
+        sent: Vec<Message>,
+        closed: bool,
+    }
+
+    impl futures::Sink<Message> for UpgradeCloseSink {
+        type Error = &'static str;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.closed = true;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn post_upgrade_admission_revocation_sends_websocket_close() {
+        let mut socket = UpgradeCloseSink::default();
+
+        close_revoked_upgraded_socket(&mut socket).await;
+
+        assert_eq!(socket.sent, vec![Message::Close(None)]);
+        assert!(socket.closed);
+    }
+
     #[tokio::test]
     async fn abandoned_inbound_slot_does_not_block_handoff_cleanup() {
         let mut conn = WsConnState::new();

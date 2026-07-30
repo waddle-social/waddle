@@ -159,8 +159,9 @@ pub(crate) fn keypair_slot_table_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Critical local services whose unexpected death makes clustered ownership
-/// unsafe. These are typed operational causes, not XMPP payloads.
+/// Critical local services whose unexpected death makes actor ownership and
+/// socket admission unsafe in every runtime mode. These are typed operational
+/// causes, not XMPP payloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CriticalNodeFailure {
     RoomRegistryTerminated,
@@ -195,6 +196,7 @@ impl NodeAdmissionGeneration {
 struct NodeLifecycleState {
     admission: NodeAdmission,
     generation: NodeAdmissionGeneration,
+    generation_revoked: CancellationToken,
 }
 
 /// A successful admission decision for one socket upgrade, bound to the
@@ -204,6 +206,7 @@ struct NodeLifecycleState {
 pub struct NodeAdmissionPermit {
     state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     generation: NodeAdmissionGeneration,
+    generation_revoked: CancellationToken,
 }
 
 impl NodeAdmissionPermit {
@@ -222,6 +225,13 @@ impl NodeAdmissionPermit {
             return Err(NodeAdmissionError::Revoked);
         }
         Ok(())
+    }
+
+    /// Resolve as soon as the lifecycle leaves the exact serving generation
+    /// that admitted this socket. The token stays cancelled after recovery,
+    /// so an old transport can never become authoritative again.
+    pub async fn revoked(&self) {
+        self.generation_revoked.cancelled().await;
     }
 }
 
@@ -270,6 +280,7 @@ impl NodeLifecycle {
             state: std::sync::Arc::new(std::sync::RwLock::new(NodeLifecycleState {
                 admission,
                 generation: NodeAdmissionGeneration(0),
+                generation_revoked: CancellationToken::new(),
             })),
             fatal_fence: CancellationToken::new(),
         }
@@ -292,6 +303,7 @@ impl NodeLifecycle {
             NodeAdmission::Serving => Ok(NodeAdmissionPermit {
                 state: std::sync::Arc::clone(&self.state),
                 generation: state.generation,
+                generation_revoked: state.generation_revoked.clone(),
             }),
             _ => Err(NodeAdmissionError::NotServing(state.admission.clone())),
         }
@@ -315,8 +327,10 @@ impl NodeLifecycle {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match state.admission {
             NodeAdmission::Starting => {
+                state.generation_revoked.cancel();
                 state.admission = NodeAdmission::Serving;
                 state.generation = state.generation.next();
+                state.generation_revoked = CancellationToken::new();
                 StartupServingTransition::Promoted
             }
             NodeAdmission::Serving => StartupServingTransition::AlreadyServing,
@@ -339,8 +353,10 @@ impl NodeLifecycle {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let next = NodeAdmission::Failed(failure);
         if state.admission != next {
+            state.generation_revoked.cancel();
             state.admission = next;
             state.generation = state.generation.next();
+            state.generation_revoked = CancellationToken::new();
         }
         drop(state);
         self.fatal_fence.cancel();
@@ -359,8 +375,10 @@ impl NodeLifecycle {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !matches!(state.admission, NodeAdmission::Failed(_)) && state.admission != next {
+            state.generation_revoked.cancel();
             state.admission = next;
             state.generation = state.generation.next();
+            state.generation_revoked = CancellationToken::new();
         }
     }
 
@@ -420,6 +438,39 @@ mod readiness_tests {
             .expect("recovered serving permit")
             .revalidate()
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn old_generation_revocation_stays_latched_after_recovery() {
+        let lifecycle = NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+
+        lifecycle.begin_fenced_recovery();
+        lifecycle.serve();
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), permit.revoked())
+            .await
+            .expect("old permit must remain revoked after recovery");
+        assert_eq!(permit.revalidate(), Err(NodeAdmissionError::Revoked));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_revocation_wins_over_ready_socket_work() {
+        let lifecycle = NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        lifecycle.begin_fenced_recovery();
+        let mut dispatched = false;
+
+        tokio::select! {
+            biased;
+            _ = permit.revoked() => {}
+            _ = std::future::ready(()) => dispatched = true,
+        }
+
+        assert!(
+            !dispatched,
+            "no stanza may dispatch after generation revocation"
+        );
     }
 
     #[test]
