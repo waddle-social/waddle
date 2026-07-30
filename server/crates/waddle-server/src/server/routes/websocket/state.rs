@@ -1228,8 +1228,10 @@ impl WebSocketDeps {
     /// XEP-0397 is available only when both its durable backend exists and
     /// the externally configured WebSocket endpoint is TLS protected.
     pub fn isr_available(&self) -> bool {
-        self.transport_security.is_tls()
-            && self.app_state.clustering_claims.isr_token_store().is_some()
+        // P0.3 retires the incomplete ISR path until a conformant,
+        // non-bearer persistence design exists. Do not advertise or enable
+        // a feature whose storage would retain raw authentication material.
+        false
     }
 }
 
