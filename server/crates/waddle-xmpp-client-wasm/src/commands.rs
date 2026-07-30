@@ -43,14 +43,117 @@ pub(crate) fn send_failure_outcome(error: &ClientError) -> WaddleSendMessageOutc
     }
 }
 
+/// Bound an IQ request's shared-FIFO admission and reply wait. A peer that
+/// never replies must not keep callers such as call teardown pending forever.
+pub(crate) const IQ_REPLY_DEADLINE_MS: u32 = 30_000;
+
+pub(crate) enum IqReplyWait {
+    Reply(Result<Element, ClientError>),
+    Disconnected,
+    DeadlineExpired,
+}
+
+pub(crate) async fn wait_iq_reply_with_deadline<F, D>(round_trip: F, deadline: D) -> IqReplyWait
+where
+    F: core::future::Future<Output = IqReplyWait>,
+    D: core::future::Future<Output = ()>,
+{
+    use futures::future::{select, Either};
+    futures::pin_mut!(round_trip);
+    futures::pin_mut!(deadline);
+    match select(round_trip, deadline).await {
+        Either::Left((outcome, _)) => outcome,
+        Either::Right(((), _)) => IqReplyWait::DeadlineExpired,
+    }
+}
+
+pub(crate) async fn iq_reply_from_oneshot(
+    rx: oneshot::Receiver<Result<Element, ClientError>>,
+) -> IqReplyWait {
+    match rx.await {
+        Ok(reply) => IqReplyWait::Reply(reply),
+        Err(_) => IqReplyWait::Disconnected,
+    }
+}
+
+fn sleep_ms(ms: u32) -> (impl core::future::Future<Output = ()>, impl FnOnce()) {
+    let timer_id = Rc::new(std::cell::Cell::new(None::<f64>));
+    let timer_id_for_set = timer_id.clone();
+    let promise = js_sys::Promise::new(&mut move |resolve, _reject| {
+        if let Some(set_timeout) = global_timer_fn("setTimeout") {
+            if let Ok(id) = set_timeout.call2(
+                &js_sys::global(),
+                &resolve,
+                &JsValue::from_f64(f64::from(ms)),
+            ) {
+                timer_id_for_set.set(id.as_f64());
+            }
+        }
+    });
+    let cancel = move || {
+        if let (Some(id), Some(clear_timeout)) = (timer_id.get(), global_timer_fn("clearTimeout")) {
+            let _ = clear_timeout.call1(&js_sys::global(), &JsValue::from_f64(id));
+        }
+    };
+    let future = async move {
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    };
+    (future, cancel)
+}
+
+fn global_timer_fn(name: &str) -> Option<js_sys::Function> {
+    use wasm_bindgen::JsCast;
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name))
+        .ok()
+        .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
+}
+
+async fn send_iq_roundtrip(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+) -> Result<Result<Element, ClientError>, JsValue> {
+    let iq_id = stanza
+        .attr("id")
+        .and_then(|value| waddle_xmpp_client::request::StanzaId::new(value).ok());
+    let (responder, rx) = oneshot::channel();
+    let queue_inner = inner.clone();
+    let round_trip = async move {
+        if enqueue_command(&queue_inner, WasmCommand::SendIq { stanza, responder })
+            .await
+            .is_err()
+        {
+            return IqReplyWait::Disconnected;
+        }
+        iq_reply_from_oneshot(rx).await
+    };
+    let (deadline, cancel_deadline) = sleep_ms(IQ_REPLY_DEADLINE_MS);
+    let outcome = wait_iq_reply_with_deadline(round_trip, deadline).await;
+    cancel_deadline();
+    match outcome {
+        IqReplyWait::Reply(reply) => Ok(reply),
+        IqReplyWait::Disconnected => Err(js_error("client is disconnected")),
+        IqReplyWait::DeadlineExpired => {
+            if let Some(id) = iq_id {
+                let cancel_inner = inner.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let (responder, _response) = oneshot::channel();
+                    let _ = enqueue_command(&cancel_inner, WasmCommand::CancelIq { id, responder })
+                        .await;
+                });
+            }
+            Ok(Err(ClientError::IqTimeout {
+                timeout: std::time::Duration::from_millis(u64::from(IQ_REPLY_DEADLINE_MS)),
+            }))
+        }
+    }
+}
+
 pub(crate) async fn send_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<Element, JsValue> {
-    let (responder, rx) = oneshot::channel();
-    enqueue_command(&inner, WasmCommand::SendIq { stanza, responder }).await?;
-    rx.await
-        .map_err(|_| js_error("client is disconnected"))?
+    send_iq_roundtrip(&inner, stanza)
+        .await?
         .map_err(iq_rejection)
 }
 
@@ -111,6 +214,8 @@ pub(crate) async fn cancel_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     id: String,
 ) -> Result<(), JsValue> {
+    let id =
+        waddle_xmpp_client::request::StanzaId::new(id).map_err(|err| js_error(err.to_string()))?;
     let (responder, rx) = oneshot::channel();
     enqueue_command(&inner, WasmCommand::CancelIq { id, responder }).await?;
     rx.await
@@ -428,9 +533,7 @@ pub(crate) async fn send_iq_command_stanza_aware(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<Result<Element, waddle_xmpp_client::StanzaError>, JsValue> {
-    let (responder, rx) = oneshot::channel();
-    enqueue_command(&inner, WasmCommand::SendIq { stanza, responder }).await?;
-    let result = rx.await.map_err(|_| js_error("client is disconnected"))?;
+    let result = send_iq_roundtrip(&inner, stanza).await?;
     match result {
         Ok(elem) => Ok(Ok(elem)),
         Err(ClientError::StanzaError(stanza_err)) => Ok(Err(stanza_err)),
@@ -442,12 +545,9 @@ pub(crate) async fn send_avatar_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<Element, AvatarRequestFailure<JsValue>> {
-    let (responder, rx) = oneshot::channel();
-    enqueue_command(&inner, WasmCommand::SendIq { stanza, responder })
+    send_iq_roundtrip(&inner, stanza)
         .await
-        .map_err(AvatarRequestFailure::Other)?;
-    rx.await
-        .map_err(|_| AvatarRequestFailure::Other(js_error("client is disconnected")))?
+        .map_err(AvatarRequestFailure::Other)?
         .map_err(|err| match err {
             ClientError::StanzaError(_) => AvatarRequestFailure::StanzaError,
             other => AvatarRequestFailure::Other(js_error(other.to_string())),
@@ -588,5 +688,43 @@ mod tests {
     #[test]
     fn non_stanza_errors_yield_no_fields() {
         assert!(stanza_error_rejection_fields(&ClientError::Disconnected).is_none());
+    }
+
+    fn iq_result_element() -> Element {
+        Element::builder("iq", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .build()
+    }
+
+    #[test]
+    fn iq_reply_wait_delivers_reply_when_it_beats_the_deadline() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Ok(iq_result_element()))
+            .unwrap_or_else(|_| panic!("receiver alive"));
+        let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
+            iq_reply_from_oneshot(rx),
+            futures::future::pending::<()>(),
+        ));
+        assert!(matches!(outcome, IqReplyWait::Reply(Ok(_))));
+    }
+
+    #[test]
+    fn iq_reply_wait_reports_disconnect_when_responder_is_dropped() {
+        let (tx, rx) = oneshot::channel::<Result<Element, ClientError>>();
+        drop(tx);
+        let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
+            iq_reply_from_oneshot(rx),
+            futures::future::pending::<()>(),
+        ));
+        assert!(matches!(outcome, IqReplyWait::Disconnected));
+    }
+
+    #[test]
+    fn iq_reply_wait_expires_even_when_queue_admission_stalls() {
+        let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
+            futures::future::pending::<IqReplyWait>(),
+            futures::future::ready(()),
+        ));
+        assert!(matches!(outcome, IqReplyWait::DeadlineExpired));
     }
 }

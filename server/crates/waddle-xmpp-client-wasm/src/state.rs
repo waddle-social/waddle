@@ -485,7 +485,7 @@ pub(crate) enum PagehideCommandCompletion {
     },
     Deferred(DeferredWasmCommand),
     CancelIq {
-        id: String,
+        id: waddle_xmpp_client::request::StanzaId,
         responder: oneshot::Sender<DriverResult<()>>,
     },
     Disconnect {
@@ -516,14 +516,14 @@ mod command_lane_tests {
     fn command(id: &str) -> WasmCommand {
         let (responder, _receiver) = oneshot::channel();
         WasmCommand::CancelIq {
-            id: id.to_owned(),
+            id: waddle_xmpp_client::request::StanzaId::new(id).expect("test stanza id"),
             responder,
         }
     }
 
     fn command_id(command: WasmCommand) -> String {
         match command {
-            WasmCommand::CancelIq { id, .. } => id,
+            WasmCommand::CancelIq { id, .. } => id.to_string(),
             _ => panic!("test lane contains only cancellation commands"),
         }
     }
