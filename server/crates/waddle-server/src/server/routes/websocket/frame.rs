@@ -398,12 +398,17 @@ async fn handle_xmpp_frame_impl(
                     }
                 }
             };
-            let dispatch_result = match admission {
+            let (dispatch_result, authority_revoked_after_start) = match admission {
                 Some((permit, shutdown)) => {
-                    run_with_backstop_and_admission(backstop, dispatch, permit, shutdown).await
+                    let result =
+                        run_with_backstop_and_admission(backstop, dispatch, permit, shutdown).await;
+                    (result.result, result.authority_revoked_after_start)
                 }
-                None => run_with_backstop(backstop, dispatch).await,
+                None => (run_with_backstop(backstop, dispatch).await, false),
             };
+            if authority_revoked_after_start {
+                *inbound_frame_terminal = Some(InboundFrameTerminal::AuthorityRevoked);
+            }
             let (responses, disposition) = match dispatch_result {
                 Ok(responses) => (responses, InboundDisposition::Handled),
                 Err(StanzaTimeout::HandledIq(reply)) => {
