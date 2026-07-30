@@ -40,8 +40,9 @@ use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
+use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
+
 const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
-const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
 
 fn audio_content_with_waddle_transport() -> Content {
     let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));

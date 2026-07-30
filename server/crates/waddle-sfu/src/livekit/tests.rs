@@ -130,6 +130,59 @@ fn revocation_is_scoped_per_participant() {
 }
 
 #[test]
+fn revoke_issued_token_ignores_a_jti_the_server_never_minted() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("c-unknown-jti").unwrap();
+    let alice = fixture_identity("alice");
+
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .unwrap();
+
+    // A jti from an unverified claim in a crafted stanza must not
+    // grow the revocation set — only provably minted issuances are
+    // recorded (see the SfuService::revoke_issued_token contract).
+    let forged = Jti::new();
+    sfu.revoke_issued_token(&call, &alice, &forged);
+
+    assert!(!sfu.is_revoked(&forged));
+    assert_eq!(sfu.revoked_count(), 0);
+    assert!(!sfu.is_revoked(&minted.jti));
+    assert_eq!(sfu.issued_count(&call, &alice), 1);
+}
+
+#[test]
+fn revoke_issued_token_drops_the_emptied_issued_bucket() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("c-empty-bucket").unwrap();
+    let alice = fixture_identity("alice");
+
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .unwrap();
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+
+    assert!(sfu.is_revoked(&minted.jti));
+    // The common mint-then-immediately-revoke bounce case must not
+    // leave an empty per-(call, identity) bucket behind.
+    assert!(
+        !sfu.issued.contains_key(&(call.clone(), alice.clone())),
+        "emptied issued bucket must be removed"
+    );
+
+    // A pair with another live issuance keeps its bucket.
+    let t1 = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .unwrap();
+    let t2 = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .unwrap();
+    sfu.revoke_issued_token(&call, &alice, &t2.jti);
+    assert!(!sfu.is_revoked(&t1.jti));
+    assert_eq!(sfu.issued_count(&call, &alice), 1);
+}
+
+#[test]
 fn issued_jti_vec_is_capped_per_participant() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
     let call = CallId::new("c-cap").unwrap();

@@ -107,6 +107,12 @@ pub trait SfuService: Send + Sync + 'static {
     /// the pair may simultaneously be live in the call through an
     /// independent, successful negotiation, and that session must
     /// survive the bounce.
+    ///
+    /// Implementations MUST ignore a `jti` that is not currently
+    /// tracked in the pair's issued window: the identifier arrives
+    /// from an unverified claim in the bounced stanza, and recording
+    /// revocations for JTIs the server never minted would let crafted
+    /// undeliverable IQs grow the revocation set without bound.
     fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti);
 
     /// Local-only cleanup driven by an SFU-originated signal that

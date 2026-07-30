@@ -2770,6 +2770,9 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
 ) {
     use waddle_sfu::{MediaCapabilities, SfuService};
     use waddle_xmpp::registry::UserRegistryActor;
+    use waddle_xmpp::xep::xep_waddle_livekit_transport::{
+        NS_WADDLE_LIVEKIT_TRANSPORT, TRANSPORT_NAME,
+    };
 
     let registry = ConnectionRegistry::new();
     let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
@@ -2859,7 +2862,7 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     let has_livekit_transport = echoed
         .children()
         .flat_map(|content| content.children())
-        .any(|elem| elem.is("transport", "urn:waddle:transports:livekit:0"));
+        .any(|elem| elem.is(TRANSPORT_NAME, NS_WADDLE_LIVEKIT_TRANSPORT));
     assert!(
         !has_livekit_transport,
         "sanitized echo must not carry the LiveKit transport: {echoed:?}"
