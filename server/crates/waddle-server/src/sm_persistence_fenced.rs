@@ -134,6 +134,7 @@ use waddle_xmpp::ownership::{
     ClaimError, ClaimStore, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
 };
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
+use waddle_xmpp::auth::{AuthContextId, AuthContextVersion, PrincipalAuthEpoch};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
@@ -703,6 +704,50 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         } else {
             Ok(None)
         }
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+        let mut rows = self
+            .guard_query(
+                "SELECT bare_jid, auth_context_id, auth_context_version, principal_auth_epoch \
+                 FROM sm_session_principals WHERE stream_id = ?",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let bare_jid = row
+            .get::<String>(0)
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+            .parse()
+            .map_err(|error| SmPersistenceError::Other(format!("invalid SM principal JID: {error}")))?;
+        let context_id = row
+            .get::<uuid::Uuid>(1)
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let context_version = u64::try_from(
+            row.get::<i64>(2)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+        )
+        .map_err(|_| SmPersistenceError::Other("invalid SM auth context version".to_string()))?;
+        let auth_epoch = u64::try_from(
+            row.get::<i64>(3)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+        )
+        .map_err(|_| SmPersistenceError::Other("invalid SM principal auth epoch".to_string()))?;
+        Ok(Some(AuthenticatedPrincipalRef::new(
+            bare_jid,
+            AuthContextId::new(context_id),
+            AuthContextVersion::new(context_version),
+            PrincipalAuthEpoch::new(auth_epoch),
+        )))
     }
 
     async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {

@@ -428,11 +428,24 @@ pub(super) async fn cleanup_connection_shutdown(
             },
         ) {
             let stream_id = detached.stream_id.clone();
+            let principal = match conn.authenticated_session.as_ref() {
+                Some(session) => match session.authenticated_principal_ref() {
+                    Ok(principal) => principal,
+                    Err(error) => {
+                        warn!(jid = %jid, %error, "Refusing SM detach without a typed principal reference");
+                        return ConnectionShutdownOutcome::NotPersisted;
+                    }
+                },
+                None => {
+                    warn!(jid = %jid, "Refusing SM detach without an authenticated principal");
+                    return ConnectionShutdownOutcome::NotPersisted;
+                }
+            };
             match state
                 .deps
                 .protocol
                 .sm_session_registry
-                .store_session(detached)
+                .store_session_with_principal(detached, principal)
                 .await
             {
                 Ok(displaced) => {

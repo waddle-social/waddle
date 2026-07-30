@@ -134,6 +134,11 @@ pub struct InMemorySmSessionRegistry {
     /// this via [`Self::with_persistence`] before Arc-wrapping.
     pub(super) persistence:
         Option<std::sync::Arc<dyn super::super::persistence::SmPersistenceStorage>>,
+    /// One detach operation's principal reference, held only long enough to
+    /// hand it to the same fenced durable snapshot transaction. This is not
+    /// an authorization cache and is removed regardless of write outcome.
+    pub(super) pending_snapshot_principals:
+        RwLock<HashMap<String, crate::auth::AuthenticatedPrincipalRef>>,
     /// The entity-ownership authority for this registry's SM-session claims
     /// (ADR-0017 Phase 3 Slice 1, Q2 "retrofit, not wrap"). Defaults to
     /// [`InProcessClaimStore`] — correct for every build today, since no
@@ -852,6 +857,7 @@ impl InMemorySmSessionRegistry {
             max_sessions: DEFAULT_MAX_SESSIONS,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            pending_snapshot_principals: RwLock::new(HashMap::new()),
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_fences: RwLock::new(HashMap::new()),
@@ -878,6 +884,7 @@ impl InMemorySmSessionRegistry {
             max_sessions,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            pending_snapshot_principals: RwLock::new(HashMap::new()),
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_fences: RwLock::new(HashMap::new()),
@@ -905,6 +912,27 @@ impl InMemorySmSessionRegistry {
     ) -> Self {
         self.persistence = Some(storage);
         self
+    }
+
+    /// Store a detached snapshot with the authenticated principal reference
+    /// in the same durable operation. The reference is staged only across
+    /// the existing store call; it never becomes local correctness state.
+    pub async fn store_session_with_principal(
+        &self,
+        session: DetachedSession,
+        principal: crate::auth::AuthenticatedPrincipalRef,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let stream_id = session.stream_id.clone();
+        self.pending_snapshot_principals
+            .write()
+            .map_err(|_| SmRegistryError::Internal("principal staging lock poisoned".to_string()))?
+            .insert(stream_id.clone(), principal);
+        let result = self.store_session(session).await;
+        self.pending_snapshot_principals
+            .write()
+            .map_err(|_| SmRegistryError::Internal("principal staging lock poisoned".to_string()))?
+            .remove(&stream_id);
+        result
     }
 
     /// Inject a `ClaimStore`/live-identity pair other than the single-node
@@ -1962,9 +1990,18 @@ impl InMemorySmSessionRegistry {
                 entry.original_receipt_at,
             )?);
         }
-        storage
-            .store_session_atomic(persisted, unacked_rows)
-            .await
+        let principal = self
+            .pending_snapshot_principals
+            .read()
+            .map_err(|_| SmRegistryError::Internal("principal staging lock poisoned".to_string()))?
+            .get(&session.stream_id)
+            .cloned();
+        match principal {
+            Some(principal) => storage
+                .store_session_atomic_with_principal(&principal, persisted, unacked_rows)
+                .await,
+            None => storage.store_session_atomic(persisted, unacked_rows).await,
+        }
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
 

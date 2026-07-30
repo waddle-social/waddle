@@ -385,6 +385,18 @@ pub trait SmPersistenceStorage: Send + Sync {
         ))
     }
 
+    /// Fetch the non-secret principal reference paired with an SM snapshot.
+    /// Callers must resolve it against the server auth authority before
+    /// producing `<resumed/>`; absence is never a fallback to local state.
+    async fn get_session_principal(
+        &self,
+        _stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "SM principal resolution requires fenced Postgres storage".to_string(),
+        ))
+    }
+
     /// Atomically increment the persistent promotion-failure counter
     /// for `stream_id` and return the new value. Used by the SM-
     /// expiry janitor (issue #209 finding #14) to break runaway retry
