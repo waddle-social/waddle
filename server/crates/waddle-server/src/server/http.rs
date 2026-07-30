@@ -55,6 +55,26 @@ pub(crate) struct HttpServerDeps {
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
 }
 
+const HTTP_FORCED_EXIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn await_http_server_or_forced_exit<F, T>(
+    server: F,
+    stop_token: tokio_util::sync::CancellationToken,
+    drain_timeout: std::time::Duration,
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::pin!(server);
+    tokio::select! {
+        result = server.as_mut() => Some(result),
+        _ = async {
+            stop_token.cancelled().await;
+            tokio::time::sleep(drain_timeout + HTTP_FORCED_EXIT_MARGIN).await;
+        } => None,
+    }
+}
+
 /// Start the HTTP server with graceful shutdown support.
 pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     let HttpServerDeps {
@@ -70,6 +90,8 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
+    let force_stop_token = stop_token.clone();
+    let drain_timeout = shutdown_handle.drain_timeout();
     let app = create_router(RouterDeps {
         state,
         server_config,
@@ -93,14 +115,31 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         }
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            stop_token.cancelled().await;
-            info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
-            drain_complete.notified().await;
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        stop_token.cancelled().await;
+        info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
+        if tokio::time::timeout(drain_timeout, drain_complete.notified())
+            .await
+            .is_err()
+        {
+            warn!(
+                timeout_secs = drain_timeout.as_secs(),
+                "HTTP server: SM drain notification timed out; forcing connection drain"
+            );
+        } else {
             info!("HTTP server: SM drain complete; draining connections");
-        })
-        .await?;
+        }
+    });
+    match await_http_server_or_forced_exit(server, force_stop_token, drain_timeout).await {
+        Some(result) => result?,
+        None => {
+            warn!(
+                timeout_secs = drain_timeout.as_secs(),
+                margin_secs = HTTP_FORCED_EXIT_MARGIN.as_secs(),
+                "HTTP graceful shutdown exceeded its absolute deadline; terminating remaining connection tasks"
+            );
+        }
+    }
 
     Ok(())
 }
@@ -1217,4 +1256,37 @@ fn env_flag(key: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod shutdown_bound_tests {
+    use super::await_http_server_or_forced_exit;
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_connection_work_cannot_outlive_http_shutdown_deadline() {
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+
+        let outcome = await_http_server_or_forced_exit(
+            std::future::pending::<()>(),
+            stop,
+            std::time::Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_http_server_wins_before_forced_exit() {
+        let stop = tokio_util::sync::CancellationToken::new();
+        let outcome = await_http_server_or_forced_exit(
+            std::future::ready(7_u8),
+            stop,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+        assert_eq!(outcome, Some(7));
+    }
 }

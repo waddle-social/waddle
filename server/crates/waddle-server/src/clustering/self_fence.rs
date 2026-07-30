@@ -903,6 +903,7 @@ async fn run_pre_ready_heartbeat<L>(
     identity: NodeIdentity,
     cancel: CancellationToken,
     fatal_fence: CancellationToken,
+    readiness: NodeLifecycle,
     heartbeat_interval: Duration,
     lease_ttl: Duration,
 ) where
@@ -930,6 +931,7 @@ async fn run_pre_ready_heartbeat<L>(
                 match result {
                     Ok(Ok(true)) => {}
                     Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+                        readiness.begin_fenced_recovery();
                         fatal_fence.cancel();
                         return;
                     }
@@ -1477,6 +1479,7 @@ pub async fn run_node_lease<L>(
                             identity.clone(),
                             recovery_heartbeat_cancel.clone(),
                             fatal_fence.clone(),
+                            readiness.clone(),
                             config.heartbeat_interval,
                             config.lease_ttl,
                         ));
@@ -1616,6 +1619,7 @@ pub async fn run_node_lease<L>(
                             result = final_heartbeat => matches!(result, Ok(Ok(true))),
                         };
                         if !heartbeat_is_fresh {
+                            readiness.begin_fenced_recovery();
                             fatal_fence.cancel();
                             terminal_fence_context
                                 .finish(&superseded_identity, &identity)

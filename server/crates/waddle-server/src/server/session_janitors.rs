@@ -735,6 +735,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             return;
         };
         let room_registry_actor = websocket_state.deps.protocol.room_registry.clone();
+        let node_lifecycle = websocket_state.deps.app_state.node_lifecycle.clone();
         tokio::spawn(async move {
             let terminal_room_registry =
                 waddle_xmpp::muc::RoomRegistry::wrap(room_registry_actor.clone());
@@ -742,6 +743,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                 registry.clone(),
                 stop.clone(),
                 fatal_fence,
+                node_lifecycle,
             );
             let mut ticker = tokio::time::interval(interval);
             // Skip the first (immediate) tick, mirroring the other janitors
@@ -771,6 +773,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                 let sweep_outcome = supervise_orphan_reaper_sweep(
                     &supervisor.workers.cancel,
                     &supervisor.workers.fatal_fence,
+                    &supervisor.workers.node_lifecycle,
                     ORPHAN_REAPER_SWEEP_TIMEOUT,
                     run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers),
                 )
@@ -872,6 +875,7 @@ fn orphan_sweep_heartbeat_outcome(
 async fn supervise_orphan_reaper_sweep<F>(
     cancel: &tokio_util::sync::CancellationToken,
     fatal_fence: &tokio_util::sync::CancellationToken,
+    node_lifecycle: &crate::clustering::NodeLifecycle,
     timeout: Duration,
     sweep: F,
 ) -> OrphanSweepOutcome
@@ -891,6 +895,7 @@ where
             }
             Ok(false) => OrphanSweepOutcome::Failed,
             Err(_) => {
+                node_lifecycle.begin_fenced_recovery();
                 fatal_fence.cancel();
                 crate::clustering::metrics::record_orphan_worker_failure("sweep", "timeout");
                 OrphanSweepOutcome::TimedOut
@@ -930,11 +935,16 @@ mod orphan_sweep_supervision_tests {
     #[tokio::test]
     async fn timed_out_outer_sweep_self_fences_uncertain_claim_handoffs() {
         let cancel = tokio_util::sync::CancellationToken::new();
-        let fatal_fence = tokio_util::sync::CancellationToken::new();
+        let node_lifecycle = crate::clustering::NodeLifecycle::new();
+        let fatal_fence = node_lifecycle.fatal_fence_token();
+        let admitted = node_lifecycle
+            .admit()
+            .expect("serving permit before ambiguity");
 
         let outcome = supervise_orphan_reaper_sweep(
             &cancel,
             &fatal_fence,
+            &node_lifecycle,
             Duration::from_millis(1),
             std::future::pending(),
         )
@@ -942,17 +952,25 @@ mod orphan_sweep_supervision_tests {
 
         assert_eq!(outcome, OrphanSweepOutcome::TimedOut);
         assert!(fatal_fence.is_cancelled());
+        assert_eq!(
+            node_lifecycle.admission(),
+            crate::clustering::NodeAdmission::FencedRecovering
+        );
+        assert!(node_lifecycle.admit().is_err());
+        assert!(admitted.revalidate().is_err());
     }
 
     #[tokio::test]
     async fn ordinary_sweep_cancellation_does_not_invent_a_new_self_fence() {
         let cancel = tokio_util::sync::CancellationToken::new();
-        let fatal_fence = tokio_util::sync::CancellationToken::new();
+        let node_lifecycle = crate::clustering::NodeLifecycle::new();
+        let fatal_fence = node_lifecycle.fatal_fence_token();
         cancel.cancel();
 
         let outcome = supervise_orphan_reaper_sweep(
             &cancel,
             &fatal_fence,
+            &node_lifecycle,
             Duration::from_secs(1),
             std::future::pending(),
         )
@@ -971,13 +989,15 @@ mod orphan_sweep_supervision_tests {
             worker_cancel.clone(),
         );
         let cancel = tokio_util::sync::CancellationToken::new();
-        let fatal_fence = tokio_util::sync::CancellationToken::new();
+        let node_lifecycle = crate::clustering::NodeLifecycle::new();
+        let fatal_fence = node_lifecycle.fatal_fence_token();
         cancel.cancel();
         let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
 
         let outcome = supervise_orphan_reaper_sweep(
             &cancel,
             &fatal_fence,
+            &node_lifecycle,
             Duration::from_secs(1),
             run_orphan_reaper_sweep_with_workers(&state, &supervisor.workers),
         )
@@ -1061,7 +1081,8 @@ mod orphan_sweep_supervision_tests {
     #[tokio::test]
     async fn fatal_fence_cancels_a_sweep_before_it_can_make_progress() {
         let cancel = tokio_util::sync::CancellationToken::new();
-        let fatal_fence = tokio_util::sync::CancellationToken::new();
+        let node_lifecycle = crate::clustering::NodeLifecycle::new();
+        let fatal_fence = node_lifecycle.fatal_fence_token();
         fatal_fence.cancel();
         let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let entered_by_sweep = Arc::clone(&entered);
@@ -1069,6 +1090,7 @@ mod orphan_sweep_supervision_tests {
         let outcome = supervise_orphan_reaper_sweep(
             &cancel,
             &fatal_fence,
+            &node_lifecycle,
             Duration::from_secs(1),
             async move {
                 entered_by_sweep.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1537,6 +1559,7 @@ struct OrphanReaperWorkers {
     sm_cursor: Arc<std::sync::Mutex<Option<crate::clustering::claims::SmOrphanScanCursor>>>,
     cancel: tokio_util::sync::CancellationToken,
     fatal_fence: tokio_util::sync::CancellationToken,
+    node_lifecycle: crate::clustering::NodeLifecycle,
 }
 
 #[cfg(feature = "clustering")]
@@ -1863,17 +1886,16 @@ impl OrphanReaperSupervisor {
         registry: Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
         parent_cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
-        Self::new_with_fatal_fence(
-            registry,
-            parent_cancel,
-            tokio_util::sync::CancellationToken::new(),
-        )
+        let node_lifecycle = crate::clustering::NodeLifecycle::new();
+        let fatal_fence = node_lifecycle.fatal_fence_token();
+        Self::new_with_fatal_fence(registry, parent_cancel, fatal_fence, node_lifecycle)
     }
 
     fn new_with_fatal_fence(
         registry: Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
         parent_cancel: tokio_util::sync::CancellationToken,
         fatal_fence: tokio_util::sync::CancellationToken,
+        node_lifecycle: crate::clustering::NodeLifecycle,
     ) -> Self {
         let cancel = parent_cancel.child_token();
         let (hydration_tx, mut hydration_rx) =
@@ -1893,6 +1915,7 @@ impl OrphanReaperSupervisor {
             sm_cursor: Arc::new(std::sync::Mutex::new(None)),
             cancel: cancel.clone(),
             fatal_fence,
+            node_lifecycle,
         };
 
         let hydration_cancel = cancel.clone();
@@ -2156,10 +2179,16 @@ impl OrphanReaperSupervisor {
             stopped
                 .workers
                 .restore_captured_terminal_work(hydration, releases);
+            stopped.workers.node_lifecycle.begin_fenced_recovery();
             fatal_fence.cancel();
             return stopped;
         }
-        let next = Self::new_with_fatal_fence(registry, parent_cancel, fatal_fence);
+        let next = Self::new_with_fatal_fence(
+            registry,
+            parent_cancel,
+            fatal_fence,
+            stopped.workers.node_lifecycle.clone(),
+        );
         next.workers.set_room_cursor(room_cursor);
         next.workers.set_sm_cursor(sm_cursor);
         for handoff in room_handoffs {
@@ -2440,6 +2469,7 @@ async fn reconcile_registered_room_or_self_fence(
             // handoff cannot produce a typed outcome, retain the supervisor's
             // exact fence for terminal transfer and stop this node's lease
             // lifecycle so another incarnation can recover after expiry.
+            workers.node_lifecycle.begin_fenced_recovery();
             workers.fatal_fence.cancel();
         }
     }
@@ -2700,11 +2730,13 @@ async fn registry_death_after_mailbox_acceptance_self_fences_the_node() {
         .reserve_pending_reclaimed_room(room_jid.clone())
         .await
         .expect("reserve adoption"));
-    let fatal_fence = tokio_util::sync::CancellationToken::new();
+    let node_lifecycle = crate::clustering::NodeLifecycle::new();
+    let fatal_fence = node_lifecycle.fatal_fence_token();
     let supervisor = OrphanReaperSupervisor::new_with_fatal_fence(
         Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
         tokio_util::sync::CancellationToken::new(),
         fatal_fence.clone(),
+        node_lifecycle,
     );
     let pending = waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
         room_jid: room_jid.clone(),
@@ -3681,6 +3713,7 @@ fn hydration_reservations_do_not_overcommit_a_127_of_128_queue() {
         sm_cursor: Arc::new(std::sync::Mutex::new(None)),
         cancel: tokio_util::sync::CancellationToken::new(),
         fatal_fence: tokio_util::sync::CancellationToken::new(),
+        node_lifecycle: crate::clustering::NodeLifecycle::new(),
     };
     let reserved = (0..64)
         .filter(|index| {
@@ -3725,6 +3758,7 @@ async fn full_hydration_channel_retains_and_redrives_pending_work() {
         sm_cursor: Arc::new(std::sync::Mutex::new(None)),
         cancel: tokio_util::sync::CancellationToken::new(),
         fatal_fence: tokio_util::sync::CancellationToken::new(),
+        node_lifecycle: crate::clustering::NodeLifecycle::new(),
     };
     let candidate = Entity::new(EntityType::SmSession, "candidate");
 
@@ -3780,6 +3814,7 @@ fn closed_hydration_channel_retains_restart_inventory() {
         sm_cursor: Arc::new(std::sync::Mutex::new(None)),
         cancel: tokio_util::sync::CancellationToken::new(),
         fatal_fence: tokio_util::sync::CancellationToken::new(),
+        node_lifecycle: crate::clustering::NodeLifecycle::new(),
     };
     let candidate = Entity::new(EntityType::SmSession, "candidate");
 
@@ -3860,6 +3895,7 @@ async fn full_release_channel_retains_and_redrives_pending_work() {
         sm_cursor: Arc::new(std::sync::Mutex::new(None)),
         cancel: tokio_util::sync::CancellationToken::new(),
         fatal_fence: tokio_util::sync::CancellationToken::new(),
+        node_lifecycle: crate::clustering::NodeLifecycle::new(),
     };
     let candidate = ExactReleaseWork {
         claim_store: Arc::new(InProcessClaimStore::new()),
@@ -3909,6 +3945,7 @@ fn closed_release_channel_retains_restart_inventory() {
         sm_cursor: Arc::new(std::sync::Mutex::new(None)),
         cancel: tokio_util::sync::CancellationToken::new(),
         fatal_fence: tokio_util::sync::CancellationToken::new(),
+        node_lifecycle: crate::clustering::NodeLifecycle::new(),
     };
     let candidate = ExactReleaseWork {
         claim_store: Arc::new(InProcessClaimStore::new()),
@@ -4183,6 +4220,7 @@ async fn run_orphan_reaper_sweep_with_workers(
             }
             Err(error) => {
                 debug!(%error, "orphan reaper: pending RoomActor listing failed");
+                workers.node_lifecycle.begin_fenced_recovery();
                 workers.fatal_fence.cancel();
                 return false;
             }

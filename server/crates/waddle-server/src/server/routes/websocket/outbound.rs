@@ -1,6 +1,8 @@
 use super::*;
 use super::{
-    batch_write::{write_response_batch_with_admission, BatchSmPolicy, BatchWriteOutcome},
+    batch_write::{
+        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+    },
     frame::ordered_relay_origin_from_sm,
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
@@ -12,6 +14,12 @@ use super::{
 };
 use waddle_xmpp::stream_management::SmRequest;
 
+#[derive(Clone, Copy)]
+pub(super) struct OutboundAuthority<'a> {
+    pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
+    pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
+}
+
 pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
     sender: &mut S,
     reader: &mut R,
@@ -19,8 +27,7 @@ pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
     conn: &mut WsConnState,
     timers: &mut TransportTimers,
     outbound_stanza: OutboundStanza,
-    permit: &crate::clustering::NodeAdmissionPermit,
-    shutdown: &tokio_util::sync::CancellationToken,
+    authority: OutboundAuthority<'_>,
 ) -> bool
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -28,6 +35,7 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    let OutboundAuthority { permit, shutdown } = authority;
     let authoritative = || !shutdown.is_cancelled() && permit.revalidate().is_ok();
     if !authoritative() {
         return false;
@@ -197,8 +205,7 @@ where
                 conn,
                 drive.frames,
                 BatchSmPolicy::Record,
-                permit,
-                shutdown,
+                BatchAuthority { permit, shutdown },
             )
             .await
             {

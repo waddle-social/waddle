@@ -242,6 +242,55 @@ pub(crate) async fn metrics_handler() -> impl IntoResponse {
     )
 }
 
+/// Detailed health check endpoint (for monitoring)
+pub(crate) async fn detailed_health_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.db_pool.health_check().await {
+        Ok(health) => {
+            let status = if health.is_healthy() {
+                "healthy"
+            } else {
+                "degraded"
+            };
+            let status_code = if health.is_healthy() {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+
+            (
+                status_code,
+                Json(DetailedHealthResponse {
+                    status: status.to_string(),
+                    service: "waddle-server".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    license: "AGPL-3.0".to_string(),
+                    database: health.into(),
+                }),
+            )
+        }
+        Err(e) => {
+            warn!("Detailed health check failed: {}", e);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(DetailedHealthResponse {
+                    status: "unhealthy".to_string(),
+                    service: "waddle-server".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    license: "AGPL-3.0".to_string(),
+                    database: DatabaseHealthStatus {
+                        status: format!("error: {}", e),
+                        global_healthy: false,
+                        waddle_dbs_healthy: false,
+                        loaded_waddle_count: 0,
+                    },
+                }),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod readiness_generation_tests {
     use super::*;
@@ -315,54 +364,5 @@ mod readiness_generation_tests {
         assert!(health_for_serving_generation(&lifecycle, async { true })
             .await
             .expect("serving generation"));
-    }
-}
-
-/// Detailed health check endpoint (for monitoring)
-pub(crate) async fn detailed_health_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    match state.db_pool.health_check().await {
-        Ok(health) => {
-            let status = if health.is_healthy() {
-                "healthy"
-            } else {
-                "degraded"
-            };
-            let status_code = if health.is_healthy() {
-                StatusCode::OK
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            };
-
-            (
-                status_code,
-                Json(DetailedHealthResponse {
-                    status: status.to_string(),
-                    service: "waddle-server".to_string(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    license: "AGPL-3.0".to_string(),
-                    database: health.into(),
-                }),
-            )
-        }
-        Err(e) => {
-            warn!("Detailed health check failed: {}", e);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(DetailedHealthResponse {
-                    status: "unhealthy".to_string(),
-                    service: "waddle-server".to_string(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    license: "AGPL-3.0".to_string(),
-                    database: DatabaseHealthStatus {
-                        status: format!("error: {}", e),
-                        global_healthy: false,
-                        waddle_dbs_healthy: false,
-                        loaded_waddle_count: 0,
-                    },
-                }),
-            )
-        }
     }
 }

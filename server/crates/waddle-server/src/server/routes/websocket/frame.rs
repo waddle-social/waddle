@@ -48,10 +48,9 @@ async fn await_control_stage<T>(
     )>,
     work: impl std::future::Future<Output = T>,
 ) -> Result<T, InboundFrameTerminal> {
-    // Control/auth/session futures own exact claim and rollback guards at
-    // internal await boundaries. Let the stage reach its defined completion
-    // boundary, then reject its response/publication if the generation moved;
-    // dropping these futures mid-commit could leak a claim.
+    // Claim-owning control futures must reach their typed completion boundary;
+    // dropping them mid-commit could strand durable ownership. The process
+    // boundary is independently hard-bounded by the HTTP drain deadline.
     let output = work.await;
     if let Some((permit, shutdown)) = admission {
         if shutdown.is_cancelled() || permit.revalidate().is_err() {

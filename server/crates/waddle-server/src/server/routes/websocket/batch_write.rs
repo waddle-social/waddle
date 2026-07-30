@@ -108,29 +108,10 @@ fn batch_authoritative(
         .is_none_or(|(permit, shutdown)| !shutdown.is_cancelled() && permit.revalidate().is_ok())
 }
 
-/// Write a response batch to the WebSocket, recording countable
-/// stanzas into the XEP-0198 unacked queue one frame at a time and
-/// interleaving an `<r/>` ack request after every `ack_threshold`th
-/// countable stanza.
-///
-/// Frames are recorded just before their own write: if the send
-/// fails they replay on resume, and the counters re-converge when
-/// the client receives them.
-pub(super) async fn write_response_batch<S, SE, R, RE>(
-    sender: &mut S,
-    reader: &mut R,
-    state: &WebSocketState,
-    conn: &mut WsConnState,
-    frames: Vec<String>,
-    policy: BatchSmPolicy,
-) -> BatchWriteOutcome
-where
-    S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
-    RE: std::fmt::Display,
-{
-    write_response_batch_impl(sender, reader, state, conn, frames, policy, None).await
+#[derive(Clone, Copy)]
+pub(super) struct BatchAuthority<'a> {
+    pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
+    pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
 pub(super) async fn write_response_batch_with_admission<S, SE, R, RE>(
@@ -140,8 +121,7 @@ pub(super) async fn write_response_batch_with_admission<S, SE, R, RE>(
     conn: &mut WsConnState,
     frames: Vec<String>,
     policy: BatchSmPolicy,
-    permit: &crate::clustering::NodeAdmissionPermit,
-    shutdown: &tokio_util::sync::CancellationToken,
+    authority: BatchAuthority<'_>,
 ) -> BatchWriteOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -156,7 +136,7 @@ where
         conn,
         frames,
         policy,
-        Some((permit, shutdown)),
+        Some((authority.permit, authority.shutdown)),
     )
     .await
 }

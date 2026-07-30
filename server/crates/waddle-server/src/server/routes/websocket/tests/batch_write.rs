@@ -8,9 +8,9 @@
 use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
 use super::super::{
     batch_write::{
-        write_response_batch, write_response_batch_with_admission, BatchSmPolicy, BatchWriteOutcome,
+        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
     },
-    state::WsConnState,
+    state::{WebSocketState, WsConnState},
 };
 use super::create_test_websocket_state;
 use futures::{stream, Sink, Stream, StreamExt as _};
@@ -109,8 +109,10 @@ async fn authority_revocation_stops_batch_before_next_record_or_write() {
         &mut conn,
         vec![countable_message(1), countable_message(2)],
         BatchSmPolicy::Record,
-        &permit,
-        &shutdown,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
     )
     .await;
 
@@ -152,6 +154,38 @@ fn sink_texts(sink: &CollectSink) -> Vec<String> {
 /// (like a live socket with nothing more to read — NOT end-of-stream).
 fn reader_with(frames: Vec<Message>) -> impl Stream<Item = Result<Message, Infallible>> + Unpin {
     stream::iter(frames.into_iter().map(Ok)).chain(stream::pending())
+}
+
+async fn write_response_batch<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    frames: Vec<String>,
+    policy: BatchSmPolicy,
+) -> BatchWriteOutcome
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving test permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    write_response_batch_with_admission(
+        sender,
+        reader,
+        state,
+        conn,
+        frames,
+        policy,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await
 }
 
 fn message_with_id(id: &str) -> String {

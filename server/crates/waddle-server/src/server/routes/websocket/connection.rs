@@ -1,10 +1,12 @@
 use super::*;
 use super::{
-    batch_write::{write_response_batch_with_admission, BatchSmPolicy, BatchWriteOutcome},
+    batch_write::{
+        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+    },
     cleanup::cleanup_connection_shutdown,
-    frame::{handle_xmpp_frame, handle_xmpp_frame_with_admission},
+    frame::handle_xmpp_frame_with_admission,
     interpret_loop::build_interpret_deps,
-    outbound::handle_outbound_stanza,
+    outbound::{handle_outbound_stanza, OutboundAuthority},
     registration::{register_bound_connection_after_frame_with_admission, RegistrationAfterFrame},
     replay::drive_interpret_loop,
     send::{close_ws_connection, send_ws_message, send_ws_text_frames},
@@ -174,6 +176,17 @@ const ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS: usize = 1_024;
 struct RegistrationChannels<'a> {
     pending_tx: &'a mut Option<mpsc::Sender<OutboundStanza>>,
     force_detach_rx: &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+}
+
+struct ConnectionIo<'a> {
+    sender: &'a mut SplitSink<WebSocket, Message>,
+    receiver: &'a mut SplitStream<WebSocket>,
+}
+
+#[derive(Clone, Copy)]
+struct FrameAuthority<'a> {
+    permit: &'a crate::clustering::NodeAdmissionPermit,
+    shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
 /// Poll `rx` if present, otherwise never resolve (ADR-0017 Phase 3 Slice 6).
@@ -365,10 +378,14 @@ async fn handle_xmpp_websocket(
                         pending_tx: &mut pending_tx,
                         force_detach_rx: &mut force_detach_rx,
                     },
-                    &mut ws_sender,
-                    &mut ws_receiver,
-                    &admission_permit,
-                    &shutdown_token,
+                    ConnectionIo {
+                        sender: &mut ws_sender,
+                        receiver: &mut ws_receiver,
+                    },
+                    FrameAuthority {
+                        permit: &admission_permit,
+                        shutdown: &shutdown_token,
+                    },
                 )
                 .await
                 {
@@ -389,10 +406,14 @@ async fn handle_xmpp_websocket(
                                 pending_tx: &mut pending_tx,
                                 force_detach_rx: &mut force_detach_rx,
                             },
-                            &mut ws_sender,
-                            &mut ws_receiver,
-                            &admission_permit,
-                            &shutdown_token,
+                            ConnectionIo {
+                                sender: &mut ws_sender,
+                                receiver: &mut ws_receiver,
+                            },
+                            FrameAuthority {
+                                permit: &admission_permit,
+                                shutdown: &shutdown_token,
+                            },
                         )
                         .await
                         {
@@ -449,8 +470,10 @@ async fn handle_xmpp_websocket(
                             &mut conn,
                             &mut timers,
                             outbound_stanza,
-                            &admission_permit,
-                            &shutdown_token,
+                            OutboundAuthority {
+                                permit: &admission_permit,
+                                shutdown: &shutdown_token,
+                            },
                         )
                         .await
                         {
@@ -682,7 +705,14 @@ async fn handle_xmpp_websocket(
                 );
             }
         } else {
-            process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+            process_deferred_inbound_after_transport_loss(
+                &domain,
+                state.as_ref(),
+                &mut conn,
+                &admission_permit,
+                &shutdown_token,
+            )
+            .await;
         }
         drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn).await;
     }
@@ -924,15 +954,21 @@ async fn handle_inbound_text(
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
     channels: RegistrationChannels<'_>,
-    ws_sender: &mut SplitSink<WebSocket, Message>,
-    ws_receiver: &mut SplitStream<WebSocket>,
-    admission_permit: &crate::clustering::NodeAdmissionPermit,
-    shutdown_token: &tokio_util::sync::CancellationToken,
+    io: ConnectionIo<'_>,
+    authority: FrameAuthority<'_>,
 ) -> bool {
     let RegistrationChannels {
         pending_tx,
         force_detach_rx,
     } = channels;
+    let ConnectionIo {
+        sender: ws_sender,
+        receiver: ws_receiver,
+    } = io;
+    let FrameAuthority {
+        permit: admission_permit,
+        shutdown: shutdown_token,
+    } = authority;
     if close_if_frame_authority_revoked(state, conn, ws_sender, admission_permit, shutdown_token)
         .await
     {
@@ -1110,8 +1146,10 @@ async fn handle_inbound_text(
         conn,
         responses,
         policy,
-        admission_permit,
-        shutdown_token,
+        BatchAuthority {
+            permit: admission_permit,
+            shutdown: shutdown_token,
+        },
     )
     .await
     {
@@ -1172,6 +1210,12 @@ async fn close_if_frame_authority_revoked(
         return false;
     }
 
+    cleanup_frame_authority_revocation(state, conn).await;
+    close_live_session_for_node_unavailable(ws_sender, conn).await;
+    true
+}
+
+async fn cleanup_frame_authority_revocation(state: &WebSocketState, conn: &mut WsConnState) {
     // `<enable/>` has not reached its wire commit point yet. Dropping this
     // typed guard inventories exact claim release and provisional ISR token
     // revocation; a stale generation must never send `<enabled/>`.
@@ -1189,8 +1233,6 @@ async fn close_if_frame_authority_revoked(
         }
         state.deps.protocol.resumable_sessions.remove(&stream_id);
     }
-    close_live_session_for_node_unavailable(ws_sender, conn).await;
-    true
 }
 
 async fn handle_ordered_relay_handoff_completion(
@@ -1218,8 +1260,7 @@ async fn handle_ordered_relay_handoff_completion(
         conn,
         replies,
         BatchSmPolicy::Record,
-        permit,
-        shutdown,
+        BatchAuthority { permit, shutdown },
     )
     .await
     {
@@ -1320,6 +1361,8 @@ async fn process_deferred_inbound_after_transport_loss(
     domain: &str,
     state: &WebSocketState,
     conn: &mut WsConnState,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
 ) {
     if conn.sm_inbound_completion.has_unhandled_hole() {
         let dropped = discard_deferred_inbound(conn);
@@ -1332,7 +1375,27 @@ async fn process_deferred_inbound_after_transport_loss(
         return;
     }
     while let Some(text) = conn.deferred_inbound.pop_front() {
-        let responses = handle_xmpp_frame(&text, domain, state, conn).await;
+        let responses =
+            handle_xmpp_frame_with_admission(&text, domain, state, conn, permit, shutdown).await;
+        if matches!(
+            conn.inbound_frame_terminal.take(),
+            Some(InboundFrameTerminal::AuthorityRevoked)
+        ) || shutdown.is_cancelled()
+            || permit.revalidate().is_err()
+        {
+            // No transport remains to close. Release any provisional control
+            // ownership now; the caller immediately runs normal detach/full
+            // cleanup for the connection state that remains authoritative.
+            cleanup_frame_authority_revocation(state, conn).await;
+            let dropped = discard_deferred_inbound(conn);
+            if dropped > 0 {
+                warn!(
+                    dropped,
+                    "Dropping deferred inbound suffix after authority revocation"
+                );
+            }
+            break;
+        }
         conn.sync_state_machine_phase();
         let policy = if conn.suppress_sm_record_next_batch {
             conn.suppress_sm_record_next_batch = false;
@@ -1552,6 +1615,47 @@ mod tests {
         assert_eq!(discard_deferred_inbound(&mut conn), 2);
         assert!(conn.deferred_inbound.is_empty());
         assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn revoked_generation_drops_deferred_transport_loss_suffix_without_advancing_h() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("deferred-revoked".to_string(), true, Some(300));
+        let mut first = xmpp_parsers::message::Message::new(Some(
+            "bob@example.com".parse().expect("recipient JID"),
+        ));
+        first.id = Some("first".to_string());
+        let mut later = xmpp_parsers::message::Message::new(Some(
+            "carol@example.com".parse().expect("recipient JID"),
+        ));
+        later.id = Some("later".to_string());
+        conn.deferred_inbound.extend([
+            axum::extract::ws::Utf8Bytes::from(
+                waddle_xmpp::parser::stanza_to_string(first).expect("serialize first message"),
+            ),
+            axum::extract::ws::Utf8Bytes::from(
+                waddle_xmpp::parser::stanza_to_string(later).expect("serialize later message"),
+            ),
+        ]);
+        lifecycle.begin_fenced_recovery();
+
+        process_deferred_inbound_after_transport_loss(
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &permit,
+            &shutdown,
+        )
+        .await;
+
+        assert!(conn.deferred_inbound.is_empty());
+        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert!(conn.sm_state.get_stanzas_to_resend(0).is_empty());
     }
 
     #[test]

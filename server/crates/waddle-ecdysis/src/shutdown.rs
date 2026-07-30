@@ -89,6 +89,11 @@ impl ShutdownHandle {
         self.connection_count.load(Ordering::SeqCst)
     }
 
+    /// Canonical absolute drain budget configured for this process.
+    pub fn drain_timeout(&self) -> Duration {
+        self.drain_timeout
+    }
+
     /// Wait until every [`ConnectionGuard`] has dropped, bounded by the
     /// drain timeout.
     ///
