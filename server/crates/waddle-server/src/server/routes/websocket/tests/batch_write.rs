@@ -1134,7 +1134,28 @@ async fn backpressured_send_window_write_stops_promptly_on_authority_revocation(
         .expect("authority revocation must preempt the 15 second pause deadline");
 
     assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
-    assert_eq!(conn.sm_state.outbound_count, 8);
+    assert_eq!(
+        sink.committed,
+        (1..=8)
+            .map(countable_message)
+            .map(Message::Text)
+            .collect::<Vec<_>>(),
+        "the first eight stanzas committed before the backpressured ninth send"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, 9,
+        "the blocked ninth stanza must join the replay window on revocation"
+    );
+    assert_eq!(conn.sm_state.queue_len(), 9);
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 9);
+    for (index, stanza) in replay.iter().enumerate() {
+        assert_eq!(
+            stanza.stanza_xml,
+            countable_message(index + 1),
+            "the replay window contains each committed prefix frame and the unsent tail exactly once, in order"
+        );
+    }
     assert_eq!(
         sink.committed.len(),
         8,
