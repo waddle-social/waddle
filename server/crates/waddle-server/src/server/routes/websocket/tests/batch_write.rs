@@ -187,8 +187,115 @@ async fn authority_revocation_stops_batch_before_next_record_or_write() {
 
     assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
     assert_eq!(sink.sent.len(), 1);
-    assert_eq!(conn.sm_state.outbound_count, 1);
-    assert_eq!(conn.sm_state.queue_len(), 1);
+    assert_eq!(conn.sm_state.outbound_count, 2);
+    assert_eq!(conn.sm_state.queue_len(), 2);
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].stanza_xml, countable_message(1));
+    assert_eq!(replay[1].stanza_xml, countable_message(2));
+}
+
+#[tokio::test]
+async fn pre_current_revocation_records_the_entire_countable_batch_for_replay() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    lifecycle.begin_fenced_recovery();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("pre-current-revoked".to_string(), true, Some(300));
+    let first = mam_result_frame(1);
+    let second = mam_result_frame(2);
+    let fin = mam_fin_frame();
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(vec![]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![first.clone(), second.clone(), fin.clone()],
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert!(
+        sink.sent.is_empty(),
+        "revocation must fence every wire write"
+    );
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 3);
+    assert_eq!(replay[0].stanza_xml, first);
+    assert_eq!(replay[1].stanza_xml, second);
+    assert_eq!(replay[2].stanza_xml, fin);
+}
+
+/// A MAM batch can contain result messages followed by the query's final IQ.
+/// Once an admitted generation revokes before the next `poll_ready`, the
+/// written result is acknowledged and every unwritten countable response must
+/// remain exactly once, in wire order, for the XEP-0198 resume window.
+#[tokio::test]
+async fn revoked_next_readiness_keeps_mam_result_tail_and_fin_for_resume() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 1);
+    conn.sm_state
+        .enable("revoked-mam-tail".to_string(), true, Some(300));
+    let first = mam_result_frame(1);
+    let second = mam_result_frame(2);
+    let fin = mam_fin_frame();
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        // First result and its threshold `<r/>` commit. The next result's
+        // readiness check observes revocation before `start_send`.
+        revoke_on_ready_call: 3,
+        ready_calls: 0,
+    };
+    let mut reader = reader_with(vec![ack_frame(1)]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![first.clone(), second.clone(), fin.clone()],
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    let sent: Vec<String> = sink
+        .sent
+        .iter()
+        .filter_map(|message| match message {
+            Message::Text(text) => Some(text.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, vec![first, SmRequest::to_xml()]);
+    assert_eq!(
+        conn.sm_state.last_acked, 1,
+        "the inbound h settled the first result"
+    );
+    let replay = conn.sm_state.get_stanzas_to_resend(1);
+    assert_eq!(replay.len(), 2, "the tail must be retained exactly once");
+    assert_eq!(replay[0].stanza_xml, second);
+    assert_eq!(replay[1].stanza_xml, fin);
 }
 
 #[tokio::test]
@@ -711,6 +818,20 @@ fn mam_result_frame(i: usize) -> String {
                     .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
                     .attr(minidom::rxml::xml_ncname!("id").to_owned(), i.to_string())
                     .append(Element::builder("forwarded", "urn:xmpp:forward:0").build())
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+fn mam_fin_frame() -> String {
+    element_to_xml(
+        Element::builder("iq", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "mam-query")
+            .append(
+                Element::builder("fin", "urn:xmpp:mam:2")
+                    .attr(minidom::rxml::xml_ncname!("complete").to_owned(), "true")
                     .build(),
             )
             .build(),

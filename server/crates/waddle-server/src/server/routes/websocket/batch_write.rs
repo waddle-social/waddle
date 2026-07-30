@@ -196,10 +196,11 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    let mut frames = frames.into_iter();
     if !batch_authoritative(authority) {
+        record_remaining_for_replay(conn, frames, policy);
         return BatchWriteOutcome::AuthorityRevoked;
     }
-    let mut frames = frames.into_iter();
     // Send-window pacing applies ONLY to batches that actually grow the SM
     // unacked queue (issue #1219 review). A `ReplaySuppressed` batch is the
     // XEP-0198 resume replay: its stanzas are ALREADY in the restored unacked
@@ -231,19 +232,25 @@ where
                 record_remaining_for_replay(conn, frames, policy);
                 return BatchWriteOutcome::TransportClosed;
             }
-            SendWindowOutcome::AuthorityRevoked => return BatchWriteOutcome::AuthorityRevoked,
+            SendWindowOutcome::AuthorityRevoked => {
+                record_remaining_for_replay(conn, frames, policy);
+                return BatchWriteOutcome::AuthorityRevoked;
+            }
         }
     }
     while let Some(frame) = frames.next() {
         if !batch_authoritative(authority) {
+            record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
             return BatchWriteOutcome::AuthorityRevoked;
         }
-        let request_ack = if should_record(conn, &frame, policy) {
+        let current_recorded = should_record(conn, &frame, policy);
+        let request_ack = if current_recorded {
             conn.sm_state.record_outbound(frame.clone()).request_ack
         } else {
             false
         };
         if !batch_authoritative(authority) {
+            record_current_and_remaining_for_replay(conn, frame, frames, policy, current_recorded);
             return BatchWriteOutcome::AuthorityRevoked;
         }
         if let Err(outcome) = send_window_message(
@@ -259,7 +266,13 @@ where
                     record_remaining_for_replay(conn, frames, policy);
                     BatchWriteOutcome::TransportClosed
                 }
-                SendWindowOutcome::AuthorityRevoked => BatchWriteOutcome::AuthorityRevoked,
+                SendWindowOutcome::AuthorityRevoked => {
+                    // The countable current frame was recorded before the
+                    // readiness race; an uncountable control is intentionally
+                    // excluded from XEP-0198 replay. Preserve only the tail.
+                    record_remaining_for_replay(conn, frames, policy);
+                    BatchWriteOutcome::AuthorityRevoked
+                }
                 SendWindowOutcome::Recovered
                 | SendWindowOutcome::DeferredCapReached
                 | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
@@ -267,6 +280,7 @@ where
         }
         if request_ack {
             if !batch_authoritative(authority) {
+                record_remaining_for_replay(conn, frames, policy);
                 return BatchWriteOutcome::AuthorityRevoked;
             }
             if let Err(outcome) = send_window_message(
@@ -282,7 +296,10 @@ where
                         record_remaining_for_replay(conn, frames, policy);
                         BatchWriteOutcome::TransportClosed
                     }
-                    SendWindowOutcome::AuthorityRevoked => BatchWriteOutcome::AuthorityRevoked,
+                    SendWindowOutcome::AuthorityRevoked => {
+                        record_remaining_for_replay(conn, frames, policy);
+                        BatchWriteOutcome::AuthorityRevoked
+                    }
                     SendWindowOutcome::Recovered
                     | SendWindowOutcome::DeferredCapReached
                     | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
@@ -298,6 +315,7 @@ where
                     return BatchWriteOutcome::TransportClosed;
                 }
                 DrainSignal::AuthorityRevoked => {
+                    record_remaining_for_replay(conn, frames, policy);
                     return BatchWriteOutcome::AuthorityRevoked;
                 }
             }
@@ -333,6 +351,7 @@ where
                     return BatchWriteOutcome::TransportClosed;
                 }
                 SendWindowOutcome::AuthorityRevoked => {
+                    record_remaining_for_replay(conn, frames, policy);
                     return BatchWriteOutcome::AuthorityRevoked;
                 }
             }
@@ -535,6 +554,24 @@ pub(super) fn record_remaining_for_replay(
         if should_record(conn, &frame, policy) {
             let _ = conn.sm_state.record_outbound(frame);
         }
+    }
+}
+
+/// Preserve the current frame plus the unconsumed iterator tail when
+/// revocation lands before the current frame was locally recorded. Once a
+/// countable frame has entered the SM queue, recording it again would create
+/// a duplicate sequence entry; only the iterator tail remains to be saved.
+fn record_current_and_remaining_for_replay(
+    conn: &mut WsConnState,
+    current: String,
+    remaining: impl Iterator<Item = String>,
+    policy: BatchSmPolicy,
+    current_recorded: bool,
+) {
+    if current_recorded {
+        record_remaining_for_replay(conn, remaining, policy);
+    } else {
+        record_remaining_for_replay(conn, std::iter::once(current).chain(remaining), policy);
     }
 }
 
