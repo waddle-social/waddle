@@ -15,7 +15,6 @@ import {
   $callScreenShareSupported,
   $callMicEnabled,
   hangupActiveCall,
-  installCallPagehideSuspension,
   refreshScreenShareSupported,
   resetCallControls,
   seedCallControlsFromEngine,
@@ -65,28 +64,6 @@ const join: LiveKitJoin = {
   identity: "alice@waddle.test/web",
   token: "jwt",
 };
-
-class PagehideHarness {
-  private readonly listeners = new Set<EventListener>();
-
-  addEventListener(type: string, listener: EventListener) {
-    if (type === "pagehide") this.listeners.add(listener);
-  }
-
-  removeEventListener(type: string, listener: EventListener) {
-    if (type === "pagehide") this.listeners.delete(listener);
-  }
-
-  dispatchPagehide(persisted: boolean) {
-    const event = new Event("pagehide") as PageTransitionEvent;
-    Object.defineProperty(event, "persisted", { value: persisted });
-    for (const listener of this.listeners) listener(event);
-  }
-
-  listenerCount(): number {
-    return this.listeners.size;
-  }
-}
 
 function deviceError(name: string): Error {
   const err = new Error(`${name} message`);
@@ -243,7 +220,7 @@ describe("call page lifecycle controls", () => {
     expect($mucCallLiveParticipants.get()).toEqual({});
   });
 
-  test("pagehide suspension persists stream resume state before clearing the local call slot", () => {
+  test("pagehide suspension leaves stream resume persistence to the shared XMPP lifecycle", () => {
     const persistResumeStateForPageHide = mock(() => undefined);
     connectionStore.client = {
       persistResumeStateForPageHide,
@@ -259,82 +236,17 @@ describe("call page lifecycle controls", () => {
 
     suspendCallForPageHide();
 
-    expect(persistResumeStateForPageHide).toHaveBeenCalledTimes(1);
-    expect($callState.get()).toEqual({ phase: "idle" });
-  });
-
-  test("pagehide persists stream resume state for rediscovered idle DM calls", () => {
-    const persistResumeStateForPageHide = mock(() => undefined);
-    connectionStore.client = {
-      persistResumeStateForPageHide,
-    } as unknown as typeof connectionStore.client;
-    $callState.set({ phase: "idle" });
-    $dmCallActivities.set({
-      "bob@waddle.test": {
-        peerJid: "bob@waddle.test",
-        remoteFullJid: "bob@waddle.test/desktop",
-        sid: "c1",
-        media: { audio: true, video: true },
-        join,
-        state: "accepted",
-        direction: "incoming",
-        updatedAt: "2026-05-26T00:00:00.000Z",
-      },
-    });
-
-    suspendCallForPageHide();
-
-    expect(persistResumeStateForPageHide).toHaveBeenCalledTimes(1);
-    expect($callState.get()).toEqual({ phase: "idle" });
-    expect($dmCallActivities.get()["bob@waddle.test"]?.sid).toBe("c1");
-  });
-
-  test("pagehide listener ignores BFCache restores and suspends refresh unloads", () => {
-    const target = new PagehideHarness();
-    const persistResumeStateForPageHide = mock(() => undefined);
-    connectionStore.client = {
-      persistResumeStateForPageHide,
-    } as unknown as typeof connectionStore.client;
-    $callState.set({
-      phase: "active",
-      peer: "bob@waddle.test/desktop",
-      sid: "c1",
-      media: { audio: true, video: true },
-      join,
-      kind: "dm",
-    });
-
-    const disconnect = installCallPagehideSuspension(target as unknown as Window);
-    expect(target.listenerCount()).toBe(1);
-
-    target.dispatchPagehide(true);
     expect(persistResumeStateForPageHide).not.toHaveBeenCalled();
-    expect($callState.get()).toMatchObject({ phase: "active", sid: "c1" });
-
-    target.dispatchPagehide(false);
-    expect(persistResumeStateForPageHide).toHaveBeenCalledTimes(1);
     expect($callState.get()).toEqual({ phase: "idle" });
-
-    $callState.set({
-      phase: "active",
-      peer: "bob@waddle.test/desktop",
-      sid: "c2",
-      media: { audio: true, video: false },
-      join,
-      kind: "dm",
-    });
-    disconnect();
-    expect(target.listenerCount()).toBe(0);
-    target.dispatchPagehide(false);
-    expect(persistResumeStateForPageHide).toHaveBeenCalledTimes(1);
-    expect($callState.get()).toMatchObject({ phase: "active", sid: "c2" });
   });
 
-  test("CallOverlay wires the browser pagehide event to suspension, not hangup", () => {
+  test("XmppProvider owns browser pagehide suspension while CallOverlay remains a local lifecycle host", () => {
+    const provider = readFileSync(new URL("../src/components/XmppProvider.vue", import.meta.url), "utf8");
     const source = readFileSync(new URL("../src/components/calls/CallOverlay.vue", import.meta.url), "utf8");
     const unmountBlock = source.slice(source.indexOf("onBeforeUnmount(() => {"));
 
-    expect(source).toContain("installCallPagehideSuspension(window)");
+    expect(provider).toContain("installXmppPagehideLifecycle(");
+    expect(provider).toContain("suspendCallForPageHide,");
     expect(unmountBlock).toContain("void engine.disconnect();");
     expect(unmountBlock).not.toContain("tearDownActiveCall(");
   });

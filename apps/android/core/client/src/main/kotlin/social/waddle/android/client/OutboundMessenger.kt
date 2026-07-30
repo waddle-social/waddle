@@ -104,7 +104,7 @@ internal class OutboundMessenger(
                 lease,
             ) {
                 outboundQueue.enqueue(queued)
-            },
+            }
         ) {
             ActiveSession.LeaseInvocation.Stale,
             ActiveSession.LeaseInvocation.NotConnected,
