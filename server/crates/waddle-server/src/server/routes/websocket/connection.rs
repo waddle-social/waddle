@@ -2,14 +2,14 @@ use super::*;
 use super::{
     batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     cleanup::cleanup_connection_shutdown,
-    frame::handle_xmpp_frame,
+    frame::{handle_xmpp_frame, handle_xmpp_frame_with_admission},
     interpret_loop::build_interpret_deps,
     outbound::handle_outbound_stanza,
     registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
     replay::drive_interpret_loop,
     send::{close_ws_connection, send_ws_message, send_ws_text_frames},
     session_init::build_internal_server_error_stream_error,
-    state::WsConnState,
+    state::{InboundFrameTerminal, WsConnState},
     stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
     transport_xml::{
@@ -363,6 +363,8 @@ async fn handle_xmpp_websocket(
                     },
                     &mut ws_sender,
                     &mut ws_receiver,
+                    &admission_permit,
+                    &shutdown_token,
                 )
                 .await
                 {
@@ -385,6 +387,8 @@ async fn handle_xmpp_websocket(
                             },
                             &mut ws_sender,
                             &mut ws_receiver,
+                            &admission_permit,
+                            &shutdown_token,
                         )
                         .await
                         {
@@ -906,6 +910,8 @@ async fn handle_inbound_text(
     channels: RegistrationChannels<'_>,
     ws_sender: &mut SplitSink<WebSocket, Message>,
     ws_receiver: &mut SplitStream<WebSocket>,
+    admission_permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown_token: &tokio_util::sync::CancellationToken,
 ) -> bool {
     let RegistrationChannels {
         pending_tx,
@@ -917,7 +923,22 @@ async fn handle_inbound_text(
     conn.note_transport_activity();
 
     // Handle XMPP framing (RFC 7395)
-    let mut responses = handle_xmpp_frame(text, domain, state.as_ref(), conn).await;
+    let mut responses = handle_xmpp_frame_with_admission(
+        text,
+        domain,
+        state.as_ref(),
+        conn,
+        admission_permit,
+        shutdown_token,
+    )
+    .await;
+    if matches!(
+        conn.inbound_frame_terminal.take(),
+        Some(InboundFrameTerminal::AuthorityRevoked)
+    ) {
+        close_live_session_for_node_unavailable(ws_sender, conn).await;
+        return false;
+    }
 
     // Mirror any phase transition `handle_xmpp_frame` performed (most
     // importantly Ready → Closing on SASL failure / stream error)

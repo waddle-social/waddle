@@ -45,6 +45,10 @@ pub(super) enum StanzaTimeout {
     /// Dispatch was cancelled without accepting responsibility or owing a
     /// protocol response.
     Unhandled,
+    /// The exact node serving generation was revoked while dispatch was
+    /// suspended. No timeout reply is owed and XEP-0198 responsibility stays
+    /// with the sender.
+    AdmissionRevoked,
 }
 
 /// Maximum wall-clock a single stanza's dispatch may take before the backstop
@@ -251,10 +255,48 @@ pub(super) async fn run_with_backstop<F>(
 where
     F: Future<Output = Vec<String>> + Send,
 {
+    run_with_backstop_impl(backstop, dispatch, None).await
+}
+
+pub(super) async fn run_with_backstop_and_admission<F>(
+    backstop: StanzaBackstop,
+    dispatch: F,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<String>, StanzaTimeout>
+where
+    F: Future<Output = Vec<String>> + Send,
+{
+    run_with_backstop_impl(backstop, dispatch, Some((permit, shutdown))).await
+}
+
+async fn run_with_backstop_impl<F>(
+    backstop: StanzaBackstop,
+    dispatch: F,
+    admission: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) -> Result<Vec<String>, StanzaTimeout>
+where
+    F: Future<Output = Vec<String>> + Send,
+{
     let span = backstop.span.clone();
     let kind = backstop.kind;
     let started = std::time::Instant::now();
-    match tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span)).await {
+    let dispatch = tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span));
+    let result = match admission {
+        Some((permit, shutdown)) => {
+            tokio::select! {
+                biased;
+                _ = permit.revoked() => return Err(StanzaTimeout::AdmissionRevoked),
+                _ = shutdown.cancelled() => return Err(StanzaTimeout::AdmissionRevoked),
+                result = dispatch => result,
+            }
+        }
+        None => dispatch.await,
+    };
+    match result {
         Ok(responses) => {
             metrics::record_stanza(kind, "inbound");
             metrics::record_stanza_latency(started.elapsed().as_secs_f64() * 1000.0, kind);

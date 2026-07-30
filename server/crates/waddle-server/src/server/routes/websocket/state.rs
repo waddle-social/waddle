@@ -1410,6 +1410,11 @@ pub fn default_link_preview_resolve_permits() -> Arc<tokio::sync::Semaphore> {
 /// Bundles the typed lifecycle phase and the remaining transport/session
 /// adjuncts (SM state, carbons flag, suppress-SM-record flag) into a single
 /// value threaded through the frame dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InboundFrameTerminal {
+    AuthorityRevoked,
+}
+
 pub(super) struct WsConnState {
     pub(super) phase: ConnectionPhase,
     /// True once the server has answered the client's RFC 7395 `<open/>`
@@ -1425,6 +1430,9 @@ pub(super) struct WsConnState {
     /// once enabled and holds the unacked queue used for resumption.
     pub(super) sm_state: StreamManagementState,
     pub(super) sm_inbound_completion: crate::server::routes::interpret::SmInboundCompletionTracker,
+    /// Set only after a selected stanza's reserved SM slot has been settled
+    /// as unhandled because its serving generation was revoked.
+    pub(super) inbound_frame_terminal: Option<InboundFrameTerminal>,
     pub(super) ordered_relay_handoff_tx: Option<
         tokio::sync::mpsc::UnboundedSender<
             crate::server::routes::interpret::OrderedRelayHandoffCompletion,
@@ -1534,6 +1542,7 @@ impl WsConnState {
             sm_state: StreamManagementState::new(),
             sm_inbound_completion:
                 crate::server::routes::interpret::SmInboundCompletionTracker::default(),
+            inbound_frame_terminal: None,
             ordered_relay_handoff_tx: None,
             carbons_enabled: false,
             roster_interested: false,

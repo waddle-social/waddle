@@ -1,6 +1,9 @@
 use super::*;
 use super::{
-    frame_backstop::{run_with_backstop, InboundDisposition, StanzaBackstop, StanzaTimeout},
+    frame_backstop::{
+        run_with_backstop, run_with_backstop_and_admission, InboundDisposition, StanzaBackstop,
+        StanzaTimeout,
+    },
     isr_resume::handle_isr_resume_authenticate,
     parse_errors::{is_sasl_parse_failure, parse_error_responses},
     resource_binding::handle_resource_binding,
@@ -8,7 +11,7 @@ use super::{
         handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response,
         record_scram_failure,
     },
-    state::WsConnState,
+    state::{InboundFrameTerminal, WsConnState},
     stream_management::{handle_sm_stanza, SmCtx},
     transport_xml::{
         build_stream_features_for_phase, sasl_failure_xml, websocket_stream_close_xml,
@@ -24,7 +27,18 @@ pub(super) async fn handle_xmpp_frame(
     state: &WebSocketState,
     conn: &mut WsConnState,
 ) -> Vec<String> {
-    handle_xmpp_frame_impl(frame, domain, state, conn).await
+    handle_xmpp_frame_impl(frame, domain, state, conn, None).await
+}
+
+pub(super) async fn handle_xmpp_frame_with_admission(
+    frame: &str,
+    domain: &str,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Vec<String> {
+    handle_xmpp_frame_impl(frame, domain, state, conn, Some((permit, shutdown))).await
 }
 
 async fn handle_xmpp_frame_impl(
@@ -32,6 +46,10 @@ async fn handle_xmpp_frame_impl(
     domain: &str,
     state: &WebSocketState,
     conn: &mut WsConnState,
+    admission: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
 ) -> Vec<String> {
     if frame.len() > MAX_FRAME_SIZE {
         warn!(len = frame.len(), "Dropping oversized XMPP frame");
@@ -43,6 +61,7 @@ async fn handle_xmpp_frame_impl(
         authenticated_session,
         sm_state,
         sm_inbound_completion,
+        inbound_frame_terminal,
         ordered_relay_handoff_tx,
         carbons_enabled,
         presence_available,
@@ -319,12 +338,22 @@ async fn handle_xmpp_frame_impl(
                     }
                 }
             };
-            let (responses, disposition) = match run_with_backstop(backstop, dispatch).await {
+            let dispatch_result = match admission {
+                Some((permit, shutdown)) => {
+                    run_with_backstop_and_admission(backstop, dispatch, permit, shutdown).await
+                }
+                None => run_with_backstop(backstop, dispatch).await,
+            };
+            let (responses, disposition) = match dispatch_result {
                 Ok(responses) => (responses, InboundDisposition::Handled),
                 Err(StanzaTimeout::HandledIq(reply)) => {
                     (vec![element_to_xml(reply)], InboundDisposition::Handled)
                 }
                 Err(StanzaTimeout::Unhandled) => (Vec::new(), InboundDisposition::Unhandled),
+                Err(StanzaTimeout::AdmissionRevoked) => {
+                    *inbound_frame_terminal = Some(InboundFrameTerminal::AuthorityRevoked);
+                    (Vec::new(), InboundDisposition::Unhandled)
+                }
             };
             settle_inbound_dispatch(
                 disposition,
