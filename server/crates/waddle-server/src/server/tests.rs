@@ -728,10 +728,10 @@ async fn test_readyz_alias_endpoint() {
 #[tokio::test]
 async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
     let state = create_test_state().await;
-    state.node_lifecycle.begin_fenced_recovery();
-    // FIX 7(a): clone the readiness handle before `state` moves into the
-    // router below, so this test can flip it back and prove recovery on
-    // the SAME router/app instance, not just the not-ready direction.
+    // Clone the lifecycle before `state` moves into the router so this test
+    // drives the same running-node authority that the production self-fence
+    // loop changes. `create_router` finishes startup by arming critical
+    // registry supervision and transitioning `Starting` to `Serving`.
     let readiness_handle = state.node_lifecycle.clone();
     let server_config = ServerConfig::test_homeserver();
     let test_global_db = crate::db::Database::in_memory("test-mam-global")
@@ -758,6 +758,10 @@ async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
     })
     .await
     .unwrap();
+
+    // A running clustered node loses claim authority: readiness and admission
+    // must become non-serving on the already-constructed router.
+    readiness_handle.begin_fenced_recovery();
 
     let response = app
         .clone()
