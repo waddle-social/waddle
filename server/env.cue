@@ -242,7 +242,9 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
-					git diff --exit-code -- ../.gitignore ../cuenv.lock
+					cuenv sync vcs
+					cuenv sync --check -p ..
+					git -C .. diff --exit-code -- .
 				"""#]
 			inputs: [
 				"../env.cue",
@@ -256,6 +258,7 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
+					cuenv sync vcs
 					tracker=../docs/planning/switchable-alternative.md
 					test -f capabilities.toml
 					test -f ../docs/product/critical-journeys.json
