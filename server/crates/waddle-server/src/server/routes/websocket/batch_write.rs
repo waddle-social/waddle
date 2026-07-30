@@ -12,7 +12,7 @@
 //! `ack_threshold`th countable stanza with an `<r/>` (XEP-0198 §4
 //! permits requesting acks at any time).
 
-use super::send::send_ws_message;
+use super::send::{send_ws_message_with_authority, AuthoritySendOutcome};
 use super::state::WsConnState;
 use super::stream_management::{apply_sm_ack, is_countable_stanza};
 use super::*;
@@ -138,21 +138,10 @@ where
     S: Sink<Message, Error = E> + Unpin,
     E: std::fmt::Display,
 {
-    if !batch_authoritative(authority) {
-        return Err(SendWindowOutcome::AuthorityRevoked);
-    }
-    let send = send_ws_message(sender, message, failure_message);
-    tokio::pin!(send);
-    tokio::select! {
-        biased;
-        _ = batch_authority_revoked(authority) => Err(SendWindowOutcome::AuthorityRevoked),
-        sent = send.as_mut() => {
-            if sent {
-                Ok(())
-            } else {
-                Err(SendWindowOutcome::TransportClosed)
-            }
-        }
+    match send_ws_message_with_authority(sender, message, failure_message, authority).await {
+        AuthoritySendOutcome::Sent => Ok(()),
+        AuthoritySendOutcome::TransportClosed => Err(SendWindowOutcome::TransportClosed),
+        AuthoritySendOutcome::AuthorityRevoked => Err(SendWindowOutcome::AuthorityRevoked),
     }
 }
 
@@ -257,29 +246,47 @@ where
         if !batch_authoritative(authority) {
             return BatchWriteOutcome::AuthorityRevoked;
         }
-        if !send_ws_message(
+        if let Err(outcome) = send_window_message(
             sender,
             Message::Text(frame.into()),
             "Failed to send WebSocket message",
+            authority,
         )
         .await
         {
-            record_remaining_for_replay(conn, frames, policy);
-            return BatchWriteOutcome::TransportClosed;
+            return match outcome {
+                SendWindowOutcome::TransportClosed => {
+                    record_remaining_for_replay(conn, frames, policy);
+                    BatchWriteOutcome::TransportClosed
+                }
+                SendWindowOutcome::AuthorityRevoked => BatchWriteOutcome::AuthorityRevoked,
+                SendWindowOutcome::Recovered
+                | SendWindowOutcome::DeferredCapReached
+                | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
+            };
         }
         if request_ack {
             if !batch_authoritative(authority) {
                 return BatchWriteOutcome::AuthorityRevoked;
             }
-            if !send_ws_message(
+            if let Err(outcome) = send_window_message(
                 sender,
                 Message::Text(SmRequest::to_xml().into()),
                 "Failed to send SM <r/> request",
+                authority,
             )
             .await
             {
-                record_remaining_for_replay(conn, frames, policy);
-                return BatchWriteOutcome::TransportClosed;
+                return match outcome {
+                    SendWindowOutcome::TransportClosed => {
+                        record_remaining_for_replay(conn, frames, policy);
+                        BatchWriteOutcome::TransportClosed
+                    }
+                    SendWindowOutcome::AuthorityRevoked => BatchWriteOutcome::AuthorityRevoked,
+                    SendWindowOutcome::Recovered
+                    | SendWindowOutcome::DeferredCapReached
+                    | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
+                };
             }
             // Give already-arrived inbound frames a chance to land:
             // `<a/>` acks shrink the unacked queue mid-flood instead
@@ -616,14 +623,23 @@ where
                         if !batch_authoritative(authority) {
                             return DrainSignal::AuthorityRevoked;
                         }
-                        if !send_ws_message(
+                        if let Err(outcome) = send_window_message(
                             sender,
                             Message::Text(response.into()),
                             "Failed to send SM ack stream error",
+                            authority,
                         )
                         .await
                         {
-                            return DrainSignal::TransportClosed;
+                            return match outcome {
+                                SendWindowOutcome::TransportClosed => DrainSignal::TransportClosed,
+                                SendWindowOutcome::AuthorityRevoked => {
+                                    DrainSignal::AuthorityRevoked
+                                }
+                                SendWindowOutcome::Recovered
+                                | SendWindowOutcome::DeferredCapReached
+                                | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
+                            };
                         }
                     }
                     if conn.phase.is_closing() {
@@ -635,8 +651,21 @@ where
             }
             Some(Ok(Message::Ping(data))) => {
                 conn.note_transport_activity();
-                if !send_ws_message(sender, Message::Pong(data), "Failed to send pong").await {
-                    return DrainSignal::TransportClosed;
+                if let Err(outcome) = send_window_message(
+                    sender,
+                    Message::Pong(data),
+                    "Failed to send pong",
+                    authority,
+                )
+                .await
+                {
+                    return match outcome {
+                        SendWindowOutcome::TransportClosed => DrainSignal::TransportClosed,
+                        SendWindowOutcome::AuthorityRevoked => DrainSignal::AuthorityRevoked,
+                        SendWindowOutcome::Recovered
+                        | SendWindowOutcome::DeferredCapReached
+                        | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
+                    };
                 }
             }
             Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_))) => {

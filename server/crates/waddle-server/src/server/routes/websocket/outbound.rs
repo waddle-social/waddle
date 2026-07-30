@@ -6,7 +6,7 @@ use super::{
     frame::ordered_relay_origin_from_sm,
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
-    send::send_ws_message,
+    send::{send_ws_message_with_authority, AuthoritySendOutcome},
     state::WsConnState,
     stream_management::is_countable_stanza,
     timers::TransportTimers,
@@ -118,12 +118,19 @@ where
             if !authoritative() {
                 return false;
             }
-            let sent = send_ws_message(
+            let sent = match send_ws_message_with_authority(
                 sender,
                 Message::Text(xml.into()),
                 "Failed to send outbound stanza",
+                Some((permit, shutdown)),
             )
-            .await;
+            .await
+            {
+                AuthoritySendOutcome::Sent => true,
+                AuthoritySendOutcome::TransportClosed | AuthoritySendOutcome::AuthorityRevoked => {
+                    return false;
+                }
+            };
             // SM cadence: when `record_outbound` flagged the threshold,
             // follow the just-written stanza with an `<r/>` so the
             // client knows to send `<a h='N'/>`. The wasm client never
@@ -133,13 +140,16 @@ where
                 if !authoritative() {
                     return false;
                 }
-                if !send_ws_message(
-                    sender,
-                    Message::Text(SmRequest::to_xml().into()),
-                    "Failed to send SM <r/> request",
-                )
-                .await
-                {
+                if !matches!(
+                    send_ws_message_with_authority(
+                        sender,
+                        Message::Text(SmRequest::to_xml().into()),
+                        "Failed to send SM <r/> request",
+                        Some((permit, shutdown)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
                     return false;
                 }
             }
@@ -177,13 +187,16 @@ where
                 if !authoritative() {
                     return false;
                 }
-                if !send_ws_message(
-                    sender,
-                    Message::Ping(axum::body::Bytes::new()),
-                    "Failed to send keepalive ping",
-                )
-                .await
-                {
+                if !matches!(
+                    send_ws_message_with_authority(
+                        sender,
+                        Message::Ping(axum::body::Bytes::new()),
+                        "Failed to send keepalive ping",
+                        Some((permit, shutdown)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
                     return false;
                 }
             }

@@ -1,5 +1,16 @@
 use super::*;
 
+/// Result of a WebSocket write that is bound to one admitted node generation.
+///
+/// `start_send` is the transport commit point: once it has run under a valid
+/// permit, a later lifecycle transition cannot retract the frame from the
+/// sink. Before that point, revocation must suppress the write entirely.
+pub(super) enum AuthoritySendOutcome {
+    Sent,
+    TransportClosed,
+    AuthorityRevoked,
+}
+
 /// Upper bound for a single WebSocket send (including the flush that
 /// `SinkExt::send` forces through to the socket).
 ///
@@ -57,6 +68,94 @@ where
                  treating connection as dead: {failure_message}"
             );
             false
+        }
+    }
+}
+
+/// Send one frame only while the admitting node generation remains
+/// authoritative.
+///
+/// A `SinkExt::send` future combines readiness, `start_send`, and flushing.
+/// That is too coarse for a generation fence: a revocation can occur while
+/// `poll_ready` is parked, and a later poll of that future would otherwise run
+/// `start_send` before the caller can observe cancellation. Keep readiness
+/// cancellable, then revalidate immediately before the synchronous
+/// `start_send` commit. Once committed, finish flushing normally; the frame
+/// was already legitimately accepted by the transport.
+pub(super) async fn send_ws_message_with_authority<S, E>(
+    sender: &mut S,
+    message: Message,
+    failure_message: &'static str,
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) -> AuthoritySendOutcome
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    let authoritative = || {
+        authority.is_none_or(|(permit, shutdown)| {
+            !shutdown.is_cancelled() && permit.revalidate().is_ok()
+        })
+    };
+    if !authoritative() {
+        return AuthoritySendOutcome::AuthorityRevoked;
+    }
+
+    let ready = sender.ready();
+    tokio::pin!(ready);
+    let ready_result = match authority {
+        Some((permit, shutdown)) => tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return AuthoritySendOutcome::AuthorityRevoked,
+            _ = permit.revoked() => return AuthoritySendOutcome::AuthorityRevoked,
+            result = tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()) => result,
+        },
+        None => tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()).await,
+    };
+    match ready_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            error!(error = %error, "{failure_message}");
+            return AuthoritySendOutcome::TransportClosed;
+        }
+        Err(_elapsed) => {
+            error!(
+                stall_timeout_secs = SEND_STALL_TIMEOUT.as_secs(),
+                "WebSocket send stalled past the write budget (peer not draining); \\
+                 treating connection as dead: {failure_message}"
+            );
+            return AuthoritySendOutcome::TransportClosed;
+        }
+    }
+    drop(ready);
+
+    // `poll_ready` may have parked while the generation was revoked, then
+    // returned Ready in the same poll that wakes this task. This is the last
+    // point at which the pending frame can still be suppressed.
+    if !authoritative() {
+        return AuthoritySendOutcome::AuthorityRevoked;
+    }
+    if let Err(error) = std::pin::Pin::new(sender).start_send(message) {
+        error!(error = %error, "{failure_message}");
+        return AuthoritySendOutcome::TransportClosed;
+    }
+
+    match tokio::time::timeout(SEND_STALL_TIMEOUT, sender.flush()).await {
+        Ok(Ok(())) => AuthoritySendOutcome::Sent,
+        Ok(Err(error)) => {
+            error!(error = %error, "{failure_message}");
+            AuthoritySendOutcome::TransportClosed
+        }
+        Err(_elapsed) => {
+            error!(
+                stall_timeout_secs = SEND_STALL_TIMEOUT.as_secs(),
+                "WebSocket send stalled past the write budget (peer not draining); \\
+                 treating connection as dead: {failure_message}"
+            );
+            AuthoritySendOutcome::TransportClosed
         }
     }
 }

@@ -63,6 +63,17 @@ struct RevokeAfterFirstSink {
     lifecycle: crate::clustering::NodeLifecycle,
 }
 
+/// Returns Ready only after it revokes the admitted generation. This models
+/// the critical readiness race: the task was parked in `poll_ready`, the
+/// lifecycle changed, and a later poll would otherwise call `start_send` in
+/// the same `SinkExt::send` poll before its caller observes cancellation.
+struct RevokeOnReadySink {
+    sent: Vec<Message>,
+    lifecycle: crate::clustering::NodeLifecycle,
+    revoke_on_ready_call: usize,
+    ready_calls: usize,
+}
+
 #[derive(Default)]
 struct BackpressuredAfterEightSink {
     committed: Vec<Message>,
@@ -117,6 +128,34 @@ impl Sink<Message> for RevokeAfterFirstSink {
     }
 }
 
+impl Sink<Message> for RevokeOnReadySink {
+    type Error = Infallible;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.ready_calls += 1;
+        if self.ready_calls == self.revoke_on_ready_call {
+            self.lifecycle.begin_fenced_recovery();
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.sent.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 #[tokio::test]
 async fn authority_revocation_stops_batch_before_next_record_or_write() {
     let state = create_test_websocket_state().await;
@@ -150,6 +189,141 @@ async fn authority_revocation_stops_batch_before_next_record_or_write() {
     assert_eq!(sink.sent.len(), 1);
     assert_eq!(conn.sm_state.outbound_count, 1);
     assert_eq!(conn.sm_state.queue_len(), 1);
+}
+
+#[tokio::test]
+async fn ready_revocation_suppresses_the_normal_batch_frame_before_start_send() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("ready-revoked-frame".to_string(), true, Some(300));
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        revoke_on_ready_call: 1,
+        ready_calls: 0,
+    };
+    let mut reader = reader_with(vec![]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![countable_message(1)],
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert!(
+        sink.sent.is_empty(),
+        "revoked frame must not reach start_send"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, 1,
+        "the frame stays replayable"
+    );
+}
+
+#[tokio::test]
+async fn ready_revocation_suppresses_the_cadence_request_before_start_send() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("ready-revoked-cadence".to_string(), true, Some(300));
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        // Five countable stanzas commit first; the sixth send is the XEP-0198
+        // cadence `<r/>` that must be suppressed.
+        revoke_on_ready_call: 6,
+        ready_calls: 0,
+    };
+    let mut reader = reader_with(vec![]);
+    let frames: Vec<String> = (1..=5).map(countable_message).collect();
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(sink.sent.len(), 5, "the stale `<r/>` must not commit");
+    assert!(sink
+        .sent
+        .iter()
+        .filter_map(|message| match message {
+            Message::Text(text) => Some(text),
+            _ => None,
+        })
+        .all(|text| text.as_str() != SmRequest::to_xml()));
+}
+
+#[tokio::test]
+async fn ready_revocation_suppresses_the_mid_batch_drain_response_before_start_send() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("ready-revoked-drain".to_string(), true, Some(300));
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        // Five stanzas plus their `<r/>` are valid. The bogus ack produces a
+        // handled-count-too-high error in the mid-batch drain; suppress that
+        // response if its readiness poll observes the new generation.
+        revoke_on_ready_call: 7,
+        ready_calls: 0,
+    };
+    let mut reader = ScriptedReader::new(vec![Some(ack_frame(999))]);
+    let frames: Vec<String> = (1..=5).map(countable_message).collect();
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(
+        sink.sent.len(),
+        6,
+        "the stale drain response must not commit"
+    );
+    assert!(sink.sent.iter().all(|message| match message {
+        Message::Text(text) => !text.to_string().contains("handled-count-too-high"),
+        _ => true,
+    }));
 }
 
 impl Sink<Message> for CollectSink {

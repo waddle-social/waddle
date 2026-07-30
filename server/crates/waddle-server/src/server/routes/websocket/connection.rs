@@ -9,7 +9,10 @@ use super::{
     outbound::{handle_outbound_stanza, OutboundAuthority},
     registration::{register_bound_connection_after_frame_with_admission, RegistrationAfterFrame},
     replay::drive_interpret_loop,
-    send::{close_ws_connection, send_ws_message, send_ws_text_frames},
+    send::{
+        close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
+        AuthoritySendOutcome,
+    },
     session_init::build_internal_server_error_stream_error,
     state::{InboundFrameTerminal, WsConnState},
     stream_management::SmRegistrationFinalization,
@@ -310,13 +313,16 @@ async fn handle_xmpp_websocket(
                     close_live_session_for_node_unavailable(&mut ws_sender, &conn).await;
                     break;
                 }
-                if !send_ws_message(
-                    &mut ws_sender,
-                    Message::Text(SmRequest::to_xml().into()),
-                    "Failed to send SM <r/> at send-window loop pause",
-                )
-                .await
-                {
+                if !matches!(
+                    send_ws_message_with_authority(
+                        &mut ws_sender,
+                        Message::Text(SmRequest::to_xml().into()),
+                        "Failed to send SM <r/> at send-window loop pause",
+                        Some((&admission_permit, &shutdown_token)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
                     break;
                 }
             }
@@ -426,9 +432,16 @@ async fn handle_xmpp_websocket(
                     }
                     Some(Ok(Message::Ping(data))) => {
                         conn.note_transport_activity();
-                        if !send_ws_message(&mut ws_sender, Message::Pong(data), "Failed to send pong")
-                            .await
-                        {
+                        if !matches!(
+                            send_ws_message_with_authority(
+                                &mut ws_sender,
+                                Message::Pong(data),
+                                "Failed to send pong",
+                                Some((&admission_permit, &shutdown_token)),
+                            )
+                            .await,
+                            AuthoritySendOutcome::Sent
+                        ) {
                             break;
                         }
                     }
@@ -613,13 +626,16 @@ async fn handle_xmpp_websocket(
                 }
                 let mut ping_send_failed = false;
                 for _ in 0..drive.keepalive_probes {
-                    if !send_ws_message(
-                        &mut ws_sender,
-                        Message::Ping(axum::body::Bytes::new()),
-                        "Failed to send keepalive ping",
-                    )
-                    .await
-                    {
+                    if !matches!(
+                        send_ws_message_with_authority(
+                            &mut ws_sender,
+                            Message::Ping(axum::body::Bytes::new()),
+                            "Failed to send keepalive ping",
+                            Some((&admission_permit, &shutdown_token)),
+                        )
+                        .await,
+                        AuthoritySendOutcome::Sent
+                    ) {
                         ping_send_failed = true;
                         break;
                     }
