@@ -45,6 +45,21 @@ pub(super) enum StanzaTimeout {
     /// Dispatch was cancelled without accepting responsibility or owing a
     /// protocol response.
     Unhandled,
+    /// The exact node serving generation was revoked while dispatch was
+    /// suspended. No timeout reply is owed and XEP-0198 responsibility stays
+    /// with the sender.
+    AdmissionRevoked,
+}
+
+/// Completion from an admission-fenced dispatch.
+///
+/// Once admission has allowed a handler to start, it may commit durable or
+/// external effects before its next suspension point. A later lifecycle
+/// transition therefore fences the transport response, but cannot turn the
+/// dispatch result back into an unhandled stanza.
+pub(super) struct AdmissionDispatchResult {
+    pub(super) result: Result<Vec<String>, StanzaTimeout>,
+    pub(super) authority_revoked_after_start: bool,
 }
 
 /// Maximum wall-clock a single stanza's dispatch may take before the backstop
@@ -251,16 +266,73 @@ pub(super) async fn run_with_backstop<F>(
 where
     F: Future<Output = Vec<String>> + Send,
 {
+    run_with_backstop_impl(backstop, dispatch, None)
+        .await
+        .result
+}
+
+pub(super) async fn run_with_backstop_and_admission<F>(
+    backstop: StanzaBackstop,
+    dispatch: F,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> AdmissionDispatchResult
+where
+    F: Future<Output = Vec<String>> + Send,
+{
+    run_with_backstop_impl(backstop, dispatch, Some((permit, shutdown))).await
+}
+
+async fn run_with_backstop_impl<F>(
+    backstop: StanzaBackstop,
+    dispatch: F,
+    admission: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) -> AdmissionDispatchResult
+where
+    F: Future<Output = Vec<String>> + Send,
+{
+    // This check is the responsibility boundary. It happens immediately
+    // before dispatch: a revoked generation never starts a new handler,
+    // while an admitted handler runs to the existing bounded backstop.
+    // Cancelling an admitted handler on revocation can replay a stanza whose
+    // durable/external effect already committed.
+    if admission
+        .is_some_and(|(permit, shutdown)| shutdown.is_cancelled() || permit.revalidate().is_err())
+    {
+        return AdmissionDispatchResult {
+            result: Err(StanzaTimeout::AdmissionRevoked),
+            authority_revoked_after_start: false,
+        };
+    }
     let span = backstop.span.clone();
     let kind = backstop.kind;
     let started = std::time::Instant::now();
-    match tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span)).await {
+    let dispatch = tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span));
+    let result = dispatch.await;
+    let authority_revoked_after_start = admission
+        .is_some_and(|(permit, shutdown)| shutdown.is_cancelled() || permit.revalidate().is_err());
+    let result = match result {
         Ok(responses) => {
             metrics::record_stanza(kind, "inbound");
             metrics::record_stanza_latency(started.elapsed().as_secs_f64() * 1000.0, kind);
             Ok(responses)
         }
         Err(_elapsed) => Err(backstop.on_timeout()),
+    };
+    let result = if authority_revoked_after_start {
+        match result {
+            Ok(_) | Err(StanzaTimeout::HandledIq(_)) => Ok(Vec::new()),
+            Err(timeout) => Err(timeout),
+        }
+    } else {
+        result
+    };
+    AdmissionDispatchResult {
+        result,
+        authority_revoked_after_start,
     }
 }
 

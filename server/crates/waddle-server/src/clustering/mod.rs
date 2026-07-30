@@ -159,40 +159,227 @@ pub(crate) fn keypair_slot_table_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Shared client-facing HTTP readiness signal for the clustering control
-/// plane (ADR-0017 element 4, Phase 3 Slice 2): flipped to not-ready the
-/// instant a node self-fences (node-lease heartbeat CAS returns zero rows,
-/// or Postgres is unreachable past the lease deadline) and back to ready
-/// only once the node has re-registered under a fresh `node_id`/
-/// `node_epoch` and satisfied the re-acquisition hysteresis gate. Cloning
-/// shares the same underlying flag (cheap `Arc` clone).
+/// Critical local services whose unexpected death makes actor ownership and
+/// socket admission unsafe in every runtime mode. These are typed operational
+/// causes, not XMPP payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CriticalNodeFailure {
+    RoomRegistryTerminated,
+    UserRegistryTerminated,
+}
+
+/// The single authority for client admission on this node.
 ///
-/// Unconditionally compiled (no `clustering` feature gate) so `AppState`
-/// and the `/ready`/`/readyz` handlers can hold one field regardless of
-/// build: a non-clustering deployment (or a `clustering`-feature build with
-/// `clustering.enabled = false`) never flips it, so it stays ready forever
-/// — today's behavior, unchanged.
+/// A physical WebSocket remains local, but it may be admitted only while the
+/// node can safely own the logical work behind it. Keeping readiness and the
+/// upgrade gate on this same state prevents a fenced node from becoming
+/// `/ready`-healthy while still accepting a new socket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeAdmission {
+    Starting,
+    Serving,
+    Draining,
+    FencedRecovering,
+    Failed(CriticalNodeFailure),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodeAdmissionGeneration(u64);
+
+impl NodeAdmissionGeneration {
+    fn next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NodeLifecycleState {
+    admission: NodeAdmission,
+    generation: NodeAdmissionGeneration,
+    generation_revoked: CancellationToken,
+}
+
+/// A successful admission decision for one socket upgrade, bound to the
+/// exact serving generation that issued it. Any lifecycle transition revokes
+/// the permit, including a fence followed by recovery back to `Serving`.
+#[derive(Debug)]
+pub struct NodeAdmissionPermit {
+    state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
+    generation: NodeAdmissionGeneration,
+    generation_revoked: CancellationToken,
+}
+
+impl NodeAdmissionPermit {
+    /// Revalidate at the last safe pre-upgrade boundary. This deliberately
+    /// takes only a short read lock: fencing/readiness transitions must never
+    /// wait for an HTTP/WebSocket handshake.
+    pub fn revalidate(&self) -> Result<(), NodeAdmissionError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(state.admission, NodeAdmission::Serving) {
+            return Err(NodeAdmissionError::NotServing(state.admission.clone()));
+        }
+        if state.generation != self.generation {
+            return Err(NodeAdmissionError::Revoked);
+        }
+        Ok(())
+    }
+
+    /// Resolve as soon as the lifecycle leaves the exact serving generation
+    /// that admitted this socket. The token stays cancelled after recovery,
+    /// so an old transport can never become authoritative again.
+    pub async fn revoked(&self) {
+        self.generation_revoked.cancelled().await;
+    }
+}
+
+/// Why an HTTP/XMPP connection was not admitted.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum NodeAdmissionError {
+    #[error("node is not accepting connections: {0:?}")]
+    NotServing(NodeAdmission),
+    #[error("node admission permit was revoked by a lifecycle transition")]
+    Revoked,
+}
+
+/// Result of the one startup-only promotion attempted after every critical
+/// registry supervisor is armed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupServingTransition {
+    Promoted,
+    AlreadyServing,
+    Blocked(NodeAdmission),
+}
+
+/// Cloneable lifecycle state shared by readiness, socket admission, and the
+/// clustered fencing workers. `fatal_fence` is retained as the bridge to the
+/// existing bounded claim-drain machinery; its terminal state is represented
+/// here rather than by a separate readiness boolean.
 #[derive(Clone)]
-pub struct ClusteringReadiness {
-    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+pub struct NodeLifecycle {
+    state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     fatal_fence: CancellationToken,
 }
 
-impl ClusteringReadiness {
+impl NodeLifecycle {
+    /// Existing single-node/test callers start in their historical serving
+    /// state. Production startup uses [`Self::starting`] until all critical
+    /// services and routes are constructed.
     pub fn new() -> Self {
+        Self::with_admission(NodeAdmission::Serving)
+    }
+
+    pub fn starting() -> Self {
+        Self::with_admission(NodeAdmission::Starting)
+    }
+
+    fn with_admission(admission: NodeAdmission) -> Self {
         Self {
-            ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            state: std::sync::Arc::new(std::sync::RwLock::new(NodeLifecycleState {
+                admission,
+                generation: NodeAdmissionGeneration(0),
+                generation_revoked: CancellationToken::new(),
+            })),
             fatal_fence: CancellationToken::new(),
         }
     }
 
-    pub fn is_ready(&self) -> bool {
-        self.ready.load(std::sync::atomic::Ordering::Acquire) && !self.fatal_fence.is_cancelled()
+    pub fn admission(&self) -> NodeAdmission {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .admission
+            .clone()
     }
 
-    pub fn set_ready(&self, ready: bool) {
-        self.ready
-            .store(ready, std::sync::atomic::Ordering::Release);
+    pub fn admit(&self) -> Result<NodeAdmissionPermit, NodeAdmissionError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.admission {
+            NodeAdmission::Serving => Ok(NodeAdmissionPermit {
+                state: std::sync::Arc::clone(&self.state),
+                generation: state.generation,
+                generation_revoked: state.generation_revoked.clone(),
+            }),
+            _ => Err(NodeAdmissionError::NotServing(state.admission.clone())),
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(self.admission(), NodeAdmission::Serving)
+    }
+
+    pub fn serve(&self) {
+        self.transition_nonterminal(NodeAdmission::Serving);
+    }
+
+    /// Complete startup only if no fence/drain/failure won the race while
+    /// the HTTP graph was being constructed. Recovery is intentionally a
+    /// separate explicit [`Self::serve`] call after the node re-registers.
+    pub fn finish_startup(&self) -> StartupServingTransition {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.admission {
+            NodeAdmission::Starting => {
+                state.generation_revoked.cancel();
+                state.admission = NodeAdmission::Serving;
+                state.generation = state.generation.next();
+                state.generation_revoked = CancellationToken::new();
+                StartupServingTransition::Promoted
+            }
+            NodeAdmission::Serving => StartupServingTransition::AlreadyServing,
+            _ => StartupServingTransition::Blocked(state.admission.clone()),
+        }
+    }
+
+    pub fn begin_drain(&self) {
+        self.transition_nonterminal(NodeAdmission::Draining);
+    }
+
+    pub fn begin_fenced_recovery(&self) {
+        self.transition_nonterminal(NodeAdmission::FencedRecovering);
+    }
+
+    pub fn fail(&self, failure: CriticalNodeFailure) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next = NodeAdmission::Failed(failure);
+        if state.admission != next {
+            state.generation_revoked.cancel();
+            state.admission = next;
+            state.generation = state.generation.next();
+            state.generation_revoked = CancellationToken::new();
+        }
+        drop(state);
+        self.fatal_fence.cancel();
+    }
+
+    pub fn critical_failure(&self) -> Option<CriticalNodeFailure> {
+        match self.admission() {
+            NodeAdmission::Failed(failure) => Some(failure),
+            _ => None,
+        }
+    }
+
+    fn transition_nonterminal(&self, next: NodeAdmission) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(state.admission, NodeAdmission::Failed(_)) && state.admission != next {
+            state.generation_revoked.cancel();
+            state.admission = next;
+            state.generation = state.generation.next();
+            state.generation_revoked = CancellationToken::new();
+        }
     }
 
     #[cfg(any(test, feature = "clustering"))]
@@ -201,7 +388,7 @@ impl ClusteringReadiness {
     }
 }
 
-impl Default for ClusteringReadiness {
+impl Default for NodeLifecycle {
     fn default() -> Self {
         Self::new()
     }
@@ -209,16 +396,111 @@ impl Default for ClusteringReadiness {
 
 #[cfg(test)]
 mod readiness_tests {
-    use super::ClusteringReadiness;
+    use super::{
+        CriticalNodeFailure, NodeAdmission, NodeAdmissionError, NodeLifecycle,
+        StartupServingTransition,
+    };
 
     #[test]
-    fn fatal_latch_immediately_overrides_a_ready_flag() {
-        let readiness = ClusteringReadiness::new();
-        assert!(readiness.is_ready());
-        readiness.fatal_fence_token().cancel();
-        assert!(!readiness.is_ready());
-        readiness.set_ready(true);
-        assert!(!readiness.is_ready());
+    fn failed_latch_overrides_every_later_nonterminal_transition() {
+        let lifecycle = NodeLifecycle::starting();
+        lifecycle.fail(CriticalNodeFailure::RoomRegistryTerminated);
+        lifecycle.serve();
+        lifecycle.begin_drain();
+        lifecycle.serve();
+        assert_eq!(
+            lifecycle.admission(),
+            NodeAdmission::Failed(CriticalNodeFailure::RoomRegistryTerminated)
+        );
+        assert!(!lifecycle.is_ready());
+    }
+
+    #[test]
+    fn only_serving_nodes_issue_admission_permits() {
+        let lifecycle = NodeLifecycle::starting();
+        assert!(lifecycle.admit().is_err());
+        lifecycle.serve();
+        let permit = lifecycle.admit().expect("serving permit");
+        assert!(permit.revalidate().is_ok());
+        lifecycle.begin_fenced_recovery();
+        assert!(lifecycle.admit().is_err());
+        assert_eq!(
+            permit.revalidate(),
+            Err(NodeAdmissionError::NotServing(
+                NodeAdmission::FencedRecovering
+            ))
+        );
+
+        lifecycle.serve();
+        assert_eq!(permit.revalidate(), Err(NodeAdmissionError::Revoked));
+        assert!(lifecycle
+            .admit()
+            .expect("recovered serving permit")
+            .revalidate()
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn old_generation_revocation_stays_latched_after_recovery() {
+        let lifecycle = NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+
+        lifecycle.begin_fenced_recovery();
+        lifecycle.serve();
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), permit.revoked())
+            .await
+            .expect("old permit must remain revoked after recovery");
+        assert_eq!(permit.revalidate(), Err(NodeAdmissionError::Revoked));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_revocation_wins_over_ready_socket_work() {
+        let lifecycle = NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        lifecycle.begin_fenced_recovery();
+        let mut dispatched = false;
+
+        tokio::select! {
+            biased;
+            _ = permit.revoked() => {}
+            _ = std::future::ready(()) => dispatched = true,
+        }
+
+        assert!(
+            !dispatched,
+            "no stanza may dispatch after generation revocation"
+        );
+    }
+
+    #[test]
+    fn startup_promotion_cannot_overwrite_fencing_or_failure() {
+        let lifecycle = NodeLifecycle::starting();
+        assert_eq!(
+            lifecycle.finish_startup(),
+            StartupServingTransition::Promoted
+        );
+        assert_eq!(
+            lifecycle.finish_startup(),
+            StartupServingTransition::AlreadyServing
+        );
+
+        let fenced = NodeLifecycle::starting();
+        fenced.begin_fenced_recovery();
+        assert_eq!(
+            fenced.finish_startup(),
+            StartupServingTransition::Blocked(NodeAdmission::FencedRecovering)
+        );
+        assert_eq!(fenced.admission(), NodeAdmission::FencedRecovering);
+
+        let failed = NodeLifecycle::starting();
+        failed.fail(CriticalNodeFailure::UserRegistryTerminated);
+        assert_eq!(
+            failed.finish_startup(),
+            StartupServingTransition::Blocked(NodeAdmission::Failed(
+                CriticalNodeFailure::UserRegistryTerminated
+            ))
+        );
     }
 }
 
@@ -597,7 +879,7 @@ pub async fn start_if_enabled(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: &CancellationToken,
-    readiness: ClusteringReadiness,
+    readiness: NodeLifecycle,
 ) -> Result<(ClusteringHandles, ClusteringShutdown), ClusteringError> {
     if !config.enabled {
         return Ok((ClusteringHandles::default(), ClusteringShutdown(None)));

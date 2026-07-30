@@ -12,10 +12,10 @@ use crate::server::routes::websocket::{
     ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 use crate::server::session_janitors::{
-    spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor,
-    spawn_orphan_reaper_janitor, spawn_pending_delivery_claim_janitor,
-    spawn_push_service_publish_job_janitor, spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
-    spawn_user_actor_reaper,
+    spawn_auth_state_janitor, spawn_critical_registry_supervisor, spawn_graceful_shutdown_drain,
+    spawn_notification_outbox_janitor, spawn_orphan_reaper_janitor,
+    spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
+    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
@@ -24,6 +24,7 @@ use anyhow::Result;
 use axum::{middleware, routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use sqlx::sqlite::SqliteConnectOptions;
+use std::future::IntoFuture as _;
 use std::str::FromStr;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
@@ -55,6 +56,26 @@ pub(crate) struct HttpServerDeps {
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
 }
 
+const HTTP_FORCED_EXIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn await_http_server_or_forced_exit<F, T>(
+    server: F,
+    stop_token: tokio_util::sync::CancellationToken,
+    drain_timeout: std::time::Duration,
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::pin!(server);
+    tokio::select! {
+        result = server.as_mut() => Some(result),
+        _ = async {
+            stop_token.cancelled().await;
+            tokio::time::sleep(drain_timeout + HTTP_FORCED_EXIT_MARGIN).await;
+        } => None,
+    }
+}
+
 /// Start the HTTP server with graceful shutdown support.
 pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     let HttpServerDeps {
@@ -70,6 +91,8 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
+    let force_stop_token = stop_token.clone();
+    let drain_timeout = shutdown_handle.drain_timeout();
     let app = create_router(RouterDeps {
         state,
         server_config,
@@ -93,14 +116,33 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         }
     }
 
-    axum::serve(listener, app)
+    let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stop_token.cancelled().await;
             info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
-            drain_complete.notified().await;
-            info!("HTTP server: SM drain complete; draining connections");
+            if tokio::time::timeout(drain_timeout, drain_complete.notified())
+                .await
+                .is_err()
+            {
+                warn!(
+                    timeout_secs = drain_timeout.as_secs(),
+                    "HTTP server: SM drain notification timed out; forcing connection drain"
+                );
+            } else {
+                info!("HTTP server: SM drain complete; draining connections");
+            }
         })
-        .await?;
+        .into_future();
+    match await_http_server_or_forced_exit(server, force_stop_token, drain_timeout).await {
+        Some(result) => result?,
+        None => {
+            warn!(
+                timeout_secs = drain_timeout.as_secs(),
+                margin_secs = HTTP_FORCED_EXIT_MARGIN.as_secs(),
+                "HTTP graceful shutdown exceeded its absolute deadline; terminating remaining connection tasks"
+            );
+        }
+    }
 
     Ok(())
 }
@@ -287,6 +329,22 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         });
     }
 
+    spawn_critical_registry_supervisor(&websocket_state).await;
+    // Both critical registries now have lifetime supervision. Only after
+    // that fence is armed may a node still in `Starting` transition to
+    // `Serving`. A lease fence/drain/failure that won during slow startup
+    // remains authoritative until its own recovery path explicitly serves.
+    if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
+        .deps
+        .app_state
+        .node_lifecycle
+        .finish_startup()
+    {
+        warn!(
+            ?admission,
+            "HTTP graph completed after node admission left Starting; preserving non-serving state"
+        );
+    }
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_orphan_reaper_janitor(
         &websocket_state,
@@ -1201,4 +1259,37 @@ fn env_flag(key: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod shutdown_bound_tests {
+    use super::await_http_server_or_forced_exit;
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_connection_work_cannot_outlive_http_shutdown_deadline() {
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+
+        let outcome = await_http_server_or_forced_exit(
+            std::future::pending::<()>(),
+            stop,
+            std::time::Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_http_server_wins_before_forced_exit() {
+        let stop = tokio_util::sync::CancellationToken::new();
+        let outcome = await_http_server_or_forced_exit(
+            std::future::ready(7_u8),
+            stop,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+        assert_eq!(outcome, Some(7));
+    }
 }

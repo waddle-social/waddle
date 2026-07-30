@@ -1410,14 +1410,36 @@ pub fn default_link_preview_resolve_permits() -> Arc<tokio::sync::Semaphore> {
 /// Bundles the typed lifecycle phase and the remaining transport/session
 /// adjuncts (SM state, carbons flag, suppress-SM-record flag) into a single
 /// value threaded through the frame dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InboundFrameTerminal {
+    AuthorityRevoked,
+}
+
+/// Transport certainty for the server's RFC 7395 `<open/>` response.
+///
+/// The frame dispatcher handles a client `<open/>` before the batch writer
+/// reaches the socket, so lifecycle logic must distinguish that semantic fact
+/// from the conservative fact that the entire authority-aware response batch
+/// reached its wire commit point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum StreamOpenWireState {
+    #[default]
+    NotCommitted,
+    PendingResponse,
+    Committed,
+}
+
 pub(super) struct WsConnState {
     pub(super) phase: ConnectionPhase,
-    /// True once the server has answered the client's RFC 7395 `<open/>`
-    /// with its own `<open/>` response. Gates the graceful-shutdown
-    /// stream error (issue #1091): RFC 6120 §4.9.1.2 forbids sending a
-    /// stream error before the response stream header, so a connection
-    /// still in the upgrade-to-open gap is closed at the WS layer only.
-    pub(super) stream_open_sent: bool,
+    /// Semantic state: the frame dispatcher has handled the client's current
+    /// RFC 7395 `<open/>`. This resets on an actual XMPP stream close or
+    /// restart, independently from lifecycle revocation.
+    pub(super) stream_open_handled: bool,
+    /// Conservative transport state for the current server `<open/>` response.
+    /// `Committed` is reached only after its entire authority-aware batch
+    /// returns `Continue`; lifecycle close uses this state to decide whether a
+    /// stream error is legal to send.
+    pub(super) stream_open_wire_state: StreamOpenWireState,
     /// The authenticated backend Session for this connection, if any.
     /// Populated on SASL success and used for SM resume/detach.
     pub(super) authenticated_session: Option<Session>,
@@ -1425,6 +1447,9 @@ pub(super) struct WsConnState {
     /// once enabled and holds the unacked queue used for resumption.
     pub(super) sm_state: StreamManagementState,
     pub(super) sm_inbound_completion: crate::server::routes::interpret::SmInboundCompletionTracker,
+    /// Set only after a selected stanza's reserved SM slot has been settled
+    /// as unhandled because its serving generation was revoked.
+    pub(super) inbound_frame_terminal: Option<InboundFrameTerminal>,
     pub(super) ordered_relay_handoff_tx: Option<
         tokio::sync::mpsc::UnboundedSender<
             crate::server::routes::interpret::OrderedRelayHandoffCompletion,
@@ -1458,6 +1483,9 @@ pub(super) struct WsConnState {
     /// registered, closing the take-before-register fanout gap.
     pub(super) pending_resume_stream_id: Option<String>,
     pub(super) pending_resume_h: Option<u32>,
+    #[cfg(test)]
+    pub(super) post_sm_finalization_test_hook:
+        Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// One-shot flag: when set, the main loop must NOT push the current
@@ -1529,11 +1557,13 @@ impl WsConnState {
     pub(super) fn new() -> Self {
         Self {
             phase: ConnectionPhase::new(),
-            stream_open_sent: false,
+            stream_open_handled: false,
+            stream_open_wire_state: StreamOpenWireState::NotCommitted,
             authenticated_session: None,
             sm_state: StreamManagementState::new(),
             sm_inbound_completion:
                 crate::server::routes::interpret::SmInboundCompletionTracker::default(),
+            inbound_frame_terminal: None,
             ordered_relay_handoff_tx: None,
             carbons_enabled: false,
             roster_interested: false,
@@ -1546,6 +1576,8 @@ impl WsConnState {
             pending_subscribes_flushed: false,
             pending_resume_stream_id: None,
             pending_resume_h: None,
+            #[cfg(test)]
+            post_sm_finalization_test_hook: None,
             registry_owner: None,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
@@ -1556,6 +1588,39 @@ impl WsConnState {
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }
+    }
+
+    /// Start the semantic handling of a typed client `<open/>` frame.
+    ///
+    /// The server response has not passed through the authority-aware writer
+    /// yet, so this deliberately removes the previous stream's wire proof.
+    pub(super) fn begin_server_stream_open_response(&mut self) {
+        self.stream_open_handled = true;
+        self.stream_open_wire_state = StreamOpenWireState::PendingResponse;
+    }
+
+    /// Mark the typed server `<open/>` response as wire-committed only after
+    /// its authority-aware response batch returned `Continue`.
+    pub(super) fn commit_server_stream_open_response(&mut self) {
+        if matches!(
+            self.stream_open_wire_state,
+            StreamOpenWireState::PendingResponse
+        ) {
+            self.stream_open_wire_state = StreamOpenWireState::Committed;
+        }
+    }
+
+    /// Clear state for an actual XMPP stream end or restart. Lifecycle
+    /// revocation intentionally does not call this: an established stream
+    /// remains eligible for the best-effort system-shutdown error.
+    pub(super) fn reset_stream_open_for_xmpp_lifecycle(&mut self) {
+        self.stream_open_handled = false;
+        self.stream_open_wire_state = StreamOpenWireState::NotCommitted;
+    }
+
+    pub(super) fn has_committed_live_stream_open(&self) -> bool {
+        self.stream_open_handled
+            && matches!(self.stream_open_wire_state, StreamOpenWireState::Committed)
     }
 
     /// Apply the typed `<enable/>` effect after its `<enabled/>` frame has

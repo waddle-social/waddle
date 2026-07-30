@@ -142,6 +142,33 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
     }
 }
 
+async fn health_for_serving_generation<T>(
+    lifecycle: &crate::clustering::NodeLifecycle,
+    health_check: impl std::future::Future<Output = T>,
+) -> Result<T, crate::clustering::NodeAdmissionError> {
+    let permit = lifecycle.admit()?;
+    let health = health_check.await;
+    permit.revalidate()?;
+    Ok(health)
+}
+
+fn lifecycle_not_ready_response(
+    lifecycle: &crate::clustering::NodeLifecycle,
+    error: &crate::clustering::NodeAdmissionError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let admission = lifecycle.admission();
+    warn!(?admission, %error, "Readiness check: node is not admitting clients");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "status": "not_ready",
+            "service": "waddle-server",
+            "version": env!("CARGO_PKG_VERSION"),
+            "admission": format!("{admission:?}")
+        })),
+    )
+}
+
 /// Readiness check endpoint (for orchestrators).
 ///
 /// Readiness is stricter than liveness and validates overall DB pool health
@@ -150,23 +177,12 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
 /// lost, or Postgres unreachable past the lease deadline) must not stay in
 /// the client Service/Ingress endpoint set — clients whose sockets it just
 /// closed would otherwise be routed straight back to the still-refusing
-/// node. Non-clustering deployments never flip this signal, so it is
-/// always ready — today's behavior, unchanged.
+/// node. The same lifecycle also fails closed when a critical local actor
+/// terminates in a single-node deployment.
 pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if !state.clustering_readiness.is_ready() {
-        warn!("Readiness check: this node has self-fenced its clustering claims");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "not_ready",
-                "service": "waddle-server",
-                "version": env!("CARGO_PKG_VERSION"),
-                "clustering": "self-fenced"
-            })),
-        );
-    }
-    match state.db_pool.health_check().await {
-        Ok(health) if health.is_healthy() => (
+    match health_for_serving_generation(&state.node_lifecycle, state.db_pool.health_check()).await {
+        Err(error) => lifecycle_not_ready_response(&state.node_lifecycle, &error),
+        Ok(Ok(health)) if health.is_healthy() => (
             StatusCode::OK,
             Json(json!({
                 "status": "ready",
@@ -175,7 +191,7 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 "database": "ready"
             })),
         ),
-        Ok(health) => {
+        Ok(Ok(health)) => {
             warn!(
                 global_healthy = health.global_healthy,
                 waddle_dbs_healthy = health.waddle_dbs_healthy,
@@ -197,7 +213,7 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 })),
             )
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(error = %e, "Readiness check failed");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -272,5 +288,81 @@ pub(crate) async fn detailed_health_handler(
                 }),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod readiness_generation_tests {
+    use super::*;
+
+    async fn assert_transition_during_health_returns_unavailable(
+        transition: impl FnOnce(&crate::clustering::NodeLifecycle),
+    ) -> crate::clustering::NodeAdmissionError {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let worker_lifecycle = lifecycle.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            health_for_serving_generation(&worker_lifecycle, async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                true
+            })
+            .await
+        });
+
+        started_rx.await.expect("health check started");
+        transition(&lifecycle);
+        let _ = release_tx.send(());
+        let error = worker
+            .await
+            .expect("health race task")
+            .expect_err("changed serving generation must not become ready");
+
+        assert_eq!(
+            lifecycle_not_ready_response(&lifecycle, &error)
+                .into_response()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        error
+    }
+
+    #[tokio::test]
+    async fn fence_during_database_health_cannot_return_ready() {
+        let _ = assert_transition_during_health_returns_unavailable(|lifecycle| {
+            lifecycle.begin_fenced_recovery();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn critical_failure_during_database_health_cannot_return_ready() {
+        let _ = assert_transition_during_health_returns_unavailable(|lifecycle| {
+            lifecycle.fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fence_and_recovery_during_database_health_revokes_old_readiness_probe() {
+        let error = assert_transition_during_health_returns_unavailable(|lifecycle| {
+            lifecycle.begin_fenced_recovery();
+            lifecycle.serve();
+            assert_eq!(
+                lifecycle.admission(),
+                crate::clustering::NodeAdmission::Serving
+            );
+        })
+        .await;
+        assert_eq!(error, crate::clustering::NodeAdmissionError::Revoked);
+    }
+
+    #[tokio::test]
+    async fn healthy_database_in_same_serving_generation_is_ready() {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        assert!(health_for_serving_generation(&lifecycle, async { true })
+            .await
+            .expect("serving generation"));
     }
 }

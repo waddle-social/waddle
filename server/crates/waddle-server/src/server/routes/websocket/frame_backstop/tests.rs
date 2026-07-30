@@ -122,7 +122,111 @@ fn responses_and_disposition(
             InboundDisposition::Handled,
         ),
         Err(StanzaTimeout::Unhandled) => (Vec::new(), InboundDisposition::Unhandled),
+        Err(StanzaTimeout::AdmissionRevoked) => (Vec::new(), InboundDisposition::Unhandled),
     }
+}
+
+#[tokio::test]
+async fn already_revoked_admission_never_starts_dispatch_and_preserves_sm_hole() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let stanza = message_stanza();
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let side_effect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_side_effect = Arc::clone(&side_effect);
+    lifecycle.begin_fenced_recovery();
+    let dispatch = async move {
+        dispatch_side_effect.store(true, std::sync::atomic::Ordering::SeqCst);
+        Vec::new()
+    };
+    let guarded = run_with_backstop_and_admission(
+        StanzaBackstop::capture(&stanza, None),
+        dispatch,
+        &permit,
+        &shutdown,
+    )
+    .await;
+    let (responses, disposition) = responses_and_disposition(guarded.result);
+
+    assert!(
+        responses.is_empty(),
+        "revocation must not synthesize a reply"
+    );
+    assert_eq!(disposition, InboundDisposition::Unhandled);
+    assert!(!side_effect.load(std::sync::atomic::Ordering::SeqCst));
+
+    let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+    sm_state.enable("revoked-dispatch".to_string(), true, Some(300));
+    let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
+    let sequence = completion.reserve(&sm_state);
+    crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        disposition,
+        false,
+        Some(sequence),
+        &mut completion,
+        &mut sm_state,
+    );
+    assert_eq!(sm_state.get_inbound_count(), 0);
+    assert!(completion.has_unhandled_hole());
+    assert!(!completion.has_pending());
+}
+
+#[tokio::test]
+async fn revoked_after_committed_dispatch_suppresses_frames_but_settles_sm() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let stanza = message_stanza();
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dispatch_commits = Arc::clone(&commits);
+    let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let dispatch = async move {
+        dispatch_commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = committed_tx.send(());
+        let _ = release_rx.await;
+        vec!["<message type='result'/>".to_string()]
+    };
+    let mut guarded = Box::pin(run_with_backstop_and_admission(
+        StanzaBackstop::capture(&stanza, None),
+        dispatch,
+        &permit,
+        &shutdown,
+    ));
+
+    assert!(futures::poll!(guarded.as_mut()).is_pending());
+    committed_rx.await.expect("dispatch committed its effect");
+    lifecycle.begin_fenced_recovery();
+    release_tx
+        .send(())
+        .expect("dispatch remains owned by the backstop");
+    let guarded = guarded.await;
+    assert!(guarded.authority_revoked_after_start);
+
+    let (responses, disposition) = responses_and_disposition(guarded.result);
+    assert!(
+        responses.is_empty(),
+        "stale admission must not write responses"
+    );
+    assert_eq!(disposition, InboundDisposition::Handled);
+    assert_eq!(commits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+    sm_state.enable("revoked-after-commit".to_string(), true, Some(300));
+    let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
+    let sequence = completion.reserve(&sm_state);
+    crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        disposition,
+        false,
+        Some(sequence),
+        &mut completion,
+        &mut sm_state,
+    );
+    assert_eq!(sm_state.get_inbound_count(), 1);
+    assert!(!completion.has_unhandled_hole());
+    assert!(!completion.has_pending());
 }
 
 #[tokio::test(start_paused = true)]

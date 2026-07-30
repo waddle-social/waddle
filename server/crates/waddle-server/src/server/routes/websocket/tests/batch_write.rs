@@ -7,8 +7,10 @@
 
 use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
 use super::super::{
-    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
-    state::WsConnState,
+    batch_write::{
+        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+    },
+    state::{WebSocketState, WsConnState},
 };
 use super::create_test_websocket_state;
 use futures::{stream, Sink, Stream, StreamExt as _};
@@ -56,6 +58,381 @@ struct CollectSink {
     sent: Vec<Message>,
 }
 
+struct RevokeAfterFirstSink {
+    sent: Vec<Message>,
+    lifecycle: crate::clustering::NodeLifecycle,
+}
+
+/// Returns Ready only after it revokes the admitted generation. This models
+/// the critical readiness race: the task was parked in `poll_ready`, the
+/// lifecycle changed, and a later poll would otherwise call `start_send` in
+/// the same `SinkExt::send` poll before its caller observes cancellation.
+struct RevokeOnReadySink {
+    sent: Vec<Message>,
+    lifecycle: crate::clustering::NodeLifecycle,
+    revoke_on_ready_call: usize,
+    ready_calls: usize,
+}
+
+#[derive(Default)]
+struct BackpressuredAfterEightSink {
+    committed: Vec<Message>,
+}
+
+impl Sink<Message> for BackpressuredAfterEightSink {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.committed.len() < 8 {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.committed.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Sink<Message> for RevokeAfterFirstSink {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.sent.push(item);
+        if self.sent.len() == 1 {
+            self.lifecycle.begin_fenced_recovery();
+        }
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Sink<Message> for RevokeOnReadySink {
+    type Error = Infallible;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.ready_calls += 1;
+        if self.ready_calls == self.revoke_on_ready_call {
+            self.lifecycle.begin_fenced_recovery();
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.sent.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn authority_revocation_stops_batch_before_next_record_or_write() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("authority-batch".to_string(), true, Some(300));
+    let mut sink = RevokeAfterFirstSink {
+        sent: Vec::new(),
+        lifecycle,
+    };
+    let mut reader = reader_with(vec![]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![countable_message(1), countable_message(2)],
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(sink.sent.len(), 1);
+    assert_eq!(conn.sm_state.outbound_count, 2);
+    assert_eq!(conn.sm_state.queue_len(), 2);
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].stanza_xml, countable_message(1));
+    assert_eq!(replay[1].stanza_xml, countable_message(2));
+}
+
+#[tokio::test]
+async fn pre_current_revocation_records_the_entire_countable_batch_for_replay() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    lifecycle.begin_fenced_recovery();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("pre-current-revoked".to_string(), true, Some(300));
+    let first = mam_result_frame(1);
+    let second = mam_result_frame(2);
+    let fin = mam_fin_frame();
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(vec![]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![first.clone(), second.clone(), fin.clone()],
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert!(
+        sink.sent.is_empty(),
+        "revocation must fence every wire write"
+    );
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 3);
+    assert_eq!(replay[0].stanza_xml, first);
+    assert_eq!(replay[1].stanza_xml, second);
+    assert_eq!(replay[2].stanza_xml, fin);
+}
+
+/// A MAM batch can contain result messages followed by the query's final IQ.
+/// Once an admitted generation revokes before the next `poll_ready`, the
+/// written result is acknowledged and every unwritten countable response must
+/// remain exactly once, in wire order, for the XEP-0198 resume window.
+#[tokio::test]
+async fn revoked_next_readiness_keeps_mam_result_tail_and_fin_for_resume() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 1);
+    conn.sm_state
+        .enable("revoked-mam-tail".to_string(), true, Some(300));
+    let first = mam_result_frame(1);
+    let second = mam_result_frame(2);
+    let fin = mam_fin_frame();
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        // First result and its threshold `<r/>` commit. The next result's
+        // readiness check observes revocation before `start_send`.
+        revoke_on_ready_call: 3,
+        ready_calls: 0,
+    };
+    let mut reader = reader_with(vec![ack_frame(1)]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![first.clone(), second.clone(), fin.clone()],
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    let sent: Vec<String> = sink
+        .sent
+        .iter()
+        .filter_map(|message| match message {
+            Message::Text(text) => Some(text.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, vec![first, SmRequest::to_xml()]);
+    assert_eq!(
+        conn.sm_state.last_acked, 1,
+        "the inbound h settled the first result"
+    );
+    let replay = conn.sm_state.get_stanzas_to_resend(1);
+    assert_eq!(replay.len(), 2, "the tail must be retained exactly once");
+    assert_eq!(replay[0].stanza_xml, second);
+    assert_eq!(replay[1].stanza_xml, fin);
+}
+
+#[tokio::test]
+async fn ready_revocation_suppresses_the_normal_batch_frame_before_start_send() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("ready-revoked-frame".to_string(), true, Some(300));
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        revoke_on_ready_call: 1,
+        ready_calls: 0,
+    };
+    let mut reader = reader_with(vec![]);
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![countable_message(1)],
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert!(
+        sink.sent.is_empty(),
+        "revoked frame must not reach start_send"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, 1,
+        "the frame stays replayable"
+    );
+}
+
+#[tokio::test]
+async fn ready_revocation_suppresses_the_cadence_request_before_start_send() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("ready-revoked-cadence".to_string(), true, Some(300));
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        // Five countable stanzas commit first; the sixth send is the XEP-0198
+        // cadence `<r/>` that must be suppressed.
+        revoke_on_ready_call: 6,
+        ready_calls: 0,
+    };
+    let mut reader = reader_with(vec![]);
+    let frames: Vec<String> = (1..=5).map(countable_message).collect();
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(sink.sent.len(), 5, "the stale `<r/>` must not commit");
+    assert!(sink
+        .sent
+        .iter()
+        .filter_map(|message| match message {
+            Message::Text(text) => Some(text),
+            _ => None,
+        })
+        .all(|text| text.as_str() != SmRequest::to_xml()));
+}
+
+#[tokio::test]
+async fn ready_revocation_suppresses_the_mid_batch_drain_response_before_start_send() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("ready-revoked-drain".to_string(), true, Some(300));
+    let mut sink = RevokeOnReadySink {
+        sent: Vec::new(),
+        lifecycle,
+        // Five stanzas plus their `<r/>` are valid. The bogus ack produces a
+        // handled-count-too-high error in the mid-batch drain; suppress that
+        // response if its readiness poll observes the new generation.
+        revoke_on_ready_call: 7,
+        ready_calls: 0,
+    };
+    let mut reader = ScriptedReader::new(vec![Some(ack_frame(999))]);
+    let frames: Vec<String> = (1..=5).map(countable_message).collect();
+
+    let outcome = write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(
+        sink.sent.len(),
+        6,
+        "the stale drain response must not commit"
+    );
+    assert!(sink.sent.iter().all(|message| match message {
+        Message::Text(text) => !text.to_string().contains("handled-count-too-high"),
+        _ => true,
+    }));
+}
+
 impl Sink<Message> for CollectSink {
     type Error = Infallible;
 
@@ -88,6 +465,38 @@ fn sink_texts(sink: &CollectSink) -> Vec<String> {
 /// (like a live socket with nothing more to read — NOT end-of-stream).
 fn reader_with(frames: Vec<Message>) -> impl Stream<Item = Result<Message, Infallible>> + Unpin {
     stream::iter(frames.into_iter().map(Ok)).chain(stream::pending())
+}
+
+async fn write_response_batch<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    frames: Vec<String>,
+    policy: BatchSmPolicy,
+) -> BatchWriteOutcome
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving test permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    write_response_batch_with_admission(
+        sender,
+        reader,
+        state,
+        conn,
+        frames,
+        policy,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await
 }
 
 fn message_with_id(id: &str) -> String {
@@ -415,6 +824,20 @@ fn mam_result_frame(i: usize) -> String {
     )
 }
 
+fn mam_fin_frame() -> String {
+    element_to_xml(
+        Element::builder("iq", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "mam-query")
+            .append(
+                Element::builder("fin", "urn:xmpp:mam:2")
+                    .attr(minidom::rxml::xml_ncname!("complete").to_owned(), "true")
+                    .build(),
+            )
+            .build(),
+    )
+}
+
 /// Oversized inbound frames are dropped by the drain immediately —
 /// the main dispatcher's MAX_FRAME_SIZE backstop would discard them
 /// anyway, so parking them would only retain up to 64 near-1MiB
@@ -676,6 +1099,68 @@ async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
         "exactly one off-cadence <r/> per pause (at 8/16/24/32/40)"
     );
     assert_eq!(texts.len(), 45, "40 stanzas + 5 pacing <r/>");
+}
+
+#[tokio::test]
+async fn backpressured_send_window_write_stops_promptly_on_authority_revocation() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("authority-pause".to_string(), true, Some(300));
+    let mut sink = BackpressuredAfterEightSink::default();
+    let mut reader = reader_with(vec![]);
+    let frames: Vec<String> = (1..=9).map(countable_message).collect();
+    let mut writer = Box::pin(write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    ));
+
+    assert!(futures::poll!(writer.as_mut()).is_pending());
+    lifecycle.begin_fenced_recovery();
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), writer)
+        .await
+        .expect("authority revocation must preempt the 15 second pause deadline");
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(
+        sink.committed,
+        (1..=8)
+            .map(countable_message)
+            .map(|frame| Message::Text(frame.into()))
+            .collect::<Vec<_>>(),
+        "the first eight stanzas committed before the backpressured ninth send"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, 9,
+        "the blocked ninth stanza must join the replay window on revocation"
+    );
+    assert_eq!(conn.sm_state.queue_len(), 9);
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 9);
+    for (index, stanza) in replay.iter().enumerate() {
+        assert_eq!(
+            stanza.stanza_xml,
+            countable_message(index + 1),
+            "the replay window contains each committed prefix frame and the unsent tail exactly once, in order"
+        );
+    }
+    assert_eq!(
+        sink.committed.len(),
+        8,
+        "the backpressured <r/> must never commit after revocation"
+    );
 }
 
 /// A dead/stalled peer never acks the window down. The pause deadline fires

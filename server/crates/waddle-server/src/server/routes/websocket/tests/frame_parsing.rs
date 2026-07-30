@@ -262,7 +262,7 @@ async fn websocket_oauthbearer_authenticates_session_token() {
 }
 
 #[tokio::test]
-async fn websocket_stream_open_sent_tracks_current_stream_instance() {
+async fn websocket_stream_open_handling_tracks_current_stream_instance() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;
     let mut conn = WsConnState::new();
@@ -270,9 +270,19 @@ async fn websocket_stream_open_sent_tracks_current_stream_instance() {
         r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#;
     let close = r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#;
 
-    assert!(!conn.stream_open_sent, "no stream answered yet at upgrade");
+    assert!(
+        !conn.stream_open_handled,
+        "no stream handled yet at upgrade"
+    );
     handle_xmpp_frame(open, "example.com", state.as_ref(), &mut conn).await;
-    assert!(conn.stream_open_sent, "server answered the first <open/>");
+    assert!(conn.stream_open_handled, "server handled the first <open/>");
+    assert!(
+        matches!(
+            conn.stream_open_wire_state,
+            super::super::state::StreamOpenWireState::PendingResponse
+        ),
+        "frame handling alone must not claim the server <open/> reached the wire"
+    );
 
     // RFC 6120 §6.4.6: SASL success restarts the stream — the server
     // has not yet sent a response header for the NEW stream, so a
@@ -290,16 +300,16 @@ async fn websocket_stream_open_sent_tracks_current_stream_instance() {
     let responses = handle_xmpp_frame(&auth, "example.com", state.as_ref(), &mut conn).await;
     assert_eq!(responses, vec![sasl_success_xml()]);
     assert!(
-        !conn.stream_open_sent,
+        !conn.stream_open_handled,
         "SASL success restarts the stream; no response header exists for the new stream yet"
     );
 
     handle_xmpp_frame(open, "example.com", state.as_ref(), &mut conn).await;
-    assert!(conn.stream_open_sent, "restarted stream answered");
+    assert!(conn.stream_open_handled, "restarted stream handled");
 
     handle_xmpp_frame(close, "example.com", state.as_ref(), &mut conn).await;
     assert!(
-        !conn.stream_open_sent,
+        !conn.stream_open_handled,
         "a closed stream has no live response header to error on"
     );
 }

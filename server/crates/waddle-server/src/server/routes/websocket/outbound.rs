@@ -1,16 +1,24 @@
 use super::*;
 use super::{
-    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
+    batch_write::{
+        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+    },
     frame::ordered_relay_origin_from_sm,
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
-    send::send_ws_message,
+    send::{send_ws_message_with_authority, AuthoritySendOutcome},
     state::WsConnState,
     stream_management::is_countable_stanza,
     timers::TransportTimers,
     transport_xml::stanza_to_xml,
 };
 use waddle_xmpp::stream_management::SmRequest;
+
+#[derive(Clone, Copy)]
+pub(super) struct OutboundAuthority<'a> {
+    pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
+    pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
+}
 
 pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
     sender: &mut S,
@@ -19,6 +27,7 @@ pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
     conn: &mut WsConnState,
     timers: &mut TransportTimers,
     outbound_stanza: OutboundStanza,
+    authority: OutboundAuthority<'_>,
 ) -> bool
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -26,6 +35,11 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    let OutboundAuthority { permit, shutdown } = authority;
+    let authoritative = || !shutdown.is_cancelled() && permit.revalidate().is_ok();
+    if !authoritative() {
+        return false;
+    }
     debug!(kind = ?outbound_stanza.kind, "Received outbound stanza from registry");
     match outbound_stanza.kind {
         DeliveryKind::DirectFrame => {
@@ -101,27 +115,43 @@ where
                     }
                 }
             }
-            let sent = send_ws_message(
+            if !authoritative() {
+                return false;
+            }
+            let sent = match send_ws_message_with_authority(
                 sender,
                 Message::Text(xml.into()),
                 "Failed to send outbound stanza",
+                Some((permit, shutdown)),
             )
-            .await;
+            .await
+            {
+                AuthoritySendOutcome::Sent => true,
+                AuthoritySendOutcome::TransportClosed | AuthoritySendOutcome::AuthorityRevoked => {
+                    return false;
+                }
+            };
             // SM cadence: when `record_outbound` flagged the threshold,
             // follow the just-written stanza with an `<r/>` so the
             // client knows to send `<a h='N'/>`. The wasm client never
             // acks proactively, so without this nudge the unacked queue
             // grows unbounded until eviction permanently breaks resume.
-            if sent
-                && request_ack_after
-                && !send_ws_message(
-                    sender,
-                    Message::Text(SmRequest::to_xml().into()),
-                    "Failed to send SM <r/> request",
-                )
-                .await
-            {
-                return false;
+            if sent && request_ack_after {
+                if !authoritative() {
+                    return false;
+                }
+                if !matches!(
+                    send_ws_message_with_authority(
+                        sender,
+                        Message::Text(SmRequest::to_xml().into()),
+                        "Failed to send SM <r/> request",
+                        Some((permit, shutdown)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
+                    return false;
+                }
             }
             sent
         }
@@ -145,19 +175,28 @@ where
                 build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref())
                     .with_ordered_relay_origin(ordered_relay_origin);
             let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+            if !authoritative() {
+                return false;
+            }
             // Timer/keepalive effects can't arise from a StanzaFromPeer
             // dispatch today (only TransportReady/Tick produce them),
             // but honour them anyway so a future policy change can't
             // silently drop effects on this path.
             timers.apply(drive.timer_commands);
             for _ in 0..drive.keepalive_probes {
-                if !send_ws_message(
-                    sender,
-                    Message::Ping(axum::body::Bytes::new()),
-                    "Failed to send keepalive ping",
-                )
-                .await
-                {
+                if !authoritative() {
+                    return false;
+                }
+                if !matches!(
+                    send_ws_message_with_authority(
+                        sender,
+                        Message::Ping(axum::body::Bytes::new()),
+                        "Failed to send keepalive ping",
+                        Some((permit, shutdown)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
                     return false;
                 }
             }
@@ -172,18 +211,20 @@ where
             // already-arrived inbound `<a/>` acks after each `<r/>` so
             // a large outbound frame batch can't pin the unacked queue
             // at capacity.
-            match write_response_batch(
+            match write_response_batch_with_admission(
                 sender,
                 reader,
                 state.as_ref(),
                 conn,
                 drive.frames,
                 BatchSmPolicy::Record,
+                BatchAuthority { permit, shutdown },
             )
             .await
             {
                 BatchWriteOutcome::Continue => {}
                 BatchWriteOutcome::TransportClosed => return false,
+                BatchWriteOutcome::AuthorityRevoked => return false,
             }
             if close {
                 info!("PeerStanza dispatch requested transport close");
