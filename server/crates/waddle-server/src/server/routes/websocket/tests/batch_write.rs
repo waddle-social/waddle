@@ -63,6 +63,36 @@ struct RevokeAfterFirstSink {
     lifecycle: crate::clustering::NodeLifecycle,
 }
 
+#[derive(Default)]
+struct BackpressuredAfterEightSink {
+    committed: Vec<Message>,
+}
+
+impl Sink<Message> for BackpressuredAfterEightSink {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.committed.len() < 8 {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.committed.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 impl Sink<Message> for RevokeAfterFirstSink {
     type Error = Infallible;
 
@@ -774,6 +804,47 @@ async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
         "exactly one off-cadence <r/> per pause (at 8/16/24/32/40)"
     );
     assert_eq!(texts.len(), 45, "40 stanzas + 5 pacing <r/>");
+}
+
+#[tokio::test]
+async fn backpressured_send_window_write_stops_promptly_on_authority_revocation() {
+    let state = create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("authority-pause".to_string(), true, Some(300));
+    let mut sink = BackpressuredAfterEightSink::default();
+    let mut reader = reader_with(vec![]);
+    let frames: Vec<String> = (1..=9).map(countable_message).collect();
+    let mut writer = Box::pin(write_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    ));
+
+    assert!(futures::poll!(writer.as_mut()).is_pending());
+    lifecycle.begin_fenced_recovery();
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), writer)
+        .await
+        .expect("authority revocation must preempt the 15 second pause deadline");
+
+    assert!(matches!(outcome, BatchWriteOutcome::AuthorityRevoked));
+    assert_eq!(conn.sm_state.outbound_count, 8);
+    assert_eq!(
+        sink.committed.len(),
+        8,
+        "the backpressured <r/> must never commit after revocation"
+    );
 }
 
 /// A dead/stalled peer never acks the window down. The pause deadline fires

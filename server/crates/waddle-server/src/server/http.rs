@@ -24,6 +24,7 @@ use anyhow::Result;
 use axum::{middleware, routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use sqlx::sqlite::SqliteConnectOptions;
+use std::future::IntoFuture as _;
 use std::str::FromStr;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
@@ -115,21 +116,23 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         }
     }
 
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        stop_token.cancelled().await;
-        info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
-        if tokio::time::timeout(drain_timeout, drain_complete.notified())
-            .await
-            .is_err()
-        {
-            warn!(
-                timeout_secs = drain_timeout.as_secs(),
-                "HTTP server: SM drain notification timed out; forcing connection drain"
-            );
-        } else {
-            info!("HTTP server: SM drain complete; draining connections");
-        }
-    });
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            stop_token.cancelled().await;
+            info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
+            if tokio::time::timeout(drain_timeout, drain_complete.notified())
+                .await
+                .is_err()
+            {
+                warn!(
+                    timeout_secs = drain_timeout.as_secs(),
+                    "HTTP server: SM drain notification timed out; forcing connection drain"
+                );
+            } else {
+                info!("HTTP server: SM drain complete; draining connections");
+            }
+        })
+        .into_future();
     match await_http_server_or_forced_exit(server, force_stop_token, drain_timeout).await {
         Some(result) => result?,
         None => {

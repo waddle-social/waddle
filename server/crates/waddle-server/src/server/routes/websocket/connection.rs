@@ -1235,16 +1235,24 @@ async fn cleanup_frame_authority_revocation(state: &WebSocketState, conn: &mut W
     }
 }
 
-async fn handle_ordered_relay_handoff_completion(
-    ws_sender: &mut SplitSink<WebSocket, Message>,
-    ws_receiver: &mut SplitStream<WebSocket>,
+async fn handle_ordered_relay_handoff_completion<S, SE, R, RE>(
+    ws_sender: &mut S,
+    ws_receiver: &mut R,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
     completion: crate::server::routes::interpret::OrderedRelayHandoffCompletion,
     permit: &crate::clustering::NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
-) -> bool {
+) -> bool
+where
+    S: futures::Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
     if shutdown.is_cancelled() || permit.revalidate().is_err() {
+        conn.sm_inbound_completion
+            .abandon(completion.inbound_sequence);
         return false;
     }
     conn.sm_inbound_completion
@@ -1518,6 +1526,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoked_consumed_handoff_is_abandoned_before_cleanup() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("handoff-revoked".to_string(), true, Some(300));
+        let inbound_sequence = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        let completion = crate::server::routes::interpret::OrderedRelayHandoffCompletion {
+            inbound_sequence,
+            replies: Vec::new(),
+        };
+        let mut sender = UpgradeCloseSink::default();
+        let mut receiver = futures::stream::pending::<Result<Message, &'static str>>();
+        let (handoff_tx, mut handoff_rx) = tokio::sync::mpsc::unbounded_channel();
+        conn.ordered_relay_handoff_tx = Some(handoff_tx);
+        lifecycle.begin_fenced_recovery();
+
+        assert!(
+            !handle_ordered_relay_handoff_completion(
+                &mut sender,
+                &mut receiver,
+                &state,
+                &mut conn,
+                completion,
+                &permit,
+                &shutdown,
+            )
+            .await
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn),
+        )
+        .await
+        .expect("abandoned consumed completion must not block cleanup");
+
+        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert!(!conn.sm_inbound_completion.has_pending());
+        assert!(sender.sent.is_empty());
+    }
+
+    #[tokio::test]
     async fn cleanup_waits_for_pre_hole_ordered_relay_completion() {
         let mut conn = WsConnState::new();
         conn.sm_state
@@ -1629,11 +1681,11 @@ mod tests {
         let mut first = xmpp_parsers::message::Message::new(Some(
             "bob@example.com".parse().expect("recipient JID"),
         ));
-        first.id = Some("first".to_string());
+        first.id = Some(xmpp_parsers::message::Id("first".to_string()));
         let mut later = xmpp_parsers::message::Message::new(Some(
             "carol@example.com".parse().expect("recipient JID"),
         ));
-        later.id = Some("later".to_string());
+        later.id = Some(xmpp_parsers::message::Id("later".to_string()));
         conn.deferred_inbound.extend([
             axum::extract::ws::Utf8Bytes::from(
                 waddle_xmpp::parser::stanza_to_string(first).expect("serialize first message"),

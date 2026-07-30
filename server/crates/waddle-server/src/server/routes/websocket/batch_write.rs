@@ -108,6 +108,54 @@ fn batch_authoritative(
         .is_none_or(|(permit, shutdown)| !shutdown.is_cancelled() && permit.revalidate().is_ok())
 }
 
+async fn batch_authority_revoked(
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) {
+    let Some((permit, shutdown)) = authority else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {}
+        _ = permit.revoked() => {}
+    }
+}
+
+async fn send_window_message<S, E>(
+    sender: &mut S,
+    message: Message,
+    failure_message: &'static str,
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) -> Result<(), SendWindowOutcome>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    if !batch_authoritative(authority) {
+        return Err(SendWindowOutcome::AuthorityRevoked);
+    }
+    let send = send_ws_message(sender, message, failure_message);
+    tokio::pin!(send);
+    tokio::select! {
+        biased;
+        _ = batch_authority_revoked(authority) => Err(SendWindowOutcome::AuthorityRevoked),
+        sent = send.as_mut() => {
+            if sent {
+                Ok(())
+            } else {
+                Err(SendWindowOutcome::TransportClosed)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct BatchAuthority<'a> {
     pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
@@ -317,14 +365,15 @@ where
     let deadline = tokio::time::Instant::now() + SEND_WINDOW_PAUSE_DEADLINE;
     // Elicit an ack immediately — nothing more is being written until the
     // window recovers, so the client must be prompted.
-    if !send_ws_message(
+    if let Err(outcome) = send_window_message(
         sender,
         Message::Text(SmRequest::to_xml().into()),
         "Failed to send SM <r/> at send-window pause",
+        authority,
     )
     .await
     {
-        return SendWindowOutcome::TransportClosed;
+        return outcome;
     }
     loop {
         if !batch_authoritative(authority) {
@@ -336,7 +385,13 @@ where
         if conn.deferred_inbound.len() >= DEFERRED_INBOUND_CAP {
             return SendWindowOutcome::DeferredCapReached;
         }
-        let next = match tokio::time::timeout_at(deadline, reader.next()).await {
+        let next = match tokio::select! {
+            biased;
+            _ = batch_authority_revoked(authority) => {
+                return SendWindowOutcome::AuthorityRevoked;
+            }
+            result = tokio::time::timeout_at(deadline, reader.next()) => result,
+        } {
             Ok(next) => next,
             Err(_) => {
                 waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause_timeout();
@@ -373,14 +428,15 @@ where
                         if !batch_authoritative(authority) {
                             return SendWindowOutcome::AuthorityRevoked;
                         }
-                        if !send_ws_message(
+                        if let Err(outcome) = send_window_message(
                             sender,
                             Message::Text(response.into()),
                             "Failed to send SM ack stream error",
+                            authority,
                         )
                         .await
                         {
-                            return SendWindowOutcome::TransportClosed;
+                            return outcome;
                         }
                     }
                     if conn.phase.is_closing() {
@@ -394,14 +450,15 @@ where
                         if !batch_authoritative(authority) {
                             return SendWindowOutcome::AuthorityRevoked;
                         }
-                        if !send_ws_message(
+                        if let Err(outcome) = send_window_message(
                             sender,
                             Message::Text(SmRequest::to_xml().into()),
                             "Failed to re-send SM <r/> during send-window pause",
+                            authority,
                         )
                         .await
                         {
-                            return SendWindowOutcome::TransportClosed;
+                            return outcome;
                         }
                     }
                 } else {
@@ -410,8 +467,15 @@ where
             }
             Some(Ok(Message::Ping(data))) => {
                 conn.note_transport_activity();
-                if !send_ws_message(sender, Message::Pong(data), "Failed to send pong").await {
-                    return SendWindowOutcome::TransportClosed;
+                if let Err(outcome) = send_window_message(
+                    sender,
+                    Message::Pong(data),
+                    "Failed to send pong",
+                    authority,
+                )
+                .await
+                {
+                    return outcome;
                 }
             }
             Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_))) => {
