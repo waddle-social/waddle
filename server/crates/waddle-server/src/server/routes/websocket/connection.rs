@@ -17,7 +17,10 @@ use super::{
         build_system_shutdown_stream_error, websocket_stream_close_xml,
     },
 };
-use axum::response::IntoResponse;
+use axum::{
+    extract::{FromRequest, Request},
+    response::IntoResponse,
+};
 use futures::stream::{SplitSink, SplitStream};
 use waddle_xmpp::stream_management::SmRequest;
 
@@ -33,8 +36,8 @@ pub fn router(state: Arc<WebSocketState>) -> Router {
 /// WebSocket endpoint for XMPP over WebSocket (RFC 7395).
 /// Upgrades HTTP connection to WebSocket and handles XMPP framing.
 async fn xmpp_websocket_handler(
-    ws: WebSocketUpgrade,
     State(state): State<Arc<WebSocketState>>,
+    request: Request,
 ) -> Response {
     // Graceful shutdown gate (issue #1091). The guard is minted BEFORE
     // the stop-token check: the upgrade handshake spans a client
@@ -49,10 +52,28 @@ async fn xmpp_websocket_handler(
         info!("Rejecting XMPP WebSocket upgrade: server is draining");
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    // This is deliberately after Ecdysis's mint-then-check gate and before
+    // the RFC 7395 upgrade. A fenced, recovering, draining, or terminally
+    // failed node must return plain HTTP 503 rather than open an XMPP stream
+    // it cannot safely own.
+    let admission_permit = match state.deps.app_state.node_lifecycle.admit() {
+        Ok(permit) => permit,
+        Err(error) => {
+            info!(%error, "Rejecting XMPP WebSocket upgrade: node is not serving");
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
     info!("XMPP WebSocket connection request");
 
-    ws.protocols(["xmpp"])
-        .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))
+    let ws = match WebSocketUpgrade::from_request(request, &state).await {
+        Ok(ws) => ws,
+        Err(rejection) => return rejection.into_response(),
+    };
+
+    ws.protocols(["xmpp"]).on_upgrade(move |socket| async move {
+        let _admission_permit = admission_permit;
+        handle_xmpp_websocket(socket, state, connection_guard).await;
+    })
 }
 
 /// Size of the outbound message channel buffer
@@ -637,6 +658,76 @@ async fn handle_xmpp_websocket(
     }
 
     info!("XMPP WebSocket connection closed");
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    fn websocket_request() -> Request<Body> {
+        Request::builder()
+            .uri("/ws")
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .expect("valid RFC 7395 websocket handshake request")
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_every_non_serving_admission_state_before_upgrade() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let app = router(state.clone());
+
+        // `tower::oneshot` has no Hyper upgrade extension, so a serving node
+        // reaches Axum's expected 426 rejection instead of attempting a real
+        // 101. The non-serving cases below are deliberately rejected before
+        // this extractor and therefore return plain HTTP 503.
+        assert_eq!(
+            app.clone()
+                .oneshot(websocket_request())
+                .await
+                .expect("response")
+                .status(),
+            axum::http::StatusCode::UPGRADE_REQUIRED
+        );
+
+        state.deps.app_state.node_lifecycle.begin_fenced_recovery();
+        assert_eq!(
+            app.clone()
+                .oneshot(websocket_request())
+                .await
+                .expect("response")
+                .status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        state.deps.app_state.node_lifecycle.begin_drain();
+        assert_eq!(
+            app.clone()
+                .oneshot(websocket_request())
+                .await
+                .expect("response")
+                .status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        state
+            .deps
+            .app_state
+            .node_lifecycle
+            .fail(crate::clustering::CriticalNodeFailure::UserRegistryTerminated);
+        assert_eq!(
+            app.oneshot(websocket_request())
+                .await
+                .expect("response")
+                .status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }
 
 /// Handle one inbound XMPP text frame end to end: framing, phase

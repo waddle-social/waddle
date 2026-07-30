@@ -728,11 +728,11 @@ async fn test_readyz_alias_endpoint() {
 #[tokio::test]
 async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
     let state = create_test_state().await;
-    state.clustering_readiness.set_ready(false);
+    state.node_lifecycle.begin_fenced_recovery();
     // FIX 7(a): clone the readiness handle before `state` moves into the
     // router below, so this test can flip it back and prove recovery on
     // the SAME router/app instance, not just the not-ready direction.
-    let readiness_handle = state.clustering_readiness.clone();
+    let readiness_handle = state.node_lifecycle.clone();
     let server_config = ServerConfig::test_homeserver();
     let test_global_db = crate::db::Database::in_memory("test-mam-global")
         .await
@@ -774,12 +774,12 @@ async fn test_ready_endpoint_reports_not_ready_when_clustering_self_fenced() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "not_ready");
-    assert_eq!(json["clustering"], "self-fenced");
+    assert_eq!(json["admission"], "FencedRecovering");
 
     // FIX 7(a): recovery — once a node re-registers and clears its
     // self-fenced state, `/ready` must report healthy again on the same
     // router/state, not just flip one direction and stay stuck.
-    readiness_handle.set_ready(true);
+    readiness_handle.serve();
     let response = app
         .oneshot(
             Request::builder()

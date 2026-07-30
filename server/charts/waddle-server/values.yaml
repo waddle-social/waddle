@@ -251,7 +251,7 @@ probes:
     timeoutSeconds: 2
     failureThreshold: 3
   readiness:
-    path: /api/v1/health
+    path: /ready
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 2

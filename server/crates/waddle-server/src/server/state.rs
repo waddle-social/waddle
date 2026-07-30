@@ -62,12 +62,10 @@ pub struct AppState {
     /// startup). Used to seed `Affiliation::Owner` rows on Spaces PubSub
     /// nodes so XEP-0060 admin operations work for these accounts.
     pub server_owner_jids: Arc<[BareJid]>,
-    /// Client-facing clustering readiness signal (ADR-0017 Phase 3 Slice 2):
-    /// the `/ready`/`/readyz` handlers report not-ready whenever this node
-    /// has self-fenced its entity-ownership claims. Non-clustering
-    /// deployments (and clustering-disabled builds) never flip it, so it
-    /// stays ready forever — today's behavior, unchanged.
-    pub clustering_readiness: crate::clustering::ClusteringReadiness,
+    /// Sole typed authority for HTTP readiness and WebSocket admission.
+    /// Cluster self-fencing moves it to `FencedRecovering`; an unexpected
+    /// critical registry death latches `Failed` until this process exits.
+    pub node_lifecycle: crate::clustering::NodeLifecycle,
     /// Live `ClaimStore`/node-identity handles from the clustering
     /// subsystem (ADR-0017 Phase 3 Slice 4 follow-up plumbing note), used
     /// to select and construct the Postgres-fenced `SmPersistenceStorage`
@@ -123,7 +121,7 @@ impl AppState {
             occupant_id_secret,
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
-            clustering_readiness: crate::clustering::ClusteringReadiness::new(),
+            node_lifecycle: crate::clustering::NodeLifecycle::new(),
             clustering_claims: crate::clustering::ClusteringHandles::default(),
         })
     }
@@ -145,7 +143,7 @@ impl AppState {
             occupant_id_secret,
             permission_actor,
             server_owner_jids,
-            clustering_readiness,
+            node_lifecycle,
             clustering_claims,
         } = deps;
         Self {
@@ -161,7 +159,7 @@ impl AppState {
             occupant_id_secret,
             permission_actor,
             server_owner_jids,
-            clustering_readiness,
+            node_lifecycle,
             clustering_claims,
         }
     }
@@ -183,7 +181,7 @@ pub struct AppStateDeps {
     pub occupant_id_secret: OccupantIdSecret,
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,
-    pub clustering_readiness: crate::clustering::ClusteringReadiness,
+    pub node_lifecycle: crate::clustering::NodeLifecycle,
     pub clustering_claims: crate::clustering::ClusteringHandles,
 }
 

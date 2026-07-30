@@ -266,6 +266,6 @@ This chart supports two extra env mechanisms:
 ## Probes
 
 - Liveness probe: `GET /health`
-- Readiness probe: `GET /api/v1/health`
+- Readiness probe: `GET /ready`
 
 Both are configurable via `probes.*`.

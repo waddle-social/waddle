@@ -194,8 +194,16 @@ pub async fn start_with_config(
     // self-fencing loop, gated behind `clustering.enabled` + the
     // `clustering` build feature + the Postgres control plane. A no-op when
     // disabled — the default single-replica path is byte-for-byte unchanged,
-    // and `clustering_readiness` simply never flips (stays ready forever).
-    let clustering_readiness = crate::clustering::ClusteringReadiness::new();
+    // and the typed node lifecycle simply stays serving after startup.
+    let node_lifecycle = crate::clustering::NodeLifecycle::starting();
+    let lifecycle_on_shutdown = node_lifecycle.clone();
+    let stop_token_for_lifecycle = stop_token.clone();
+    tokio::spawn(async move {
+        stop_token_for_lifecycle.cancelled().await;
+        // A critical-service failure has already latched `Failed`; ordinary
+        // Ecdysis shutdowns become `Draining` and are intentionally nonfatal.
+        lifecycle_on_shutdown.begin_drain();
+    });
     // ADR-0017 Phase 3 Slice 10: `clustering_shutdown` is awaited after the
     // HTTP server exits below — see that await's own comment for why this
     // node's graceful per-entity claim drain must complete before process
@@ -204,7 +212,7 @@ pub async fn start_with_config(
         &server_config.clustering,
         db_pool.global(),
         &stop_token,
-        clustering_readiness.clone(),
+        node_lifecycle.clone(),
     )
     .await?;
 
@@ -262,7 +270,7 @@ pub async fn start_with_config(
         occupant_id_secret: server_config.occupant_id_secret.clone(),
         permission_actor: permission_actor.clone(),
         server_owner_jids,
-        clustering_readiness,
+        node_lifecycle: node_lifecycle.clone(),
         clustering_claims: clustering_handles,
     }));
     // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
@@ -377,7 +385,12 @@ pub async fn start_with_config(
     shutdown_handle.abort();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown_handle).await;
     info!("Graceful shutdown complete");
-    result.map(|()| metrics_flush)
+    match node_lifecycle.critical_failure() {
+        Some(failure) => Err(anyhow::anyhow!(
+            "critical clustered service terminated; node fenced and drained: {failure:?}"
+        )),
+        None => result.map(|()| metrics_flush),
+    }
 }
 
 #[cfg(test)]

@@ -153,15 +153,16 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
 /// node. Non-clustering deployments never flip this signal, so it is
 /// always ready — today's behavior, unchanged.
 pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if !state.clustering_readiness.is_ready() {
-        warn!("Readiness check: this node has self-fenced its clustering claims");
+    if !state.node_lifecycle.is_ready() {
+        let admission = state.node_lifecycle.admission();
+        warn!(?admission, "Readiness check: node is not admitting clients");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "not_ready",
                 "service": "waddle-server",
                 "version": env!("CARGO_PKG_VERSION"),
-                "clustering": "self-fenced"
+                "admission": format!("{admission:?}")
             })),
         );
     }

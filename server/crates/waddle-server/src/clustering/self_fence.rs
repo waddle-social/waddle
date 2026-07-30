@@ -33,7 +33,7 @@ use waddle_xmpp::ownership::{
 
 use super::claims::NodeLeaseStore;
 use super::metrics;
-use super::ClusteringReadiness;
+use super::NodeLifecycle;
 use crate::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
 
 /// Readable snapshot of the swarm's current connected-peer count (Phase 2
@@ -389,7 +389,7 @@ pub struct NodeLeaseRunConfig {
     pub self_fence_config: ClusteringSelfFenceConfig,
     pub connected_peers: ConnectedPeerCount,
     pub local_claims: Arc<dyn LocallyClaimedEntities>,
-    pub readiness: ClusteringReadiness,
+    pub readiness: NodeLifecycle,
     /// FIX 4(b) (ADR-0017 Phase 3 Slice 5 corrigenda, council-adjudicated):
     /// the same `ClaimStore` handle every other clustering-aware call site
     /// binds — never a second, independent store — used by the
@@ -806,7 +806,7 @@ struct TerminalFenceContext<'a, L> {
     lease: &'a L,
     live_identity: &'a SharedNodeIdentity,
     local_claims: &'a Arc<dyn LocallyClaimedEntities>,
-    readiness: &'a ClusteringReadiness,
+    readiness: &'a NodeLifecycle,
     stop_token: &'a CancellationToken,
     fatal_fence: &'a CancellationToken,
     control_plane_budget: Duration,
@@ -827,7 +827,7 @@ where
         // admitting traffic and NEW claims first, but keep the current
         // identity authoritative while mailbox seal barriers complete the
         // final fenced writes for already-owned rooms.
-        self.readiness.set_ready(false);
+        self.readiness.begin_fenced_recovery();
         if self.fatal_fence.is_cancelled() {
             self.finish(identity, identity).await;
             return;
@@ -875,7 +875,7 @@ where
     }
 
     async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
-        self.readiness.set_ready(false);
+        self.readiness.begin_fenced_recovery();
         self.stop_token.cancel();
 
         // A registration call is deliberately allowed to finish instead of
@@ -1309,7 +1309,7 @@ pub async fn run_node_lease<L>(
         // demotion sweep complete even while recovery workers are winding
         // down.
         if terminal_fence {
-            readiness.set_ready(false);
+            readiness.begin_fenced_recovery();
             stop_token.cancel();
             let superseded_identity = identity.clone();
             live_identity.disable().await;
@@ -1321,7 +1321,7 @@ pub async fn run_node_lease<L>(
         for entity in local_claims.owned().await {
             local_claims.demote(&entity).await;
         }
-        readiness.set_ready(false);
+        readiness.begin_fenced_recovery();
         isolation.reset();
 
         // FIX 1(b): best-effort mark the just-fenced identity's row
@@ -1631,9 +1631,9 @@ pub async fn run_node_lease<L>(
                                 .await;
                             return;
                         }
-                        readiness.set_ready(true);
+                        readiness.serve();
                         if fatal_fence.is_cancelled() {
-                            readiness.set_ready(false);
+                            readiness.begin_fenced_recovery();
                             terminal_fence_context
                                 .finish(&superseded_identity, &identity)
                                 .await;
@@ -1986,7 +1986,7 @@ mod tests {
                 "simulated Postgres partition".to_string(),
             ))
         }));
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         tokio::spawn(run_node_lease(
             lease,
@@ -2033,7 +2033,7 @@ mod tests {
         let interval = Duration::from_millis(50);
         let lease_ttl = Duration::from_secs(10);
         let lease = FakeLease::new(Box::new(|| Ok(false)));
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         tokio::spawn(run_node_lease(
             lease,
@@ -2084,7 +2084,7 @@ mod tests {
             }
         }));
         let draining_calls = Arc::clone(&lease.draining_calls);
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity());
         let task = tokio::spawn(run_node_lease(
@@ -2157,7 +2157,7 @@ mod tests {
         lease.other_live_nodes.store(1, Ordering::SeqCst);
         let registered_node_ids = Arc::clone(&lease.registered_node_ids);
         let registrations = Arc::clone(&lease.registrations);
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         tokio::spawn(run_node_lease(
             lease,
@@ -2340,7 +2340,7 @@ mod tests {
         let interval = Duration::from_millis(80);
         let lease_ttl = Duration::from_millis(300);
         let connected_peers = ConnectedPeerCount::new();
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
 
         let task_store = PostgresClaimStore::new(db.clone());
@@ -2765,7 +2765,7 @@ mod tests {
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         tokio::spawn(run_node_lease(
             lease,
@@ -2834,7 +2834,7 @@ mod tests {
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         tokio::spawn(run_node_lease(
             lease,
@@ -2904,7 +2904,7 @@ mod tests {
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         tokio::spawn(run_node_lease(
             lease,
@@ -2977,7 +2977,7 @@ mod tests {
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         tokio::spawn(run_node_lease(
             lease,
@@ -3050,7 +3050,7 @@ mod tests {
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let stop_token = CancellationToken::new();
         let initial_identity = identity();
@@ -3130,7 +3130,7 @@ mod tests {
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let stop_token = CancellationToken::new();
         let task = tokio::spawn(run_node_lease(
@@ -3206,7 +3206,7 @@ mod tests {
             live_identity_at_hydration: None,
             stale_hydration_observed: Arc::new(AtomicBool::new(false)),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         let task = tokio::spawn(run_node_lease(
             lease,
@@ -3271,7 +3271,7 @@ mod tests {
             seal_release,
             exact_demoted_owners: Arc::clone(&exact_demoted_owners),
         });
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let stop_token = CancellationToken::new();
         let task = tokio::spawn(run_node_lease(
@@ -3363,7 +3363,7 @@ mod tests {
                 },
                 connected_peers: ConnectedPeerCount::new(),
                 local_claims,
-                readiness: ClusteringReadiness::new(),
+                readiness: NodeLifecycle::new(),
                 live_identity: live_identity.clone(),
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
@@ -3626,7 +3626,7 @@ mod tests {
         let interval = Duration::from_millis(80);
         let lease_ttl = Duration::from_millis(300);
         let connected_peers = ConnectedPeerCount::new();
-        let readiness = ClusteringReadiness::new();
+        let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
         let hydrated = FakeLocalClaims::unhydrated();
         let live_identity =

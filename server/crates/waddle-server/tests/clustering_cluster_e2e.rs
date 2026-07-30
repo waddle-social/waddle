@@ -1870,7 +1870,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     use waddle_server::clustering::self_fence::{
         self, ConnectedPeerCount, LocallyClaimedEntities, NodeLeaseRunConfig,
     };
-    use waddle_server::clustering::ClusteringReadiness;
+    use waddle_server::clustering::NodeLifecycle;
     use waddle_server::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
@@ -2092,7 +2092,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             self_fence_config: ClusteringSelfFenceConfig::default(),
             connected_peers: ConnectedPeerCount::new(),
             local_claims,
-            readiness: ClusteringReadiness::new(),
+            readiness: NodeLifecycle::new(),
             live_identity,
             peer_id: None,
             claim_store,
@@ -3064,7 +3064,7 @@ async fn subscription_presence_and_probe_route_to_foreign_user_owner() {
 /// `lone_survivor_and_isolation_fencing`'s Part 2 uses), extended with an
 /// assertion Part 2 does NOT make — genuine, unattended SELF-RECOVERY
 /// (re-registration under a fresh identity, `self_fence.rs`'s
-/// `readiness.set_ready(true)` re-arm path) once connectivity returns, with
+/// `readiness.serve()` re-arm path) once connectivity returns, with
 /// no process restart. This is the most faithful available proof that a
 /// connectivity degradation "degrades... without [permanently] fencing"
 /// rather than requiring manual/operator intervention to recover.
@@ -3168,7 +3168,7 @@ async fn whole_node_isolation_fences_then_self_heals_without_operator_interventi
     // genuine, unattended SELF-RECOVERY — no process restart, a fresh
     // internal identity re-registers and readiness re-arms once swarm
     // connectivity actually returns (`self_fence.rs`'s
-    // `can_reacquire_claims`/`readiness.set_ready(true)` path).
+    // `can_reacquire_claims`/`readiness.serve()` path).
     conn.execute(
         "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
         waddle_server::db_params![peer_c.clone()],

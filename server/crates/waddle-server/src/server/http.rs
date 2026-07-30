@@ -12,10 +12,10 @@ use crate::server::routes::websocket::{
     ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 use crate::server::session_janitors::{
-    spawn_auth_state_janitor, spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor,
-    spawn_orphan_reaper_janitor, spawn_pending_delivery_claim_janitor,
-    spawn_push_service_publish_job_janitor, spawn_room_dormancy_janitor, spawn_sm_expiry_janitor,
-    spawn_user_actor_reaper,
+    spawn_auth_state_janitor, spawn_critical_registry_supervisor, spawn_graceful_shutdown_drain,
+    spawn_notification_outbox_janitor, spawn_orphan_reaper_janitor,
+    spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
+    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
@@ -287,6 +287,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         });
     }
 
+    spawn_critical_registry_supervisor(&websocket_state);
+    // Both critical registries now have lifetime supervision. Only after
+    // that fence is armed may this node transition from `Starting` to
+    // `Serving` and admit WebSocket upgrades.
+    websocket_state.deps.app_state.node_lifecycle.serve();
     spawn_sm_expiry_janitor(&websocket_state);
     spawn_orphan_reaper_janitor(
         &websocket_state,
