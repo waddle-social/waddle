@@ -663,6 +663,25 @@ CREATE TABLE IF NOT EXISTS xmpp_auth_codes (
 CREATE INDEX IF NOT EXISTS idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
 "#;
 
+/// Durable, non-secret reference metadata for XMPP SM resumption. The
+/// context UUID is not a session credential; it is resolved against the
+/// still-live session row and its exact version/epoch at resume time.
+pub const V0010_AUTH_CONTEXT_REFERENCE: &str = r#"
+ALTER TABLE sessions ADD COLUMN auth_context_id TEXT;
+ALTER TABLE sessions ADD COLUMN auth_context_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE sessions ADD COLUMN principal_auth_epoch INTEGER NOT NULL DEFAULT 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_auth_context
+    ON sessions (auth_context_id);
+"#;
+
+pub const V0010_AUTH_CONTEXT_REFERENCE_POSTGRES: &str = r#"
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_context_id UUID;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_context_version BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS principal_auth_epoch BIGINT NOT NULL DEFAULT 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_auth_context
+    ON sessions (auth_context_id);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -722,6 +741,12 @@ pub fn all() -> Vec<Migration> {
             description: "Durable OIDC/OAuth handshake state shared across replicas".to_string(),
             sql_sqlite: V0009_AUTH_HANDSHAKE_STATE,
             sql_postgres: V0009_AUTH_HANDSHAKE_STATE_POSTGRES,
+        },
+        Migration {
+            version: 10,
+            description: "Durable non-secret auth-context references for SM resume".to_string(),
+            sql_sqlite: V0010_AUTH_CONTEXT_REFERENCE,
+            sql_postgres: V0010_AUTH_CONTEXT_REFERENCE_POSTGRES,
         },
     ]
 }

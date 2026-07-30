@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use super::sql::migrations_table_sql;
 use super::{global, waddle, Migration};
@@ -85,9 +85,11 @@ impl MigrationRunner {
             applied_rows.push((version, description));
         }
 
-        // Hard-cut protection: if the migration history doesn't match this binary's
-        // migration set (unknown versions or differing descriptions), reset migration
-        // tracking and re-apply current migrations from scratch.
+        // Migration history is durable authority. An unknown version or a
+        // changed description means this binary cannot prove that its DDL is
+        // compatible with the schema already on disk. In particular, never
+        // drop `_migrations` here: doing so makes every V1 migration look
+        // pending and can replay destructive DDL against a forward database.
         let expected: HashMap<i64, &str> = self
             .migrations
             .iter()
@@ -100,28 +102,14 @@ impl MigrationRunner {
                 .unwrap_or(true)
         });
 
-        let applied: Vec<i64> = if has_incompatible_history {
-            info!("Incompatible migration history detected, resetting migration tracking");
-            conn.execute_batch("DROP TABLE IF EXISTS _migrations;")
-                .await
-                .map_err(|e| {
-                    DatabaseError::MigrationFailed(format!(
-                        "Failed to reset migration tracking table: {}",
-                        e
-                    ))
-                })?;
-            conn.execute(migrations_table_sql(driver), ())
-                .await
-                .map_err(|e| {
-                    DatabaseError::MigrationFailed(format!(
-                        "Failed to recreate migrations table: {}",
-                        e
-                    ))
-                })?;
-            Vec::new()
-        } else {
-            applied_rows.iter().map(|(version, _)| *version).collect()
-        };
+        if has_incompatible_history {
+            warn!("Incompatible migration history detected; refusing to mutate schema");
+            return Err(DatabaseError::MigrationFailed(
+                "incompatible migration history; refusing to mutate schema".to_string(),
+            ));
+        }
+
+        let applied: Vec<i64> = applied_rows.iter().map(|(version, _)| *version).collect();
 
         debug!("Already applied migrations: {:?}", applied);
 
@@ -226,6 +214,10 @@ impl MigrationRunner {
     pub async fn has_pending(&self, db: &Database) -> Result<bool, DatabaseError> {
         let current = self.current_version(db).await?.unwrap_or(0);
         let latest = self.migrations.last().map(|m| m.version).unwrap_or(0);
-        Ok(current < latest)
+        // A forward/unknown history is not "up to date" merely because its
+        // largest version exceeds this binary's final migration. `run()`
+        // rejects that state without mutation; expose it as pending here so
+        // tests and callers cannot mistake it for a converged schema.
+        Ok(current != latest)
     }
 }

@@ -20,6 +20,65 @@ async fn test_migration_runner_global() {
 }
 
 #[tokio::test]
+async fn migration_runner_refuses_unknown_history_without_dropping_tracking() {
+    let db = Database::in_memory("migration-history-is-authority").await.unwrap();
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        r#"
+            CREATE TABLE _migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO _migrations (version, description) VALUES (?, ?)",
+        (9_999_i64, "newer binary migration"),
+    )
+    .await
+    .unwrap();
+    conn.execute("CREATE TABLE forward_schema_sentinel (id INTEGER PRIMARY KEY)", ())
+        .await
+        .unwrap();
+    drop(conn);
+
+    let error = MigrationRunner::global().run(&db).await.unwrap_err();
+    assert!(
+        error.to_string().contains("incompatible migration history"),
+        "unexpected migration error: {error}"
+    );
+
+    let conn = db.guard().await.unwrap();
+    let mut history = conn
+        .query("SELECT version FROM _migrations", ())
+        .await
+        .unwrap();
+    let row = history.next().await.unwrap().unwrap();
+    let version: i64 = row.get(0).unwrap();
+    assert_eq!(version, 9_999);
+    drop(history);
+
+    let mut sentinel = conn
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'forward_schema_sentinel'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(sentinel.next().await.unwrap().is_some());
+    drop(sentinel);
+
+    assert!(
+        MigrationRunner::global().has_pending(&db).await.unwrap(),
+        "forward history must never be reported as up-to-date"
+    );
+}
+
+#[tokio::test]
 async fn test_migration_runner_waddle() {
     let db = Database::in_memory("test-waddle").await.unwrap();
     let runner = MigrationRunner::waddle();
@@ -241,7 +300,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![4, 5, 6, 7, 8, 9, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![4, 5, 6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     // Column exists.

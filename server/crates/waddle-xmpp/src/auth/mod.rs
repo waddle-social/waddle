@@ -6,12 +6,16 @@
 //! - SASL SCRAM-SHA-256 (RFC 5802, RFC 7677)
 
 pub mod scram;
+pub mod principal;
 
 use jid::BareJid;
 
 pub use scram::{
     encode_sasl_name, generate_salt, generate_scram_keys, ScramServer, ScramState,
     ServerFinalMessage, ServerFirstMessage, DEFAULT_ITERATIONS,
+};
+pub use principal::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
 
 use crate::XmppError;

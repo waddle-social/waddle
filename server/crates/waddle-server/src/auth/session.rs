@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 
 use crate::db::actor::{CreateAuthSession, DbActor, DbExecute, DbQueryOne, RowValues};
 use crate::db::{row_value, ValueExt};
@@ -31,6 +34,11 @@ pub struct Session {
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
+    /// Non-secret durable identity context used for SM resume. This is not
+    /// the bearer token (`id`) and never travels on the XMPP wire.
+    pub auth_context_id: Uuid,
+    pub auth_context_version: u64,
+    pub principal_auth_epoch: u64,
 }
 
 impl Session {
@@ -44,17 +52,43 @@ impl Session {
             expires_at: Some(Utc::now() + Duration::days(30)),
             created_at: Utc::now(),
             last_used_at: Utc::now(),
+            auth_context_id: Uuid::new_v4(),
+            auth_context_version: AuthContextVersion::INITIAL.get(),
+            principal_auth_epoch: PrincipalAuthEpoch::INITIAL.get(),
         }
     }
 
     pub fn is_expired(&self) -> bool {
         self.expires_at.map(|v| Utc::now() >= v).unwrap_or(false)
     }
+
+    pub fn authenticated_principal_ref(&self) -> Result<AuthenticatedPrincipalRef, AuthError> {
+        let bare_jid = self.user_jid.parse().map_err(|error| {
+            AuthError::DatabaseError(format!("invalid persisted principal JID: {error}"))
+        })?;
+        Ok(AuthenticatedPrincipalRef::new(
+            bare_jid,
+            AuthContextId::new(self.auth_context_id),
+            AuthContextVersion::new(self.auth_context_version),
+            PrincipalAuthEpoch::new(self.principal_auth_epoch),
+        ))
+    }
 }
 
 pub struct SessionManager {
     actor: ActorRef<DbActor>,
     hash_key: Option<Vec<u8>>,
+}
+
+/// Closed outcome of a durable principal-reference resolution. Callers must
+/// never convert these into a live authorization context without matching
+/// `Active` first.
+#[derive(Debug)]
+pub enum PrincipalResolution {
+    Active(Session),
+    Mismatch,
+    Revoked,
+    Expired,
 }
 
 impl SessionManager {
@@ -103,6 +137,9 @@ impl SessionManager {
                 username: session.username.clone(),
                 xmpp_localpart: session.xmpp_localpart.clone(),
                 token_hash,
+                auth_context_id: session.auth_context_id,
+                auth_context_version: session.auth_context_version,
+                principal_auth_epoch: session.principal_auth_epoch,
                 expires_at,
                 created_at,
                 last_used_at,
@@ -172,6 +209,13 @@ impl SessionManager {
             .map_err(|e| {
                 AuthError::DatabaseError(format!("Failed to get xmpp_localpart: {}", e))
             })?;
+        let auth_context_id: Uuid = row_value(row, 8)
+            .and_then(ValueExt::as_string)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get auth context id: {e}")))?
+            .parse()
+            .map_err(|e| AuthError::DatabaseError(format!("invalid auth context id: {e}")))?;
+        let auth_context_version = integer_column(row, 9, "auth context version")?;
+        let principal_auth_epoch = integer_column(row, 10, "principal auth epoch")?;
 
         Ok(Session {
             id,
@@ -181,6 +225,9 @@ impl SessionManager {
             expires_at,
             created_at,
             last_used_at,
+            auth_context_id,
+            auth_context_version,
+            principal_auth_epoch,
         })
     }
 
@@ -188,7 +235,8 @@ impl SessionManager {
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AuthError> {
         let sql = r#"
             SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
-                   u.username, u.xmpp_localpart
+                   u.username, u.xmpp_localpart, s.auth_context_id, s.auth_context_version,
+                   s.principal_auth_epoch
             FROM sessions s
             JOIN users u ON u.jid = s.user_jid
             WHERE s.id = ?
@@ -209,6 +257,51 @@ impl SessionManager {
             Some(values) => Ok(Some(self.values_to_session(&values)?)),
             None => Ok(None),
         }
+    }
+
+    /// Resolve a non-secret SM principal reference from database authority.
+    ///
+    /// The reference contains no bearer proof. The session's context UUID,
+    /// exact version/epoch, bare JID, and expiry must all still match. A
+    /// storage error is returned separately so callers can fail closed as a
+    /// transient unavailability rather than pretending it is revocation.
+    #[instrument(skip(self, principal))]
+    pub async fn resolve_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+    ) -> Result<PrincipalResolution, AuthError> {
+        let sql = r#"
+            SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
+                   u.username, u.xmpp_localpart, s.auth_context_id, s.auth_context_version,
+                   s.principal_auth_epoch
+            FROM sessions s
+            JOIN users u ON u.jid = s.user_jid
+            WHERE s.auth_context_id = ?
+            LIMIT 1
+        "#
+        .to_string();
+        let row: Option<RowValues> = self
+            .actor
+            .ask(DbQueryOne {
+                sql,
+                params: vec![crate::db::Value::from(
+                    principal.auth_context_id().as_uuid().to_string(),
+                )],
+            })
+            .await
+            .map_err(Self::ask_err)?;
+
+        let Some(values) = row else {
+            return Ok(PrincipalResolution::Revoked);
+        };
+        let session = self.values_to_session(&values)?;
+        if session.authenticated_principal_ref()? != *principal {
+            return Ok(PrincipalResolution::Mismatch);
+        }
+        if session.is_expired() {
+            return Ok(PrincipalResolution::Expired);
+        }
+        Ok(PrincipalResolution::Active(session))
     }
 
     #[instrument(skip(self))]
@@ -254,6 +347,17 @@ impl SessionManager {
 
         self.touch_session(session_id).await?;
         Ok(session)
+    }
+}
+
+fn integer_column(row: &[crate::db::Value], index: usize, name: &str) -> Result<u64, AuthError> {
+    match row_value(row, index).map_err(|error| AuthError::DatabaseError(error.to_string()))? {
+        crate::db::Value::Integer(value) => (*value).try_into().map_err(|_| {
+            AuthError::DatabaseError(format!("invalid {name}: {value}"))
+        }),
+        value => Err(AuthError::DatabaseError(format!(
+            "invalid {name} value: {value:?}"
+        ))),
     }
 }
 

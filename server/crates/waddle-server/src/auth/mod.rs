@@ -23,7 +23,7 @@ pub use jid::{localpart_to_jid, username_to_localpart};
 pub use native::{NativeUserStore, RegisterRequest};
 pub use providers::AuthProviderTokenEndpointAuthMethod;
 pub use providers::{AuthProviderConfig, AuthProviderKind, ProviderRegistry};
-pub use session::{Session, SessionManager};
+pub use session::{PrincipalResolution, Session, SessionManager};
 
 /// Authentication-related errors.
 #[derive(Error, Debug)]
