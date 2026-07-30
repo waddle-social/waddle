@@ -1,5 +1,6 @@
 package social.waddle.android.client.prefs
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,10 +26,14 @@ class SessionPrefsTest {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private fun newPrefs(): SessionPrefs {
+    private fun newDataStore(): DataStore<androidx.datastore.preferences.core.Preferences> {
         val file = File(tempFolder.root, "session.preferences_pb")
-        return SessionPrefs(PreferenceDataStoreFactory.create(scope = scope) { file })
+        return PreferenceDataStoreFactory.create(scope = scope) { file }
     }
+
+    private fun newPrefs(
+        dataStore: DataStore<androidx.datastore.preferences.core.Preferences> = newDataStore(),
+    ): SessionPrefs = SessionPrefs(dataStore)
 
     @After
     fun tearDown() {
@@ -48,24 +53,6 @@ class SessionPrefsTest {
         assertEquals("sess-1", prefs.sessionId.first())
         assertEquals(setOf("general@muc.waddle.test"), prefs.joinedRooms.first())
         assertEquals(mapOf("alice@waddle.test" to "2026-07-15T10:00:00Z"), prefs.lastSeen.first())
-    }
-
-    @Test
-    fun `round trips the resume snapshot and null clears it`() = runBlocking {
-        val prefs = newPrefs()
-        val snapshot = SmResumeSnapshot(
-            previd = "prev-1",
-            inboundH = 5u,
-            outboundH = 7u,
-            maxResumeSeconds = 300u,
-            queuedStanzasXml = listOf("<message/>"),
-        )
-
-        prefs.setSmResume(snapshot)
-        assertEquals(snapshot, prefs.smResume.first())
-
-        prefs.setSmResume(null)
-        assertNull(prefs.smResume.first())
     }
 
     @Test

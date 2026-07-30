@@ -23,13 +23,13 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ConnectionLoop
+import social.waddle.android.client.session.ConnectionLoopCallbacks
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleChatState
-import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMucAffiliation
@@ -62,6 +62,8 @@ class XmppSessionManager(
     reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+    /** Test seam for the stale terminal-auth completion race. */
+    private val beforeTerminalAuthCommit: suspend () -> Unit = {},
 ) {
     private val stores = SessionStores()
 
@@ -85,11 +87,19 @@ class XmppSessionManager(
 
     private var sessionScope: CoroutineScope? = null
 
+    /**
+     * Terminal authentication cleanup cannot run in the session scope it
+     * retires: a relogin cancels that scope while the old completion may still
+     * be waiting to validate its lease. This manager-owned scope lets that
+     * completion perform its fenced no-op after the old loop has stopped.
+     */
+    private val terminalAuthScope = CoroutineScope(SupervisorJob() + dispatcher)
+
     private val lifecycleMutex = Mutex()
 
     private val resume = ResumePersistence(sessionPrefs)
 
-    private val activeSession = ActiveSession(resume::queueResumeSnapshot)
+    private val activeSession = ActiveSession()
 
     private val readState: ReadStateCoordinator =
         ReadStateCoordinator(activeSession, stores, userPrefs) { event ->
@@ -131,8 +141,11 @@ class XmppSessionManager(
         sessionPrefs = sessionPrefs,
         activeSession = activeSession,
         router = router,
-        onReady = ::onSessionReady,
-        onTerminalAuthFailure = ::onTerminalAuthFailure,
+        callbacks = ConnectionLoopCallbacks(
+            onReady = ::onSessionReady,
+            onDeliveryAcked = messenger::acknowledgeDelivery,
+            onTerminalAuthFailure = ::onTerminalAuthFailure,
+        ),
         reconnectPolicy = reconnectPolicy,
         connectTimeoutMillis = connectTimeoutMillis,
     )
@@ -158,7 +171,7 @@ class XmppSessionManager(
         // into the freshly seeded stores.
         activeSession.advanceGeneration()
         clearSessionState()
-        activeSession.ownBareJid = bareJid(session.jid)
+        activeSession.activateOwner(bareJid(session.jid))
         persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
         timelineStore.setOwnBareJid(session.jid)
         persistQuietly { sessionPrefs.setSessionId(session.sessionId) }
@@ -170,11 +183,16 @@ class XmppSessionManager(
         resume.start(scope)
         callStore.start(scope)
         scope.launch { router.sweepChatStates() }
-        scope.launch { loop.run(session) }
+        scope.launch { loop.run(session, scope) }
     }
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
+        // Fence ALL ordinary outbound work before the call teardown can
+        // suspend. The one captured connection is call-teardown-only;
+        // concurrent sends cannot capture a lease, persist a row, or use
+        // its transport. This also invalidates a same-account relogin.
+        val retiredCallConnection = activeSession.revokeOutboundAuthority()
         // Best-effort call teardown BEFORE the stream closes (web
         // client.ts disconnect parity): the peer must get the
         // retract/reject/terminate + XEP-0353 <finish/> bookend instead
@@ -186,7 +204,12 @@ class XmppSessionManager(
         // already-cancelled coroutine and abort it halfway.
         if (callStore.state.value != CallState.Idle) {
             try {
-                withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) { callStore.hangUp() }
+                val callSender = retiredCallConnection?.let(ClientCallSignaling::forRetiredConnection)
+                if (callSender != null) {
+                    withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) {
+                    callStore.hangUpWith(callSender, retiredCallConnection.ownFullJid)
+                }
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {
@@ -194,9 +217,6 @@ class XmppSessionManager(
             }
         }
         cancelSessionScope()
-        activeSession.advanceGeneration()
-        activeSession.ownBareJid = null
-        activeSession.ownFullJid = null
         clearSessionState()
         sessionPrefs.clear()
         loop.resetToIdle()
@@ -497,36 +517,56 @@ class XmppSessionManager(
     /** `SessionReady` hook for [ConnectionLoop]: launch the ready work. */
     private fun onSessionReady(
         attemptScope: CoroutineScope,
-        client: WaddleClientInterface,
         session: WaddleSessionInfo,
         freshStream: Boolean,
+        lease: ActiveSession.OwnerLease,
     ) {
         // Topology discovery now heads the sequential ready pipeline:
         // the bookmark-driven rejoin derives its join set from it.
-        attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
+        attemptScope.launch {
+            if (activeSession.isCurrent(lease)) catchup.onSessionReady(session, freshStream)
+        }
         // Once per connect: retry the XEP-0166 mixer terminates a
         // previous group-call leave still owes (terminate-pending
         // session-cache entries survive process death and reconnects).
-        attemptScope.launch { callStore.muc.retryPendingTerminates(activeSession.ownFullJid) }
+        attemptScope.launch {
+            if (activeSession.isCurrent(lease)) callStore.muc.retryPendingTerminates(activeSession.ownFullJid)
+        }
     }
 
-    private suspend fun onTerminalAuthFailure() {
-        _appState.value = WaddleAppState.SignedOut
-        // The dead session's in-flight verb acks (caller-scoped, up to
-        // the 30 s IQ timeout away) must not write during the signed-out
-        // idle period or into the next login's stores.
-        activeSession.advanceGeneration()
-        // A live call slot must not outlive the session: the shell is
-        // about to render the login screen with no in-app hang-up, and
-        // the app-scoped collectors (FGS, media, ring notification)
-        // tear down off this transition.
-        callStore.clear()
-        persistQuietly { sessionPrefs.clear() }
-        // Last statement on purpose: cancelling the session scope kills
-        // this coroutine too, but also the parked snapshot persister that
-        // would otherwise leak until the next login.
-        sessionScope?.cancel()
-        sessionScope = null
+    private fun onTerminalAuthFailure(
+        failingLease: ActiveSession.OwnerLease,
+        failingScope: CoroutineScope,
+    ) {
+        terminalAuthScope.launch {
+            // Deliberately before [lifecycleMutex]: tests pause an old
+            // completion here, install a successor, then prove the old
+            // terminal signal is a strict no-op when released.
+            beforeTerminalAuthCommit()
+            lifecycleMutex.withLock {
+                // The scope reference is an immutable session identity. A
+                // current owner check alone would not distinguish an old
+                // terminal failure from a successor that logged in as the
+                // same account; [advanceGenerationIfCurrent] is the
+                // transport-fence CAS for the lease half of this check.
+                if (sessionScope !== failingScope) return@withLock
+                if (!activeSession.advanceGenerationIfCurrent(failingLease)) return@withLock
+
+                _appState.value = WaddleAppState.SignedOut
+                // A live call slot must not outlive the session: the shell
+                // is about to render the login screen with no in-app hang-up,
+                // and its collectors tear down from this transition.
+                clearSessionState()
+                persistQuietly { sessionPrefs.clear() }
+                // Do not call [cancelSessionScope] here: this completion can
+                // be contemporaneous with the loop it retires, and joining a
+                // scope from its own lifecycle path would deadlock. The
+                // handler itself is manager-owned, so cancellation cannot
+                // interrupt the completed fenced cleanup above.
+                failingScope.cancel()
+                sessionScope = null
+            }
+        }
     }
 
     /** Persist DM-list recency (UI hook and router callback). */

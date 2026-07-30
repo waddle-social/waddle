@@ -28,7 +28,10 @@ sealed interface CallState {
         val media: WaddleCallMedia,
         /** The local user tapped accept; `<proceed/>` is in flight. */
         val accepting: Boolean = false,
-    ) : CallState
+    ) : CallState {
+        /** Exact ready attempt that owns all local responses for this call. */
+        internal var connection: CallConnection? = null
+    }
 
     /** Our `<propose/>` is ringing the peer. */
     data class Outgoing(
@@ -40,7 +43,10 @@ sealed interface CallState {
         val initiator: String? = null,
         /** A `<ringing/>` came back: a callee device is ringing. */
         val ringing: Boolean = false,
-    ) : CallState
+    ) : CallState {
+        /** Exact ready attempt that owns all local responses for this call. */
+        internal var connection: CallConnection? = null
+    }
 
     /**
      * XEP-0272 §Joining two-phase group-call setup in flight (web
@@ -61,7 +67,10 @@ sealed interface CallState {
          * so a rollback/teardown must also send the Jingle terminate.
          */
         val activePresencePublished: Boolean = false,
-    ) : CallState
+    ) : CallState {
+        /** Exact ready attempt that owns this Muji setup. */
+        internal var connection: CallConnection? = null
+    }
 
     /** Jingle session established; [join] holds the LiveKit media credentials. */
     data class Active(
@@ -74,7 +83,10 @@ sealed interface CallState {
         val kind: CallKind = CallKind.DM,
         /** Our MUC occupant nick; `null` for DM calls. */
         val selfNick: String? = null,
-    ) : CallState
+    ) : CallState {
+        /** Exact ready attempt that owns all normal call signaling. */
+        internal var connection: CallConnection? = null
+    }
 
     /** Terminal slot until the UI dismisses it back to [Idle]. */
     data class Ended(
@@ -103,6 +115,48 @@ val CallState.sidOrNull: String?
         is CallState.Active -> sid
         is CallState.Ended -> sid
     }
+
+/** The active attempt context carried by a live DM or Muji slot. */
+internal val CallState.connectionOrNull: CallConnection?
+    get() = when (this) {
+        CallState.Idle, is CallState.Ended -> null
+        is CallState.Incoming -> connection
+        is CallState.Outgoing -> connection
+        is CallState.MucPending -> connection
+        is CallState.Active -> connection
+    }
+
+/** Incoming server events acquire the current attempt once, before reducer state changes. */
+internal fun CallState.withConnectionIfMissing(connection: CallConnection?): CallState = when (this) {
+    is CallState.Incoming -> copyWithConnection(connection = this.connection ?: connection)
+    is CallState.Outgoing -> copyWithConnection(connection = this.connection ?: connection)
+    is CallState.MucPending -> copyWithConnection(connection = this.connection ?: connection)
+    is CallState.Active -> copyWithConnection(this.connection ?: connection)
+    CallState.Idle, is CallState.Ended -> this
+}
+
+/** Copies retain the internal, attempt-pinned signaling capability. */
+internal fun CallState.Incoming.copyWithConnection(
+    accepting: Boolean = this.accepting,
+    connection: CallConnection? = this.connection,
+): CallState.Incoming = copy(accepting = accepting).also { it.connection = connection }
+
+/** Copies retain the internal, attempt-pinned signaling capability. */
+internal fun CallState.Outgoing.copyWithConnection(
+    ringing: Boolean = this.ringing,
+    connection: CallConnection? = this.connection,
+): CallState.Outgoing = copy(ringing = ringing).also { it.connection = connection }
+
+/** Copies retain the internal, attempt-pinned signaling capability. */
+internal fun CallState.MucPending.copyWithConnection(
+    activePresencePublished: Boolean = this.activePresencePublished,
+    connection: CallConnection? = this.connection,
+): CallState.MucPending = copy(activePresencePublished = activePresencePublished).also { it.connection = connection }
+
+/** Copies retain the internal, attempt-pinned signaling capability. */
+internal fun CallState.Active.copyWithConnection(
+    connection: CallConnection? = this.connection,
+): CallState.Active = copy().also { it.connection = connection }
 
 /**
  * Why the call slot ended — the typed equivalent of the web reducer's

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,6 +47,7 @@ class MessageSearchViewModel(
      * reads run in [viewModelScope] — so a plain field suffices.
      */
     private var searchGeneration = 0
+    private var activeSearch: Job? = null
 
     init {
         viewModelScope.launch { collectQueries() }
@@ -76,13 +78,17 @@ class MessageSearchViewModel(
                 // emptied the field must not resurrect results.
                 val ticket = ++searchGeneration
                 if (trimmed.isEmpty()) {
+                    activeSearch?.cancel()
+                    activeSearch = null
                     _state.value = MessageSearchState.Idle
                 } else {
                     _state.value = MessageSearchState.Searching
-                    // Launched, not awaited: the collector must stay
-                    // responsive so the next debounced query can take a
-                    // newer ticket while this one is still in flight.
-                    viewModelScope.launch { runSearch(ticket, trimmed) }
+                    // A stale archive call can hold the session's transport
+                    // fence while it awaits the FFI response. Cancel it
+                    // before starting the successor so a newer query is not
+                    // artificially queued behind an obsolete one.
+                    activeSearch?.cancel()
+                    activeSearch = viewModelScope.launch { runSearch(ticket, trimmed) }
                 }
             }
     }

@@ -43,21 +43,34 @@ internal class ConversationVerbs(
      * that never received messages.
      */
     suspend fun joinRoom(roomJid: String, nick: String): VerbResult {
-        val client = activeSession.client
-        if (client == null) {
-            stores.roomStore.markJoined(roomJid)
-            persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
-            return VerbResult.NotConnected
-        }
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
         try {
-            client.joinRoom(roomJid, nick)
+            when (val result = activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, nick) }) {
+                ActiveSession.LeaseInvocation.Stale -> return VerbResult.NotConnected
+                ActiveSession.LeaseInvocation.NotConnected -> {
+                    if (!activeSession.runIfCurrent(lease) {
+                            stores.roomStore.markJoined(roomJid)
+                            persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
+                        }
+                    ) {
+                        return VerbResult.NotConnected
+                    }
+                    return VerbResult.NotConnected
+                }
+                is ActiveSession.LeaseInvocation.Completed -> Unit
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return VerbResult.Rejected
         }
-        stores.roomStore.markJoined(roomJid)
-        persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
+        if (!activeSession.runIfCurrent(lease) {
+                stores.roomStore.markJoined(roomJid)
+                persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
+            }
+        ) {
+            return VerbResult.NotConnected
+        }
         return VerbResult.Ok
     }
 
@@ -66,12 +79,30 @@ internal class ConversationVerbs(
      * (dedupe by stanza id keeps replays collapsed). `null` when no
      * session is ready or the query failed.
      */
-    suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
-        fetchHistory { client -> client.fetchRoomHistory(roomJid, maxMessages, beforeId) }
+    suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? {
+        val lease = activeSession.captureOwnerLease() ?: return null
+        return fetchRoomHistory(lease, roomJid, maxMessages, beforeId)
+    }
+
+    internal suspend fun fetchRoomHistory(
+        lease: ActiveSession.OwnerLease,
+        roomJid: String,
+        maxMessages: UInt,
+        beforeId: String?,
+    ): WaddleMamPage? = fetchHistory(lease) { client -> client.fetchRoomHistory(roomJid, maxMessages, beforeId) }
 
     /** DM twin of [fetchRoomHistory]. */
-    suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
-        fetchHistory { client -> client.fetchDmHistory(peerJid, maxMessages, beforeId) }
+    suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? {
+        val lease = activeSession.captureOwnerLease() ?: return null
+        return fetchDmHistory(lease, peerJid, maxMessages, beforeId)
+    }
+
+    internal suspend fun fetchDmHistory(
+        lease: ActiveSession.OwnerLease,
+        peerJid: String,
+        maxMessages: UInt,
+        beforeId: String?,
+    ): WaddleMamPage? = fetchHistory(lease) { client -> client.fetchDmHistory(peerJid, maxMessages, beforeId) }
 
     /**
      * MAM full-text search over a room's archive (XEP-0313 with the
@@ -82,11 +113,15 @@ internal class ConversationVerbs(
      * session is ready or the query failed.
      */
     suspend fun searchRoomHistory(roomJid: String, query: String, maxResults: UInt): WaddleMamPage? =
-        activeSession.fetch { client -> client.searchRoomHistory(roomJid, query, maxResults) }
+        activeSession.captureOwnerLease()?.let { lease ->
+            activeSession.fetchIfCurrent(lease) { client -> client.searchRoomHistory(roomJid, query, maxResults) }
+        }
 
     /** DM twin of [searchRoomHistory]. */
     suspend fun searchDmHistory(peerJid: String, query: String, maxResults: UInt): WaddleMamPage? =
-        activeSession.fetch { client -> client.searchDmHistory(peerJid, query, maxResults) }
+        activeSession.captureOwnerLease()?.let { lease ->
+            activeSession.fetchIfCurrent(lease) { client -> client.searchDmHistory(peerJid, query, maxResults) }
+        }
 
     /**
      * XEP-0363: request an upload slot from the account's upload
@@ -98,14 +133,24 @@ internal class ConversationVerbs(
         sizeBytes: ULong,
         contentType: String,
     ): WaddleUploadSlot? {
-        val client = activeSession.client ?: return null
-        val service = activeSession.uploadService ?: run {
-            val discovered = runCatching { client.discoverUploadService() }.getOrNull() ?: return null
-            activeSession.uploadService = discovered
-            discovered
-        }
+        val lease = activeSession.captureOwnerLease() ?: return null
         return try {
-            client.requestUploadSlot(service, filename, sizeBytes, contentType)
+            when (
+                val result = activeSession.invokeIfCurrent(
+                lease,
+                { client ->
+                    val service = activeSession.uploadService
+                        ?: client.discoverUploadService()?.also { activeSession.uploadService = it }
+                        ?: return@invokeIfCurrent null
+                    client.requestUploadSlot(service, filename, sizeBytes, contentType)
+                },
+            )
+            ) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> null
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -131,14 +176,19 @@ internal class ConversationVerbs(
         // NOTE (deferred, needs an FFI signature change): the reaction
         // stanza does not yet echo the target's XEP-0201 <thread/> like
         // the web client does — send_reaction takes no options today.
-        val owner = activeSession.ownBareJid ?: return VerbResult.NotReady
-        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return VerbResult.NotReady
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        val sender = ownMutationSender(conversationJid, isGroupchat, lease) ?: return VerbResult.NotReady
         val base = ownReactionSet(conversationJid, targetStanzaId) ?: emptyList()
         val next = if (emoji in base) base - emoji else base + emoji
-        applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, next)
+        if (!activeSession.applyIfCurrent(lease) {
+                applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, next)
+            }
+        ) {
+            return VerbResult.NotConnected
+        }
         var result: VerbResult = VerbResult.Rejected
         try {
-            result = activeSession.verbCall {
+            result = activeSession.verbCallIfCurrent(lease) {
                 it.sendReaction(bareJid(conversationJid), targetStanzaId, next, isGroupchat)
             }
         } finally {
@@ -147,8 +197,10 @@ internal class ConversationVerbs(
             // happen — in a DM nothing on the wire would ever correct
             // the phantom chip. Owner-gated: a rollback racing logout
             // must not park pre-logout state into the next session.
-            if (result != VerbResult.Ok && activeSession.ownBareJid == owner) {
+            if (result != VerbResult.Ok) {
+                activeSession.applyIfCurrent(lease) {
                 applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, base)
+            }
             }
         }
         return result
@@ -165,13 +217,23 @@ internal class ConversationVerbs(
         newBody: String,
         threadId: String? = null,
     ): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
-        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return VerbResult.NotReady
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        val sender = ownMutationSender(conversationJid, isGroupchat, lease) ?: return VerbResult.NotReady
         val options = threadId?.let {
             sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
         }
         val outcome = try {
-            client.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options)
+            when (
+                val result = activeSession.invokeIfCurrent(
+                lease,
+                { it.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options) },
+            )
+            ) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -182,12 +244,15 @@ internal class ConversationVerbs(
         // reject the correction — MUC state waits for the reflection
         // (web parity). A DM has no reflection to wait for. Owner-gated
         // so a completion racing logout cannot park stale state.
-        if (!isGroupchat && activeSession.ownBareJid != null) {
-            stores.timelineStore.applyLocalMutation(
+        if (!isGroupchat && !activeSession.applyIfCurrent(lease) {
+                stores.timelineStore.applyLocalMutation(
                 conversationJid,
                 MessageMutation.Correction(targetId = targetId, from = sender, newBody = newBody),
                 isGroupchat,
-            )
+                )
+            }
+        ) {
+            return VerbResult.NotConnected
         }
         return VerbResult.Ok
     }
@@ -198,20 +263,24 @@ internal class ConversationVerbs(
         isGroupchat: Boolean,
         targetStanzaId: String,
     ): VerbResult {
-        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return VerbResult.NotReady
-        val result = activeSession.verbCall {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        val sender = ownMutationSender(conversationJid, isGroupchat, lease) ?: return VerbResult.NotReady
+        val result = activeSession.verbCallIfCurrent(lease) {
             it.sendRetraction(bareJid(conversationJid), targetStanzaId, isGroupchat)
         }
         // DM only (see sendCorrection): a room rejection after stream
         // accept would leave an irreversible local tombstone; the MUC
         // reflection drives room state instead. Owner-gated like the
         // reaction rollback.
-        if (result == VerbResult.Ok && !isGroupchat && activeSession.ownBareJid != null) {
-            stores.timelineStore.applyLocalMutation(
+        if (result == VerbResult.Ok && !isGroupchat && !activeSession.applyIfCurrent(lease) {
+                stores.timelineStore.applyLocalMutation(
                 conversationJid,
                 MessageMutation.Retraction(targetId = targetStanzaId, from = sender),
                 isGroupchat,
-            )
+                )
+            }
+        ) {
+            return VerbResult.NotConnected
         }
         return result
     }
@@ -223,24 +292,28 @@ internal class ConversationVerbs(
      * No optimistic tombstone: the room broadcasts the §4.3 retraction
      * to every occupant (including this one) on success.
      */
-    suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): VerbResult =
-        activeSession.verbCall { client ->
+    suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): VerbResult {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        return activeSession.verbCallIfCurrent(lease) { client ->
             client.sendModeration(bareJid(roomJid), targetStanzaId, reason)
         }
+    }
 
     /**
      * `urn:waddle:pin:0` room pin/unpin. No optimistic pin-set write —
      * the room broadcasts a `<pin-event/>` that lands in the pin store
      * (and a forbidden reply for non-admins surfaces via `on_error`).
      */
-    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): VerbResult =
-        activeSession.verbCall { client ->
+    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): VerbResult {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        return activeSession.verbCallIfCurrent(lease) { client ->
             if (pin) {
                 client.pinMessage(bareJid(roomJid), targetStanzaId)
             } else {
                 client.unpinMessage(bareJid(roomJid), targetStanzaId)
             }
         }
+    }
 
     /**
      * `urn:waddle:link-preview:0` composer lookup: resolve [url] into a
@@ -249,7 +322,9 @@ internal class ConversationVerbs(
      * proceeds without a preview, never blocks on one.
      */
     suspend fun lookupLinkPreview(url: String, scopeJid: String): WaddleLinkPreviewLookup? =
-        activeSession.fetch { it.lookupLinkPreview(url, bareJid(scopeJid)) }
+        activeSession.captureOwnerLease()?.let { lease ->
+            activeSession.fetchIfCurrent(lease) { it.lookupLinkPreview(url, bareJid(scopeJid)) }
+        }
 
     /**
      * Seed the pin store with the room's current pin list (room open).
@@ -258,17 +333,24 @@ internal class ConversationVerbs(
      * that arrived while the fetch was in flight.
      */
     suspend fun refreshRoomPins(roomJid: String) {
-        val client = activeSession.client ?: return
+        val lease = activeSession.captureOwnerLease() ?: return
         val room = bareJid(roomJid)
         val fetchedAtVersion = stores.pinStore.eventVersion(room)
         val entries = try {
-            client.fetchRoomPins(room)
+            when (val result = activeSession.invokeIfCurrent(lease) { it.fetchRoomPins(room) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return
         }
-        activeSession.bridge?.submit(XmppEvent.RoomPins(room, entries, fetchedAtVersion))
+        activeSession.applyIfCurrent(lease) {
+            activeSession.bridge?.submit(XmppEvent.RoomPins(room, entries, fetchedAtVersion))
+        }
     }
 
     /**
@@ -282,10 +364,27 @@ internal class ConversationVerbs(
         mode: WaddleNotifyMode,
         name: String? = null,
     ): NotifySettingsResult {
-        val client = activeSession.client ?: return NotifySettingsResult.NotConnected
+        val lease = activeSession.captureOwnerLease() ?: return NotifySettingsResult.NotConnected
         val room = bareJid(roomJid)
         val outcome = try {
-            client.setRoomNotificationMode(room, mode, name, stores.notifySettingsStore.richPayloadOptIn(room))
+            when (
+                val result = activeSession.invokeIfCurrent(
+                lease,
+                {
+                    it.setRoomNotificationMode(
+                        room,
+                        mode,
+                        name,
+                        stores.notifySettingsStore.richPayloadOptIn(room),
+                    )
+                },
+            )
+            ) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return NotifySettingsResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -293,8 +392,14 @@ internal class ConversationVerbs(
         }
         return when (outcome) {
             is WaddleSetRoomNotificationModeOutcome.Ok -> {
-                stores.notifySettingsStore.applyRoomUpdate(outcome.item)
-                NotifySettingsResult.Ok
+                if (activeSession.applyIfCurrent(lease) {
+                        stores.notifySettingsStore.applyRoomUpdate(outcome.item)
+                    }
+                ) {
+                    NotifySettingsResult.Ok
+                } else {
+                    NotifySettingsResult.NotConnected
+                }
             }
             WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch -> NotifySettingsResult.NodeConfigMismatch
             WaddleSetRoomNotificationModeOutcome.Error -> NotifySettingsResult.Rejected
@@ -308,10 +413,20 @@ internal class ConversationVerbs(
      * store reconciles by dropping the entry.
      */
     suspend fun setDmNotificationMode(peerJid: String, mode: WaddleNotifyMode): NotifySettingsResult {
-        val client = activeSession.client ?: return NotifySettingsResult.NotConnected
+        val lease = activeSession.captureOwnerLease() ?: return NotifySettingsResult.NotConnected
         val peer = bareJid(peerJid)
         val outcome = try {
-            client.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer))
+            when (
+                val result = activeSession.invokeIfCurrent(
+                lease,
+                { it.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer)) },
+            )
+            ) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return NotifySettingsResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -319,12 +434,24 @@ internal class ConversationVerbs(
         }
         return when (outcome) {
             is WaddleSetDmNotificationModeOutcome.Ok -> {
-                stores.notifySettingsStore.applyDmUpdate(outcome.item)
-                NotifySettingsResult.Ok
+                if (activeSession.applyIfCurrent(lease) {
+                        stores.notifySettingsStore.applyDmUpdate(outcome.item)
+                    }
+                ) {
+                    NotifySettingsResult.Ok
+                } else {
+                    NotifySettingsResult.NotConnected
+                }
             }
             is WaddleSetDmNotificationModeOutcome.Removed -> {
-                stores.notifySettingsStore.applyDmRemoved(outcome.jid)
-                NotifySettingsResult.Ok
+                if (activeSession.applyIfCurrent(lease) {
+                        stores.notifySettingsStore.applyDmRemoved(outcome.jid)
+                    }
+                ) {
+                    NotifySettingsResult.Ok
+                } else {
+                    NotifySettingsResult.NotConnected
+                }
             }
             WaddleSetDmNotificationModeOutcome.NodeConfigMismatch -> NotifySettingsResult.NodeConfigMismatch
             WaddleSetDmNotificationModeOutcome.Error -> NotifySettingsResult.Rejected
@@ -340,8 +467,12 @@ internal class ConversationVerbs(
         conversationJid: String,
         isGroupchat: Boolean,
         state: WaddleChatState,
-    ): VerbResult =
-        activeSession.verbCall { it.sendChatState(bareJid(conversationJid), state, isGroupchat) }
+    ): VerbResult {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        return activeSession.verbCallIfCurrent(lease) {
+            it.sendChatState(bareJid(conversationJid), state, isGroupchat)
+        }
+    }
 
     /** The account's current reaction set on a row, from the store. */
     private fun ownReactionSet(conversationJid: String, targetId: String): List<String>? {
@@ -375,8 +506,12 @@ internal class ConversationVerbs(
      * JID (room/nick) in a MUC, the bare account JID in 1:1 — matching
      * how [conversationKeyOf] classifies own incoming copies.
      */
-    private fun ownMutationSender(conversationJid: String, isGroupchat: Boolean): String? {
-        val own = activeSession.ownBareJid ?: return null
+    private fun ownMutationSender(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        lease: ActiveSession.OwnerLease,
+    ): String? {
+        val own = lease.ownerBareJid
         return if (isGroupchat) {
             "${bareJid(conversationJid)}/${own.substringBefore('@')}"
         } else {
@@ -385,14 +520,17 @@ internal class ConversationVerbs(
     }
 
     private suspend fun fetchHistory(
+        lease: ActiveSession.OwnerLease,
         fetch: suspend (WaddleClientInterface) -> WaddleMamPage,
     ): WaddleMamPage? {
-        val page = activeSession.fetch(fetch) ?: return null
+        val page = activeSession.fetchIfCurrent(lease, fetch) ?: return null
         // Per-message guard: one malformed archived stanza must not kill
         // the caller's paging coroutine (and crash-loop on every reopen
         // of the conversation, since the archive re-serves it).
         page.messages.forEach { message ->
-            runCatching { stores.timelineStore.onArchivedMessage(message) }
+            activeSession.applyIfCurrent(lease) {
+                runCatching { stores.timelineStore.onArchivedMessage(message) }
+            }
         }
         return page
     }

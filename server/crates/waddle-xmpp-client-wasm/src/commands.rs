@@ -4,12 +4,8 @@ pub(crate) async fn send_stanza_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<(), JsValue> {
-    let mut cmd_tx = command_sender(&inner)?;
     let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::SendStanza { stanza, responder })
-        .await
-        .map_err(|_| js_error("client is disconnected"))?;
+    enqueue_command(&inner, WasmCommand::SendStanza { stanza, responder }).await?;
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))
@@ -19,10 +15,8 @@ pub(crate) async fn send_message_stanza_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<(), WaddleSendMessageOutcome> {
-    let mut cmd_tx = command_sender(&inner).map_err(|_| WaddleSendMessageOutcome::NotConnected)?;
     let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::SendStanza { stanza, responder })
+    enqueue_command(&inner, WasmCommand::SendStanza { stanza, responder })
         .await
         .map_err(|_| WaddleSendMessageOutcome::NotConnected)?;
     rx.await
@@ -49,29 +43,16 @@ pub(crate) fn send_failure_outcome(error: &ClientError) -> WaddleSendMessageOutc
     }
 }
 
-/// Deadline for a client-initiated IQ round trip (#1446). RFC 6120
-/// requires a reply to every IQ, but a broken or silent server can
-/// simply never send one — and the reply oneshot only resolves on a
-/// matched result or a disconnect sweep. Without a deadline every
-/// caller up the stack (including call teardown) inherits an unbounded
-/// wait.
+/// Bound an IQ request's shared-FIFO admission and reply wait. A peer that
+/// never replies must not keep callers such as call teardown pending forever.
 pub(crate) const IQ_REPLY_DEADLINE_MS: u32 = 30_000;
 
-/// Outcome of racing the driver's IQ-reply oneshot against a deadline.
 pub(crate) enum IqReplyWait {
     Reply(Result<Element, ClientError>),
-    /// The driver dropped the responder (disconnect sweep).
     Disconnected,
     DeadlineExpired,
 }
 
-/// Race a full IQ round trip (queue admission + reply oneshot) against
-/// `deadline`. The whole trip sits inside the race on purpose: a
-/// stalled driver can block the bounded command channel before the
-/// stanza is even accepted, and that wait must count against the
-/// deadline too. Split from the wasm entry points (which supply a real
-/// `setTimeout` future) so the race itself is testable on native
-/// targets.
 pub(crate) async fn wait_iq_reply_with_deadline<F, D>(round_trip: F, deadline: D) -> IqReplyWait
 where
     F: core::future::Future<Output = IqReplyWait>,
@@ -86,8 +67,6 @@ where
     }
 }
 
-/// Map the reply oneshot into an [`IqReplyWait`]: a dropped responder
-/// is the driver's disconnect sweep.
 pub(crate) async fn iq_reply_from_oneshot(
     rx: oneshot::Receiver<Result<Element, ClientError>>,
 ) -> IqReplyWait {
@@ -97,24 +76,16 @@ pub(crate) async fn iq_reply_from_oneshot(
     }
 }
 
-/// Resolve after `ms` on the JS event loop, plus a cancel handle that
-/// clears the timer once the race is decided (so a won race doesn't
-/// retain the timer + resolve closure for the rest of the deadline).
-/// Reads `setTimeout`/`clearTimeout` off the global scope so it works
-/// in both window and worker contexts, and compiles (unused) on native
-/// test targets. If the runtime somehow lacks a timer API the promise
-/// never resolves and the wait degrades to the pre-deadline behavior.
 fn sleep_ms(ms: u32) -> (impl core::future::Future<Output = ()>, impl FnOnce()) {
     let timer_id = Rc::new(std::cell::Cell::new(None::<f64>));
     let timer_id_for_set = timer_id.clone();
     let promise = js_sys::Promise::new(&mut move |resolve, _reject| {
         if let Some(set_timeout) = global_timer_fn("setTimeout") {
-            let scheduled = set_timeout.call2(
+            if let Ok(id) = set_timeout.call2(
                 &js_sys::global(),
                 &resolve,
                 &JsValue::from_f64(f64::from(ms)),
-            );
-            if let Ok(id) = scheduled {
+            ) {
                 timer_id_for_set.set(id.as_f64());
             }
         }
@@ -137,24 +108,17 @@ fn global_timer_fn(name: &str) -> Option<js_sys::Function> {
         .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
 }
 
-/// Send an IQ and await its reply under [`IQ_REPLY_DEADLINE_MS`].
-/// Shared by [`send_iq_command`], [`send_iq_command_stanza_aware`],
-/// and [`send_avatar_iq_command`].
 async fn send_iq_roundtrip(
     inner: &Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
 ) -> Result<Result<Element, ClientError>, JsValue> {
-    let mut cmd_tx = command_sender(inner)?;
-    let cancel_tx = cmd_tx.clone();
-    // Parsed once into the typed correlation id; an absent/empty id
-    // simply means there is nothing to cancel on expiry.
     let iq_id = stanza
         .attr("id")
         .and_then(|value| waddle_xmpp_client::request::StanzaId::new(value).ok());
     let (responder, rx) = oneshot::channel();
+    let queue_inner = inner.clone();
     let round_trip = async move {
-        if cmd_tx
-            .send(WasmCommand::SendIq { stanza, responder })
+        if enqueue_command(&queue_inner, WasmCommand::SendIq { stanza, responder })
             .await
             .is_err()
         {
@@ -169,27 +133,14 @@ async fn send_iq_roundtrip(
         IqReplyWait::Reply(reply) => Ok(reply),
         IqReplyWait::Disconnected => Err(js_error("client is disconnected")),
         IqReplyWait::DeadlineExpired => {
-            // Free the driver's pending-IQ slot (and any deferred copy of
-            // the command) so a reply that limps in later has nowhere to
-            // land. Spawned so a momentarily full command queue delays
-            // the cancellation instead of dropping it — the expired
-            // caller must not block on it either way.
             if let Some(id) = iq_id {
-                let mut cancel_tx = cancel_tx;
+                let cancel_inner = inner.clone();
                 wasm_bindgen_futures::spawn_local(async move {
-                    let (cancel_responder, _cancel_rx) = oneshot::channel();
-                    let _ = cancel_tx
-                        .send(WasmCommand::CancelIq {
-                            id,
-                            responder: cancel_responder,
-                        })
+                    let (responder, _response) = oneshot::channel();
+                    let _ = enqueue_command(&cancel_inner, WasmCommand::CancelIq { id, responder })
                         .await;
                 });
             }
-            // Typed until the WASM boundary: callers map this like any
-            // other ClientError (send_iq_command stringifies it in
-            // iq_rejection; the stanza-aware/avatar variants at their
-            // own boundary arms).
             Ok(Err(ClientError::IqTimeout {
                 timeout: std::time::Duration::from_millis(u64::from(IQ_REPLY_DEADLINE_MS)),
             }))
@@ -265,15 +216,308 @@ pub(crate) async fn cancel_iq_command(
 ) -> Result<(), JsValue> {
     let id =
         waddle_xmpp_client::request::StanzaId::new(id).map_err(|err| js_error(err.to_string()))?;
-    let mut cmd_tx = command_sender(&inner)?;
     let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::CancelIq { id, responder })
-        .await
-        .map_err(|_| js_error("client is disconnected"))?;
+    enqueue_command(&inner, WasmCommand::CancelIq { id, responder }).await?;
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))
+}
+
+pub(crate) async fn request_stream_management_ack_command(
+    inner: Rc<RefCell<WaddleClientInner>>,
+) -> Result<(), JsValue> {
+    let (responder, rx) = oneshot::channel();
+    enqueue_command(
+        &inner,
+        WasmCommand::RequestStreamManagementAck { responder },
+    )
+    .await?;
+    rx.await
+        .map_err(|_| js_error("client is disconnected"))?
+        .map_err(|err| js_error(err.to_string()))
+}
+
+/// Closed synchronous pagehide result exposed to the browser binding. This is
+/// deliberately a wasm enum rather than a stringly-typed transport status.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagehideSmAckEnqueueOutcome {
+    Sent,
+    AlreadyPending,
+    Full,
+    Closed,
+    Busy,
+    WriteFailed,
+}
+
+/// Write a typed XEP-0198 `<r/>` through the active driver's exact physical
+/// socket before a browser pagehide handler returns. The runtime state is
+/// committed only after `WebSocket.send` succeeds.
+pub(crate) fn try_request_stream_management_ack_for_pagehide(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+) -> PagehideSmAckEnqueueOutcome {
+    let Ok(inner_ref) = inner.try_borrow() else {
+        return PagehideSmAckEnqueueOutcome::Busy;
+    };
+    let Some(core) = inner_ref.driver_core.clone() else {
+        return PagehideSmAckEnqueueOutcome::Closed;
+    };
+    let Some(command_lane) = inner_ref.command_lane.clone() else {
+        return PagehideSmAckEnqueueOutcome::Closed;
+    };
+    drop(inner_ref);
+
+    let Ok(mut core) = core.try_borrow_mut() else {
+        return PagehideSmAckEnqueueOutcome::Busy;
+    };
+    let Ok(mut command_lane) = command_lane.try_borrow_mut() else {
+        return PagehideSmAckEnqueueOutcome::Busy;
+    };
+    if command_lane.is_closed() {
+        return PagehideSmAckEnqueueOutcome::Closed;
+    }
+
+    let mut completions = Vec::new();
+    while let Some(command) = command_lane.pop_ready() {
+        match drain_pagehide_command(inner, &mut core, command, &mut completions) {
+            Ok(()) => {}
+            Err(()) => {
+                // A failed physical write closes the same admission lane the
+                // async driver observes. Remaining accepted commands lose
+                // their responders as a normal disconnect, never execute
+                // after the `<r/>`, and cannot be overtaken on a later turn.
+                drop(command_lane.close());
+                for completion in completions {
+                    command_lane.push_pagehide_completion(completion);
+                }
+                return PagehideSmAckEnqueueOutcome::WriteFailed;
+            }
+        }
+    }
+
+    if core.runtime.prepare_pagehide_ack() == PagehideAckRequest::AlreadyPending {
+        for completion in completions {
+            command_lane.push_pagehide_completion(completion);
+        }
+        return PagehideSmAckEnqueueOutcome::AlreadyPending;
+    }
+
+    let message = TransportMessage::Element(SmState::build_request_ack());
+    let Ok(frame) = waddle_xmpp_client::encode_message(&message) else {
+        for completion in completions {
+            command_lane.push_pagehide_completion(completion);
+        }
+        return PagehideSmAckEnqueueOutcome::WriteFailed;
+    };
+    if core.web_socket.send_with_str(&frame).is_err() {
+        for completion in completions {
+            command_lane.push_pagehide_completion(completion);
+        }
+        return PagehideSmAckEnqueueOutcome::WriteFailed;
+    }
+
+    let outcome = if core.runtime.commit_pagehide_ack_written(chrono::Utc::now()) {
+        publish_resume_state_snapshot(inner, &core.runtime, false);
+        PagehideSmAckEnqueueOutcome::Sent
+    } else {
+        PagehideSmAckEnqueueOutcome::AlreadyPending
+    };
+    for completion in completions {
+        command_lane.push_pagehide_completion(completion);
+    }
+    outcome
+}
+
+/// Synchronous subset of the regular driver used only while the browser is
+/// executing `pagehide`. It performs the physical write and authoritative
+/// runtime transition now, then leaves Promise completion/query bookkeeping
+/// for the normal driver wakeup. No core borrow survives an await.
+fn drain_pagehide_command(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    core: &mut WasmDriverCore,
+    command: WasmCommand,
+    completions: &mut Vec<PagehideCommandCompletion>,
+) -> Result<(), ()> {
+    match command {
+        WasmCommand::SendStanza { stanza, responder } => {
+            if !core.runtime.can_send_app_stanza() {
+                completions.push(PagehideCommandCompletion::Deferred(
+                    DeferredWasmCommand::Stanza { stanza, responder },
+                ));
+                return Ok(());
+            }
+            let result = pagehide_send_transport_message(
+                inner,
+                core,
+                TransportMessage::Element(stanza),
+                completions,
+            );
+            let failed = result.is_err();
+            completions.push(PagehideCommandCompletion::Stanza { responder, result });
+            if failed {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        WasmCommand::SendIq { stanza, responder } => {
+            if !core.runtime.can_send_app_stanza() {
+                completions.push(PagehideCommandCompletion::Deferred(
+                    DeferredWasmCommand::Iq { stanza, responder },
+                ));
+                return Ok(());
+            }
+            let result = pagehide_send_transport_message(
+                inner,
+                core,
+                TransportMessage::Element(stanza.clone()),
+                completions,
+            );
+            let failed = result.is_err();
+            completions.push(PagehideCommandCompletion::Iq {
+                stanza,
+                responder,
+                result,
+            });
+            if failed {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        WasmCommand::SendMamQuery {
+            stanza,
+            query_id,
+            responder,
+        } => {
+            if !core.runtime.can_send_app_stanza() {
+                completions.push(PagehideCommandCompletion::Deferred(
+                    DeferredWasmCommand::MamQuery {
+                        stanza,
+                        query_id,
+                        responder,
+                    },
+                ));
+                return Ok(());
+            }
+            let result = pagehide_send_transport_message(
+                inner,
+                core,
+                TransportMessage::Element(stanza.clone()),
+                completions,
+            );
+            let failed = result.is_err();
+            completions.push(PagehideCommandCompletion::MamQuery {
+                stanza,
+                query_id,
+                responder,
+                result,
+            });
+            if failed {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        WasmCommand::SendInboxQuery {
+            stanza,
+            query_id,
+            responder,
+        } => {
+            if !core.runtime.can_send_app_stanza() {
+                completions.push(PagehideCommandCompletion::Deferred(
+                    DeferredWasmCommand::InboxQuery {
+                        stanza,
+                        query_id,
+                        responder,
+                    },
+                ));
+                return Ok(());
+            }
+            let result = pagehide_send_transport_message(
+                inner,
+                core,
+                TransportMessage::Element(stanza.clone()),
+                completions,
+            );
+            let failed = result.is_err();
+            completions.push(PagehideCommandCompletion::InboxQuery {
+                stanza,
+                query_id,
+                responder,
+                result,
+            });
+            if failed {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        WasmCommand::CancelIq { id, responder } => {
+            completions.push(PagehideCommandCompletion::CancelIq { id, responder });
+            Ok(())
+        }
+        WasmCommand::Disconnect { responder } => {
+            let result = pagehide_send_transport_message(
+                inner,
+                core,
+                TransportMessage::Close(StreamClose),
+                completions,
+            );
+            let failed = result.is_err();
+            completions.push(PagehideCommandCompletion::Disconnect { responder, result });
+            if failed {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        WasmCommand::RequestStreamManagementAck { responder } => {
+            let mut result = Ok(());
+            for event in core.runtime.request_stream_management_ack() {
+                if let ClientEvent::Connection(ConnectionEvent::OutboundMessage(message)) = event {
+                    if let Err(err) =
+                        pagehide_send_transport_message(inner, core, message, completions)
+                    {
+                        result = Err(err);
+                        break;
+                    }
+                } else {
+                    completions.push(PagehideCommandCompletion::Event(event));
+                }
+            }
+            let failed = result.is_err();
+            completions.push(PagehideCommandCompletion::StreamManagementAck { responder, result });
+            if failed {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn pagehide_send_transport_message(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    core: &mut WasmDriverCore,
+    message: TransportMessage,
+    completions: &mut Vec<PagehideCommandCompletion>,
+) -> DriverResult<()> {
+    let frame = waddle_xmpp_client::encode_message(&message)?;
+    core.web_socket
+        .send_with_str(&frame)
+        .map_err(|_| ClientError::TransportClosed)?;
+    if matches!(message, TransportMessage::Close(_)) {
+        let _ = core.web_socket.close();
+    }
+    for event in apply_pagehide_message_sent(inner, &mut core.runtime, message)? {
+        if let ClientEvent::Connection(ConnectionEvent::OutboundMessage(message)) = event {
+            pagehide_send_transport_message(inner, core, message, completions)?;
+        } else {
+            completions.push(PagehideCommandCompletion::Event(event));
+        }
+    }
+    Ok(())
 }
 
 /// Variant of [`send_iq_command`] that surfaces RFC 6120 §8.3 stanza
@@ -315,16 +559,16 @@ pub(crate) async fn send_mam_query_command(
     stanza: Element,
     query_id: String,
 ) -> Result<waddle_xmpp_client::MamPage, JsValue> {
-    let mut cmd_tx = command_sender(&inner)?;
     let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::SendMamQuery {
+    enqueue_command(
+        &inner,
+        WasmCommand::SendMamQuery {
             stanza,
             query_id,
             responder,
-        })
-        .await
-        .map_err(|_| js_error("client is disconnected"))?;
+        },
+    )
+    .await?;
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))
@@ -335,16 +579,16 @@ pub(crate) async fn send_inbox_query_command(
     stanza: Element,
     query_id: String,
 ) -> Result<crate::state::InboxPage, JsValue> {
-    let mut cmd_tx = command_sender(&inner)?;
     let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::SendInboxQuery {
+    enqueue_command(
+        &inner,
+        WasmCommand::SendInboxQuery {
             stanza,
             query_id,
             responder,
-        })
-        .await
-        .map_err(|_| js_error("client is disconnected"))?;
+        },
+    )
+    .await?;
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))
@@ -353,31 +597,44 @@ pub(crate) async fn send_inbox_query_command(
 pub(crate) async fn disconnect_client(
     inner: Rc<RefCell<WaddleClientInner>>,
 ) -> Result<(), JsValue> {
-    let mut cmd_tx = match inner.borrow().cmd_tx.clone() {
-        Some(cmd_tx) => cmd_tx,
+    let connected = match inner.borrow().command_lane.clone() {
+        Some(lane) if !lane.borrow().is_closed() => true,
         None => return Ok(()),
+        Some(_) => return Ok(()),
     };
+    debug_assert!(connected);
 
     let (responder, rx) = oneshot::channel();
-    cmd_tx
-        .send(WasmCommand::Disconnect { responder })
-        .await
-        .map_err(|_| js_error("client is disconnected"))?;
-    inner.borrow_mut().cmd_tx = None;
+    enqueue_command(&inner, WasmCommand::Disconnect { responder }).await?;
+    inner.borrow_mut().command_lane = None;
     inner.borrow_mut().resume_state = None;
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))
 }
 
-pub(crate) fn command_sender(
+/// Enqueue a browser command while preserving the former async-channel
+/// backpressure. Commands are only considered admitted once they occupy the
+/// shared ready FIFO; pagehide drains that same FIFO synchronously.
+pub(crate) async fn enqueue_command(
     inner: &Rc<RefCell<WaddleClientInner>>,
-) -> Result<mpsc::Sender<WasmCommand>, JsValue> {
-    inner
+    command: WasmCommand,
+) -> Result<(), JsValue> {
+    let lane = inner
         .borrow()
-        .cmd_tx
+        .command_lane
         .clone()
-        .ok_or_else(|| js_error("client is not connected"))
+        .ok_or_else(|| js_error("client is not connected"))?;
+    let admission = lane
+        .borrow_mut()
+        .enqueue(command)
+        .map_err(|_| js_error("client is disconnected"))?;
+    if let Some(admission) = admission {
+        admission
+            .await
+            .map_err(|_| js_error("client is disconnected"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -448,10 +705,7 @@ mod tests {
             iq_reply_from_oneshot(rx),
             futures::future::pending::<()>(),
         ));
-        match outcome {
-            IqReplyWait::Reply(Ok(elem)) => assert_eq!(elem.name(), "iq"),
-            _ => panic!("reply must win over a pending deadline"),
-        }
+        assert!(matches!(outcome, IqReplyWait::Reply(Ok(_))));
     }
 
     #[test]
@@ -466,23 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn iq_reply_wait_expires_instead_of_waiting_forever() {
-        // #1446: the reply oneshot must never be awaited bare — a server
-        // that goes silent after the send would otherwise hang the JS
-        // promise (and anything awaiting it, like call teardown) forever.
-        let (_tx, rx) = oneshot::channel::<Result<Element, ClientError>>();
-        let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
-            iq_reply_from_oneshot(rx),
-            futures::future::ready(()),
-        ));
-        assert!(matches!(outcome, IqReplyWait::DeadlineExpired));
-    }
-
-    #[test]
     fn iq_reply_wait_expires_even_when_queue_admission_stalls() {
-        // The deadline must cover the bounded command-channel send too:
-        // a stalled driver that never accepts the command is the same
-        // user-visible hang as a server that never replies.
         let outcome = futures::executor::block_on(wait_iq_reply_with_deadline(
             futures::future::pending::<IqReplyWait>(),
             futures::future::ready(()),

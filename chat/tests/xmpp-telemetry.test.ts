@@ -15,7 +15,6 @@ import {
   __scrubXhrSpanUrlForTesting,
   __sanitizeFaroTransportItemForTesting,
   __setFaroForTesting,
-  __websocketUrlWithTraceparentForTesting,
   initTelemetry,
   markSensitiveUrlForTelemetry,
   reportCallAudioProcessing,
@@ -32,8 +31,8 @@ import {
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
+  reportStreamManagement,
   setXmppResourceForTelemetry,
-  websocketUrlWithTraceparent,
 } from "../src/lib/telemetry";
 import {
   adoptCallCorrelationId,
@@ -291,6 +290,7 @@ describe("telemetry module no-op behaviour", () => {
       reportReconnectScheduled({ attempt: 1, delayMs: 2_000 });
       reportCatchup({ conversations: 1, pages: 1, pageFailures: 0, messages: 1, durationMs: 10 });
       reportResumeDrain({ buffered: 1, durationMs: 10 });
+      reportStreamManagement({ kind: "ack-validated", progress: true });
     }).not.toThrow();
   });
 
@@ -316,6 +316,7 @@ describe("telemetry module no-op behaviour", () => {
       outcome: "aborted",
     });
     reportResumeDrain({ buffered: 5, durationMs: 12.4 });
+    reportStreamManagement({ kind: "ack-retry", attempt: 99 });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toEqual([
@@ -326,11 +327,13 @@ describe("telemetry module no-op behaviour", () => {
       "chat.xmpp.status",
       "chat.xmpp.status",
       "chat.xmpp.reconnect.scheduled",
+      "chat.xmpp.stream_management",
     ]);
     expect(stub.events[0].attributes).toEqual({ kind: "room" });
     expect(stub.events[1].attributes).toEqual({ kind: "dm" });
     expect(stub.events[4].attributes).toEqual({ state: "reconnecting" });
     expect(stub.events[6].attributes).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+    expect(stub.events[7].attributes).toEqual({ kind: "ack-retry", attempt: "10" });
 
     const measurementTypes = stub.measurements.map((m) => m.type);
     expect(measurementTypes).toEqual([
@@ -381,6 +384,22 @@ describe("telemetry module no-op behaviour", () => {
     const resumeDrain = stub.measurements[5];
     expect(resumeDrain.values).toEqual({ buffered: 5, duration_ms: 12, hidden_ms: 0 });
     expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+  });
+
+  test("stream-management failures emit one closed outcome with no sensitive attributes", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportStreamManagement({ kind: "failed" });
+    reportStreamManagement({ kind: "lifecycle-failed", operation: "prepare-xmpp" });
+
+    expect(stub.events).toEqual([
+      { name: "chat.xmpp.stream_management", attributes: { kind: "failed" } },
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "lifecycle-failed", operation: "prepare-xmpp" },
+      },
+    ]);
   });
 
   test("queue-depth measurements are deduped per kind until the reading changes (#1443)", () => {
@@ -513,42 +532,16 @@ describe("telemetry module no-op behaviour", () => {
     expect(stub.sessions.at(-1)?.attributes?.xmpp_resource).toBe(resource);
   });
 
-  test("passes a valid traceparent while dropping session-bearing query values", () => {
+  test("drops all WebSocket query values from telemetry span URLs", () => {
     const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
     expect(__scrubSpanUrlForTesting(
       `wss://xmpp.example/ws?session_id=secret&traceparent=${traceparent}`,
       ["https://xmpp.example"],
-    )).toBe(`wss://xmpp.example/:route?traceparent=${traceparent}`);
+    )).toBe("wss://xmpp.example/:route");
   });
 
-  test("generates valid random trace context when there is no active span", () => {
-    const result = new URL(
-      websocketUrlWithTraceparent("wss://xmpp.example/ws?transport=websocket"),
-    );
-
-    expect(result.searchParams.get("transport")).toBe("websocket");
-    expect(result.searchParams.get("traceparent"))
-      .toMatch(/^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-00$/);
-  });
-
-  test("leaves the WebSocket URL unchanged when Web Crypto is unavailable", () => {
-    const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
-    const value = "wss://xmpp.example/ws?transport=websocket";
-    Object.defineProperty(globalThis, "crypto", {
-      configurable: true,
-      value: undefined,
-    });
-
-    try {
-      expect(websocketUrlWithTraceparent(value)).toBe(value);
-    } finally {
-      if (original) Object.defineProperty(globalThis, "crypto", original);
-      else Reflect.deleteProperty(globalThis, "crypto");
-    }
-  });
-
-  test("passes a well-formed traceparent into the XMPP WebSocket configuration", async () => {
+  test("passes the unmodified XMPP WebSocket URL into the configuration", async () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
     let configuredUrl = "";
@@ -580,33 +573,11 @@ describe("telemetry module no-op behaviour", () => {
 
     const configured = new URL(configuredUrl);
     expect(configured.searchParams.get("session_id")).toBe("secret");
-    expect(configured.searchParams.get("traceparent"))
-      .toMatch(/^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-00$/);
+    expect(configured.searchParams.get("traceparent")).toBeNull();
 
     await client.disconnect();
     await pendingConnect.catch(() => undefined);
     state.reconnect.clearTimer();
-  });
-
-  test("appends the active trace context without dropping existing WebSocket query values", () => {
-    expect(__websocketUrlWithTraceparentForTesting(
-      "wss://xmpp.example/ws?transport=websocket",
-      {
-        traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
-        spanId: "00f067aa0ba902b7",
-        traceFlags: 1,
-      },
-    )).toBe(
-      "wss://xmpp.example/ws?transport=websocket&traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-    );
-  });
-
-  test("drops W3C-invalid all-zero trace identifiers", () => {
-    const zeroTraceparent = "00-00000000000000000000000000000000-0000000000000000-01";
-    expect(__scrubSpanUrlForTesting(
-      `wss://xmpp.example/ws?traceparent=${zeroTraceparent}`,
-      ["https://xmpp.example"],
-    )).toBe("wss://xmpp.example/:route");
   });
 
   test("reportError drops identifier-bearing context fields", () => {
@@ -1127,6 +1098,14 @@ describe("BrowserXmppClient telemetry hooks", () => {
       outcome: "completed",
     });
     internal.events.emitSafe("resumeDrain", { buffered: 7, durationMs: 8 });
+    // Every closed XEP-0198 telemetry variant is carried through the
+    // BrowserXmppClient hook, never by direct instrumentation access to WASM.
+    internal.events.emitSafe("streamManagement", { kind: "ack-requested", reason: "outbound-stanza" });
+    internal.events.emitSafe("streamManagement", { kind: "ack-validated", progress: true });
+    internal.events.emitSafe("streamManagement", { kind: "ack-retry", attempt: 99 });
+    internal.events.emitSafe("streamManagement", { kind: "ack-request-timed-out" });
+    internal.events.emitSafe("streamManagement", { kind: "progress-timed-out" });
+    internal.events.emitSafe("streamManagement", { kind: "failed" });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toContain("chat.xmpp.message.acked");
@@ -1143,6 +1122,15 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.reconnect.attempt")).toBe(true);
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.catchup")).toBe(true);
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.resume_drain")).toBe(true);
+    expect(stub.events.filter((event) => event.name === "chat.xmpp.stream_management"))
+      .toEqual([
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-requested", reason: "outbound-stanza" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-validated", progress: "true" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-retry", attempt: "10" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "ack-request-timed-out" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "progress-timed-out" } },
+        { name: "chat.xmpp.stream_management", attributes: { kind: "failed" } },
+      ]);
   });
 
   test("catch-up hook reports failed outcomes and processed conversation count", async () => {

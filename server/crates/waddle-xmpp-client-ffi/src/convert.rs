@@ -1,6 +1,4 @@
 use jid::Jid;
-use minidom::Element;
-
 use waddle_xmpp_client::{
     inbox::{InboxStreamEntry, InboxStreamEntrySource},
     mds::MdsCatchupEntry,
@@ -18,7 +16,7 @@ use waddle_xmpp_client::{
         thread::ThreadRef,
     },
     ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
-    MessagingEvent, SmResumeState,
+    MessagingEvent,
 };
 
 use crate::{
@@ -32,8 +30,8 @@ use crate::{
     WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePackSticker,
     WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
     WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
-    WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType,
-    WaddleStanzaId, WaddleStickerHash, WaddleStickerPack,
+    WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
+    WaddleStickerPack,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -77,11 +75,6 @@ pub(super) fn dispatch_event(
         ClientEvent::Call(call) => {
             listener.on_event(WaddleClientEvent::Call {
                 event: call_event_to_ffi(*call),
-            });
-        }
-        ClientEvent::ResumeStateChanged(state) => {
-            listener.on_event(WaddleClientEvent::ResumeStateChanged {
-                state: state.map(resume_state_to_ffi),
             });
         }
         ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(failure)) => {
@@ -684,48 +677,6 @@ fn carbon_to_ffi(direction: CarbonDirection) -> WaddleCarbonDirection {
         CarbonDirection::Sent => WaddleCarbonDirection::Sent,
         CarbonDirection::Received => WaddleCarbonDirection::Received,
     }
-}
-
-// ── XEP-0198 resume snapshot round-trip ──────────────────────────────────────
-
-/// Serialize the typed resume snapshot for opaque persistence on the
-/// app side. Queued stanzas cross as XML strings — the message
-/// stanza-id is re-derived from each element on restore, so the
-/// round trip is lossless for replay identity.
-pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
-    WaddleSmResumeState {
-        previd: state.previd().to_string(),
-        inbound_h: state.inbound_h(),
-        outbound_h: state.outbound_h(),
-        max_resume_seconds: state.max_resume_seconds(),
-        queued_stanzas_xml: state
-            .unhandled_outbound_stanzas()
-            .map(String::from)
-            .collect(),
-    }
-}
-
-/// Rebuild the typed resume snapshot from persisted FFI data. Parsing
-/// the queued-stanza XML happens exactly once, here at the boundary;
-/// malformed persisted state is surfaced as a human-readable error
-/// (via the listener) rather than silently dropped.
-pub(super) fn resume_state_from_ffi(state: WaddleSmResumeState) -> Result<SmResumeState, String> {
-    let stanzas = state
-        .queued_stanzas_xml
-        .into_iter()
-        .map(|xml| {
-            xml.parse::<Element>()
-                .map_err(|err| format!("invalid resume stanza XML: {err}"))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    SmResumeState::from_unhandled_outbound_stanzas(
-        state.previd,
-        state.inbound_h,
-        state.outbound_h,
-        stanzas,
-    )
-    .map(|resume| resume.with_max_resume_seconds(state.max_resume_seconds))
-    .map_err(|err| err.to_string())
 }
 
 fn call_media_to_ffi(media: CallMedia) -> WaddleCallMedia {
@@ -2352,66 +2303,6 @@ mod tests {
         }
     }
 
-    // ── XEP-0198 resume snapshot round-trip ──────────────────────────────────
-
-    #[test]
-    fn resume_state_round_trips_through_session_config_and_snapshot() {
-        use waddle_xmpp_client::stream_management::SmState;
-
-        // Serialize the queued stanza with the same writer the FFI
-        // uses so string equality is meaningful.
-        let queued: Element = "<message xmlns='jabber:client' id='queued-1' type='chat' \
-                                to='bob@waddle.test'>\
-                                 <body>unacked</body>\
-                                 <delay xmlns='urn:xmpp:delay' stamp='2026-06-01T12:00:00Z'/>\
-                               </message>"
-            .parse()
-            .expect("fixture parses");
-        let original = WaddleSmResumeState {
-            previd: "prev-stream".to_string(),
-            inbound_h: 5,
-            outbound_h: 9,
-            max_resume_seconds: Some(300),
-            queued_stanzas_xml: vec![String::from(&queued)],
-        };
-
-        // FFI record → typed SmResumeState (as threaded into
-        // SessionConfig.stream_management.resume_state on connect).
-        let typed = resume_state_from_ffi(original.clone()).expect("resume state converts");
-        assert_eq!(typed.previd(), "prev-stream");
-        assert_eq!(typed.inbound_h(), 5);
-        assert_eq!(typed.outbound_h(), 9);
-        assert_eq!(typed.max_resume_seconds(), Some(300));
-        assert_eq!(
-            typed.unhandled_message_stanza_ids(),
-            vec![StanzaId::new("queued-1").expect("stanza id")],
-            "message stanza-id must be re-derived from the persisted XML"
-        );
-
-        // Seed a runtime SM state from it and snapshot back — the
-        // round trip the native reconnect path performs.
-        let snapshot = SmState::from_resume_state(&typed)
-            .resume_state()
-            .expect("seeded SM state stays resumable");
-        assert_eq!(snapshot, typed, "snapshot must preserve the seeded state");
-
-        let round_tripped = resume_state_to_ffi(snapshot);
-        assert_eq!(round_tripped, original);
-    }
-
-    #[test]
-    fn resume_state_from_ffi_rejects_malformed_stanza_xml() {
-        let err = resume_state_from_ffi(WaddleSmResumeState {
-            previd: "prev-stream".to_string(),
-            inbound_h: 0,
-            outbound_h: 1,
-            max_resume_seconds: None,
-            queued_stanzas_xml: vec!["<not-xml".to_string()],
-        })
-        .expect_err("malformed XML must be rejected");
-        assert!(err.contains("invalid resume stanza XML"), "err: {err}");
-    }
-
     /// In-test listener that captures every dispatched event in
     /// order. Used to verify the `dispatch_event` routing without
     /// spinning up the tokio broadcast bus.
@@ -2505,17 +2396,8 @@ mod tests {
         let call = messaging::parse_call_event(&call_stanza).expect("fixture is a call");
         dispatch_event(ClientEvent::Call(Box::new(call)), account, &listener);
 
-        dispatch_event(
-            ClientEvent::ResumeStateChanged(Some(
-                SmResumeState::new("prev-1", 3, 7).expect("resume state"),
-            )),
-            account,
-            &listener,
-        );
-        dispatch_event(ClientEvent::ResumeStateChanged(None), account, &listener);
-
         let events = listener.events();
-        assert_eq!(events.len(), 8);
+        assert_eq!(events.len(), 6);
         assert!(matches!(events[0], WaddleClientEvent::Connected));
         match &events[1] {
             WaddleClientEvent::Message { message } => {
@@ -2543,19 +2425,6 @@ mod tests {
                 assert_eq!(event.sid, "c1");
             }
             _ => panic!("expected Call variant"),
-        }
-        match &events[6] {
-            WaddleClientEvent::ResumeStateChanged { state } => {
-                let state = state.as_ref().expect("resume snapshot present");
-                assert_eq!(state.previd, "prev-1");
-                assert_eq!(state.inbound_h, 3);
-                assert_eq!(state.outbound_h, 7);
-            }
-            _ => panic!("expected ResumeStateChanged variant"),
-        }
-        match &events[7] {
-            WaddleClientEvent::ResumeStateChanged { state } => assert!(state.is_none()),
-            _ => panic!("expected ResumeStateChanged(None) variant"),
         }
     }
 

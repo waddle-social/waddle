@@ -1,7 +1,8 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
@@ -20,135 +21,215 @@ internal class OutboundMessenger(
     private val dispatchEvent: (XmppEvent) -> Unit,
 ) {
     private val outboundQueue = OutboundQueue(sessionPrefs)
+    private val sendMutex = Mutex()
 
     /**
-     * One manager-level send: the client stanza id is generated HERE
-     * (not by the FFI) so a queued replay can resend under the same
-     * XEP-0359 origin-id. `NotConnected`/`TransportError` mean no live
-     * session carried the message — those enqueue for replay on the
-     * next `SessionReady` and hand the queue id back via
-     * [SendResult.queuedId]; every other outcome passes through
-     * untouched (a live session rejected the payload — replaying the
-     * identical stanza cannot succeed).
+     * One manager-level send. The typed semantic intent is persisted
+     * before the FFI call, and one generated UUID is used as both
+     * message `id` and XEP-0359 `origin-id`. A transport-accepted send
+     * stays durable until its matching XEP-0198 acknowledgement.
      */
     suspend fun sendOrEnqueue(
         conversationJid: String,
         isGroupchat: Boolean,
         body: String,
         extras: MessageSendExtras? = null,
-    ): SendResult {
+    ): SendResult = sendMutex.withLock {
         val clientStanzaId = newClientStanzaId()
-        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId, extras)
-        if (!isQueueableFailure(outcome)) return SendResult(outcome)
-        // A logout can race this persist (reply-receiver sends run on the
-        // process scope): never enqueue without an owner, and the owned
-        // entry gets pruned by the next account's drain if it survives
-        // the teardown window. Process-death revivals (notification
-        // direct replies) have no in-memory owner yet — fall back to the
-        // persisted one so the reply queues instead of being discarded;
-        // logout clears that key too, keeping the teardown race safe.
-        val owner = activeSession.ownBareJid
-            ?: runCatching { sessionPrefs.ownerBareJid.first() }.getOrNull()
-            ?: return SendResult(outcome)
-        val evicted = try {
-            outboundQueue.enqueue(
-                QueuedOutboundMessage(
-                    ownerBareJid = owner,
-                    conversationJid = conversationJid,
-                    isGroupchat = isGroupchat,
-                    body = body,
-                    clientStanzaId = clientStanzaId,
-                    enqueuedAtMillis = System.currentTimeMillis(),
-                    replyToId = extras?.replyToId,
-                    replyToAuthorJid = extras?.replyToAuthorJid,
-                    replyParentBody = extras?.replyParentBody,
-                    threadId = extras?.threadId,
-                    threadParent = extras?.threadParent,
-                    sharedFiles = extras?.sharedFiles.orEmpty(),
-                    mentions = extras?.mentions.orEmpty(),
-                    markup = extras?.markup.orEmpty(),
-                    sticker = extras?.sticker,
-                ),
-            )
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            // Persistence is best-effort: a failed enqueue write behaves
-            // like the pre-queue behavior (the outcome already reports
-            // the failure) instead of crashing the sender's scope.
-            return SendResult(outcome)
+        val lease = activeSession.captureOwnerLease()
+            ?: return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        val owner = lease.ownerBareJid
+        val queued = QueuedOutboundMessage(
+            ownerBareJid = owner,
+            conversationJid = conversationJid,
+            isGroupchat = isGroupchat,
+            body = body,
+            clientStanzaId = clientStanzaId,
+            enqueuedAtMillis = System.currentTimeMillis(),
+            replyToId = extras?.replyToId,
+            replyToAuthorJid = extras?.replyToAuthorJid,
+            replyParentBody = extras?.replyParentBody,
+            threadId = extras?.threadId,
+            threadParent = extras?.threadParent,
+            sharedFiles = extras?.sharedFiles.orEmpty(),
+            mentions = extras?.mentions.orEmpty(),
+            markup = extras?.markup.orEmpty(),
+            sticker = extras?.sticker,
+        )
+        // The durable write is linearized with logout revocation. Holding the
+        // narrow transport fence through this one DataStore update prevents a
+        // stale attempt from committing after logout has cleared persistence
+        // and before a same-account successor starts draining its queue.
+        val persisted = enqueueForCurrentLease(lease, queued)
+            ?: return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        if (persisted == OutboundQueue.EnqueueResult.FULL) {
+            return@withLock SendResult(WaddleSendMessageOutcome.Error)
         }
-        evicted?.let { reportDroppedQueuedMessage(it, DROP_REASON_QUEUE_FULL) }
-        return SendResult(outcome, queuedId = clientStanzaId)
+
+        // A logout/relogin can race the DataStore suspend point. Remove only
+        // the row this stale attempt created; never touch a later owner's
+        // durable queue, and never invoke its transport.
+        if (!activeSession.isCurrent(lease)) {
+            outboundQueue.remove(owner, clientStanzaId)
+            return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        }
+
+        // sendMessage validates the lease immediately before transport
+        // selection and explicitly reports a stale no-transport outcome.
+        val attempt = sendMessage(lease, conversationJid, isGroupchat, body, clientStanzaId, extras)
+        if (attempt is ActiveSession.LeaseSendResult.Stale) {
+            outboundQueue.remove(owner, clientStanzaId)
+            return@withLock SendResult(WaddleSendMessageOutcome.Error)
+        }
+        val outcome = (attempt as ActiveSession.LeaseSendResult.Attempted).outcome
+        when (outcome) {
+            is WaddleSendMessageOutcome.Sent,
+            WaddleSendMessageOutcome.NotConnected,
+            WaddleSendMessageOutcome.TransportError,
+            -> SendResult(outcome, queuedId = clientStanzaId)
+            else -> {
+                outboundQueue.remove(owner, clientStanzaId)
+                reportDroppedQueuedMessage(queued, outcome::class.simpleName ?: DROP_REASON_UNKNOWN)
+                SendResult(outcome)
+            }
+        }
+    }
+
+    private suspend fun enqueueForCurrentLease(
+        lease: ActiveSession.OwnerLease,
+        queued: QueuedOutboundMessage,
+    ): OutboundQueue.EnqueueResult? = try {
+        when (
+            val result = activeSession.runIfCurrentResult(
+                lease,
+            ) {
+                outboundQueue.enqueue(queued)
+            }
+        ) {
+            ActiveSession.LeaseInvocation.Stale,
+            ActiveSession.LeaseInvocation.NotConnected,
+            -> null
+            is ActiveSession.LeaseInvocation.Completed -> result.value
+        }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        null
     }
 
     /**
      * Replays the persisted outbound queue through the live attempt's
-     * client. Runs unconditionally on every `SessionReady` (a resumed
-     * stream replays 0198-unacked stanzas itself, but the persisted
-     * queue only ever holds messages NO stream accepted, so replaying
-     * them here can never duplicate a resume replay).
+     * client once per retained row on every fresh `SessionReady`.
+     * Transport acceptance is deliberately at-least-once until the
+     * matching XEP-0198 acknowledgement removes the durable intent;
+     * server-side effect deduplication is the following P1 concern.
      */
     suspend fun drainOutboundQueue() {
-        val owner = activeSession.ownBareJid ?: return
-        outboundQueue.drain(
-            ownerBareJid = owner,
-            send = { queued ->
-                sendMessage(
-                    conversationJid = queued.conversationJid,
-                    isGroupchat = queued.isGroupchat,
-                    body = queued.body,
-                    stanzaId = queued.clientStanzaId,
-                    extras = queued.sendExtras(),
-                )
-            },
-            onDropped = { queued, outcome ->
-                reportDroppedQueuedMessage(queued, outcome::class.simpleName ?: DROP_REASON_UNKNOWN)
-            },
-        )
+        sendMutex.withLock {
+            val lease = activeSession.captureOwnerLease() ?: return@withLock
+            val owner = lease.ownerBareJid
+            // Keep OutboundQueue.drain's snapshot membership recheck and its
+            // send callback under sendMutex. acknowledgeDelivery uses this
+            // same mutex, making the exact durable removal and transport
+            // selection one ordered decision.
+            outboundQueue.drain(
+                ownerBareJid = owner,
+                send = { queued ->
+                    if (!activeSession.isCurrent(lease)) {
+                        outboundQueue.remove(owner, queued.clientStanzaId)
+                        return@drain WaddleSendMessageOutcome.NotConnected
+                    }
+                    val attempt = sendMessage(
+                        lease = lease,
+                        conversationJid = queued.conversationJid,
+                        isGroupchat = queued.isGroupchat,
+                        body = queued.body,
+                        stanzaId = queued.clientStanzaId,
+                        extras = queued.sendExtras(),
+                    )
+                    if (attempt is ActiveSession.LeaseSendResult.Stale) {
+                        outboundQueue.remove(owner, queued.clientStanzaId)
+                        return@drain WaddleSendMessageOutcome.NotConnected
+                    }
+                    val outcome = (attempt as ActiveSession.LeaseSendResult.Attempted).outcome
+                    if (!activeSession.isCurrent(lease)) {
+                        outboundQueue.remove(owner, queued.clientStanzaId)
+                        WaddleSendMessageOutcome.NotConnected
+                    } else {
+                        outcome
+                    }
+                },
+                onDropped = { queued, outcome ->
+                    reportDroppedQueuedMessage(queued, outcome::class.simpleName ?: DROP_REASON_UNKNOWN)
+                },
+            )
+        }
+    }
+
+    /** Persisted delivery ownership moves to the server before UI dispatch. */
+    suspend fun acknowledgeDelivery(clientStanzaId: String) {
+        // The durable membership check in drainOutboundQueue and the FFI send
+        // share this authority.  An acknowledgement that acquires it first
+        // removes the exact intent before replay can select a client; one
+        // that arrives after replay has acquired it observes the resulting
+        // at-least-once send and removes the row afterwards.  Do not put a
+        // DataStore transaction around transport I/O: sendMutex is the only
+        // cross-suspension serialization point.
+        sendMutex.withLock {
+            val owner = activeSession.ownBareJid ?: return@withLock
+            outboundQueue.acknowledge(owner, clientStanzaId)
+        }
     }
 
     private suspend fun sendMessage(
+        lease: ActiveSession.OwnerLease,
         conversationJid: String,
         isGroupchat: Boolean,
         body: String,
         stanzaId: String,
         extras: MessageSendExtras? = null,
-    ): WaddleSendMessageOutcome {
+    ): ActiveSession.LeaseSendResult {
         val (finalBody, options) = preparedSend(stanzaId, body, extras)
-        val outcome = activeSession.send { client ->
+        val attempt = activeSession.sendIfCurrent(lease) { client ->
             if (isGroupchat) {
                 client.sendGroupchatMessage(conversationJid, finalBody, options)
             } else {
                 client.sendChatMessage(conversationJid, finalBody, options)
             }
         }
+        if (attempt is ActiveSession.LeaseSendResult.Stale) return attempt
+        val outcome = (attempt as ActiveSession.LeaseSendResult.Attempted).outcome
         // A DM send has no reflection: insert the local echo so peer
         // mutations (reactions, markers) can resolve their target and
         // the sender can edit/retract the fresh message (see ownDmEcho).
         if (!isGroupchat && outcome is WaddleSendMessageOutcome.Sent) {
-            activeSession.ownBareJid?.let { own ->
+            val echo = ownDmEcho(
+                ownJid = lease.ownerBareJid,
+                peerJid = conversationJid,
+                stanzaId = stanzaId,
+                body = finalBody,
+                options = options,
+            )
+            // sendIfCurrent releases the transport fence when the FFI call
+            // returns. A logout or relogin can win before this local
+            // projection, so publish the already-built echo only while its
+            // exact owner lease remains current.
+            activeSession.applyIfCurrent(lease) {
                 stores.timelineStore.onLiveMessage(
-                    ownDmEcho(
-                        ownJid = own,
-                        peerJid = conversationJid,
-                        stanzaId = stanzaId,
-                        body = finalBody,
-                        options = options,
-                    ),
+                    echo,
                 )
             }
         }
-        return outcome
+        return if (outcome is WaddleSendMessageOutcome.Sent) {
+            ActiveSession.LeaseSendResult.Attempted(WaddleSendMessageOutcome.Sent(stanzaId))
+        } else {
+            ActiveSession.LeaseSendResult.Attempted(outcome)
+        }
     }
 
-    private fun isQueueableFailure(outcome: WaddleSendMessageOutcome): Boolean =
-        outcome == WaddleSendMessageOutcome.NotConnected ||
-            outcome == WaddleSendMessageOutcome.TransportError
-
     /**
-     * A queued message will never be delivered (cap eviction or a
-     * permanent replay rejection): `DeliveryFailed` flips any optimistic
+     * A queued message will never be delivered (a permanent synchronous
+     * rejection): `DeliveryFailed` flips any optimistic
      * row that tracks the id to the retryable failed state — factual,
      * not a faked ack — and the `Error` diagnostic surfaces the drop
      * even when no conversation screen is tracking it.
@@ -159,7 +240,6 @@ internal class OutboundMessenger(
     }
 
     private companion object {
-        const val DROP_REASON_QUEUE_FULL = "outbound queue full, oldest evicted"
         const val DROP_REASON_UNKNOWN = "rejected"
     }
 }

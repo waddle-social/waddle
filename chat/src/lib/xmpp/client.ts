@@ -1,7 +1,4 @@
-import {
-  websocketUrlWithTraceparent,
-  withSpan,
-} from "@/lib/telemetry";
+import { withSpan } from "@/lib/telemetry";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
@@ -42,6 +39,7 @@ import type {
   MdsDisplayedEntry,
   PubsubEvent,
   RoomAccessChangedEvent,
+  StreamManagementTelemetry,
 } from "./client-events";
 import {
   OfflineSendQueue,
@@ -314,6 +312,12 @@ type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
   discover_extension_routes?: () => Promise<unknown>;
   fetch_extension_route_items?: (route: unknown, roomJid: string) => Promise<unknown>;
 };
+type PagehideSmAckEnqueueOutcome = import("@waddle/xmpp-client-wasm").PagehideSmAckEnqueueOutcome;
+
+// wasm-bindgen exports this C-style enum as stable numeric discriminants. Keep
+// the browser boundary typed without importing the WASM module before init.
+const PAGEHIDE_SM_ACK_SENT: PagehideSmAckEnqueueOutcome = 0;
+const PAGEHIDE_SM_ACK_ALREADY_PENDING: PagehideSmAckEnqueueOutcome = 1;
 
 
 /** Per-event handler signatures for the legacy emitter surface some
@@ -349,9 +353,12 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
+  set_on_stream_management?: (cb: (event: StreamManagementTelemetry) => void) => void;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
+  request_stream_management_ack?: () => Promise<void>;
+  try_request_stream_management_ack_for_pagehide?: () => PagehideSmAckEnqueueOutcome;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
@@ -445,6 +452,9 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
+  /** Terminal lifecycle latch. A disposed client is never reconnectable. */
+  private disposed = false;
+  private disposePromise: Promise<void> | null = null;
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
@@ -694,7 +704,7 @@ export class BrowserXmppClient {
   get bareJid(): string { return this.session.jid; }
 
   private isCurrentXmpp(xmpp: XmppClientInstance): boolean {
-    return this.xmpp === xmpp && !this.destroying;
+    return this.xmpp === xmpp && !this.destroying && !this.disposed;
   }
 
   private rejectRoomJoinWaiters(error: Error): void {
@@ -883,6 +893,7 @@ export class BrowserXmppClient {
   onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
   onCatchup(hook: (info: CatchupHookInfo) => void) { this.events.on("catchup", hook); }
   onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.events.on("resumeDrain", hook); }
+  onStreamManagement(hook: (event: StreamManagementTelemetry) => void) { this.events.on("streamManagement", hook); }
 
   private emitError(event: XmppErrorEvent) { this.events.emitSafe("error", event); }
 
@@ -938,11 +949,49 @@ export class BrowserXmppClient {
   }
 
   persistResumeStateForPageHide(): void {
+    if (this.disposed) return;
     this.resume.persistForPageHide(
       this.xmpp?.get_resume_state?.() ?? null,
       this.resource,
       () => this.persistRetainedJoinedRooms(),
     );
+  }
+
+  /**
+   * XMPP owns the page lifecycle so persistence cannot depend on whether a
+   * call surface is mounted. This is synchronous by browser design: pagehide
+   * cannot await a network round trip.
+   */
+  prepareForPageHide(): void {
+    if (this.disposed) return;
+    let acknowledgementUnavailable = false;
+    try {
+      // `pagehide` must never await I/O. The WASM owner synchronously writes
+      // the typed `<r/>` itself (or reports the already-pending request) before
+      // returning; persistence still runs for every outcome.
+      if (this.xmpp) {
+        const outcome = this.xmpp.try_request_stream_management_ack_for_pagehide?.();
+        acknowledgementUnavailable = outcome !== PAGEHIDE_SM_ACK_SENT
+          && outcome !== PAGEHIDE_SM_ACK_ALREADY_PENDING;
+      }
+    } catch {
+      acknowledgementUnavailable = true;
+    } finally {
+      this.persistResumeStateForPageHide();
+    }
+    if (acknowledgementUnavailable) {
+      // The page-lifecycle owner maps this local failure to its closed
+      // `prepare-xmpp` telemetry operation; no raw queue or stream state leaves
+      // the client boundary.
+      throw new Error("XMPP pagehide acknowledgement was unavailable");
+    }
+  }
+
+  /** A BFCache restore retains this client; reconnect only if it lost its wire. */
+  resumeAfterPageShow(): void {
+    if (!this.disposed && !this.destroying && !this.connected) {
+      void this.connect().catch(() => undefined);
+    }
   }
 
   private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
@@ -967,24 +1016,33 @@ export class BrowserXmppClient {
 
   private async doConnect(): Promise<void> {
     const epoch = ++this.connectEpoch;
-    const websocketUrl = websocketUrlWithTraceparent(this.session.xmpp_websocket_url);
+    const websocketUrl = this.session.xmpp_websocket_url;
     const mod = await this.loadModule();
     // Stale continuation: a newer connect attempt started (or the
     // timeout tore this one down) while the module load was pending.
     // Abort before creating a handle — the current attempt owns the
     // connection now.
-    if (epoch !== this.connectEpoch || this.destroying) return;
-    const config = new mod.WaddleConfig(
+    if (epoch !== this.connectEpoch || this.destroying || this.disposed) return;
+    const createConfig = () => new mod.WaddleConfig(
       websocketUrl,
       this.session.jid,
       this.session.session_id,
       this.resource,
     );
+    let config = createConfig();
     if (this.resume.handle && typeof config.with_resume_state_handle === "function") {
       config.with_resume_state_handle(this.resume.handle);
       this.clearResumeState();
     } else if (this.resume.state) {
-      applyResumeStateToWasmConfig(config, this.resume.state);
+      try {
+        applyResumeStateToWasmConfig(config, this.resume.state);
+      } catch {
+        // The Rust WASM boundary owns XML and RFC3339 parsing. A corrupt
+        // persisted SM-only snapshot must not wedge reconnect or leave a
+        // partially-mutated config: discard it and use a clean fresh stream.
+        this.resume.discardState();
+        config = createConfig();
+      }
       this.resume.discardState();
     }
     const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
@@ -1024,6 +1082,7 @@ export class BrowserXmppClient {
    * implicitly by constructing a new client.
    */
   async connect(): Promise<void> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     if (this.xmpp && this.connected) return;
     // Join an in-flight attempt BEFORE the terminal/exhausted gate:
     // during the scheduler's FINAL attempt the timer is already null
@@ -1057,6 +1116,7 @@ export class BrowserXmppClient {
    * (#1164). Internal/background callers must use `connect()` instead.
    */
   private connectWithFreshBudget(): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error("XMPP client is disposed"));
     this.reconnect.resetAttempts();
     this.inTerminalErrorState = false;
     this.terminalDisconnectDetail = null;
@@ -1070,6 +1130,7 @@ export class BrowserXmppClient {
   }
 
   private async connectInternal(): Promise<void> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
     this.destroying = false;
@@ -1142,7 +1203,12 @@ export class BrowserXmppClient {
     return this.connectPromise;
   }
 
-  async disconnect() {
+  async disconnect(): Promise<void> {
+    if (this.disposed) return;
+    return this.disconnectInternal();
+  }
+
+  private async disconnectInternal(): Promise<void> {
     this.destroying = true;
     this.outboundQueue.dispose();
     this.roomDiscoveryGeneration += 1;
@@ -1217,6 +1283,24 @@ export class BrowserXmppClient {
     }
     await xmpp?.disconnect?.();
     this.emitStatus({ state: "offline", detail: "Disconnected" });
+  }
+
+  /**
+   * Terminal client teardown for logout, replacement, and provider unmount.
+   * `disconnect()` deliberately remains reusable for callers that reconnect
+   * the same BrowserXmppClient; only a disposed owner releases its durable
+   * lease heartbeat.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposed = true;
+    // Release the durable owner synchronously. Transport teardown below can
+    // wait indefinitely on a stalled call, room leave, or socket close; it
+    // must never keep this terminal owner's lease or resumable tail alive.
+    this.clearResumeState();
+    this.resume.dispose();
+    this.disposePromise = this.disconnectInternal();
+    return this.disposePromise;
   }
 
   private roomJidForChannel(channelId: string): string {
@@ -1554,7 +1638,7 @@ export class BrowserXmppClient {
   }
 
   private canUseConnectedSession(): boolean {
-    return !!this.xmpp && this.connected && !this.destroying && !browserOffline();
+    return !!this.xmpp && this.connected && !this.destroying && !this.disposed && !browserOffline();
   }
 
   private roomIsReady(roomJid: string): boolean {
@@ -1563,6 +1647,7 @@ export class BrowserXmppClient {
 
   private enqueueReason(): string {
     if (browserOffline()) return "offline";
+    if (this.disposed) return "disposed";
     if (this.destroying) return "destroying";
     if (!this.xmpp) return "no-client";
     if (!this.connected) return "reconnecting";
@@ -1637,12 +1722,13 @@ export class BrowserXmppClient {
   private async requireJoinedRoom(spaceId: string, channelId: string): Promise<{ xmpp: XmppClientInstance; roomJid: string }> {
     const roomJid = this.roomJidForChannel(channelId);
     await this.switchRoom(spaceId, channelId);
-    if (!this.xmpp || !this.connected || this.destroying || this.currentRoom !== roomJid) throw new Error(`Room is not ready: ${roomJid}`);
+    if (!this.xmpp || !this.connected || this.destroying || this.disposed || this.currentRoom !== roomJid) throw new Error(`Room is not ready: ${roomJid}`);
     return { xmpp: this.xmpp, roomJid };
   }
 
   /** Send a queued DM through the current session (OfflineSendQueue drain callback). */
   private sendQueuedDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): Promise<string | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
     return this.compatSendDirectMessage(xmpp, peerJid, body, opts);
@@ -1650,6 +1736,7 @@ export class BrowserXmppClient {
 
   /** Send a queued room message through the current session (OfflineSendQueue drain callback). */
   private sendQueuedRoomMessage(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): Promise<string | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
     return this.compatSendGroupMessage(xmpp, roomJid, body, opts);
@@ -1664,6 +1751,7 @@ export class BrowserXmppClient {
   }
 
   async sendGroupMessage(spaceId: string, channelId: string, body: string, opts: SendGroupMessageOptions = {}): Promise<OutboundSendResult | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     const hasFiles = !!opts.files?.length;
     const hasThreadMetadata = !!opts.threadId?.trim();
     const hasForumMetadata = !!opts.threadCreate?.title?.trim() || !!opts.threadReply?.threadId?.trim();
@@ -1673,15 +1761,19 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
       this.outboundQueue.persistPendingRoomSend(roomJid, body, sendOpts);
+      // Claim before the compat host call. A host may synchronously deliver
+      // the matching XEP-0198 ack, in which case marking afterwards would
+      // resurrect an already-settled in-flight claim.
+      const attempt = this.outboundQueue.beginLiveAttempt(outboundId, "room");
       let id: string | null;
       try {
         id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
       } catch (error) {
-        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
+        this.outboundQueue.rollbackLiveAttempt(attempt);
+        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(attempt);
         throw error;
       }
-      if (id) this.outboundQueue.markInflight(id);
-      this.outboundQueue.notePendingSend(id, "room");
+      if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(attempt);
       return { id, state: "sending" };
     }
     const queued = this.outboundQueue.queueRoomMessage(roomJid, body, opts);
@@ -1708,6 +1800,7 @@ export class BrowserXmppClient {
   }
 
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {
+    if (this.disposed) throw new Error("XMPP client is disposed");
     if (!body.trim() && !opts.files?.length) return null;
     const explicitScope = typeof opts.mucPm === "boolean"
       ? opts.mucPm ? "muc-occupant" : "account"
@@ -1720,15 +1813,18 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, ...(mucPm ? { mucPm: true } : {}) };
       this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
+      // See the room-send path: the durable claim must precede a host that
+      // can synchronously dispatch its matching SM acknowledgement.
+      const attempt = this.outboundQueue.beginLiveAttempt(outboundId, "dm");
       let id: string | null;
       try {
         id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
       } catch (error) {
-        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
+        this.outboundQueue.rollbackLiveAttempt(attempt);
+        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(attempt);
         throw error;
       }
-      if (id) this.outboundQueue.markInflight(id);
-      this.outboundQueue.notePendingSend(id, "dm");
+      if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(attempt);
       return { id, state: "sending" };
     }
     return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
@@ -2590,7 +2686,7 @@ export class BrowserXmppClient {
     if (this.sessionReadyHandledXmpp === xmpp) return;
     this.sessionReadyHandledXmpp = xmpp;
     if (lifecycle.type === "fresh") {
-      this.outboundQueue.clearInflight();
+      this.outboundQueue.clearOrdinaryInflight();
       void this.enableCarbons(xmpp);
       // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
       // to future +notify events. Both are best-effort and fully
@@ -3176,6 +3272,10 @@ export class BrowserXmppClient {
     xmpp.set_on_message_delivery_failed?.((id: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handleMessageFailed(id);
+    });
+    xmpp.set_on_stream_management?.((event: StreamManagementTelemetry) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.events.emitSafe("streamManagement", event);
     });
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       if (!this.isCurrentXmpp(xmpp)) return;

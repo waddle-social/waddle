@@ -6528,26 +6528,14 @@ public struct WaddleConfig: Equatable, Hashable {
     public var jid: String
     public var accessToken: String
     public var resource: String
-    /**
-     * XEP-0198 resume snapshot from a previous session. When present
-     * the runtime attempts `<resume/>` before resource binding and
-     * replays the queued outbound stanzas the server never acked.
-     */
-    public var resumeState: WaddleSmResumeState?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(serverUrl: String, jid: String, accessToken: String, resource: String,
-        /**
-         * XEP-0198 resume snapshot from a previous session. When present
-         * the runtime attempts `<resume/>` before resource binding and
-         * replays the queued outbound stanzas the server never acked.
-         */resumeState: WaddleSmResumeState?) {
+    public init(serverUrl: String, jid: String, accessToken: String, resource: String) {
         self.serverUrl = serverUrl
         self.jid = jid
         self.accessToken = accessToken
         self.resource = resource
-        self.resumeState = resumeState
     }
 
 
@@ -6569,8 +6557,7 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
                 serverUrl: FfiConverterString.read(from: &buf),
                 jid: FfiConverterString.read(from: &buf),
                 accessToken: FfiConverterString.read(from: &buf),
-                resource: FfiConverterString.read(from: &buf),
-                resumeState: FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
+                resource: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -6579,7 +6566,6 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.jid, into: &buf)
         FfiConverterString.write(value.accessToken, into: &buf)
         FfiConverterString.write(value.resource, into: &buf)
-        FfiConverterOptionTypeWaddleSmResumeState.write(value.resumeState, into: &buf)
     }
 }
 
@@ -10561,114 +10547,6 @@ public func FfiConverterTypeWaddleSharedFile_lower(_ value: WaddleSharedFile) ->
 }
 
 
-/**
- * XEP-0198 client resume snapshot crossing the FFI as an opaque
- * persistence round-trip: the Swift app stores it on disconnect and
- * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound stanzas travel as serialized XML strings — the message
- * stanza-id is re-derived from the element's `id` attribute on
- * restore, and the original enqueue instant survives only when the
- * element already carries a `<delay/>` stamp (identical semantics to
- * the wasm client's localStorage persistence of the same snapshot).
- */
-public struct WaddleSmResumeState: Equatable, Hashable {
-    /**
-     * SM resumption token from `<enabled id='…'/>`.
-     */
-    public var previd: String
-    /**
-     * Count of inbound stanzas handled by this client.
-     */
-    public var inboundH: UInt32
-    /**
-     * Count of outbound stanzas sent by this client.
-     */
-    public var outboundH: UInt32
-    /**
-     * Server-advertised resumption window in seconds, when supplied.
-     */
-    public var maxResumeSeconds: UInt32?
-    /**
-     * Outbound stanzas the server had not acked at snapshot time,
-     * serialized to XML in send order for lossless replay.
-     */
-    public var queuedStanzasXml: [String]
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * SM resumption token from `<enabled id='…'/>`.
-         */previd: String,
-        /**
-         * Count of inbound stanzas handled by this client.
-         */inboundH: UInt32,
-        /**
-         * Count of outbound stanzas sent by this client.
-         */outboundH: UInt32,
-        /**
-         * Server-advertised resumption window in seconds, when supplied.
-         */maxResumeSeconds: UInt32?,
-        /**
-         * Outbound stanzas the server had not acked at snapshot time,
-         * serialized to XML in send order for lossless replay.
-         */queuedStanzasXml: [String]) {
-        self.previd = previd
-        self.inboundH = inboundH
-        self.outboundH = outboundH
-        self.maxResumeSeconds = maxResumeSeconds
-        self.queuedStanzasXml = queuedStanzasXml
-    }
-
-
-
-
-}
-
-#if compiler(>=6)
-extension WaddleSmResumeState: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSmResumeState {
-        return
-            try WaddleSmResumeState(
-                previd: FfiConverterString.read(from: &buf),
-                inboundH: FfiConverterUInt32.read(from: &buf),
-                outboundH: FfiConverterUInt32.read(from: &buf),
-                maxResumeSeconds: FfiConverterOptionUInt32.read(from: &buf),
-                queuedStanzasXml: FfiConverterSequenceString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: WaddleSmResumeState, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.previd, into: &buf)
-        FfiConverterUInt32.write(value.inboundH, into: &buf)
-        FfiConverterUInt32.write(value.outboundH, into: &buf)
-        FfiConverterOptionUInt32.write(value.maxResumeSeconds, into: &buf)
-        FfiConverterSequenceString.write(value.queuedStanzasXml, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeWaddleSmResumeState_lift(_ buf: RustBuffer) throws -> WaddleSmResumeState {
-    return try FfiConverterTypeWaddleSmResumeState.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeWaddleSmResumeState_lower(_ value: WaddleSmResumeState) -> RustBuffer {
-    return FfiConverterTypeWaddleSmResumeState.lower(value)
-}
-
-
 public struct WaddleSpace: Equatable, Hashable {
     public var id: String
     public var serviceJid: String
@@ -12126,14 +12004,6 @@ public enum WaddleClientEvent: Equatable, Hashable {
     case call(event: WaddleCallEvent
     )
     /**
-     * XEP-0198 resume snapshot changed. `None` after an explicit
-     * disconnect or when the session carries no resumable state;
-     * persist `Some(state)` and feed it back via
-     * `WaddleConfig.resume_state` on the next connect.
-     */
-    case resumeStateChanged(state: WaddleSmResumeState?
-    )
-    /**
      * RFC 6120 §6.5 SASL failure during connect. Terminal for the
      * presented credentials — apps must not blindly retry with the
      * same token (web #1164: surface "sign in again", never an
@@ -12192,13 +12062,10 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case 9: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         )
 
-        case 10: return .resumeStateChanged(state: try FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
+        case 10: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
         )
 
-        case 11: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
-        )
-
-        case 12: return .error(description: try FfiConverterString.read(from: &buf)
+        case 11: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -12252,18 +12119,13 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
 
 
-        case let .resumeStateChanged(state):
-            writeInt(&buf, Int32(10))
-            FfiConverterOptionTypeWaddleSmResumeState.write(state, into: &buf)
-
-
         case let .authenticationFailed(condition):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(10))
             FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
 
 
         case let .error(description):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(description, into: &buf)
 
         }
@@ -15421,30 +15283,6 @@ fileprivate struct FfiConverterOptionTypeWaddleSendOptions: FfiConverterRustBuff
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleSendOptions.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionTypeWaddleSmResumeState: FfiConverterRustBuffer {
-    typealias SwiftType = WaddleSmResumeState?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeWaddleSmResumeState.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeWaddleSmResumeState.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

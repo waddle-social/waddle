@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use chrono::{Duration, TimeZone, Utc};
 use jid::{BareJid, FullJid};
 use minidom::Element;
 use url::Url;
@@ -9,6 +10,7 @@ use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::{
     ConnectionConfig, SmResumeState, StreamErrorCondition, StreamId, StreamManagementEvent,
+    UnhandledOutboundEntry,
 };
 
 fn config() -> ClientConfig {
@@ -31,6 +33,187 @@ fn runtime_updates_state_when_connecting() {
     let events = runtime.queue_request(ClientRequest::Connect).unwrap();
     assert_eq!(runtime.snapshot().phase, SessionPhase::Connecting);
     assert_eq!(events.len(), 2);
+}
+
+#[test]
+fn runtime_immediately_requests_ack_for_first_unhandled_outbound_stanza() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.enabled = true;
+    let message = Element::builder("message", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "outbound-1")
+        .build();
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            message,
+        )))
+        .unwrap();
+
+    assert!(runtime.acknowledgement_clock_pending());
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequested {
+                reason: crate::SmAckRequestReason::OutboundStanza
+            }
+        ))
+    )));
+}
+
+#[test]
+fn runtime_pagehide_ack_request_uses_the_typed_sm_builder() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.enabled = true;
+
+    let events = runtime.request_stream_management_ack();
+    assert!(matches!(
+        &events[0],
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+    ));
+    assert!(matches!(
+        &events[1],
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequested {
+                reason: crate::SmAckRequestReason::Pagehide
+            }
+        ))
+    ));
+}
+
+#[test]
+fn runtime_pagehide_ack_commits_only_after_the_socket_write() {
+    let mut config = config();
+    config.session.stream_management.resume_state =
+        Some(resume_state_with_sent_messages(["unacked-pagehide"]));
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    runtime.sm_state.enabled = true;
+    let now = Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap();
+
+    assert_eq!(runtime.prepare_pagehide_ack(), PagehideAckRequest::Ready);
+    assert_eq!(
+        runtime.prepare_pagehide_ack(),
+        PagehideAckRequest::Ready,
+        "a failed browser write must not leave a false outstanding request"
+    );
+
+    assert!(runtime.commit_pagehide_ack_written(now));
+    assert_eq!(
+        runtime.prepare_pagehide_ack(),
+        PagehideAckRequest::AlreadyPending,
+        "only the successful write commits the duplicate-suppression edge"
+    );
+}
+
+#[test]
+fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.enabled = true;
+    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let message = Element::builder("message", crate::NS_CLIENT).build();
+    assert!(runtime.sm_state.record_sent_stanza_at(&message, now));
+
+    let retry = runtime.poll_stream_management_clock(now + Duration::milliseconds(250));
+    assert!(retry.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+    )));
+    assert!(retry.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRetry { attempt: 1 }
+        ))
+    )));
+
+    let timeout = runtime.poll_stream_management_clock(now + Duration::seconds(5));
+    assert!(timeout.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+    )));
+    assert!(timeout.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRetry { attempt: 2 }
+        ))
+    )));
+    assert!(timeout.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestTimedOut
+        ))
+    )));
+    let reconnect = runtime.poll_stream_management_clock(now + Duration::seconds(30));
+    assert_eq!(reconnect.len(), 2);
+    assert!(reconnect.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::ReconnectRequired
+        ))
+    )));
+    assert!(reconnect.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+    )));
+    assert!(!reconnect.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+    )));
+    assert!(runtime
+        .poll_stream_management_clock(now + Duration::seconds(35))
+        .is_empty());
+    assert!(!runtime.acknowledgement_clock_pending());
+}
+
+#[test]
+fn runtime_rearms_the_retry_scheduler_after_a_no_progress_ack() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.enabled = true;
+    runtime.sm_negotiation = SmNegotiationState::Enabled;
+    let now = Utc::now();
+    let message = Element::builder("message", crate::NS_CLIENT).build();
+    assert!(runtime.sm_state.record_sent_stanza_at(&message, now));
+
+    let mut events = Vec::new();
+    runtime
+        .handle_sm_element(&SmState::build_ack(0), &mut events)
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckReceived {
+                h: 0,
+                progressed: false
+            }
+        ))
+    )));
+    assert!(runtime.acknowledgement_clock_pending());
+
+    // The browser/wasm driver only wakes the clock; this typed runtime action
+    // is what it turns into the next `<r/>` write and retry telemetry.
+    let retry = runtime.poll_stream_management_clock(now + Duration::seconds(1));
+    assert!(retry.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+    )));
+    assert!(retry.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRetry { attempt: 1 }
+        ))
+    )));
 }
 
 #[test]
@@ -549,7 +732,7 @@ fn runtime_bootstraps_auth_bind_and_ready_state() {
 fn runtime_requests_sm_resume_before_resource_binding_when_resume_state_exists() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
 
@@ -592,7 +775,7 @@ fn runtime_requests_sm_resume_before_resource_binding_when_resume_state_exists()
 fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -633,10 +816,100 @@ fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
 }
 
 #[test]
+fn runtime_resumed_unacked_tail_replays_before_requesting_ack_without_recounting() {
+    let mut config = config();
+    config.session.stream_management.resume_state =
+        Some(resume_state_with_sent_messages(["unacked-1", "unacked-2"]));
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("resumed", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )))
+        .unwrap();
+
+    assert!(runtime.acknowledgement_clock_pending());
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ResumeEvent<'a> {
+        Replay(&'a str),
+        AckRequest,
+        AckRequestTelemetry,
+    }
+
+    let relevant_events = events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "message" => element.attr("id").map(ResumeEvent::Replay),
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "r" && element.ns() == crate::stream_management::NS_SM => {
+                Some(ResumeEvent::AckRequest)
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested {
+                    reason: crate::SmAckRequestReason::ResumedUnackedTail,
+                },
+            )) => Some(ResumeEvent::AckRequestTelemetry),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relevant_events,
+        vec![
+            ResumeEvent::Replay("unacked-1"),
+            ResumeEvent::Replay("unacked-2"),
+            ResumeEvent::AckRequest,
+            ResumeEvent::AckRequestTelemetry,
+        ]
+    );
+    assert_eq!(runtime.sm_state.outbound_count, 2);
+
+    // The replay write acknowledgement is suppressed and must not increment
+    // the carried XEP-0198 counter or emit another immediate request.
+    let replay = events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if matches!(element.attr("id"), Some("unacked-1" | "unacked-2")) => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replay.len(), 2);
+    for replay in replay {
+        let replay_sent = runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                replay,
+            )))
+            .unwrap();
+        assert_eq!(runtime.sm_state.outbound_count, 2);
+        assert!(replay_sent.iter().all(|event| !matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+                if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+        )));
+    }
+}
+
+#[test]
 fn runtime_rejects_resumed_without_required_h() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -675,7 +948,7 @@ fn runtime_rejects_resumed_without_required_h() {
 fn runtime_rejects_resumed_with_mismatched_previd() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -709,7 +982,7 @@ fn runtime_rejects_resumed_with_mismatched_previd() {
             TransportMessage::Element(element)
         )) if element.name() == "error"
             && element
-                .get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-streams")
+                .get_child("policy-violation", "urn:ietf:params:xml:ns:xmpp-streams")
                 .is_some()
     )));
 }
@@ -718,7 +991,7 @@ fn runtime_rejects_resumed_with_mismatched_previd() {
 fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -731,6 +1004,10 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("failed", crate::stream_management::NS_SM)
                 .attr(minidom::rxml::xml_ncname!("h").to_owned(), "12")
+                .append(
+                    Element::builder("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                        .build(),
+                )
                 .build(),
         )))
         .unwrap();
@@ -752,6 +1029,16 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
             TransportMessage::Element(element)
         )) if element.name() == "iq" && element.get_child("bind", NS_BIND).is_some()
     )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "error"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+    )));
 }
 
 #[test]
@@ -762,7 +1049,7 @@ fn runtime_fresh_sm_session_ack_counts_only_current_session_inbound_stanzas() {
     // the previous session's received-stanza count (7 here).
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -859,7 +1146,7 @@ fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() 
     // resume rejected with handled-count-too-high.
     let mut first_config = config();
     first_config.session.stream_management.resume_state =
-        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
     let mut runtime = XmppRuntime::new(first_config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -881,9 +1168,25 @@ fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() 
             _ => None,
         })
         .expect("bind requested after failed resume");
-    runtime
+    let ready_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = ready_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" && element.ns() == crate::stream_management::NS_SM => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .expect("stream-management enable");
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
         )))
         .unwrap();
     runtime
@@ -1007,12 +1310,227 @@ fn runtime_rejects_duplicate_enabled_on_live_sm_session() {
                 TransportMessage::Element(element)
             )) if element.name() == "error"
                 && element
-                    .get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-streams")
+                    .get_child("policy-violation", "urn:ietf:params:xml:ns:xmpp-streams")
                     .is_some()
         )),
         "duplicate <enabled/> on a live SM session must be answered with a \
          stream error, not silently re-establish the session"
     );
+}
+
+#[test]
+fn runtime_rejects_unsolicited_enabled_before_resource_binding_without_mutating_sm() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unsolicited")
+                .build(),
+        )))
+        .unwrap();
+
+    assert_sm_protocol_violation(&events);
+    assert_eq!(runtime.sm_state.inbound_count, 0);
+    assert_eq!(runtime.sm_state.outbound_count, 0);
+    assert!(runtime.sm_state.previd.is_none());
+}
+
+#[test]
+fn runtime_rejects_unsolicited_ack_and_request_controls_without_mutating_sm() {
+    for control in [
+        Element::builder("r", crate::stream_management::NS_SM).build(),
+        Element::builder("a", crate::stream_management::NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+            .build(),
+    ] {
+        let mut runtime = XmppRuntime::new(config()).unwrap();
+        let events = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                control,
+            )))
+            .unwrap();
+
+        assert_sm_protocol_violation(&events);
+        assert_eq!(runtime.sm_state.inbound_count, 0);
+        assert_eq!(runtime.sm_state.outbound_count, 0);
+        assert_eq!(runtime.sm_state.server_h, 0);
+        assert!(runtime.sm_state.previd.is_none());
+    }
+}
+
+#[test]
+fn runtime_rejects_malformed_sm_ack_without_mutating_counters_or_ownership() {
+    for ack in [
+        Element::builder("a", crate::stream_management::NS_SM).build(),
+        Element::builder("a", crate::stream_management::NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "not-a-u32")
+            .build(),
+    ] {
+        let mut runtime = XmppRuntime::new(config()).unwrap();
+        send_bound_enable(&mut runtime);
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("enabled", crate::stream_management::NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "owned-sm-id")
+                    .build(),
+            )))
+            .unwrap();
+        let inbound_before = runtime.sm_state.inbound_count;
+        let outbound_before = runtime.sm_state.outbound_count;
+        let server_h_before = runtime.sm_state.server_h;
+        let previd_before = runtime.sm_state.previd.clone();
+
+        let events = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                ack,
+            )))
+            .unwrap();
+
+        assert_sm_protocol_violation(&events);
+        assert_eq!(runtime.sm_state.inbound_count, inbound_before);
+        assert_eq!(runtime.sm_state.outbound_count, outbound_before);
+        assert_eq!(runtime.sm_state.server_h, server_h_before);
+        assert_eq!(runtime.sm_state.previd, previd_before);
+    }
+}
+
+#[test]
+fn runtime_rejects_malformed_failed_before_acknowledging_or_falling_back() {
+    for failed in [
+        Element::builder("failed", crate::stream_management::NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "not-a-u32")
+            .build(),
+        Element::builder("failed", crate::stream_management::NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1 2")
+            .build(),
+        Element::builder("failed", crate::stream_management::NS_SM)
+            .attr(minidom::rxml::xml_ncname!("unexpected").to_owned(), "value")
+            .build(),
+    ] {
+        let resume_state = resume_state_with_sent_messages(["first", "second"]);
+        let expected_resume_state = resume_state.clone();
+        let mut resume_config = config();
+        resume_config.session.stream_management.resume_state = Some(resume_state);
+        let mut runtime = XmppRuntime::new(resume_config).unwrap();
+
+        drive_to_authenticated_stream(&mut runtime);
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                post_auth_features_with_sm(),
+            )))
+            .unwrap();
+        let server_h_before = runtime.sm_state.server_h;
+
+        let events = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                failed,
+            )))
+            .unwrap();
+
+        assert_sm_protocol_violation(&events);
+        assert_eq!(runtime.sm_state.server_h, server_h_before);
+        assert_eq!(runtime.resume_state(), Some(expected_resume_state));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(_))
+        )));
+    }
+}
+
+#[test]
+fn runtime_recovers_from_failed_resume_with_redirect_condition() {
+    let resume_state = resume_state_with_sent_messages(["retry-after-redirect"]);
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let mut redirect = Element::builder("redirect", "urn:ietf:params:xml:ns:xmpp-stanzas").build();
+    redirect.append_text_node("xmpp:replacement.example");
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM)
+                .append(redirect)
+                .build(),
+        )))
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(_))
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+    )));
+}
+
+#[test]
+fn runtime_accepts_enable_response_only_after_bound_enable_was_sent() {
+    let mut enabled_runtime = XmppRuntime::new(config()).unwrap();
+    send_bound_enable(&mut enabled_runtime);
+    let enabled_events = enabled_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert!(enabled_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Enabled { previd: None }
+        ))
+    )));
+    assert!(enabled_runtime.sm_state.enabled);
+
+    let mut failed_runtime = XmppRuntime::new(config()).unwrap();
+    send_bound_enable(&mut failed_runtime);
+    let failed_events = failed_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert!(failed_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+    assert!(!failed_runtime.sm_state.enabled);
+    assert!(!failed_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+    )));
+}
+
+#[test]
+fn runtime_routes_application_stanzas_while_awaiting_enable_response() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    send_bound_enable(&mut runtime);
+
+    let stanza: Element = r#"<message xmlns='jabber:client' from='alice@example.com/desktop'>
+        <propose xmlns='urn:xmpp:jingle-message:0' id='call-awaiting-enable'>
+          <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>
+        </propose>
+    </message>"#
+        .parse()
+        .unwrap();
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            stanza,
+        )))
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Call(call) if call.sid.0 == "call-awaiting-enable"
+    )));
 }
 
 #[test]
@@ -1189,9 +1707,25 @@ fn runtime_releases_send_barrier_when_fresh_sm_enable_fails() {
             _ => None,
         })
         .unwrap();
-    runtime
+    let ready_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = ready_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" && element.ns() == crate::stream_management::NS_SM => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .expect("stream-management enable");
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
         )))
         .unwrap();
 
@@ -1274,11 +1808,7 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
 #[test]
 fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
     let mut first_runtime = XmppRuntime::new(config()).unwrap();
-    first_runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
-        )))
-        .unwrap();
+    send_bound_enable(&mut first_runtime);
     first_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("enabled", crate::stream_management::NS_SM)
@@ -1328,6 +1858,176 @@ fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
             TransportMessage::Element(element)
         )) if element.attr("id") == Some("carried-unhandled")
     )));
+}
+
+#[test]
+fn runtime_retries_persisted_tail_after_post_auth_features_omit_sm() {
+    let sent_at = Utc
+        .with_ymd_and_hms(2026, 7, 28, 10, 11, 12)
+        .single()
+        .expect("valid typed recovery timestamp");
+    let message = Element::builder("message", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retry-message")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+        .append(
+            Element::builder("origin-id", "urn:xmpp:sid:0")
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "origin-retry-message",
+                )
+                .build(),
+        )
+        .build();
+    let presence = Element::builder("presence", crate::NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "retry-presence",
+        )
+        .build();
+    let iq = Element::builder("iq", crate::NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "must-not-retry-iq",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .append(Element::builder("query", "jabber:iq:version").build())
+        .build();
+    let resume_state = SmResumeState::from_unhandled_outbound_entries(
+        StreamId::new("old-sm-id"),
+        0,
+        3,
+        [
+            UnhandledOutboundEntry::try_new(message, sent_at).expect("message is countable"),
+            UnhandledOutboundEntry::try_new(presence, sent_at).expect("presence is countable"),
+            UnhandledOutboundEntry::try_new(iq, sent_at).expect("IQ is countable"),
+        ],
+    )
+    .expect("persisted SM tail is valid");
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    let no_sm_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    assert!(!no_sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "resume"
+    )));
+    assert!(no_sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::IqCancelled { stanza_id }
+            if stanza_id.as_str() == "must-not-retry-iq"
+    )));
+    let bind_id = no_sm_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("no-SM stream binds fresh");
+    assert!(
+        runtime.resume_state().is_some(),
+        "the durable tail survives the no-SM feature transition before a physical retry write"
+    );
+
+    let repeated_features = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    assert!(!repeated_features.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if matches!(element.name(), "resume" | "message" | "presence")
+    )));
+
+    let bound_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let retries = bound_events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if matches!(element.name(), "message" | "presence" | "iq") => Some(element.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retries.len(),
+        2,
+        "only message and presence get fresh-stream retries"
+    );
+    assert!(
+        retries
+            .iter()
+            .all(|element| element.attr("id") != Some("must-not-retry-iq")),
+        "IQ is never replayed on a fresh stream"
+    );
+    for retry in &retries {
+        let delays = retry
+            .children()
+            .filter(|child| child.name() == "delay" && child.ns() == "urn:xmpp:delay")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delays.len(),
+            1,
+            "each fresh-stream retry has one direct XEP-0203 delay"
+        );
+        assert_eq!(delays[0].attr("stamp"), Some("2026-07-28T10:11:12.000Z"));
+    }
+    let retried_message = retries
+        .iter()
+        .find(|element| element.attr("id") == Some("retry-message"))
+        .expect("message retry");
+    assert_eq!(
+        retried_message
+            .get_child("origin-id", "urn:xmpp:sid:0")
+            .and_then(|element| element.attr("id")),
+        Some("origin-retry-message"),
+        "XEP-0359 origin identity is retained"
+    );
+    assert!(
+        runtime.resume_state().is_some(),
+        "queue remains durable until the driver confirms the exact retry writes"
+    );
+
+    runtime
+        .apply_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+        .unwrap();
+    assert!(
+        runtime.resume_state().is_some(),
+        "a write failure cannot clear the fresh-stream retry tail"
+    );
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            retries[0].clone(),
+        )))
+        .unwrap();
+    assert!(
+        runtime.resume_state().is_some(),
+        "one confirmed retry is insufficient"
+    );
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            retries[1].clone(),
+        )))
+        .unwrap();
+    assert!(
+        runtime.resume_state().is_none(),
+        "the persisted tail clears only after every eligible exact retry write succeeds"
+    );
 }
 
 #[test]
@@ -1474,12 +2174,13 @@ fn runtime_preserves_failed_resume_snapshot_until_fallback_retry_is_sent() {
         )))
         .unwrap();
 
-    assert_resume_state_replays_id(
-        runtime
-            .resume_state()
-            .expect("fallback snapshot should survive fresh enable attempt"),
-        "retry-after-drop",
-    );
+    let fallback = runtime
+        .resume_state()
+        .expect("fallback snapshot should survive fresh enable attempt");
+    assert!(!fallback.is_resumable());
+    assert!(fallback
+        .unhandled_outbound_entries()
+        .any(|entry| { entry.stanza_for_persistence().attr("id") == Some("retry-after-drop") }));
 }
 
 #[test]
@@ -1654,7 +2355,7 @@ fn runtime_rejects_stanza_only_conditions_in_stream_error_namespace() {
 }
 
 #[test]
-fn runtime_discards_fallback_resume_state_after_prebind_stream_error() {
+fn runtime_preserves_no_sm_fallback_after_prebind_stream_error_for_reconnect() {
     let resume_state = resume_state_with_sent_messages(["retry-after-fallback-error"]);
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
@@ -1663,14 +2364,7 @@ fn runtime_discards_fallback_resume_state_after_prebind_stream_error() {
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            post_auth_features_with_sm(),
-        )))
-        .unwrap();
-    runtime
-        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            Element::builder("failed", crate::stream_management::NS_SM)
-                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
-                .build(),
+            post_auth_features(),
         )))
         .unwrap();
 
@@ -1684,14 +2378,169 @@ fn runtime_discards_fallback_resume_state_after_prebind_stream_error() {
             internal_server_error_stream_error(),
         )))
         .unwrap();
-    assert!(runtime.resume_state().is_none());
+    assert!(runtime.resume_state().is_some());
 
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
             StreamClose,
         )))
         .unwrap();
-    assert!(runtime.resume_state().is_none());
+    let persisted_fallback = runtime
+        .resume_state()
+        .expect("pre-bind stream error cannot discard unconfirmed no-SM retries");
+
+    let mut reconnect_config = config();
+    reconnect_config.session.stream_management.resume_state = Some(persisted_fallback);
+    let mut reconnect = XmppRuntime::new(reconnect_config).unwrap();
+    drive_to_authenticated_stream(&mut reconnect);
+    let no_sm_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    let bind_id = no_sm_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("reconnect binds a fresh no-SM stream");
+    let retry_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    assert!(retry_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("retry-after-fallback-error")
+    )));
+}
+
+#[test]
+fn runtime_never_resumes_or_replays_iq_after_persisted_no_sm_fallback() {
+    let sent_at = Utc
+        .with_ymd_and_hms(2026, 7, 28, 10, 11, 12)
+        .single()
+        .expect("valid typed recovery timestamp");
+    let message = Element::builder("message", crate::NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "fallback-message",
+        )
+        .build();
+    let iq = Element::builder("iq", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "fallback-iq")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .append(Element::builder("query", "jabber:iq:version").build())
+        .build();
+    let resume_state = SmResumeState::from_unhandled_outbound_entries(
+        StreamId::new("old-sm-id"),
+        0,
+        2,
+        [
+            UnhandledOutboundEntry::try_new(message, sent_at).expect("message is countable"),
+            UnhandledOutboundEntry::try_new(iq, sent_at).expect("IQ is countable"),
+        ],
+    )
+    .expect("persisted SM tail is valid");
+    let mut initial_config = config();
+    initial_config.session.stream_management.resume_state = Some(resume_state);
+    let mut initial = XmppRuntime::new(initial_config).unwrap();
+
+    drive_to_authenticated_stream(&mut initial);
+    let no_sm_events = initial
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    assert!(no_sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::IqCancelled { stanza_id } if stanza_id.as_str() == "fallback-iq"
+    )));
+    initial
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            internal_server_error_stream_error(),
+        )))
+        .unwrap();
+    initial
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .unwrap();
+    let persisted_fallback = initial
+        .resume_state()
+        .expect("unwritten fresh retry remains durable");
+    assert!(!persisted_fallback.is_resumable());
+    assert_eq!(
+        persisted_fallback.unhandled_outbound_entries().count(),
+        1,
+        "only the fresh-stream-safe message persists"
+    );
+
+    let mut reconnect_config = config();
+    reconnect_config.session.stream_management.resume_state = Some(persisted_fallback);
+    let mut reconnect = XmppRuntime::new(reconnect_config).unwrap();
+    drive_to_authenticated_stream(&mut reconnect);
+    let sm_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    assert!(!sm_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "resume"
+    )));
+    let bind_id = sm_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("a non-resumable fallback binds a fresh stream");
+    let binding_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = binding_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" => Some(element.clone()),
+            _ => None,
+        })
+        .expect("fresh stream negotiates SM normally");
+    reconnect
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+    let retry_events = reconnect
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert!(retry_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("fallback-message")
+    )));
+    assert!(!retry_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.attr("id") == Some("fallback-iq")
+    )));
 }
 
 #[test]
@@ -1804,9 +2653,10 @@ fn runtime_retries_unhandled_stanzas_when_fresh_sm_enable_fails() {
 #[test]
 fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
+    send_bound_enable(&mut runtime);
     runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
         )))
         .unwrap();
     runtime
@@ -1836,12 +2686,7 @@ fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
 #[test]
 fn runtime_counts_outbound_stanzas_after_enable_is_sent() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
-
-    runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
-        )))
-        .unwrap();
+    send_bound_enable(&mut runtime);
 
     let message = Element::builder("message", crate::NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), "out-1")
@@ -1859,9 +2704,10 @@ fn runtime_counts_outbound_stanzas_after_enable_is_sent() {
 #[test]
 fn runtime_rejects_sm_ack_above_sent_count() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
+    send_bound_enable(&mut runtime);
     runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
         )))
         .unwrap();
 
@@ -2011,6 +2857,65 @@ fn drive_to_authenticated_stream(runtime: &mut XmppRuntime) {
         .unwrap();
 }
 
+fn send_bound_enable(runtime: &mut XmppRuntime) {
+    drive_to_authenticated_stream(runtime);
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let bind_id = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("resource binding request");
+    let ready_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = ready_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" && element.ns() == crate::stream_management::NS_SM => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .expect("bound stream-management enable");
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+}
+
+fn assert_sm_protocol_violation(events: &[ClientEvent]) {
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+            if element.name() == "error"
+                && element.get_child("policy-violation", "urn:ietf:params:xml:ns:xmpp-streams").is_some()
+                && element.get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-streams").is_none()
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+    )));
+}
+
 fn bind_result(stanza_id: &StanzaId) -> Element {
     Element::builder("iq", crate::NS_CLIENT)
         .attr(
@@ -2032,11 +2937,7 @@ fn bind_result(stanza_id: &StanzaId) -> Element {
 
 fn resume_state_with_sent_messages<const N: usize>(ids: [&str; N]) -> SmResumeState {
     let mut runtime = XmppRuntime::new(config()).unwrap();
-    runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
-        )))
-        .unwrap();
+    send_bound_enable(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("enabled", crate::stream_management::NS_SM)
@@ -2102,32 +3003,4 @@ fn invalid_forbidden_stream_error() -> Element {
     Element::builder("error", NS_STREAMS)
         .append(Element::builder("forbidden", "urn:ietf:params:xml:ns:xmpp-streams").build())
         .build()
-}
-
-fn assert_resume_state_replays_id(resume_state: SmResumeState, expected_id: &str) {
-    let mut config = config();
-    config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(config).unwrap();
-
-    drive_to_authenticated_stream(&mut runtime);
-    runtime
-        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            post_auth_features_with_sm(),
-        )))
-        .unwrap();
-    let events = runtime
-        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
-            Element::builder("resumed", crate::stream_management::NS_SM)
-                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
-                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
-                .build(),
-        )))
-        .unwrap();
-
-    assert!(events.iter().any(|event| matches!(
-        event,
-        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-            TransportMessage::Element(element)
-        )) if element.attr("id") == Some(expected_id)
-    )));
 }

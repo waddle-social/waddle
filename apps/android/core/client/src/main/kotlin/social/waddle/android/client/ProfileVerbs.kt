@@ -24,11 +24,10 @@ internal fun avatarItemId(data: ByteArray): String =
  * collapses to a typed [VerbResult] or `null`, and the profile store
  * stays consistent with what the server accepted.
  *
- * Every post-ack store write is generation-gated: the
- * [ActiveSession.generation] captured before the wire call must still
- * be current when the reply lands, so a slow ack racing a logout (or a
- * relogin into the same account) is dropped instead of parked into the
- * next session's stores.
+ * Every write captures one [ActiveSession.OwnerLease] before it starts.
+ * FFI use and every optimistic, commit, or rollback store projection are
+ * fenced by that same lease, so a slow operation racing a logout or any
+ * relogin cannot use or mutate a successor account.
  */
 internal class ProfileVerbs(
     private val activeSession: ActiveSession,
@@ -42,26 +41,45 @@ internal class ProfileVerbs(
      * best-effort — an absent PEP node must not fail the load.
      */
     suspend fun loadSelfProfile(): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
-        val own = activeSession.ownBareJid ?: return VerbResult.NotReady
-        val generation = activeSession.generation
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        val own = lease.ownerBareJid
         val vcard = try {
-            client.fetchVcard4(own)
+            when (val result = activeSession.invokeIfCurrent(lease) { it.fetchVcard4(own) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return VerbResult.Rejected
         }
-        if (activeSession.generation != generation) return VerbResult.NotConnected
-        stores.profileStore.setSelfVcard(vcard)
-        activeSession.fetch { it.fetchUserPepProfile(own) }
-            ?.takeIf { activeSession.generation == generation }
-            ?.let { stores.profileStore.setSelfStatus(it) }
-        // The PEP fetch above can outlive the session: a stale
-        // coroutine must not issue avatar IQs through the NEXT
-        // session's client for the old account's JID.
-        if (activeSession.generation != generation) return VerbResult.NotConnected
-        fetchAvatar(own)
+        if (!activeSession.applyIfCurrent(lease) { stores.profileStore.setSelfVcard(vcard) }) {
+            return VerbResult.NotConnected
+        }
+        val status = try {
+            when (val result = activeSession.invokeIfCurrent(lease) { it.fetchUserPepProfile(own) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> result.value
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+        if (status != null && !activeSession.applyIfCurrent(lease) {
+                stores.profileStore.setSelfStatus(status)
+            }
+        ) {
+            return VerbResult.NotConnected
+        }
+        // Each follow-up remains bound to the original lease. A completed
+        // old read cannot issue an avatar IQ through a successor client.
+        fetchAvatarForLease(own, lease)
+        if (!activeSession.isCurrent(lease)) return VerbResult.NotConnected
         return VerbResult.Ok
     }
 
@@ -76,18 +94,36 @@ internal class ProfileVerbs(
      * cache, peers included.
      */
     suspend fun fetchAvatar(jid: String, knownId: String? = null): WaddleAvatar? {
+        val lease = activeSession.captureOwnerLease() ?: return null
+        return fetchAvatarForLease(jid, lease, knownId)
+    }
+
+    private suspend fun fetchAvatarForLease(
+        jid: String,
+        lease: ActiveSession.OwnerLease,
+        knownId: String? = null,
+    ): WaddleAvatar? {
         val owner = bareJid(jid)
         if (knownId != null) {
             stores.profileStore.cachedAvatar(owner, knownId)?.let { cached ->
-                stores.profileStore.onAvatar(cached)
-                return cached
+                return if (activeSession.applyIfCurrent(lease) {
+                        stores.profileStore.onAvatar(cached)
+                    }
+                ) {
+                    cached
+                } else {
+                    null
+                }
             }
         }
-        val client = activeSession.client ?: return null
-        val generation = activeSession.generation
         val knownIds = stores.profileStore.knownAvatarIds(owner)
         val result = try {
-            client.requestAvatar(owner, knownIds)
+            when (val invocation = activeSession.invokeIfCurrent(lease) { it.requestAvatar(owner, knownIds) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return null
+                is ActiveSession.LeaseInvocation.Completed -> invocation.value
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -99,39 +135,53 @@ internal class ProfileVerbs(
         val avatar = result.avatar
             ?: stores.profileStore.cachedAvatar(owner, result.id)
             ?: return null
-        if (activeSession.generation == generation) {
-            stores.profileStore.onAvatar(avatar)
-        }
-        return avatar
+        return if (activeSession.applyIfCurrent(lease) { stores.profileStore.onAvatar(avatar) }) avatar else null
     }
 
     /**
      * XEP-0292: publish the account's vCard4, applied optimistically —
      * the store shows the new value immediately and rolls back to the
      * previous one when the publish fails (web `VCardEditor` parity).
-     * Generation-gated like every other write: a rollback racing a
-     * logout or relogin must not park pre-logout state into the next
-     * session.
+     * Lease-gated like every other write: a rollback racing a logout or
+     * relogin must not park pre-logout state into the next session.
      */
     suspend fun publishProfile(vcard: WaddleVCard4): VerbResult {
-        activeSession.ownBareJid ?: return VerbResult.NotReady
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        return publishProfileWithLease(lease, vcard)
+    }
+
+    /**
+     * Exact-lease implementation of [publishProfile]. Keeping this separate
+     * lets the lifecycle suite prove that an operation parked with a retired
+     * lease cannot select or mutate a successor account.
+     */
+    internal suspend fun publishProfileWithLease(
+        lease: ActiveSession.OwnerLease,
+        vcard: WaddleVCard4,
+    ): VerbResult {
         // No live client → nothing to publish, and more importantly no
         // optimistic write: inside login()'s bump→clear window the
         // client is provably null, and capturing `previous` there would
         // let the rollback resurrect the OLD account's vCard into the
         // freshly seeded stores.
-        activeSession.client ?: return VerbResult.NotConnected
-        val generation = activeSession.generation
-        val previous = stores.profileStore.selfVcard.value
-        stores.profileStore.setSelfVcard(vcard)
-        var result: VerbResult = VerbResult.Rejected
-        try {
-            result = unitVerb { it.publishVcard4(vcard) }
-        } finally {
-            if (result != VerbResult.Ok && activeSession.generation == generation) {
-                stores.profileStore.setSelfVcard(previous)
+        if (!hasLiveClient(lease)) return VerbResult.NotConnected
+        var previous: WaddleVCard4? = null
+        if (!activeSession.applyIfCurrent(lease) {
+                previous = stores.profileStore.selfVcard.value
+                stores.profileStore.setSelfVcard(vcard)
             }
+        ) {
+            return VerbResult.NotConnected
         }
+        val result = unitVerb(lease) { it.publishVcard4(vcard) }
+        if (result == VerbResult.Ok) {
+            // A completed old call must not be reported as committed after
+            // its account attempt has been retired.
+            return if (activeSession.applyIfCurrent(lease) {}) VerbResult.Ok else VerbResult.NotConnected
+        }
+        // The optimistic value belongs only to this exact attempt.  A
+        // stale rollback must not overwrite a successor's profile.
+        activeSession.applyIfCurrent(lease) { stores.profileStore.setSelfVcard(previous) }
         return result
     }
 
@@ -139,97 +189,142 @@ internal class ProfileVerbs(
      *  ordered inside the FFI); on success the bytes are cached at
      *  their SHA-1 item id and become the account's current avatar. */
     suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt): VerbResult {
-        val own = activeSession.ownBareJid ?: return VerbResult.NotReady
-        val generation = activeSession.generation
-        val result = unitVerb { it.publishAvatar(data, mimeType, width, height) }
-        if (result == VerbResult.Ok && activeSession.generation == generation) {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        val result = unitVerb(lease) { it.publishAvatar(data, mimeType, width, height) }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
             stores.profileStore.onAvatar(
-                WaddleAvatar(jid = own, id = avatarItemId(data), mimeType = mimeType, data = data, url = null),
+                WaddleAvatar(
+                    jid = lease.ownerBareJid,
+                    id = avatarItemId(data),
+                    mimeType = mimeType,
+                    data = data,
+                    url = null,
+                ),
             )
+        }
+        ) {
+            return VerbResult.NotConnected
         }
         return result
     }
 
     /** XEP-0084 §4.3: publish the empty metadata "no avatar" item. */
     suspend fun disableAvatar(): VerbResult {
-        val own = activeSession.ownBareJid ?: return VerbResult.NotReady
-        val generation = activeSession.generation
-        val result = unitVerb { it.disableAvatar() }
-        if (result == VerbResult.Ok && activeSession.generation == generation) {
-            stores.profileStore.clearAvatar(own)
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
+        val result = unitVerb(lease) { it.disableAvatar() }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
+                stores.profileStore.clearAvatar(lease.ownerBareJid)
+            }
+        ) {
+            return VerbResult.NotConnected
         }
         return result
     }
 
     /** XEP-0107: publish a mood; the store reflects it on success. */
     suspend fun setMood(kind: String, text: String?): VerbResult {
-        val generation = activeSession.generation
-        return unitVerb { it.publishMood(kind, text) }.also { result ->
-            if (result == VerbResult.Ok && activeSession.generation == generation) {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
+        val result = unitVerb(lease) { it.publishMood(kind, text) }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfMood(WaddleMood(kind = kind, text = text))
             }
+        ) {
+            return VerbResult.NotConnected
         }
+        return result
     }
 
     /** XEP-0107 §2.2: retract the mood via the empty payload. */
     suspend fun clearMood(): VerbResult {
-        val generation = activeSession.generation
-        return unitVerb { it.retractMood() }.also { result ->
-            if (result == VerbResult.Ok && activeSession.generation == generation) {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
+        val result = unitVerb(lease) { it.retractMood() }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfMood(null)
             }
+        ) {
+            return VerbResult.NotConnected
         }
+        return result
     }
 
     /** XEP-0108: publish an activity; the store reflects it on success. */
     suspend fun setActivity(general: String, specific: String?, text: String?): VerbResult {
-        val generation = activeSession.generation
-        return unitVerb { it.publishActivity(general, specific, text) }.also { result ->
-            if (result == VerbResult.Ok && activeSession.generation == generation) {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
+        val result = unitVerb(lease) { it.publishActivity(general, specific, text) }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfActivity(
                     WaddleActivity(general = general, specific = specific, text = text),
                 )
             }
+        ) {
+            return VerbResult.NotConnected
         }
+        return result
     }
 
     /** XEP-0108: retract the activity via the empty payload. */
     suspend fun clearActivity(): VerbResult {
-        val generation = activeSession.generation
-        return unitVerb { it.retractActivity() }.also { result ->
-            if (result == VerbResult.Ok && activeSession.generation == generation) {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
+        val result = unitVerb(lease) { it.retractActivity() }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfActivity(null)
             }
+        ) {
+            return VerbResult.NotConnected
         }
+        return result
     }
 
     /** XEP-0118: publish a tune; the store reflects it on success. */
     suspend fun publishTune(tune: WaddleTune): VerbResult {
-        val generation = activeSession.generation
-        return unitVerb { it.publishTune(tune) }.also { result ->
-            if (result == VerbResult.Ok && activeSession.generation == generation) {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
+        val result = unitVerb(lease) { it.publishTune(tune) }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfTune(tune)
             }
+        ) {
+            return VerbResult.NotConnected
         }
+        return result
     }
 
     /** XEP-0118 §3.2: stop publishing via the empty payload. */
     suspend fun clearTune(): VerbResult {
-        val generation = activeSession.generation
-        return unitVerb { it.retractTune() }.also { result ->
-            if (result == VerbResult.Ok && activeSession.generation == generation) {
+        val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
+        val result = unitVerb(lease) { it.retractTune() }
+        if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfTune(null)
             }
+        ) {
+            return VerbResult.NotConnected
         }
+        return result
     }
 
     /** Unit-returning FFI verb shape: the profile publishes signal
      *  refusal by throwing `WaddleException` instead of returning
      *  false, so success is simply "did not throw". */
-    private suspend fun unitVerb(op: suspend (WaddleClientInterface) -> Unit): VerbResult {
-        val client = activeSession.client ?: return VerbResult.NotConnected
+    /** Confirm that an optimistic projection has a live owner-bound client. */
+    private suspend fun hasLiveClient(lease: ActiveSession.OwnerLease): Boolean = when (
+        activeSession.invokeIfCurrent(lease) { Unit }
+    ) {
+        ActiveSession.LeaseInvocation.Stale,
+        ActiveSession.LeaseInvocation.NotConnected,
+        -> false
+        is ActiveSession.LeaseInvocation.Completed -> true
+    }
+
+    private suspend fun unitVerb(
+        lease: ActiveSession.OwnerLease,
+        op: suspend (WaddleClientInterface) -> Unit,
+    ): VerbResult {
         return try {
-            op(client)
+            when (activeSession.invokeIfCurrent(lease, op)) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> return VerbResult.NotConnected
+                is ActiveSession.LeaseInvocation.Completed -> Unit
+            }
             VerbResult.Ok
         } catch (cancellation: CancellationException) {
             throw cancellation

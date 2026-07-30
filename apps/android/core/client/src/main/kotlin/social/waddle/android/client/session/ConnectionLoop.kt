@@ -31,15 +31,13 @@ import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppEventRouter
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.SessionPrefs
-import social.waddle.android.client.prefs.toFfi
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleSaslCondition
 
 /**
- * The supervised reconnect loop: each attempt builds a fresh
- * `WaddleConfig` (with the persisted XEP-0198 resume snapshot), a fresh
- * bridge, and a fresh client from the injected [ClientFactory], then
+ * The supervised reconnect loop: each attempt builds a fresh `WaddleConfig`,
+ * bridge, and client from the injected [ClientFactory], then
  * waits up to the connect budget for `SessionReady`. Failed attempts
  * back off via [ReconnectPolicy]; credential-shaped SASL failures are
  * terminal and reported via [onTerminalAuthFailure].
@@ -50,8 +48,7 @@ internal class ConnectionLoop(
     private val sessionPrefs: SessionPrefs,
     private val activeSession: ActiveSession,
     private val router: XmppEventRouter,
-    private val onReady: SessionReadyListener,
-    private val onTerminalAuthFailure: suspend () -> Unit,
+    private val callbacks: ConnectionLoopCallbacks,
     private val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
 ) {
@@ -59,13 +56,6 @@ internal class ConnectionLoop(
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
     private val retryRequests = Channel<Unit>(Channel.CONFLATED)
-
-    /**
-     * Set on the first `SessionReady` since process start — half of the
-     * fresh-stream heuristic in [consumeEvents].
-     */
-    @Volatile
-    private var hadReadySessionThisProcess = false
 
     /** Logout: the loop is cancelled; publish `Idle` for the UI. */
     fun resetToIdle() {
@@ -77,7 +67,7 @@ internal class ConnectionLoop(
         retryRequests.trySend(Unit)
     }
 
-    suspend fun run(session: WaddleSessionInfo) {
+    suspend fun run(session: WaddleSessionInfo, sessionScope: CoroutineScope) {
         var attempt = 0
         while (currentCoroutineContext().isActive) {
             waitUntilOnline()
@@ -94,9 +84,9 @@ internal class ConnectionLoop(
                 AttemptEnd.CONNECT_FAILED
             }
             when (end) {
-                AttemptEnd.AUTH_FAILED -> {
+                is AttemptEnd.AuthFailed -> {
                     _state.value = ConnectionState.AuthFailed
-                    onTerminalAuthFailure()
+                    callbacks.onTerminalAuthFailure(end.lease, sessionScope)
                     return
                 }
                 AttemptEnd.DROPPED_AFTER_READY -> attempt = 0
@@ -125,13 +115,13 @@ internal class ConnectionLoop(
      * attempt immediately instead of waiting out the connect budget.
      */
     private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
-        val bridge = activeSession.beginAttempt()
+        val attempt = activeSession.beginAttempt() ?: return AttemptEnd.CONNECT_FAILED
+        val bridge = attempt.bridge
         val config = buildConfig(session)
         // The full JID the call engine signs Jingle stanzas with
         // (initiator/responder attributes, tie-break comparand).
-        activeSession.ownFullJid = "${config.jid}/${config.resource}"
+        val ownFullJid = "${config.jid}/${config.resource}"
         val client = clientFactory.create(config, bridge)
-        val hadResumeSnapshot = config.resumeState != null
         try {
             return coroutineScope {
                 val connector = async {
@@ -145,7 +135,16 @@ internal class ConnectionLoop(
                     }
                 }
                 val consumer = async {
-                    consumeEvents(bridge.events, client, session, this, hadResumeSnapshot)
+                    consumeEvents(
+                        AttemptEventConsumer(
+                            events = bridge.events,
+                            client = client,
+                            session = session,
+                            attempt = attempt,
+                            ownFullJid = ownFullJid,
+                            scope = this,
+                        ),
+                    )
                 }
                 val end = select<AttemptEnd?> {
                     consumer.onAwait { it }
@@ -157,7 +156,7 @@ internal class ConnectionLoop(
                 end
             }
         } finally {
-            activeSession.endAttempt()
+            activeSession.endAttempt(attempt, client)
             withContext(NonCancellable) {
                 runCatching { client.disconnect() }
             }
@@ -170,40 +169,41 @@ internal class ConnectionLoop(
      * waits for `SessionReady` under the connect budget; phase 2 keeps
      * fanning events out until the stream ends.
      */
-    private suspend fun consumeEvents(
-        events: ReceiveChannel<XmppEvent>,
-        client: WaddleClientInterface,
-        session: WaddleSessionInfo,
-        attemptScope: CoroutineScope,
-        hadResumeSnapshot: Boolean,
-    ): AttemptEnd {
-        val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(events) }
+    private data class AttemptEventConsumer(
+        val events: ReceiveChannel<XmppEvent>,
+        val client: WaddleClientInterface,
+        val session: WaddleSessionInfo,
+        val attempt: ActiveSession.Attempt,
+        val ownFullJid: String,
+        val scope: CoroutineScope,
+    )
+
+    private suspend fun consumeEvents(consumer: AttemptEventConsumer): AttemptEnd {
+        val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(consumer.events) }
         when (readiness) {
             null, Readiness.CLOSED -> return AttemptEnd.CONNECT_FAILED
-            Readiness.AUTH_FAILED -> return AttemptEnd.AUTH_FAILED
+            Readiness.AUTH_FAILED -> return AttemptEnd.AuthFailed(consumer.attempt.lease)
             Readiness.READY -> Unit
         }
-        activeSession.onReady(client)
-        // Fresh-stream heuristic: the FFI does not report whether the
-        // XEP-0198 <resume/> was accepted, so treat the stream as fresh
-        // when (a) no resume snapshot was presented (definitely a new
-        // stream) or (b) this is the first `SessionReady` of the process
-        // (a snapshot that survived process death may resume, but
-        // catching up is cheap and dedupe collapses the overlap). Known
-        // gap, accepted: a mid-process resume that the server REJECTS
-        // looks resumed here and skips catch-up until the next fresh
-        // session; the open screen still refetches via its own
-        // SessionReady hook.
-        val freshStream = !hadResumeSnapshot || !hadReadySessionThisProcess
-        hadReadySessionThisProcess = true
+        val published = activeSession.publishReady(
+            attempt = consumer.attempt,
+            readyClient = consumer.client,
+            readyOwnFullJid = consumer.ownFullJid,
+            onPublished = {
+                callbacks.onReady(consumer.scope, consumer.session, true, consumer.attempt.lease)
+            },
+        )
+        if (!published) return AttemptEnd.CONNECT_FAILED
         _state.value = ConnectionState.Ready
-        onReady(attemptScope, client, session, freshStream)
+        // Native FFI clients deliberately start fresh streams: the web-only
+        // typed SM persistence path owns resumable browser sessions, while
+        // Android catch-up is durable and idempotent.
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
         // treating those as terminal would sign the user out mid-session.
-        for (event in events) {
-            router.dispatch(event)
+        for (event in consumer.events) {
+            dispatch(event)
             if (event is XmppEvent.Disconnected) return AttemptEnd.DROPPED_AFTER_READY
         }
         return AttemptEnd.DROPPED_AFTER_READY
@@ -211,7 +211,7 @@ internal class ConnectionLoop(
 
     private suspend fun awaitReadiness(events: ReceiveChannel<XmppEvent>): Readiness {
         for (event in events) {
-            router.dispatch(event)
+            dispatch(event)
             when (event) {
                 is XmppEvent.SessionReady -> return Readiness.READY
                 // Typed SASL failure from the FFI: the ONLY terminal auth
@@ -231,12 +231,19 @@ internal class ConnectionLoop(
         return Readiness.CLOSED
     }
 
+    /** Durable queue acknowledgement must complete before UI fan-out. */
+    private suspend fun dispatch(event: XmppEvent) {
+        if (event is XmppEvent.DeliveryAcked) {
+            callbacks.onDeliveryAcked(event.stanzaId)
+        }
+        router.dispatch(event)
+    }
+
     private suspend fun buildConfig(session: WaddleSessionInfo): WaddleConfig = WaddleConfig(
         serverUrl = session.xmppWebsocketUrl,
         jid = session.jid,
         accessToken = session.sessionId,
         resource = RESOURCE_PREFIX + sessionPrefs.resourceSuffix(),
-        resumeState = sessionPrefs.smResume.first()?.toFfi(),
     )
 
     /** Park in `Offline` until connectivity exists. */
@@ -290,7 +297,12 @@ internal class ConnectionLoop(
             else -> false
         }
 
-    private enum class AttemptEnd { AUTH_FAILED, CONNECT_FAILED, DROPPED_AFTER_READY }
+    /** The terminal result retains the exact pre-ready attempt authority. */
+    private sealed interface AttemptEnd {
+        data class AuthFailed(val lease: ActiveSession.OwnerLease) : AttemptEnd
+        data object CONNECT_FAILED : AttemptEnd
+        data object DROPPED_AFTER_READY : AttemptEnd
+    }
 
     private enum class Readiness { READY, AUTH_FAILED, CLOSED }
 
@@ -304,12 +316,25 @@ internal class ConnectionLoop(
 
 /**
  * Callback fired on the attempt's scope once `SessionReady` lands:
- * receives the live client and whether the stream is fresh (needs
- * catch-up) so the owner can launch the ready pipeline.
+ * receives whether the stream is fresh (needs catch-up) so the owner can
+ * launch the ready pipeline through [ActiveSession]'s transport gateway.
  */
 internal typealias SessionReadyListener = (
     attemptScope: CoroutineScope,
-    client: WaddleClientInterface,
     session: WaddleSessionInfo,
     freshStream: Boolean,
+    lease: ActiveSession.OwnerLease,
 ) -> Unit
+
+/** Typed lifecycle callbacks kept together as one constructor dependency. */
+internal class ConnectionLoopCallbacks(
+    val onReady: SessionReadyListener,
+    val onDeliveryAcked: suspend (String) -> Unit,
+    /**
+     * Carries both the failing attempt's immutable lease and the exact
+     * manager scope that launched this loop. The receiver must validate both
+     * before touching lifecycle state: a cancelled old loop can report after
+     * a same-account or different-account successor has been installed.
+     */
+    val onTerminalAuthFailure: (ActiveSession.OwnerLease, CoroutineScope) -> Unit,
+)

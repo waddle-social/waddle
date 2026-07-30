@@ -66,8 +66,8 @@ pub use discovery::{
 };
 pub use error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 pub use event::{
-    ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, StreamErrorCondition,
-    StreamErrorDetail, StreamManagementEvent,
+    ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, SmAckRequestReason,
+    StreamErrorCondition, StreamErrorDetail, StreamManagementEvent,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use inbox_ext::InboxExt;
@@ -121,7 +121,7 @@ pub use stickers::{
     parse_sticker_packs_result, HashAlgo, PackId, PackRef, PackSticker, StickerHash, StickerMarker,
     StickerPackDoc, StickerText, NS_STICKERS, STICKERS_NODE,
 };
-pub use stream_management::SmResumeState;
+pub use stream_management::{SmResumeState, UnhandledOutboundEntry};
 pub use transport::{
     decode_message, encode_message, StreamClose, StreamOpen, TransportCapabilities, TransportEvent,
     TransportKind, TransportMessage, TransportState,

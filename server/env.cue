@@ -127,7 +127,6 @@ schema.#Project & {
 				}
 			}
 			tasks: [
-				_t.checkRootSyncDrift,
 				_t.checkCiDrift,
 				_t.checkSwitchableAlternativeProgram,
 				_t.fmt,
@@ -169,7 +168,24 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+		}
+		rootSync: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.checkRootSyncDrift]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -226,8 +242,9 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
+					cuenv sync vcs
 					cuenv sync --check -p ..
-					git diff --exit-code -- ../.gitignore ../cuenv.lock
+					git -C .. diff --exit-code -- .
 				"""#]
 			inputs: [
 				"../env.cue",
@@ -241,6 +258,7 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
+					cuenv sync vcs
 					tracker=../docs/planning/switchable-alternative.md
 					test -f capabilities.toml
 					test -f ../docs/product/critical-journeys.json

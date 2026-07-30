@@ -27,6 +27,12 @@ class PendingSendTracker {
     private val ackedIds = linkedSetOf<String>()
     private val failedIds = linkedSetOf<String>()
 
+    // The timeline can receive the local DM projection while the send
+    // continuation is still suspended below the manager. Keep its latest
+    // identities here so an ack that arrives later can reveal that stored
+    // row immediately, rather than waiting for another timeline emission.
+    private var storedIds: Set<String> = emptySet()
+
     /** Append an optimistic row for a send about to dispatch. */
     fun append(body: String, extras: MessageSendExtras?, timestampMillis: Long): PendingMessage {
         val message = PendingMessage(
@@ -69,6 +75,7 @@ class PendingSendTracker {
                 failed = trackedId in failedIds,
             )
         }
+        removeAcknowledgedStoredRows()
         return true
     }
 
@@ -86,6 +93,7 @@ class PendingSendTracker {
                 if (it.stanzaId == stanzaId) it.copy(acked = true, failed = false, queued = false) else it
             }
         }
+        removeAcknowledgedStoredRows()
     }
 
     fun onDeliveryFailed(stanzaId: String) {
@@ -98,21 +106,15 @@ class PendingSendTracker {
     }
 
     /**
-     * Prune (not just hide) rows whose identity the timeline now holds:
-     * a view-side filter alone lets the list grow for the screen's
-     * lifetime, and a timeline trim could drop the stored row and
-     * resurrect an already-delivered send as an unconfirmed ghost.
+     * Remember the latest stored identities and prune only an ACKED pending
+     * row. A local DM echo can land before [onSendResult] adopts its
+     * XEP-0359 origin-id; the optimistic row owns the visible delivery state
+     * until the exact XEP-0198 acknowledgement, so a stored echo alone is
+     * never authority to hide it as delivered.
      */
     fun pruneAgainst(storedIds: Set<String>) {
-        // A stored row's races are settled: its delivery ids are done.
-        // Removal happens OUTSIDE the update lambda (CAS retries must
-        // stay side-effect free).
-        val settled = _pending.value.mapNotNull { it.stanzaId }.filter { it in storedIds }.toSet()
-        ackedIds -= settled
-        failedIds -= settled
-        _pending.update { list ->
-            list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
-        }
+        this.storedIds = storedIds
+        removeAcknowledgedStoredRows()
     }
 
     /**
@@ -129,6 +131,24 @@ class PendingSendTracker {
     private fun updatePending(localId: Long, transform: (PendingMessage) -> PendingMessage) {
         _pending.update { list ->
             list.map { if (it.localId == localId) transform(it) else it }
+        }
+    }
+
+    /**
+     * Acknowledgement is the durable ownership transfer. Only then may a
+     * stored local echo replace its optimistic overlay; DMs without a stored
+     * reflection deliberately retain their acked optimistic row.
+     */
+    private fun removeAcknowledgedStoredRows() {
+        val settled = _pending.value.asSequence()
+            .filter { it.acked && it.stanzaId != null && it.stanzaId in storedIds }
+            .mapNotNull { it.stanzaId }
+            .toSet()
+        if (settled.isEmpty()) return
+        ackedIds -= settled
+        failedIds -= settled
+        _pending.update { list ->
+            list.filterNot { it.acked && it.stanzaId != null && it.stanzaId in storedIds }
         }
     }
 

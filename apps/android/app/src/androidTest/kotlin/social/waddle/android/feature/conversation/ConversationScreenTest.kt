@@ -12,6 +12,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -19,8 +20,12 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import social.waddle.android.TestAppGraph
+import social.waddle.android.client.sendCalls
+import social.waddle.android.client.sendMessageStall
+import social.waddle.android.client.sendOutcome
 import social.waddle.android.client.testMessage
 import social.waddle.android.feature.dm.DmViewModel
+import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /**
  * DM conversation over the shared scaffold, driven end-to-end through
@@ -88,16 +93,39 @@ class ConversationScreenTest {
     }
 
     @Test
-    fun sendShowsTheOptimisticPendingRow() {
+    fun sendShowsSendingUntilTheTransportOutcomeIsKnown() {
+        val releaseSend = CompletableDeferred<Unit>()
+        harness.activeFakeClient().sendMessageStall = releaseSend
+
+        try {
+            composeRule.onNode(hasSetTextAction()).performTextInput("hi there penguin")
+            composeRule.onNodeWithContentDescription("Send").performClick()
+
+            composeRule.waitUntil(timeoutMillis = 10_000) {
+                harness.activeFakeClient().sendCalls.contains(PEER_JID to "hi there penguin")
+            }
+            waitForText("Sending…")
+        } finally {
+            releaseSend.complete(Unit)
+        }
+
+        waitForText("Queued — sends when connected")
+    }
+
+    @Test
+    fun sendShowsTheDurablyQueuedOptimisticRow() {
+        // A session-shaped transport failure is persisted before it returns;
+        // assert that durable queued state directly rather than relying on a
+        // timing race with an accepted send.
+        harness.activeFakeClient().sendOutcome = WaddleSendMessageOutcome.NotConnected
+
         composeRule.onNode(hasSetTextAction()).performTextInput("hi there penguin")
         composeRule.onNodeWithContentDescription("Send").performClick()
-        // The fake outcome id never matches the local echo's identity,
-        // so the pending row stays visible with its sending status.
-        waitForText("hi there penguin")
-        waitForText("Sending…")
         composeRule.waitUntil(timeoutMillis = 10_000) {
             harness.activeFakeClient().sendCalls.contains(PEER_JID to "hi there penguin")
         }
+        waitForText("hi there penguin")
+        waitForText("Queued — sends when connected")
     }
 
     @Test

@@ -59,6 +59,15 @@ export interface MdsDisplayedEntry {
 
 export type PubsubEvent = WasmPubsubEvent;
 
+/** Closed XEP-0198 observability projection from the Rust runtime. */
+export type StreamManagementTelemetry =
+  | { kind: "ack-requested"; reason: "outbound-stanza" | "resumed-unacked-tail" | "peer-request" | "pagehide" }
+  | { kind: "ack-validated"; progress: boolean }
+  | { kind: "ack-retry"; attempt: number }
+  | { kind: "ack-request-timed-out" }
+  | { kind: "progress-timed-out" }
+  | { kind: "failed" };
+
 type CatchupOutcome = "completed" | "aborted" | "failed";
 
 /**
@@ -144,6 +153,7 @@ export type ClientEvents = {
   reconnectScheduled: [info: { attempt: number; delayMs: number }];
   catchup: [info: CatchupHookInfo];
   resumeDrain: [info: { buffered: number; durationMs: number }];
+  streamManagement: [event: StreamManagementTelemetry];
 };
 
 type GenericListener = (...args: ReadonlyArray<unknown>) => void;

@@ -1,20 +1,23 @@
 package social.waddle.android.client
 
 import app.cash.turbine.test
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
-import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleSaslCondition
@@ -22,7 +25,10 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XmppSessionManagerTest {
-    private class Harness(testScope: TestScope) {
+    private class Harness(
+        testScope: TestScope,
+        beforeTerminalAuthCommit: suspend () -> Unit = {},
+    ) {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
@@ -33,6 +39,7 @@ class XmppSessionManagerTest {
             userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
+            beforeTerminalAuthCommit = beforeTerminalAuthCommit,
         )
     }
 
@@ -170,6 +177,12 @@ class XmppSessionManagerTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
+        // Prove the terminal owner still receives the full cleanup, not just
+        // an app-state transition: this pre-ready intent is in both the
+        // store and session persistence when the terminal SASL failure lands.
+        harness.manager.joinRoom("general@muc.waddle.test", "icepuma")
+        assertEquals(setOf("general@muc.waddle.test"), harness.manager.roomStore.joinedRooms.value)
+
         harness.factory.emit(
             WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED),
         )
@@ -178,7 +191,77 @@ class XmppSessionManagerTest {
         assertEquals(ConnectionState.AuthFailed, harness.manager.connectionState.value)
         assertEquals(WaddleAppState.SignedOut, harness.manager.appState.value)
         assertEquals("session id cleared on auth failure", null, harness.prefs.sessionId.first())
+        assertEquals("owner cleared on auth failure", null, harness.prefs.ownerBareJid.first())
+        assertEquals(
+            "session stores cleared on auth failure",
+            emptySet<String>(),
+            harness.manager.roomStore.joinedRooms.value,
+        )
         assertEquals("no retry after auth failure", 1, harness.factory.clients.size)
+    }
+
+    @Test
+    fun `stale terminal auth completion leaves a relogged successor untouched`() = runTest {
+        val terminalEntered = CompletableDeferred<Unit>()
+        val releaseTerminal = CompletableDeferred<Unit>()
+        val harness = Harness(this) {
+            terminalEntered.complete(Unit)
+            // The terminal worker is intentionally manager-owned. Keeping the
+            // test gate non-cancellable models an old completion that resumes
+            // after login cancelled its original connection-loop scope.
+            withContext(NonCancellable) { releaseTerminal.await() }
+        }
+        val oldSession = testSessionInfo(sessionId = "old-session")
+        val successor = testSessionInfo(
+            sessionId = "successor-session",
+            username = "snowowl",
+            jid = "snowowl@waddle.test",
+        )
+
+        harness.manager.login(oldSession)
+        runCurrent()
+        harness.factory.emit(
+            WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED),
+        )
+        runCurrent()
+        terminalEntered.await()
+
+        // The successor is installed while the old terminal handler is
+        // parked before its lifecycle CAS. Login joins only the old loop;
+        // the manager-owned terminal worker remains to exercise the exact
+        // stale-completion path when released below.
+        harness.manager.login(successor)
+        runCurrent()
+        assertEquals(WaddleAppState.Ready, harness.manager.appState.value)
+        assertEquals("successor-session", harness.prefs.sessionId.first())
+        assertEquals("snowowl@waddle.test", harness.prefs.ownerBareJid.first())
+        assertEquals(2, harness.factory.clients.size)
+
+        releaseTerminal.complete(Unit)
+        runCurrent()
+
+        assertEquals(
+            "stale failure must not sign out the successor",
+            WaddleAppState.Ready,
+            harness.manager.appState.value,
+        )
+        assertEquals(
+            "successor persistence survives stale failure",
+            "successor-session",
+            harness.prefs.sessionId.first(),
+        )
+        assertEquals(
+            "successor owner survives stale failure",
+            "snowowl@waddle.test",
+            harness.prefs.ownerBareJid.first(),
+        )
+        assertEquals(
+            "stale failure must not cancel successor callbacks",
+            2,
+            harness.factory.clients.size,
+        )
+
+        harness.manager.logout()
     }
 
     @Test
@@ -271,36 +354,6 @@ class XmppSessionManagerTest {
         runCurrent()
         assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
         assertEquals(1, harness.factory.clients.size)
-
-        harness.manager.logout()
-    }
-
-    @Test
-    fun `resume snapshots persist and feed the next attempt`() = runTest {
-        val harness = Harness(this)
-        harness.manager.login(testSessionInfo())
-        runCurrent()
-
-        harness.factory.emit(WaddleClientEvent.Connected)
-        runCurrent()
-
-        val state = testResumeState()
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(state))
-        runCurrent()
-        assertEquals(state.toSnapshot(), harness.prefs.smResume.first())
-
-        harness.factory.emit(WaddleClientEvent.Disconnected)
-        runCurrent()
-        advanceTimeBy(1_000L)
-        runCurrent()
-
-        val resumed = harness.factory.configs.last().resumeState
-        assertNotNull("second attempt must carry the persisted snapshot", resumed)
-        assertEquals("prev-1", resumed?.previd)
-
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(null))
-        runCurrent()
-        assertEquals(null, harness.prefs.smResume.first())
 
         harness.manager.logout()
     }
@@ -437,12 +490,10 @@ class XmppSessionManagerTest {
         client.sendOutcome = WaddleSendMessageOutcome.Sent("stanza-42")
 
         val roomSend = harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hello room")
-        assertEquals(WaddleSendMessageOutcome.Sent("stanza-42"), roomSend.outcome)
-        assertEquals("live sends never queue", false, roomSend.queued)
-        assertEquals(
-            WaddleSendMessageOutcome.Sent("stanza-42"),
-            harness.manager.sendChatMessage("alice@waddle.test", "hello dm").outcome,
-        )
+        val dmSend = harness.manager.sendChatMessage("alice@waddle.test", "hello dm")
+        assertEquals(WaddleSendMessageOutcome.Sent(roomSend.queuedId!!), roomSend.outcome)
+        assertEquals(WaddleSendMessageOutcome.Sent(dmSend.queuedId!!), dmSend.outcome)
+        assertTrue("live sends remain durable until SM acknowledgement", roomSend.queued && dmSend.queued)
         assertEquals(
             listOf("general@muc.waddle.test" to "hello room", "alice@waddle.test" to "hello dm"),
             client.sendCalls,
@@ -450,6 +501,10 @@ class XmppSessionManagerTest {
         assertTrue(
             "manager-generated stanza id rides the send options",
             client.sendOptions.all { it?.stanzaId != null },
+        )
+        assertEquals(
+            listOf(roomSend.queuedId, dmSend.queuedId),
+            harness.prefs.outboundQueue.first().map { it.clientStanzaId },
         )
 
         // The attempt died → the passthrough must stop targeting the client.
@@ -562,6 +617,71 @@ class XmppSessionManagerTest {
             testScheduler.currentTime - before <= XmppSessionManager.LOGOUT_CALL_TEARDOWN_MILLIS,
         )
         assertEquals(WaddleAppState.SignedOut, harness.manager.appState.value)
+    }
+
+    @Test
+    fun `logout revokes outbound authority while call teardown is stalled`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        harness.manager.callStore.startCall(
+            peerJid = "bob@waddle.test",
+            media = social.waddle.client.ffi.WaddleCallMedia(audio = true, video = false),
+        )
+        runCurrent()
+        val sid = (
+            harness.manager.callStore.state.value as social.waddle.android.client.calls.CallState.Outgoing
+            ).sid
+        harness.factory.emit(
+            WaddleClientEvent.Call(
+                social.waddle.client.ffi.WaddleCallEvent(
+                    from = "bob@waddle.test/phone",
+                    to = null,
+                    sid = sid,
+                    kind = social.waddle.client.ffi.WaddleCallEventKind.SessionAccept(
+                        join = social.waddle.client.ffi.WaddleLiveKitJoin(
+                            url = "wss://livekit.waddle.test",
+                            room = "dm-room",
+                            identity = "icepuma@waddle.test/r",
+                            token = "jwt",
+                        ),
+                        media = social.waddle.client.ffi.WaddleCallMedia(audio = true, video = false),
+                    ),
+                ),
+            ),
+        )
+        runCurrent()
+
+        val oldClient = harness.factory.clients.single()
+        oldClient.callTerminateDelayMillis = 60_000L
+        val logout = async { harness.manager.logout() }
+        runCurrent()
+
+        // The terminate IQ is still stalled, but no new message can take
+        // an owner lease from the retired account or use its transport.
+        val rejected = async { harness.manager.sendChatMessage("alice@waddle.test", "must not cross logout") }
+        runCurrent()
+        assertEquals(WaddleSendMessageOutcome.Error, rejected.await().outcome)
+        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+        assertTrue(oldClient.sendCalls.isEmpty())
+
+        advanceTimeBy(XmppSessionManager.LOGOUT_CALL_TEARDOWN_MILLIS)
+        runCurrent()
+        logout.await()
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        val successor = harness.factory.clients.last()
+        val sent = harness.manager.sendChatMessage("alice@waddle.test", "new generation")
+        assertTrue(sent.outcome is WaddleSendMessageOutcome.Sent)
+        assertEquals(listOf("alice@waddle.test" to "new generation"), successor.sendCalls)
+
+        harness.manager.logout()
     }
 
     @Test

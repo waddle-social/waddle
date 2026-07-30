@@ -21,8 +21,8 @@ interface ConversationIo {
     suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage?
 
     /**
-     * Send [body] to the conversation; [SendResult.queuedId] is set when
-     * the session manager persisted the message for offline replay.
+     * Send [body] to the conversation; [SendResult.queuedId] is set after
+     * the session manager durably persists the outbound intent.
      * [extras] carry XEP-0461 reply / XEP-0201 thread annotations.
      */
     suspend fun send(body: String, extras: MessageSendExtras? = null): SendResult

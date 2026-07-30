@@ -141,12 +141,20 @@ class PendingSendTrackerTest {
     }
 
     @Test
-    fun `pruneAgainst removes only rows whose identity is stored`() {
+    fun `stored echo waits for the exact delivery ack before pruning`() {
         val echoed = tracker.append("echoed", extras = null, timestampMillis = 1_000L)
         tracker.onSendResult(echoed.localId, SendResult(WaddleSendMessageOutcome.Sent("s-echoed")))
         val inFlight = tracker.append("still flying", extras = null, timestampMillis = 1_000L)
 
         tracker.pruneAgainst(setOf("s-echoed", "unrelated"))
+
+        assertEquals(
+            "a local echo is not proof that the durable send was acknowledged",
+            listOf(echoed.localId, inFlight.localId),
+            tracker.pending.value.map { it.localId },
+        )
+
+        tracker.onDeliveryAcked("s-echoed")
 
         assertEquals(listOf(inFlight.localId), tracker.pending.value.map { it.localId })
     }
@@ -167,7 +175,7 @@ class PendingSendTrackerTest {
     }
 
     @Test
-    fun `pruning a stored row settles its delivery-id bookkeeping`() {
+    fun `acknowledged stored row settles its delivery-id bookkeeping`() {
         // An ack recorded before pruning must not linger: a NEW send that
         // happens to reuse the id (queue replay across sessions) would
         // otherwise adopt a stale acked flag.

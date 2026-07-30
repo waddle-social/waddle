@@ -54,12 +54,14 @@ class ConversationRowsTest {
         localId: Long,
         stanzaId: String? = null,
         threadId: String? = null,
+        acked: Boolean = false,
     ) = PendingMessage(
         localId = localId,
         stanzaId = stanzaId,
         body = "pending",
         timestampMillis = 1_000L,
         failed = false,
+        acked = acked,
         extras = threadId?.let { MessageSendExtras(threadId = it) },
     )
 
@@ -99,7 +101,7 @@ class ConversationRowsTest {
     }
 
     @Test
-    fun `pending rows dedupe against every stored identity`() {
+    fun `active pending row shadows a stored echo until its exact ack`() {
         // The MUC reflection is keyed by the room-assigned stanza id;
         // the send returned the client origin id.
         val echo = item("room-assigned-id").let { stored ->
@@ -117,8 +119,28 @@ class ConversationRowsTest {
         )
 
         assertEquals(2, rows.size)
-        assertTrue(rows[0] is ConversationRow.Stored)
+        assertEquals(0L, (rows[0] as ConversationRow.Unconfirmed).message.localId)
         assertEquals(1L, (rows[1] as ConversationRow.Unconfirmed).message.localId)
+    }
+
+    @Test
+    fun `acknowledged pending row reveals its stored echo`() {
+        val echo = item("room-assigned-id").let { stored ->
+            stored.copy(
+                source = TimelineSource.Live(
+                    (stored.source as TimelineSource.Live).message.copy(originId = "client-origin-id"),
+                ),
+            )
+        }
+
+        val rows = visibleRows(
+            items = listOf(echo),
+            pending = listOf(pending(localId = 0, stanzaId = "client-origin-id", acked = true)),
+            threadId = null,
+        )
+
+        assertEquals(1, rows.size)
+        assertTrue(rows.single() is ConversationRow.Stored)
     }
 
     @Test

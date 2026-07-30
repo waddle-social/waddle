@@ -1,9 +1,9 @@
 package social.waddle.android.client.calls
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -12,7 +12,6 @@ import social.waddle.android.client.bareJid
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
-import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddlePresence
 import java.util.UUID
@@ -52,16 +51,82 @@ class CallStore internal constructor(
 
     /** The live call slot; the UI renders ringing/in-call surfaces off this. */
     val state: StateFlow<CallState> = _state.asStateFlow()
-
     private val _lastError = MutableStateFlow<String?>(null)
 
     /** Most recent wire-send failure; cleared on the next transition. */
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
-
     private var scope: CoroutineScope? = null
     private var effects: Channel<suspend () -> Unit>? = null
-    private var outgoingTimer: Job? = null
-    private var sessionAcceptTimer: Job? = null
+    private val timers = CallTimers(
+        outgoingTimeoutMillis,
+        sessionAcceptTimeoutMillis,
+        object : CallTimerHost {
+            override fun outgoing(sid: String): CallState.Outgoing? = synchronized(stateLock) {
+                (_state.value as? CallState.Outgoing)?.takeIf { it.sid == sid }
+            }
+
+            override fun incoming(sid: String): CallState.Incoming? = synchronized(stateLock) {
+                (_state.value as? CallState.Incoming)?.takeIf { it.sid == sid }
+            }
+
+            override fun launch(block: suspend () -> Unit): Job? = synchronized(stateLock) {
+                scope?.launch { block() }
+            }
+
+            override fun endOutgoingIfCurrent(sid: String, connection: CallConnection) {
+                synchronized(stateLock) {
+                    if (_state.value is CallState.Outgoing &&
+                        _state.value.sidOrNull == sid &&
+                        _state.value.connectionOrNull.isSameActiveAttempt(connection)
+                    ) {
+                        _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
+                    }
+                }
+            }
+
+            override fun endIncomingIfCurrent(sid: String, connection: CallConnection) {
+                synchronized(stateLock) {
+                    if (_state.value is CallState.Incoming &&
+                        _state.value.sidOrNull == sid &&
+                        _state.value.connectionOrNull.isSameActiveAttempt(connection)
+                    ) {
+                        _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
+                    }
+                }
+            }
+
+            override fun reportError(message: String) = this@CallStore.reportError(message)
+        },
+    )
+    private val teardown = CallTeardown(
+        stateLock = stateLock,
+        state = _state,
+        muc = muc,
+        signaling = signaling,
+        ownFullJid = ownFullJid,
+        callbacks = CallTeardownCallbacks(
+            cancelTimers = ::cancelCallTimersLocked,
+            reportError = ::reportError,
+            clearError = { _lastError.value = null },
+        ),
+    )
+    private val remoteEffects = CallRemoteEffects(
+        muc,
+        ownFullJid,
+        object : CallRemoteEffectsHost {
+            override suspend fun handleProposeSideEffect(
+                event: WaddleCallEvent,
+                kind: WaddleCallEventKind.Propose,
+                prev: CallState,
+                connection: CallConnection?,
+            ) = proposeSideEffect(event, kind, prev, connection)
+
+            override fun callStillLive(sid: String): Boolean = this@CallStore.callStillLive(sid)
+            override fun failCall(sid: String, message: String) = this@CallStore.failCall(sid, message)
+            override fun scheduleSessionAcceptTimeout(peerFullJid: String, sid: String) =
+                this@CallStore.scheduleSessionAcceptTimeout(peerFullJid, sid)
+        },
+    )
 
     /**
      * Sids of Reject/Retract events the reducer could not apply (the
@@ -123,6 +188,7 @@ class CallStore internal constructor(
         if (muc.tryFulfillAccept(event)) return
         val selfBare = ownBareJid()?.lowercase()
         val isSelfOriginated = selfBare != null && bareJid(event.from).lowercase() == selfBare
+        val connection = signaling.captureActiveConnection()
         val prev: CallState
         synchronized(stateLock) {
             prev = _state.value
@@ -132,12 +198,12 @@ class CallStore internal constructor(
             ) {
                 recentlyAbortedSids[event.sid] = Unit
             }
-            if (!isSelfOriginated || selfOriginatedEventShouldTouchCurrentCall(prev, event)) {
-                applyCallEventLocked(prev, event)
+            if (!isSelfOriginated || CallSelfOriginatedEventPolicy.shouldTouchCurrentCall(prev, event)) {
+                applyCallEventLocked(prev, event, connection)
             }
         }
         if (!isSelfOriginated) {
-            enqueueEffect { handleCallEventSideEffect(event, prev) }
+            enqueueEffect { remoteEffects.handle(event, prev, connection) }
         }
     }
 
@@ -152,22 +218,32 @@ class CallStore internal constructor(
     suspend fun startCall(peerJid: String, media: WaddleCallMedia): Boolean {
         val peerBare = bareJid(peerJid)
         val sid = newSid()
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Idle && current !is CallState.Ended) return false
-            cancelCallTimersLocked()
-            _state.value = CallState.Outgoing(
-                to = peerBare,
-                sid = sid,
-                media = media,
-                initiator = ownFullJid(),
-            )
-            _lastError.value = null
-        }
-        if (!signaling.propose(peerBare, sid, media)) {
+        val connection = signaling.captureActiveConnection() ?: return false
+        var claimed = false
+        val connectionCurrent = connection.applyIfCurrent {
             synchronized(stateLock) {
-                val next = _state.value
-                if (next is CallState.Outgoing && next.sid == sid) _state.value = CallState.Idle
+                val current = _state.value
+                if (current !is CallState.Idle && current !is CallState.Ended) return@applyIfCurrent
+                cancelCallTimersLocked()
+                _state.value = CallState.Outgoing(
+                    to = peerBare, sid = sid, media = media, initiator = ownFullJid(),
+                ).copyWithConnection(connection = connection)
+                _lastError.value = null
+                claimed = true
+            }
+        }
+        if (!connectionCurrent || !claimed || !slotMatchesConnection(sid, connection)) return false
+        if (!connection.propose(peerBare, sid, media)) {
+            connection.applyIfCurrent {
+                synchronized(stateLock) {
+                    val next = _state.value
+                    if (next is CallState.Outgoing &&
+                        next.sid == sid &&
+                        next.connection.isSameActiveAttempt(connection)
+                    ) {
+                        _state.value = CallState.Idle
+                    }
+                }
             }
             reportError("call propose failed")
             return false
@@ -186,18 +262,31 @@ class CallStore internal constructor(
      * session-initiate lands (web `answerIncomingDmCallActivity`).
      */
     suspend fun acceptIncoming(): Boolean {
-        val target: CallState.Incoming
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Incoming || current.accepting) return false
-            target = current
-            _state.value = current.copy(accepting = true)
-        }
-        if (!signaling.proceed(target.from, target.sid)) {
+        val connection = signaling.captureActiveConnection() ?: return false
+        var target: CallState.Incoming? = null
+        var claimed = false
+        connection.applyIfCurrent {
             synchronized(stateLock) {
-                val next = _state.value
-                if (next is CallState.Incoming && next.sid == target.sid) {
-                    _state.value = next.copy(accepting = false)
+                val current = _state.value
+                if (current !is CallState.Incoming || current.accepting) return@applyIfCurrent
+                if (!current.connection.isSameActiveAttempt(connection)) return@applyIfCurrent
+                target = current
+                _state.value = checkNotNull(target).copyWithConnection(accepting = true)
+                claimed = true
+            }
+        }
+        val accepted = target ?: return false
+        if (!claimed) return false
+        if (!connection.proceed(accepted.from, accepted.sid)) {
+            connection.applyIfCurrent {
+                synchronized(stateLock) {
+                    val next = _state.value
+                    if (next is CallState.Incoming &&
+                        next.sid == accepted.sid &&
+                        next.connection.isSameActiveAttempt(connection)
+                    ) {
+                        _state.value = next.copyWithConnection(accepting = false)
+                    }
                 }
             }
             reportError("call proceed failed")
@@ -208,7 +297,7 @@ class CallStore internal constructor(
         // that dies right after our <proceed/> leaves the responder in
         // `Incoming(accepting)` forever — which now also holds the
         // phone-call foreground service.
-        scheduleSessionInitiateTimeout(target.from, target.sid)
+        scheduleSessionInitiateTimeout(accepted.from, accepted.sid)
         return true
     }
 
@@ -219,59 +308,50 @@ class CallStore internal constructor(
      * `<cancel/>` (a late reject would contradict the proceed).
      */
     suspend fun declineIncoming(): Boolean {
-        val target: CallState.Incoming
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Incoming) return false
-            cancelCallTimersLocked()
-            target = current
-            _state.value = CallState.Idle
+        val connection = signaling.captureActiveConnection() ?: return false
+        var target: CallState.Incoming? = null
+        var claimed = false
+        connection.applyIfCurrent {
+            synchronized(stateLock) {
+                val current = _state.value
+                if (current !is CallState.Incoming) return@applyIfCurrent
+                if (!current.connection.isSameActiveAttempt(connection)) return@applyIfCurrent
+                cancelCallTimersLocked()
+                target = current
+                _state.value = CallState.Idle
+                claimed = true
+            }
         }
-        val answered = if (target.accepting) {
-            signaling.finishWithReason(target.from, target.sid, WaddleJingleReason.CANCEL)
+        val declined = target ?: return false
+        if (!claimed) return false
+        val answered = if (declined.accepting) {
+            connection.finishWithReason(declined.from, declined.sid, WaddleJingleReason.CANCEL)
         } else {
-            signaling.reject(target.from, target.sid)
+            connection.reject(declined.from, declined.sid)
         }
         if (!answered) {
-            reportError(if (target.accepting) "call finish failed" else "call reject failed")
+            reportError(if (declined.accepting) "call finish failed" else "call reject failed")
             return false
         }
         return true
     }
 
-    /**
-     * Best-effort teardown for the live slot (web `tearDownActiveCall`):
-     * active → XEP-0166 session-terminate (outcome-aware) plus the
-     * XEP-0353 `<finish/>` bookend both parties SHOULD send so MAM
-     * archives stay consistent; outgoing → `<retract/>`; incoming →
-     * `<reject/>`.
-     */
+    /** Best-effort teardown for the live slot (web `tearDownActiveCall`). */
     suspend fun hangUp(reason: WaddleJingleReason = WaddleJingleReason.SUCCESS) {
-        val current: CallState
-        synchronized(stateLock) {
-            cancelCallTimersLocked()
-            current = _state.value
-            _state.value = CallState.Idle
-        }
-        when (current) {
-            is CallState.Active ->
-                if (current.kind == CallKind.MUC) muc.teardownActive(current) else terminateActive(current, reason)
-            is CallState.MucPending -> muc.teardownPending(current)
-            is CallState.Outgoing ->
-                if (!signaling.retract(bareJid(current.to), current.sid)) reportError("call retract failed")
-            is CallState.Incoming ->
-                if (current.accepting) {
-                    // Our <proceed/> is already out — abandon with the
-                    // finish bookend (<cancel/>), never a late reject.
-                    if (!signaling.finishWithReason(current.from, current.sid, WaddleJingleReason.CANCEL)) {
-                        reportError("call finish failed")
-                    }
-                } else if (!signaling.reject(current.from, current.sid)) {
-                    reportError("call reject failed")
-                }
-            else -> Unit
+        val request = teardown.claimHangUp(reason) ?: return
+        val sessionScope = synchronized(stateLock) { scope }
+        if (sessionScope == null) {
+            teardown.sendClaimedHangUp(request)
+        } else {
+            sessionScope.launch(start = CoroutineStart.UNDISPATCHED) { teardown.sendClaimedHangUp(request) }
         }
     }
+
+    /** Internal logout path; ordinary UI callers cannot select a retired transport. */
+    internal suspend fun hangUpWith(
+        sender: LogoutCallTeardown,
+        ownJid: String?,
+    ) = teardown.hangUpWith(sender, ownJid)
 
     /**
      * Scoped teardown for NON-user callers (the media controller): acts
@@ -281,17 +361,7 @@ class CallStore internal constructor(
      * migration ring, an Ended banner, or a fresh call. Plain [hangUp]
      * stays reserved for explicit user intent.
      */
-    suspend fun hangUpActiveIf(sid: String, reason: WaddleJingleReason) {
-        val current: CallState.Active
-        synchronized(stateLock) {
-            val state = _state.value
-            if (state !is CallState.Active || state.sid != sid) return
-            cancelCallTimersLocked()
-            current = state
-            _state.value = CallState.Idle
-        }
-        if (current.kind == CallKind.MUC) muc.teardownActive(current) else terminateActive(current, reason)
-    }
+    suspend fun hangUpActiveIf(sid: String, reason: WaddleJingleReason) = teardown.hangUpActiveIf(sid, reason)
 
     /**
      * Dismiss the `Ended` banner → `Idle`. Phase-guarded: a Close tap
@@ -300,37 +370,15 @@ class CallStore internal constructor(
      * the wire) must not silently kill a live call — live phases end
      * only through the wire-answering actions.
      */
-    fun dismiss() {
-        synchronized(stateLock) {
-            if (_state.value !is CallState.Ended) return
-            cancelCallTimersLocked()
-            _state.value = CallState.Idle
-            _lastError.value = null
-        }
-    }
+    fun dismiss() = teardown.dismiss()
 
     /** XEP-0215 TURN/STUN advertisement for the media layer's RTC config. */
-    suspend fun fetchExternalServices() = signaling.fetchExternalServices()
-
-    private suspend fun terminateActive(current: CallState.Active, reason: WaddleJingleReason) {
-        val outcome = signaling.sessionTerminateWithOutcome(current.peer, current.sid, reason)
-        if (outcome == WaddleCallSessionTerminateOutcome.ERROR) {
-            reportError("call session terminate failed")
-            return
-        }
-        // XEP-0353: both parties SHOULD send <finish/> after the call
-        // ends. A classified ORPHANED terminate means the server already
-        // lost the call registry, so only the message-level bookend can
-        // still route (web parity).
-        if (!signaling.finish(current.peer, current.sid)) {
-            reportError("call finish failed")
-        }
-    }
+    suspend fun fetchExternalServices() = signaling.captureActiveConnection()?.fetchExternalServices()
 
     // ── applyCallEvent port ──────────────────────────────────────────────────
 
-    private fun applyCallEventLocked(before: CallState, event: WaddleCallEvent) {
-        val next = reduceCallState(before, event)
+    private fun applyCallEventLocked(before: CallState, event: WaddleCallEvent, connection: CallConnection?) {
+        val next = reduceCallState(before, event).withConnectionIfMissing(connection)
         if (next != before) {
             _lastError.value = null
             if (leftTimerOwningPhase(before, next)) {
@@ -356,59 +404,9 @@ class CallStore internal constructor(
         if (event.kind !is WaddleCallEventKind.Propose) return
         if (next !is CallState.Incoming || next.sid != event.sid) return
         if (before is CallState.Incoming && before.sid == event.sid) return
+        val connection = next.connection ?: return
         enqueueEffect {
-            if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
-        }
-    }
-
-    /**
-     * Which SELF-ORIGINATED carbons may touch the live slot — the
-     * sibling-device transitions (answered/declined/ended elsewhere)
-     * from the web's on_call wiring. Everything else from our own bare
-     * JID is an echo of something this device already did and MUST NOT
-     * re-run transitions (or the slot flaps).
-     */
-    private fun selfOriginatedEventShouldTouchCurrentCall(prev: CallState, event: WaddleCallEvent): Boolean {
-        val prevSid = prev.sidOrNull ?: return false
-        if (prevSid != event.sid) return false
-        return when (event.kind) {
-            is WaddleCallEventKind.Propose -> false
-            is WaddleCallEventKind.Proceed -> true
-            is WaddleCallEventKind.Reject -> prev is CallState.Incoming
-            is WaddleCallEventKind.SessionInitiate -> prev is CallState.Incoming
-            is WaddleCallEventKind.SessionAccept -> prev is CallState.Outgoing
-            is WaddleCallEventKind.SessionTerminate -> prev is CallState.Active
-            is WaddleCallEventKind.Finish -> prev is CallState.Active
-            else -> false
-        }
-    }
-
-    // ── call-effects.ts port ─────────────────────────────────────────────────
-
-    /**
-     * Side effects for a REMOTE-originated event, invoked after the
-     * reducer updated the slot. `prev` is the snapshot BEFORE the
-     * reducer applied the event (web `handleCallEventSideEffect`).
-     */
-    private suspend fun handleCallEventSideEffect(event: WaddleCallEvent, prev: CallState) {
-        when (val kind = event.kind) {
-            is WaddleCallEventKind.Propose -> proposeSideEffect(event, kind, prev)
-            is WaddleCallEventKind.Proceed -> proceedSideEffect(event, prev)
-            is WaddleCallEventKind.SessionInitiate -> sessionInitiateSideEffect(event, kind, prev)
-            // The DM reducer leaves MUC phases untouched: a matching
-            // remote end event runs the engine-owned teardown instead.
-            is WaddleCallEventKind.Reject -> muc.endFromRemote(
-                event.sid,
-                if (tieBreakExpired(kind.tieBreak, kind.reason)) CallEndReason.Expired else CallEndReason.Rejected,
-            )
-            is WaddleCallEventKind.Retract -> muc.endFromRemote(
-                event.sid,
-                if (tieBreakExpired(kind.tieBreak, kind.reason)) CallEndReason.Expired else CallEndReason.Retracted,
-            )
-            is WaddleCallEventKind.Finish -> muc.endFromRemote(event.sid, CallEndReason.Finished(kind.reason))
-            is WaddleCallEventKind.SessionTerminate ->
-                muc.endFromRemote(event.sid, CallEndReason.Finished(kind.reason))
-            else -> Unit
+            if (!connection.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
         }
     }
 
@@ -416,6 +414,7 @@ class CallStore internal constructor(
         event: WaddleCallEvent,
         kind: WaddleCallEventKind.Propose,
         prev: CallState,
+        connection: CallConnection?,
     ) {
         // The peer's own reject/retract for this sid already arrived
         // while the effect was queued: the propose is concluded on the
@@ -441,7 +440,8 @@ class CallStore internal constructor(
         // until timeout. XEP-0353 defines no <busy/> child — plain
         // reject to the proposer's full JID is the conformant signal.
         if (prev !is CallState.Idle && prev !is CallState.Ended) {
-            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            val active = prev.connectionOrNull ?: connection ?: return
+            if (!active.reject(event.from, event.sid)) reportError("call reject failed")
         }
     }
 
@@ -450,6 +450,7 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
+        val connection = prev.connection ?: return
         // The effect queue runs after the reducer pass that captured
         // `prev`; a slot that moved before this effect ran still owes
         // the peer's propose an answer (XEP-0353 tolerates no silent
@@ -468,7 +469,7 @@ class CallStore internal constructor(
         } else {
             // The receiver of the HIGHER-sid propose rejects it with
             // <tie-break/> + <expired/>; our own outgoing ring continues.
-            if (!signaling.rejectTieBreak(event.from, event.sid)) {
+            if (!connection.rejectTieBreak(event.from, event.sid)) {
                 reportError("call tie-break reject failed")
             }
         }
@@ -490,7 +491,8 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
-        if (!signaling.retractTieBreak(event.from, prev.sid)) {
+        val connection = prev.connection ?: return
+        if (!connection.retractTieBreak(event.from, prev.sid)) {
             reportError("call tie-break retract failed")
             return
         }
@@ -535,6 +537,7 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Active,
     ) {
+        val connection = prev.connection ?: return
         val outcome = synchronized(stateLock) {
             val current = _state.value
             when {
@@ -554,7 +557,7 @@ class CallStore internal constructor(
                         sid = event.sid,
                         media = kind.media,
                         accepting = true,
-                    )
+                    ).copyWithConnection(connection = connection)
                     _lastError.value = null
                     RefusedMigration.OLD_CONCLUDED_REMOTELY
                 }
@@ -563,14 +566,14 @@ class CallStore internal constructor(
         }
         when (outcome) {
             RefusedMigration.PROPOSE_DIED -> scope?.launch {
-                if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
+                if (!connection.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
                     reportError("call session terminate failed")
                 }
             }
             RefusedMigration.OLD_CONCLUDED_REMOTELY ->
                 scheduleSessionInitiateTimeout(event.from, event.sid)
             RefusedMigration.WALKED_AWAY ->
-                if (!signaling.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
+                if (!connection.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
                     reportError("call finish failed")
                 }
         }
@@ -583,6 +586,7 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
+        val connection = prev.connection ?: return
         val answer = synchronized(stateLock) {
             val current = _state.value
             when {
@@ -595,7 +599,11 @@ class CallStore internal constructor(
                     current.sid == prev.sid &&
                     current.reason == CallEndReason.Expired -> {
                     cancelCallTimersLocked()
-                    _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = kind.media)
+                    _state.value = CallState.Incoming(
+                        from = event.from,
+                        sid = event.sid,
+                        media = kind.media,
+                    ).copyWithConnection(connection = connection)
                     _lastError.value = null
                     SlotMovedAnswer.RING_WINNER
                 }
@@ -604,9 +612,9 @@ class CallStore internal constructor(
         }
         when (answer) {
             SlotMovedAnswer.RING_WINNER ->
-                if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
+                if (!connection.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
             SlotMovedAnswer.DECLINE ->
-                if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+                if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
             SlotMovedAnswer.ALREADY_CONCLUDED -> Unit
         }
     }
@@ -624,16 +632,17 @@ class CallStore internal constructor(
         event: WaddleCallEvent,
         prev: CallState.Outgoing,
     ) {
+        val connection = prev.connection ?: return
         if (compareOctetStrings(event.sid, prev.sid) >= 0) {
-            if (!signaling.rejectTieBreak(event.from, event.sid)) {
+            if (!connection.rejectTieBreak(event.from, event.sid)) {
                 reportError("call tie-break reject failed")
             }
             return
         }
-        if (!signaling.retractTieBreak(event.from, prev.sid)) {
+        if (!connection.retractTieBreak(event.from, prev.sid)) {
             reportError("call tie-break retract failed")
         }
-        if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+        if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
         endRetractedOutgoing(prev)
     }
 
@@ -655,20 +664,21 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Active,
     ) {
+        val connection = prev.connection ?: return
         // Same stale-effect guard as the tie-break branch: if the user
         // hung up while this effect was queued, the teardown already
         // sent terminate+finish for the old sid — but the peer's fresh
         // propose still needs an answer, so decline it.
         if (!slotStillMatches(prev)) {
-            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
             return
         }
-        val migrated = signaling.finishMigrated(event.from, prev.sid, event.sid) &&
-            signaling.proceed(event.from, event.sid)
+        val migrated = connection.finishMigrated(event.from, prev.sid, event.sid) &&
+            connection.proceed(event.from, event.sid)
         if (!migrated) {
             // Same no-silent-drop invariant as the guard paths: answer
             // the re-propose (best effort) before failing the old call.
-            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
             failCall(prev.sid, "call migration failed")
             return
         }
@@ -688,7 +698,7 @@ class CallStore internal constructor(
         // resource; don't let its IQ round-trip block the XEP-0353
         // migration markers that keep both users' devices in sync.
         scope?.launch {
-            if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
+            if (!connection.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
                 reportError("call session terminate failed")
             }
         }
@@ -711,49 +721,6 @@ class CallStore internal constructor(
         }
     }
 
-    private suspend fun proceedSideEffect(event: WaddleCallEvent, prev: CallState) {
-        if (prev !is CallState.Outgoing || prev.sid != event.sid) return
-        // A hang-up (or a hang-up plus a NEW outgoing call) that landed
-        // while this effect was queued already retracted this sid; a
-        // stale session-initiate must not go out for it — and its
-        // failure must not clobber whatever owns the slot now.
-        if (!callStillLive(event.sid)) return
-        // `event.from` is the responder's full JID (XEP-0353 §0.6); the
-        // initiator attribute names our own resource (XEP-0166 §7.1).
-        val ourJid = ownFullJid()
-        if (ourJid == null) {
-            failCall(event.sid, "call session initiate failed: no bound resource")
-            return
-        }
-        if (signaling.sessionInitiate(event.from, ourJid, event.sid, prev.media)) {
-            scheduleSessionAcceptTimeout(event.from, event.sid)
-        } else {
-            failCall(event.sid, "call session initiate failed")
-        }
-    }
-
-    private suspend fun sessionInitiateSideEffect(
-        event: WaddleCallEvent,
-        kind: WaddleCallEventKind.SessionInitiate,
-        prev: CallState,
-    ) {
-        if (prev !is CallState.Incoming || prev.sid != event.sid) return
-        // Same stale-effect guard as the proceed path: a concurrent
-        // hang-up already terminated this sid on the wire.
-        if (!callStillLive(event.sid)) return
-        // The responder confirms the Jingle session per XEP-0166 §6.2 —
-        // without this the CALLER never gets a populated transport
-        // rewrite and never joins the LiveKit room.
-        val ourJid = ownFullJid()
-        if (ourJid == null) {
-            failCall(event.sid, "call session accept failed: no bound resource")
-            return
-        }
-        if (!signaling.sessionAccept(event.from, ourJid, event.sid, kind.media)) {
-            failCall(event.sid, "call session accept failed")
-        }
-    }
-
     private fun isRecentlyAborted(sid: String): Boolean = synchronized(stateLock) {
         recentlyAbortedSids.containsKey(sid)
     }
@@ -770,6 +737,10 @@ class CallStore internal constructor(
         current !is CallState.Ended && current.sidOrNull == sid
     }
 
+    private fun slotMatchesConnection(sid: String, connection: CallConnection): Boolean = synchronized(stateLock) {
+        _state.value.sidOrNull == sid && _state.value.connectionOrNull.isSameActiveAttempt(connection)
+    }
+
     /**
      * Replace the slot with the tie-break winner's incoming ring —
      * only if the slot is still the state this effect was computed
@@ -783,6 +754,7 @@ class CallStore internal constructor(
         expectedSlot: CallState,
         accepting: Boolean = false,
     ): Boolean {
+        val connection = expectedSlot.connectionOrNull ?: return false
         synchronized(stateLock) {
             // Reentrant monitor: check-and-replace is one atomic step.
             if (!slotStillMatches(expectedSlot)) return false
@@ -797,7 +769,7 @@ class CallStore internal constructor(
                 sid = event.sid,
                 media = media,
                 accepting = accepting,
-            )
+            ).copyWithConnection(connection = connection)
             _lastError.value = null
         }
         return true
@@ -817,97 +789,13 @@ class CallStore internal constructor(
 
     // ── Timers ───────────────────────────────────────────────────────────────
 
-    /**
-     * Auto-retract for the most recent [startCall]: fires only if the
-     * slot is still `Outgoing` with the same sid, so any later
-     * transition makes the timeout a no-op (web `scheduleOutgoingTimeout`).
-     */
-    private fun scheduleOutgoingTimeout(sid: String) {
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Outgoing || current.sid != sid) return
-            outgoingTimer?.cancel()
-            outgoingTimer = scope?.launch {
-                delay(outgoingTimeoutMillis)
-                timeOutOutgoing(sid)
-            }
-        }
-    }
+    private fun scheduleOutgoingTimeout(sid: String) = timers.scheduleOutgoing(sid)
 
-    private suspend fun timeOutOutgoing(sid: String) {
-        val target: CallState.Outgoing
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Outgoing || current.sid != sid) return
-            target = current
-            _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
-        }
-        if (!signaling.retract(bareJid(target.to), sid)) reportError("call retract failed")
-    }
+    private fun scheduleSessionAcceptTimeout(peerFullJid: String, sid: String) =
+        timers.scheduleSessionAccept(peerFullJid, sid)
 
-    /**
-     * After the responder's `<proceed/>` cancelled the ring timeout,
-     * the call still isn't active until XEP-0166 session-accept
-     * arrives. This second timeout covers a session-initiate whose
-     * accept never comes back — e.g. the server forwarded it without
-     * the LiveKit transport rewrite, in which case NO event ever fires
-     * (web `scheduleSessionAcceptTimeout`).
-     */
-    private fun scheduleSessionAcceptTimeout(peerFullJid: String, sid: String) {
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Outgoing || current.sid != sid) return
-            sessionAcceptTimer?.cancel()
-            sessionAcceptTimer = scope?.launch {
-                delay(sessionAcceptTimeoutMillis)
-                timeOutSessionAccept(peerFullJid, sid)
-            }
-        }
-    }
-
-    private suspend fun timeOutSessionAccept(peerFullJid: String, sid: String) {
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Outgoing || current.sid != sid) return
-            _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
-        }
-        if (!signaling.sessionTerminate(peerFullJid, sid, WaddleJingleReason.TIMEOUT)) {
-            reportError("call session terminate failed")
-        }
-    }
-
-    /**
-     * Responder-side mirror of [scheduleSessionAcceptTimeout]: after
-     * our `<proceed/>`, the caller MUST follow with a Jingle
-     * session-initiate. If the caller dies first, no retract ever
-     * arrives — end the accepted ring and tell the caller's devices.
-     * The web has no equivalent timer; on Android the accepting slot
-     * pins a foreground service, so it must be bounded.
-     */
-    private fun scheduleSessionInitiateTimeout(peerFullJid: String, sid: String) {
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Incoming || current.sid != sid) return
-            sessionAcceptTimer?.cancel()
-            sessionAcceptTimer = scope?.launch {
-                delay(sessionAcceptTimeoutMillis)
-                timeOutSessionInitiate(peerFullJid, sid)
-            }
-        }
-    }
-
-    private suspend fun timeOutSessionInitiate(peerFullJid: String, sid: String) {
-        synchronized(stateLock) {
-            val current = _state.value
-            if (current !is CallState.Incoming || current.sid != sid) return
-            _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
-        }
-        // We answered the propose with <proceed/>, so the abandon verb
-        // is the <finish/> bookend with <timeout/> — not a late reject.
-        if (!signaling.finishWithReason(peerFullJid, sid, WaddleJingleReason.TIMEOUT)) {
-            reportError("call finish failed")
-        }
-    }
+    private fun scheduleSessionInitiateTimeout(peerFullJid: String, sid: String) =
+        timers.scheduleSessionInitiate(peerFullJid, sid)
 
     /**
      * Whether a transition left the phase whose timer is armed: out of
@@ -922,14 +810,11 @@ class CallStore internal constructor(
     }
 
     private fun cancelOutgoingTimeoutLocked() {
-        outgoingTimer?.cancel()
-        outgoingTimer = null
+        timers.cancelOutgoing()
     }
 
     private fun cancelCallTimersLocked() {
-        cancelOutgoingTimeoutLocked()
-        sessionAcceptTimer?.cancel()
-        sessionAcceptTimer = null
+        timers.cancelAll()
     }
 
     // ── Plumbing ─────────────────────────────────────────────────────────────

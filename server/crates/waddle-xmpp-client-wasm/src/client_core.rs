@@ -7,7 +7,8 @@ impl WaddleClient {
         WaddleClient {
             inner: Rc::new(RefCell::new(WaddleClientInner {
                 config: StoredConfig::from(&config),
-                cmd_tx: None,
+                command_lane: None,
+                driver_core: None,
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
@@ -19,6 +20,7 @@ impl WaddleClient {
                 on_mds_displayed: None,
                 on_pubsub_event: None,
                 on_call: None,
+                on_stream_management: None,
                 resume_state: None,
             })),
         }
@@ -98,10 +100,34 @@ impl WaddleClient {
         self.inner.borrow_mut().on_call = Some(cb);
     }
 
+    /// Register closed, bounded XEP-0198 lifecycle outcomes. The callback
+    /// deliberately receives no stanza XML, stream identifiers, or counters.
+    pub fn set_on_stream_management(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_stream_management = Some(cb);
+    }
+
+    /// Best-effort XEP-0198 acknowledgement request for synchronous browser
+    /// pagehide. The Rust runtime produces the typed `<r/>` control element.
+    pub fn request_stream_management_ack(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            request_stream_management_ack_command(inner).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Pagehide-only XEP-0198 acknowledgement handoff. This synchronously
+    /// drains the admitted FIFO and writes the typed `<r/>` through the
+    /// driver's exact socket before returning; it never awaits capacity or a
+    /// driver turn. Callers must persist immediately after every outcome.
+    pub fn try_request_stream_management_ack_for_pagehide(&self) -> PagehideSmAckEnqueueOutcome {
+        try_request_stream_management_ack_for_pagehide(&self.inner)
+    }
+
     pub fn connect(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            if inner.borrow().cmd_tx.is_some() {
+            if inner.borrow().command_lane.is_some() {
                 return Err(js_error("client is already connected"));
             }
 
@@ -109,13 +135,21 @@ impl WaddleClient {
             let config = build_client_config(&stored)?;
             let ws = WasmWebSocket::connect(config.transport.endpoint.as_str())
                 .map_err(|err| js_error(format!("failed to open websocket: {:?}", err)))?;
-            let (cmd_tx, cmd_rx) = mpsc::channel(64);
+            let (wake_tx, wake_rx) = mpsc::channel(1);
+            let command_lane = Rc::new(RefCell::new(WasmCommandLane::new(wake_tx)));
             let (event_tx, event_rx) = mpsc::channel(256);
 
-            inner.borrow_mut().cmd_tx = Some(cmd_tx);
+            inner.borrow_mut().command_lane = Some(command_lane.clone());
 
             spawn_local(event_dispatch_loop(inner.clone(), event_rx));
-            spawn_local(driver_loop(config, ws, cmd_rx, event_tx, inner.clone()));
+            spawn_local(driver_loop(
+                config,
+                ws,
+                wake_rx,
+                event_tx,
+                inner.clone(),
+                command_lane,
+            ));
 
             Ok(JsValue::UNDEFINED)
         })

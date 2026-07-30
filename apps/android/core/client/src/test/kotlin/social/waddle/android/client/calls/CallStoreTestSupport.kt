@@ -1,5 +1,6 @@
 package social.waddle.android.client.calls
 
+import kotlinx.coroutines.runBlocking
 import social.waddle.android.client.FakeWaddleClient
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.session.ActiveSession
@@ -62,14 +63,17 @@ internal class Fixture(
     ownFullJid: (() -> String?)? = null,
 ) {
     val client = FakeWaddleClient()
-    val activeSession = ActiveSession { }
+    val activeSession = ActiveSession()
     val sessionCache = MucCallSessionCache(InMemoryPreferencesDataStore())
     val store: CallStore
 
     init {
-        activeSession.ownBareJid = "alice@waddle.test"
-        activeSession.ownFullJid = "alice@waddle.test/waddle-android-1"
-        activeSession.onReady(client)
+        runBlocking {
+            activeSession.advanceGeneration()
+            activeSession.activateOwner("alice@waddle.test")
+            val attempt = checkNotNull(activeSession.beginAttempt())
+            check(activeSession.publishReady(attempt, client, "alice@waddle.test/waddle-android-1") {})
+        }
         store = CallStore(
             signaling = ClientCallSignaling(activeSession),
             ownBareJid = { activeSession.ownBareJid },

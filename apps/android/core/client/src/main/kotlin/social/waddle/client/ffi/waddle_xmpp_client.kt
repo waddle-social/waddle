@@ -7857,13 +7857,6 @@ data class WaddleConfig (
     var `accessToken`: kotlin.String
     ,
     var `resource`: kotlin.String
-    ,
-    /**
-     * XEP-0198 resume snapshot from a previous session. When present
-     * the runtime attempts `<resume/>` before resource binding and
-     * replays the queued outbound stanzas the server never acked.
-     */
-    var `resumeState`: WaddleSmResumeState?
 
 ){
 
@@ -7884,7 +7877,6 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterOptionalTypeWaddleSmResumeState.read(buf),
         )
     }
 
@@ -7892,8 +7884,7 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.allocationSize(value.`serverUrl`) +
             FfiConverterString.allocationSize(value.`jid`) +
             FfiConverterString.allocationSize(value.`accessToken`) +
-            FfiConverterString.allocationSize(value.`resource`) +
-            FfiConverterOptionalTypeWaddleSmResumeState.allocationSize(value.`resumeState`)
+            FfiConverterString.allocationSize(value.`resource`)
     )
 
     override fun write(value: WaddleConfig, buf: ByteBuffer) {
@@ -7901,7 +7892,6 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.write(value.`jid`, buf)
             FfiConverterString.write(value.`accessToken`, buf)
             FfiConverterString.write(value.`resource`, buf)
-            FfiConverterOptionalTypeWaddleSmResumeState.write(value.`resumeState`, buf)
     }
 }
 
@@ -10946,85 +10936,6 @@ public object FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer<WaddleSha
 
 
 
-/**
- * XEP-0198 client resume snapshot crossing the FFI as an opaque
- * persistence round-trip: the Swift app stores it on disconnect and
- * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound stanzas travel as serialized XML strings — the message
- * stanza-id is re-derived from the element's `id` attribute on
- * restore, and the original enqueue instant survives only when the
- * element already carries a `<delay/>` stamp (identical semantics to
- * the wasm client's localStorage persistence of the same snapshot).
- */
-data class WaddleSmResumeState (
-    /**
-     * SM resumption token from `<enabled id='…'/>`.
-     */
-    var `previd`: kotlin.String
-    ,
-    /**
-     * Count of inbound stanzas handled by this client.
-     */
-    var `inboundH`: kotlin.UInt
-    ,
-    /**
-     * Count of outbound stanzas sent by this client.
-     */
-    var `outboundH`: kotlin.UInt
-    ,
-    /**
-     * Server-advertised resumption window in seconds, when supplied.
-     */
-    var `maxResumeSeconds`: kotlin.UInt?
-    ,
-    /**
-     * Outbound stanzas the server had not acked at snapshot time,
-     * serialized to XML in send order for lossless replay.
-     */
-    var `queuedStanzasXml`: List<kotlin.String>
-
-){
-
-
-
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer<WaddleSmResumeState> {
-    override fun read(buf: ByteBuffer): WaddleSmResumeState {
-        return WaddleSmResumeState(
-            FfiConverterString.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterOptionalUInt.read(buf),
-            FfiConverterSequenceString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: WaddleSmResumeState) = (
-            FfiConverterString.allocationSize(value.`previd`) +
-            FfiConverterUInt.allocationSize(value.`inboundH`) +
-            FfiConverterUInt.allocationSize(value.`outboundH`) +
-            FfiConverterOptionalUInt.allocationSize(value.`maxResumeSeconds`) +
-            FfiConverterSequenceString.allocationSize(value.`queuedStanzasXml`)
-    )
-
-    override fun write(value: WaddleSmResumeState, buf: ByteBuffer) {
-            FfiConverterString.write(value.`previd`, buf)
-            FfiConverterUInt.write(value.`inboundH`, buf)
-            FfiConverterUInt.write(value.`outboundH`, buf)
-            FfiConverterOptionalUInt.write(value.`maxResumeSeconds`, buf)
-            FfiConverterSequenceString.write(value.`queuedStanzasXml`, buf)
-    }
-}
-
-
-
 data class WaddleSpace (
     var `id`: kotlin.String
     ,
@@ -12240,21 +12151,6 @@ sealed class WaddleClientEvent {
     }
 
     /**
-     * XEP-0198 resume snapshot changed. `None` after an explicit
-     * disconnect or when the session carries no resumable state;
-     * persist `Some(state)` and feed it back via
-     * `WaddleConfig.resume_state` on the next connect.
-     */
-    data class ResumeStateChanged(
-        val `state`: social.waddle.client.ffi.WaddleSmResumeState?) : WaddleClientEvent()
-
-    {
-
-
-        companion object
-    }
-
-    /**
      * RFC 6120 §6.5 SASL failure during connect. Terminal for the
      * presented credentials — apps must not blindly retry with the
      * same token (web #1164: surface "sign in again", never an
@@ -12320,13 +12216,10 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             9 -> WaddleClientEvent.Call(
                 FfiConverterTypeWaddleCallEvent.read(buf),
                 )
-            10 -> WaddleClientEvent.ResumeStateChanged(
-                FfiConverterOptionalTypeWaddleSmResumeState.read(buf),
-                )
-            11 -> WaddleClientEvent.AuthenticationFailed(
+            10 -> WaddleClientEvent.AuthenticationFailed(
                 FfiConverterTypeWaddleSaslCondition.read(buf),
                 )
-            12 -> WaddleClientEvent.Error(
+            11 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -12395,13 +12288,6 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 + FfiConverterTypeWaddleCallEvent.allocationSize(value.`event`)
             )
         }
-        is WaddleClientEvent.ResumeStateChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterOptionalTypeWaddleSmResumeState.allocationSize(value.`state`)
-            )
-        }
         is WaddleClientEvent.AuthenticationFailed -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -12463,18 +12349,13 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterTypeWaddleCallEvent.write(value.`event`, buf)
                 Unit
             }
-            is WaddleClientEvent.ResumeStateChanged -> {
-                buf.putInt(10)
-                FfiConverterOptionalTypeWaddleSmResumeState.write(value.`state`, buf)
-                Unit
-            }
             is WaddleClientEvent.AuthenticationFailed -> {
-                buf.putInt(11)
+                buf.putInt(10)
                 FfiConverterTypeWaddleSaslCondition.write(value.`condition`, buf)
                 Unit
             }
             is WaddleClientEvent.Error -> {
-                buf.putInt(12)
+                buf.putInt(11)
                 FfiConverterString.write(value.`description`, buf)
                 Unit
             }
@@ -15026,38 +14907,6 @@ public object FfiConverterOptionalTypeWaddleSendOptions: FfiConverterRustBuffer<
         } else {
             buf.put(1)
             FfiConverterTypeWaddleSendOptions.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeWaddleSmResumeState: FfiConverterRustBuffer<WaddleSmResumeState?> {
-    override fun read(buf: ByteBuffer): WaddleSmResumeState? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeWaddleSmResumeState.read(buf)
-    }
-
-    override fun allocationSize(value: WaddleSmResumeState?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeWaddleSmResumeState.allocationSize(value)
-        }
-    }
-
-    override fun write(value: WaddleSmResumeState?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeWaddleSmResumeState.write(value, buf)
         }
     }
 }

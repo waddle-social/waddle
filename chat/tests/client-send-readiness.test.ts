@@ -350,6 +350,49 @@ describe("client send readiness", () => {
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 
+  test("a synchronous MUC SM ack settles the live claim before the host returns", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const xmpp = {
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => {
+        (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck(opts.stanza_id!);
+        return opts.stanza_id;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await client.sendGroupMessage("w1", "c1", "ack in host", { id: "room-sync-ack" });
+
+    expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
+    expect((client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } }).outboundQueue.inflightQueuedIds)
+      .not.toContain("room-sync-ack");
+  });
+
+  test("MUC live-send null and mismatch results roll back the exact pre-host claim", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const xmpp = {
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) =>
+        opts.stanza_id === "room-mismatch" ? "different-id" : null),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await client.sendGroupMessage("w1", "c1", "null", { id: "room-null" });
+    await client.sendGroupMessage("w1", "c1", "mismatch", { id: "room-mismatch" });
+
+    const internal = client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } };
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("room-null");
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("room-mismatch");
+    expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id).sort())
+      .toEqual(["room-mismatch", "room-null"]);
+  });
+
   test("room send rejects typed WASM failures instead of returning a null sending id", async () => {
     const xmpp = { send_groupchat_message: mock(async () => ({ kind: "not-connected" })) };
     const client = new BrowserXmppClient(session());
@@ -1774,6 +1817,7 @@ describe("client send readiness", () => {
   test("session-ready rejoins retained rooms restored from refresh persistence", async () => {
     const roomJid = "muted@muc.example.com";
     const persistence: ResumePersistence = {
+      dispose: () => undefined,
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
@@ -1866,6 +1910,137 @@ describe("client send readiness", () => {
 
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+  });
+
+  test("a synchronous DM SM ack settles the live claim before the host returns", async () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
+        (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck(opts.stanza_id!);
+        return opts.stanza_id;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    await client.sendDirectMessage("bob@example.com", "ack in host", { id: "dm-sync-ack" });
+
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+    expect((client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } }).outboundQueue.inflightQueuedIds)
+      .not.toContain("dm-sync-ack");
+  });
+
+  test("DM live-send failures roll back the exact pre-host claim", async () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
+        if (opts.stanza_id === "dm-throw") throw new Error("socket fell away");
+        return opts.stanza_id === "dm-mismatch" ? "different-id" : null;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    await client.sendDirectMessage("bob@example.com", "null", { id: "dm-null" });
+    await client.sendDirectMessage("bob@example.com", "mismatch", { id: "dm-mismatch" });
+    await expect(client.sendDirectMessage("bob@example.com", "throw", { id: "dm-throw" })).rejects.toThrow("socket fell away");
+
+    const internal = client as unknown as { outboundQueue: { inflightQueuedIds: Set<string> } };
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("dm-null");
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("dm-mismatch");
+    expect(internal.outboundQueue.inflightQueuedIds).not.toContain("dm-throw");
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id).sort())
+      .toEqual(["dm-mismatch", "dm-null", "dm-throw"]);
+  });
+
+  test("a disposed DM client ignores a deferred null live-send completion", async () => {
+    let release: ((id: string | null) => void) | undefined;
+    const sent = new Promise<string | null>((resolve) => { release = resolve; });
+    const client = new BrowserXmppClient(session());
+    const failures: string[] = [];
+    const depths: unknown[] = [];
+    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onQueueDepthChange((depth) => depths.push(depth));
+    const xmpp = { send_chat_message: mock(async () => await sent) };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const send = client.sendDirectMessage("bob@example.com", "deferred", { id: "dm-disposed-null" });
+    await Promise.resolve();
+    await client.dispose();
+    const depthCountAtDispose = depths.length;
+    release?.(null);
+    await send;
+
+    const queue = (client as unknown as {
+      outboundQueue: { depthHeartbeat: unknown; inflightQueuedIds: Set<string> };
+    }).outboundQueue;
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+      .toEqual(["dm-disposed-null"]);
+    expect(failures).toEqual([]);
+    expect(depths).toHaveLength(depthCountAtDispose);
+    expect(queue.depthHeartbeat).toBeNull();
+    expect(queue.inflightQueuedIds).not.toContain("dm-disposed-null");
+  });
+
+  test("a disposed DM client ignores a deferred mismatched live-send completion", async () => {
+    let release: ((id: string | null) => void) | undefined;
+    const sent = new Promise<string | null>((resolve) => { release = resolve; });
+    const client = new BrowserXmppClient(session());
+    const failures: string[] = [];
+    const depths: unknown[] = [];
+    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onQueueDepthChange((depth) => depths.push(depth));
+    const xmpp = { send_chat_message: mock(async () => await sent) };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const send = client.sendDirectMessage("bob@example.com", "deferred", { id: "dm-disposed-mismatch" });
+    await Promise.resolve();
+    await client.dispose();
+    const depthCountAtDispose = depths.length;
+    release?.("different-id");
+    await send;
+
+    const queue = (client as unknown as {
+      outboundQueue: { depthHeartbeat: unknown; inflightQueuedIds: Set<string> };
+    }).outboundQueue;
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+      .toEqual(["dm-disposed-mismatch"]);
+    expect(failures).toEqual([]);
+    expect(depths).toHaveLength(depthCountAtDispose);
+    expect(queue.depthHeartbeat).toBeNull();
+    expect(queue.inflightQueuedIds).not.toContain("dm-disposed-mismatch");
+  });
+
+  test("a disposed DM client ignores a deferred non-retryable live-send failure", async () => {
+    let release: ((result: { kind: "invalid-recipient" }) => void) | undefined;
+    const sent = new Promise<{ kind: "invalid-recipient" }>((resolve) => { release = resolve; });
+    const client = new BrowserXmppClient(session());
+    const failures: string[] = [];
+    const depths: unknown[] = [];
+    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onQueueDepthChange((depth) => depths.push(depth));
+    const xmpp = { send_chat_message: mock(async () => await sent) };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const send = client.sendDirectMessage("bob@example.com", "deferred", { id: "dm-disposed-rejected" });
+    await Promise.resolve();
+    await client.dispose();
+    const depthCountAtDispose = depths.length;
+    release?.({ kind: "invalid-recipient" });
+    await expect(send).rejects.toThrow("XMPP send failed: invalid-recipient");
+
+    const queue = (client as unknown as {
+      outboundQueue: { depthHeartbeat: unknown; inflightQueuedIds: Set<string> };
+    }).outboundQueue;
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+      .toEqual(["dm-disposed-rejected"]);
+    expect(failures).toEqual([]);
+    expect(depths).toHaveLength(depthCountAtDispose);
+    expect(queue.depthHeartbeat).toBeNull();
+    expect(queue.inflightQueuedIds).not.toContain("dm-disposed-rejected");
   });
 
   test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {
@@ -1987,7 +2162,7 @@ describe("client send readiness", () => {
     messaging.disconnect();
   });
 
-  test("native failed-resume fallback owns resend for live unacked DM sends", async () => {
+  test("native failed-resume fallback retains the durable live unacked DM row until ack", async () => {
     const xmpp = {
       send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
       get_resume_state: () => ({
@@ -1995,7 +2170,7 @@ describe("client send readiness", () => {
         inboundH: 4,
         outboundH: 9,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+        unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
       }),
     };
     const client = new BrowserXmppClient(session());
@@ -2007,6 +2182,11 @@ describe("client send readiness", () => {
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id)).toEqual([
+      "dm-live-1",
+    ]);
+
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 });
