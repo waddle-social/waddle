@@ -719,6 +719,26 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
             .map(|saved| saved.user_jid.as_str()),
         Some(session.user_jid.as_str())
     );
+
+    let disco = element_to_xml(
+        Element::builder("iq", waddle_xmpp::protocol::frame::CLIENT_STANZA_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "post-resume-disco",
+            )
+            .append(Element::builder("query", "http://jabber.org/protocol/disco#info").build())
+            .build(),
+    );
+    let iq_responses = handle_xmpp_frame(&disco, &domain, state.as_ref(), &mut conn).await;
+    assert!(
+        iq_responses.iter().any(|response| {
+            Element::from_str(response)
+                .ok()
+                .is_some_and(|element| element.attr("type") == Some("result"))
+        }),
+        "the production IQ dispatcher must retain the resolved principal after resume"
+    );
 }
 
 #[tokio::test]
