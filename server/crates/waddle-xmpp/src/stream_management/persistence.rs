@@ -35,6 +35,7 @@ use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
 use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
+use crate::auth::AuthenticatedPrincipalRef;
 use crate::pending_delivery::SmSessionId;
 use crate::Stanza;
 
@@ -367,6 +368,21 @@ pub trait SmPersistenceStorage: Send + Sync {
             self.append_unacked(entry).await?;
         }
         Ok(())
+    }
+
+    /// Atomically persist a detached SM snapshot and its non-secret
+    /// authenticated principal reference. Clustered implementations bind
+    /// both writes to the exact SM claim fence; portable storage refuses
+    /// rather than silently dropping authorization authority.
+    async fn store_session_atomic_with_principal(
+        &self,
+        _principal: &AuthenticatedPrincipalRef,
+        _session: PersistedSession,
+        _unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "SM principal persistence requires fenced Postgres storage".to_string(),
+        ))
     }
 
     /// Atomically increment the persistent promotion-failure counter
