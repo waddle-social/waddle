@@ -130,6 +130,22 @@ pub(super) fn defer_superseded_sm_claim(state: &WebSocketState, sm_state: &Strea
     }
 }
 
+async fn release_rejected_resume_claim(
+    state: &WebSocketState,
+    stream_id: &str,
+    reason: &'static str,
+) {
+    if let Err(error) = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .release_claim(stream_id)
+        .await
+    {
+        warn!(stream_id, %error, reason, "Failed to release rejected SM resume claim");
+    }
+}
+
 #[cfg(test)]
 mod enable_claim_guard_tests {
     use super::SmEnableClaimGuard;
@@ -793,21 +809,12 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     {
         Ok(Some(principal)) => principal,
         Ok(None) => {
-            let _ = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .release_claim(&resume.previd)
-                .await;
+            release_rejected_resume_claim(state, &resume.previd, "principal binding missing").await;
             return vec![SmFailed::with_condition("item-not-found").to_xml()];
         }
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "SM resume principal lookup unavailable");
-            let _ = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .release_claim(&resume.previd)
+            release_rejected_resume_claim(state, &resume.previd, "principal lookup unavailable")
                 .await;
             return vec![SmFailed::with_condition("internal-server-error").to_xml()];
         }
@@ -825,21 +832,12 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             | crate::auth::PrincipalResolution::Revoked
             | crate::auth::PrincipalResolution::Expired,
         ) => {
-            let _ = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .release_claim(&resume.previd)
-                .await;
+            release_rejected_resume_claim(state, &resume.previd, "principal is not active").await;
             return vec![SmFailed::with_condition("not-authorized").to_xml()];
         }
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "SM resume auth-context resolver unavailable");
-            let _ = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .release_claim(&resume.previd)
+            release_rejected_resume_claim(state, &resume.previd, "principal resolver unavailable")
                 .await;
             return vec![SmFailed::with_condition("internal-server-error").to_xml()];
         }
@@ -940,21 +938,13 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             | crate::auth::PrincipalResolution::Revoked
             | crate::auth::PrincipalResolution::Expired,
         ) => {
-            let _ = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .release_claim(&resume.previd)
+            release_rejected_resume_claim(state, &resume.previd, "principal changed before ready")
                 .await;
             return vec![SmFailed::with_condition("not-authorized").to_xml()];
         }
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "SM final principal recheck unavailable");
-            let _ = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .release_claim(&resume.previd)
+            release_rejected_resume_claim(state, &resume.previd, "principal recheck unavailable")
                 .await;
             return vec![SmFailed::with_condition("internal-server-error").to_xml()];
         }

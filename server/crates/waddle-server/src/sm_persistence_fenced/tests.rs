@@ -27,6 +27,9 @@ use crate::clustering::claims::{NodeLeaseStore as _, PostgresClaimStore};
 use crate::db::DatabaseConfig;
 use chrono::TimeZone;
 use std::time::Duration as StdDuration;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity, StalePredicate};
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use xmpp_parsers::presence::Show;
@@ -290,10 +293,16 @@ async fn store_session_atomic_also_applies_divergence_a() {
         fixture_unacked("stream-atomic", 1),
         fixture_unacked("stream-atomic", 2),
     ];
+    let principal = AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("valid bare JID"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    );
     f.fenced
-        .store_session_atomic(session.clone(), unacked)
+        .store_session_atomic_with_principal(session.clone(), unacked, principal.clone())
         .await
-        .expect("store_session_atomic");
+        .expect("store_session_atomic_with_principal");
 
     let loaded = f
         .fenced
@@ -312,6 +321,14 @@ async fn store_session_atomic_also_applies_divergence_a() {
     assert_eq!(queue.len(), 2);
     assert_eq!(queue[0].sequence, 1);
     assert_eq!(queue[1].sequence, 2);
+    assert_eq!(
+        f.fenced
+            .get_session_principal(&SmSessionId::new("stream-atomic"))
+            .await
+            .expect("get principal"),
+        Some(principal),
+        "the fenced transaction must persist the exact non-secret principal binding"
+    );
 }
 
 #[tokio::test]
