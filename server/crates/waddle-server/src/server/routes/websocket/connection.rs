@@ -1529,7 +1529,7 @@ mod tests {
         type Error = &'static str;
 
         fn poll_ready(
-            mut self: Pin<&mut Self>,
+            self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
         ) -> Poll<Result<(), Self::Error>> {
             self.lifecycle.begin_fenced_recovery();

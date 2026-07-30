@@ -183,7 +183,7 @@ where
     if !authoritative() {
         return AuthoritySendOutcome::AuthorityRevoked;
     }
-    if let Err(error) = std::pin::Pin::new(sender).start_send(message) {
+    if let Err(error) = std::pin::Pin::new(&mut *sender).start_send(message) {
         error!(error = %error, "{failure_message}");
         return AuthoritySendOutcome::TransportClosed;
     }

@@ -1138,7 +1138,7 @@ async fn backpressured_send_window_write_stops_promptly_on_authority_revocation(
         sink.committed,
         (1..=8)
             .map(countable_message)
-            .map(Message::Text)
+            .map(|frame| Message::Text(frame.into()))
             .collect::<Vec<_>>(),
         "the first eight stanzas committed before the backpressured ninth send"
     );
