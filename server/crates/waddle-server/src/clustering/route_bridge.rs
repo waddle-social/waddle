@@ -548,6 +548,18 @@ impl OrderedRelayDeliveryBridge {
         }
     }
 
+    /// SFU handle for the undeliverable-IQ bounce compensation (#1444).
+    /// `None` before `wire()`, when the websocket state is gone, or in
+    /// deployments without an SFU — the bounce then still scrubs the
+    /// credential echo, it just skips the local JTI revocation.
+    fn sfu_for_bounce(&self) -> Option<Arc<dyn waddle_sfu::SfuService>> {
+        self.services
+            .get()?
+            .web_socket_state
+            .upgrade()
+            .and_then(|state| state.deps.protocol.sfu.clone())
+    }
+
     pub fn wire_origin_signer(&self, keypair: Keypair) {
         if self
             .origin_signer
@@ -694,6 +706,7 @@ impl OrderedRelayDeliveryBridge {
                         Stanza::Iq(_) | Stanza::Presence(_) => None,
                     };
                     tokio::spawn(async move {
+                        let sfu_for_bounce = bridge.sfu_for_bounce();
                         let delivery_outcome = bridge
                             .deliver_seeded_remote(seed, true)
                             .await
@@ -709,7 +722,13 @@ impl OrderedRelayDeliveryBridge {
                             );
                         }
                         let replies = delivery_outcome
-                            .map(|outcome| replies_for_origin_handoff(&origin_stanza, outcome))
+                            .map(|outcome| {
+                                replies_for_origin_handoff(
+                                    &origin_stanza,
+                                    outcome,
+                                    sfu_for_bounce.as_deref(),
+                                )
+                            })
                             .unwrap_or_default();
                         handoff.complete(replies);
                     });
@@ -814,6 +833,7 @@ impl OrderedRelayDeliveryBridge {
                     let bridge = Arc::clone(self);
                     let origin_stanza = stanza.clone();
                     tokio::spawn(async move {
+                        let sfu_for_bounce = bridge.sfu_for_bounce();
                         let replies = bridge
                             .deliver_seeded_remote(seed, true)
                             .await
@@ -821,6 +841,7 @@ impl OrderedRelayDeliveryBridge {
                                 replies_for_origin_handoff(
                                     &origin_stanza,
                                     caller_delivery_outcome(outcome),
+                                    sfu_for_bounce.as_deref(),
                                 )
                             })
                             .unwrap_or_default();
@@ -2003,7 +2024,11 @@ impl OrderedRelayDeliveryBridge {
                         .await
                         .unwrap_or(FullJidDeliveryOutcome::Dropped);
                     log_remote_resource_route_outcome(&outcome_log, outcome);
-                    handoff.complete(replies_for_origin_handoff(&origin_stanza, outcome));
+                    handoff.complete(replies_for_origin_handoff(
+                        &origin_stanza,
+                        outcome,
+                        bridge.sfu_for_bounce().as_deref(),
+                    ));
                 });
                 return Some(FullJidDeliveryOutcome::Delivered);
             }
@@ -4920,10 +4945,14 @@ fn definite_no_effect_outcome(is_iq: bool) -> FullJidDeliveryOutcome {
     }
 }
 
-fn replies_for_origin_handoff(stanza: &Stanza, outcome: FullJidDeliveryOutcome) -> Vec<Stanza> {
+fn replies_for_origin_handoff(
+    stanza: &Stanza,
+    outcome: FullJidDeliveryOutcome,
+    sfu: Option<&dyn waddle_sfu::SfuService>,
+) -> Vec<Stanza> {
     match outcome {
         FullJidDeliveryOutcome::Unavailable => {
-            crate::server::routes::interpret::fallback_reply_for_undeliverable_iq(stanza)
+            crate::server::routes::interpret::bounce_undeliverable_iq(stanza, sfu)
                 .into_iter()
                 .collect()
         }

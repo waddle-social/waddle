@@ -1,7 +1,7 @@
 //! Conformance guard for the CLAUDE.md hard rule: every implemented
 //! XEP module (`src/xep/xepNNNN.rs`) must have a dedicated test suite
-//! (`xep*NNNN*.rs`) in either `waddle-xmpp/tests/` or
-//! `waddle-server/tests/`.
+//! in either `waddle-xmpp/tests/` or `waddle-server/tests/` — a
+//! `xepNNNN*.rs` file, or a `xepNNNN*/` Cargo directory test target.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -37,9 +37,16 @@ fn suite_exists_for(number: &str, test_dirs: &[&Path]) -> bool {
                     else {
                         return false;
                     };
+                    let path = entry.path();
+                    if path.is_dir() {
+                        // Cargo directory test target
+                        // (`tests/xepNNNN_suite/main.rs` + submodules).
+                        return (rest.is_empty() || rest.starts_with('_'))
+                            && directory_target_has_tests(&path);
+                    }
                     (rest == ".rs" || rest.starts_with('_'))
                         && name.ends_with(".rs")
-                        && non_empty_suite(&entry.path())
+                        && non_empty_suite(&path)
                 })
             })
             .unwrap_or(false)
@@ -51,6 +58,19 @@ fn suite_exists_for(number: &str, test_dirs: &[&Path]) -> bool {
 fn non_empty_suite(path: &Path) -> bool {
     std::fs::read_to_string(path)
         .map(|src| src.contains("#[test]") || src.contains("#[tokio::test"))
+        .unwrap_or(false)
+}
+
+/// A directory test target counts when any of its `.rs` files (the
+/// `main.rs` root or a submodule) contains at least one test.
+fn directory_target_has_tests(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                let path = entry.path();
+                path.extension().is_some_and(|ext| ext == "rs") && non_empty_suite(&path)
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -70,8 +90,8 @@ fn every_numbered_xep_module_has_a_dedicated_test_suite() {
     assert!(
         missing.is_empty(),
         "CLAUDE.md hard rule: every implemented XEP needs a dedicated test suite.\n\
-         Modules without a `xep*NNNN*.rs` file in crates/waddle-xmpp/tests or \
-         crates/waddle-server/tests: {}",
+         Modules without a `xepNNNN*.rs` file or `xepNNNN*/` directory \
+         target in crates/waddle-xmpp/tests or crates/waddle-server/tests: {}",
         missing
             .iter()
             .map(|n| format!("xep{n}"))

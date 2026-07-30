@@ -786,6 +786,31 @@ impl SfuService for LiveKitSfu {
             .is_some_and(|entry| entry.contains(identity))
     }
 
+    fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti) {
+        let key = (call_id.clone(), identity.clone());
+        let mut exp = None;
+        if let Some(mut issued) = self.issued.get_mut(&key) {
+            if let Some(position) = issued.iter().position(|entry| entry.jti == *jti) {
+                exp = Some(issued.remove(position).exp);
+            }
+        }
+        // Only a JTI we can prove we minted (still present in the
+        // pair's issued window) is recorded. The jti reaches this
+        // method from an UNVERIFIED claim inside the bounced stanza,
+        // so unconditionally inserting would let crafted undeliverable
+        // IQs grow the revocation map without bound. The bounce's
+        // fresh mint is always still in the window at bounce time, so
+        // the #1444 compensation is unaffected.
+        let Some(exp) = exp else { return };
+        // Don't leave an empty bucket behind for the common
+        // mint-then-immediately-revoke bounce case; `remove_if`
+        // re-checks under the shard lock so a concurrent mint that
+        // repopulated the vec is preserved.
+        self.issued
+            .remove_if(&key, |_, issuances| issuances.is_empty());
+        self.revoked.insert(jti.clone(), exp);
+    }
+
     fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState {
         let ClearOutcome {
             was_present,

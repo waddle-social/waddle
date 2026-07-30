@@ -34,6 +34,14 @@ impl Jti {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// Reconstruct from a decoded JWT `jti` claim. Only for looking up
+    /// the server's OWN issuance bookkeeping (e.g. targeted revocation
+    /// of a token this server minted, #1444) — never an
+    /// authentication input.
+    pub fn from_claim(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -68,6 +76,22 @@ impl Jwt {
     /// client connects to the SFU.
     pub fn from_wire(value: String) -> Self {
         Self(value)
+    }
+
+    /// The `jti` claim, decoded WITHOUT signature verification. Safe
+    /// only for issuance-bookkeeping lookups — identifying which of
+    /// the server's own minted tokens a stanza carried so exactly that
+    /// issuance can be revoked (#1444). A forged claim can at worst
+    /// revoke nothing (unknown jti) or a token of the forger's own
+    /// stanza; it never authenticates anything.
+    pub fn unverified_jti(&self) -> Option<Jti> {
+        use base64::Engine as _;
+        let payload = self.0.split('.').nth(1)?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?;
+        let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        claims.get("jti")?.as_str().map(Jti::from_claim)
     }
 }
 

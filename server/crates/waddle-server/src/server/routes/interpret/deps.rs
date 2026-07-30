@@ -175,6 +175,12 @@ pub struct Deps<'a> {
     /// inbound handled-count completion until handoff settles; non-SM bound
     /// sessions and server-side routes use the locally owned entity claim.
     pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
+    /// SFU service handle (#1444). Used by the undeliverable-IQ bounce
+    /// path to revoke the LiveKit join token the Jingle handler minted
+    /// into a forwarded `session-initiate`/`session-accept` that then
+    /// failed delivery. `None` in unit tests that don't exercise the
+    /// call bounce path and in deployments without an SFU.
+    pub sfu: Option<&'a dyn waddle_sfu::SfuService>,
 }
 
 impl<'a> Deps<'a> {
@@ -205,6 +211,7 @@ impl<'a> Deps<'a> {
             message_dispatcher: None,
             pending_delivery_storage: None,
             ordered_relay_origin: None,
+            sfu: None,
         }
     }
 
@@ -234,6 +241,7 @@ impl<'a> Deps<'a> {
             message_dispatcher: None,
             pending_delivery_storage: None,
             ordered_relay_origin: None,
+            sfu: None,
         }
     }
 
@@ -261,6 +269,7 @@ impl<'a> Deps<'a> {
             message_dispatcher: None,
             pending_delivery_storage: None,
             ordered_relay_origin: None,
+            sfu: None,
         }
     }
 
@@ -286,6 +295,7 @@ impl<'a> Deps<'a> {
             message_dispatcher: None,
             pending_delivery_storage: None,
             ordered_relay_origin: None,
+            sfu: None,
         }
     }
 }

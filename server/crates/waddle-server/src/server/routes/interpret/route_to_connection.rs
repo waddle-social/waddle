@@ -252,11 +252,11 @@ async fn route_to_full_jid(
             if bare.domain().as_str() == deps.local_domain
                 && !local_account_exists_for(deps, &bare).await
             {
-                return bounce_for_nonexistent_account(stanza.as_ref());
+                return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
             }
             return Vec::new();
         }
-        fallback_reply_for_undeliverable_iq(stanza.as_ref())
+        bounce_undeliverable_iq(stanza.as_ref(), deps.sfu)
             .into_iter()
             .collect()
     } else {
@@ -469,7 +469,7 @@ async fn route_to_bare_jid(
             deliver_bare_jid_via_ordered_relay(deps, &bare, stanza.as_ref()).await
         {
             return if delivery == FullJidDeliveryOutcome::Unavailable {
-                fallback_reply_for_undeliverable_iq(stanza.as_ref())
+                bounce_undeliverable_iq(stanza.as_ref(), deps.sfu)
                     .into_iter()
                     .collect()
             } else {
@@ -541,7 +541,7 @@ async fn route_to_bare_jid(
                      bouncing with service-unavailable instead of \
                      persisting (RFC 6121 §8.5.1)"
                 );
-                return bounce_for_nonexistent_account(stanza.as_ref());
+                return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
             } else {
                 run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1).await;
             }
@@ -794,7 +794,7 @@ async fn route_to_bare_jid(
                     // (or no longer does) exist — bounce instead of
                     // creating archive/inbox rows for it (RFC 6121
                     // §8.5.1).
-                    return bounce_for_nonexistent_account(stanza.as_ref());
+                    return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
                 } else {
                     debug!(
                         bare_jid = %bare,
@@ -861,7 +861,10 @@ async fn local_account_exists_for(deps: &Deps<'_>, bare: &BareJid) -> bool {
 ///
 /// Returned stanzas are written back to the originating connection by
 /// the interpret loop, exactly like the undeliverable-IQ fallback.
-fn bounce_for_nonexistent_account(stanza: &Stanza) -> Vec<Stanza> {
+fn bounce_for_nonexistent_account(
+    stanza: &Stanza,
+    sfu: Option<&dyn waddle_sfu::SfuService>,
+) -> Vec<Stanza> {
     match stanza {
         Stanza::Message(message) => {
             if matches!(message.type_, xmpp_parsers::message::MessageType::Error) {
@@ -878,9 +881,7 @@ fn bounce_for_nonexistent_account(stanza: &Stanza) -> Vec<Stanza> {
             );
             vec![Stanza::Message(reply)]
         }
-        Stanza::Iq(_) => fallback_reply_for_undeliverable_iq(stanza)
-            .into_iter()
-            .collect(),
+        Stanza::Iq(_) => bounce_undeliverable_iq(stanza, sfu).into_iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -1014,10 +1015,56 @@ fn deliver_bare_jid_via_ordered_relay<'a>(
 /// and then forwarded the terminate to a peer whose XMPP resource had
 /// already vanished, bouncing `<service-unavailable/>` back would make
 /// the caller's completed hangup look failed. We ack it with an empty
-/// `<iq type='result'/>` instead. Every other undeliverable request IQ
-/// gets a typed `cancel`/`<service-unavailable/>` that echoes the
-/// original request payload per RFC 6120 §8.3.1.
-pub(crate) fn fallback_reply_for_undeliverable_iq(stanza: &Stanza) -> Option<Stanza> {
+/// `<iq type='result'/>` instead.
+///
+/// Every OTHER Jingle payload gets a SANITIZED §8.3.1 echo (#1444):
+/// the Jingle handler injects the addressee's freshly minted LiveKit
+/// join token into forwarded negotiation stanzas, so the raw echo
+/// would hand the callee's credential to the caller. The sender gets
+/// their own request back minus the server-injected
+/// `urn:waddle:transports:livekit:0` transport, and the bounce also
+/// revokes exactly the minted issuance via `sfu` (when supplied) so
+/// the credential does not outlive the failed delivery. Non-Jingle
+/// request IQs keep the verbatim echo.
+pub(crate) fn bounce_undeliverable_iq(
+    stanza: &Stanza,
+    sfu: Option<&dyn waddle_sfu::SfuService>,
+) -> Option<Stanza> {
+    revoke_credential_minted_into_undeliverable_iq(stanza, sfu);
+    undeliverable_iq_reply(stanza)
+}
+
+/// Compensation half of the bounce (#1444): when the undeliverable
+/// stanza is a forwarded Jingle negotiation carrying a freshly minted
+/// LiveKit credential, revoke exactly that issuance. Targeted on the
+/// stanza's own jti — never `unregister_call_participant` — because
+/// the `(call, identity)` pair may be live in the call through an
+/// independent, successful negotiation (e.g. racing same-sid
+/// initiates), and one failed delivery must not evict it or invalidate
+/// its other tokens. Revocation is process-local JTI bookkeeping; the
+/// mint happened on this node's dispatcher, so this is the right
+/// registry to compensate.
+fn revoke_credential_minted_into_undeliverable_iq(
+    stanza: &Stanza,
+    sfu: Option<&dyn waddle_sfu::SfuService>,
+) {
+    let (Stanza::Iq(iq), Some(sfu)) = (stanza, sfu) else {
+        return;
+    };
+    let Some(rollback) =
+        waddle_xmpp::protocol::handlers::jingle::undeliverable_negotiation_rollback(iq)
+    else {
+        return;
+    };
+    if let Some(jti) = &rollback.minted_jti {
+        sfu.revoke_issued_token(&rollback.call_id, &rollback.identity, jti);
+    }
+}
+
+/// Pure reply half of the bounce — no side effects. See the module
+/// doc above [`bounce_undeliverable_iq`] for the terminate-ack and
+/// credential-scrub rules.
+fn undeliverable_iq_reply(stanza: &Stanza) -> Option<Stanza> {
     let Stanza::Iq(iq) = stanza else {
         return None;
     };
@@ -1038,7 +1085,9 @@ pub(crate) fn fallback_reply_for_undeliverable_iq(stanza: &Stanza) -> Option<Sta
         } => (from.clone(), to.clone(), id.clone(), payload.clone()),
         Iq::Result { .. } | Iq::Error { .. } => return None,
     };
-    if is_jingle_session_terminate(&payload) {
+    let is_jingle = payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE);
+    if is_jingle && jingle_action(&payload) == Some(xmpp_parsers::jingle::Action::SessionTerminate)
+    {
         // The server already completed the teardown; ack the hangup.
         return Some(Stanza::Iq(Box::new(Iq::Result {
             from: to,
@@ -1047,6 +1096,16 @@ pub(crate) fn fallback_reply_for_undeliverable_iq(stanza: &Stanza) -> Option<Sta
             payload: None,
         })));
     }
+    // RFC 6120 §8.3.1: echo the offending request so the sender can
+    // correlate which stanza failed. For Jingle payloads the echo is
+    // SANITIZED first (#1444): the sender gets their own request back
+    // minus the server-injected LiveKit transport — the one element
+    // that can carry credentials they were never meant to hold.
+    let echoed = if is_jingle {
+        waddle_xmpp::protocol::handlers::jingle::credential_free_jingle_echo(&payload)
+    } else {
+        payload
+    };
     let error = StanzaError::new(
         ErrorType::Cancel,
         DefinedCondition::ServiceUnavailable,
@@ -1058,16 +1117,16 @@ pub(crate) fn fallback_reply_for_undeliverable_iq(stanza: &Stanza) -> Option<Sta
         to: from,
         id,
         error,
-        // RFC 6120 §8.3.1: echo the offending request so the sender can
-        // correlate which stanza failed.
-        payload: Some(payload),
+        payload: Some(echoed),
     })))
 }
 
-/// Whether an IQ request payload is a Jingle `session-terminate` action.
-fn is_jingle_session_terminate(payload: &minidom::Element) -> bool {
-    payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
-        && payload.attr("action") == Some("session-terminate")
+/// Typed XEP-0166 action of a jingle-namespaced payload, `None` when
+/// the payload does not parse as Jingle.
+fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Action> {
+    xmpp_parsers::jingle::Jingle::try_from(payload.clone())
+        .ok()
+        .map(|jingle| jingle.action)
 }
 
 /// #1106: queue the PROCESSED (recipient-stamped) stanza into the

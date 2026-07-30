@@ -35,6 +35,13 @@ use crate::xep::xep_waddle_livekit_transport::{
 };
 use crate::Stanza;
 
+mod undeliverable;
+
+pub use undeliverable::{
+    credential_free_jingle_echo, undeliverable_negotiation_rollback,
+    UndeliverableNegotiationRollback,
+};
+
 /// XEP-0298 conference-info namespace. We use only the `isfocus`
 /// attribute on a single element to signal that the Jingle peer
 /// (the SFU mixer) is a conference focus rather than a P2P peer —

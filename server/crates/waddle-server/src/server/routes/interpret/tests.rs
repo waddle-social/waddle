@@ -13,6 +13,8 @@ use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
+mod undeliverable_bounce;
+
 #[derive(Clone)]
 struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -311,6 +313,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         message_dispatcher: None,
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     };
     let _outcome = interpret(
         vec![OutboundEvent::SendCarbons {
@@ -2672,181 +2675,6 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
     );
 }
 
-fn jingle_payload_for_route_test(action: &str, sid: &str) -> Element {
-    Element::builder("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
-        .attr(minidom::rxml::xml_ncname!("action").to_owned(), action)
-        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
-        .build()
-}
-
-fn call_iq_set_for_route_test(id: &str, from: &jid::FullJid, to: &jid::FullJid) -> Iq {
-    Iq::Set {
-        from: Some(jid::Jid::from(from.clone())),
-        to: Some(jid::Jid::from(to.clone())),
-        id: id.to_string(),
-        payload: jingle_payload_for_route_test("session-info", "offline-sid"),
-    }
-}
-
-#[tokio::test]
-async fn route_to_connection_offline_full_jid_call_iq_returns_service_unavailable() {
-    use waddle_xmpp::registry::UserRegistryActor;
-    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
-
-    let registry = ConnectionRegistry::new();
-    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
-    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
-    let events = vec![OutboundEvent::RouteToConnection {
-        jid: jid::Jid::from(bob.clone()),
-        stanza: Box::new(Stanza::Iq(Box::new(call_iq_set_for_route_test(
-            "call-offline-1",
-            &alice,
-            &bob,
-        )))),
-    }];
-
-    let outcome = interpret(
-        events,
-        &Deps::registry_with_user_registry(&registry, &user_registry),
-    )
-    .await;
-
-    assert_eq!(
-        outcome.frames.len(),
-        1,
-        "offline full-JID request IQ should produce one error frame: {:?}",
-        outcome.frames
-    );
-    let element = Element::from_str(&outcome.frames[0]).expect("parseable IQ error");
-    let iq = Iq::try_from(element).expect("typed IQ");
-    let Iq::Error {
-        from,
-        to,
-        id,
-        error,
-        payload,
-    } = iq
-    else {
-        panic!("expected IQ error, got {iq:?}");
-    };
-    assert_eq!(id, "call-offline-1");
-    assert_eq!(from, Some(jid::Jid::from(bob)));
-    assert_eq!(to, Some(jid::Jid::from(alice)));
-    assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(
-        error.defined_condition,
-        DefinedCondition::ServiceUnavailable
-    );
-    // RFC 6120 §8.3.1: the error echoes the original request payload so
-    // the sender can correlate which stanza failed.
-    let echoed = payload.expect("service-unavailable echoes the original payload");
-    assert_eq!(echoed.name(), "jingle");
-    assert_eq!(echoed.attr("sid"), Some("offline-sid"));
-}
-
-#[tokio::test]
-async fn route_to_connection_offline_full_jid_session_terminate_is_acked() {
-    // #1130 + #1131 interaction: a session-terminate forwarded to a peer
-    // whose resource is already gone is a *successful* hangup — the caller
-    // must get an empty <iq type='result'/> ack, never <service-unavailable/>.
-    use waddle_xmpp::registry::UserRegistryActor;
-
-    let registry = ConnectionRegistry::new();
-    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
-    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
-    let terminate = Iq::Set {
-        from: Some(jid::Jid::from(alice.clone())),
-        to: Some(jid::Jid::from(bob.clone())),
-        id: "term-offline-1".to_string(),
-        payload: jingle_payload_for_route_test("session-terminate", "offline-sid"),
-    };
-    let events = vec![OutboundEvent::RouteToConnection {
-        jid: jid::Jid::from(bob.clone()),
-        stanza: Box::new(Stanza::Iq(Box::new(terminate))),
-    }];
-
-    let outcome = interpret(
-        events,
-        &Deps::registry_with_user_registry(&registry, &user_registry),
-    )
-    .await;
-
-    assert_eq!(
-        outcome.frames.len(),
-        1,
-        "an undeliverable session-terminate should be acked, not dropped: {:?}",
-        outcome.frames
-    );
-    let iq = Iq::try_from(Element::from_str(&outcome.frames[0]).expect("parseable IQ"))
-        .expect("typed IQ");
-    let Iq::Result {
-        from,
-        to,
-        id,
-        payload,
-    } = iq
-    else {
-        panic!("expected empty IQ result ack, got {iq:?}");
-    };
-    assert_eq!(id, "term-offline-1");
-    assert_eq!(from, Some(jid::Jid::from(bob)));
-    assert_eq!(to, Some(jid::Jid::from(alice)));
-    assert!(payload.is_none(), "terminate ack carries no payload");
-}
-
-#[tokio::test]
-async fn route_to_connection_offline_full_jid_call_iq_result_error_do_not_bounce() {
-    use waddle_xmpp::registry::UserRegistryActor;
-    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
-
-    let registry = ConnectionRegistry::new();
-    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
-    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
-    let result_iq = Iq::Result {
-        from: Some(jid::Jid::from(alice.clone())),
-        to: Some(jid::Jid::from(bob.clone())),
-        id: "call-result-1".to_string(),
-        payload: None,
-    };
-    let error_iq = Iq::Error {
-        from: Some(jid::Jid::from(alice)),
-        to: Some(jid::Jid::from(bob.clone())),
-        id: "call-error-1".to_string(),
-        error: StanzaError::new(
-            ErrorType::Cancel,
-            DefinedCondition::NotAllowed,
-            "en",
-            "already failed",
-        ),
-        payload: None,
-    };
-    let events = vec![
-        OutboundEvent::RouteToConnection {
-            jid: jid::Jid::from(bob.clone()),
-            stanza: Box::new(Stanza::Iq(Box::new(result_iq))),
-        },
-        OutboundEvent::RouteToConnection {
-            jid: jid::Jid::from(bob),
-            stanza: Box::new(Stanza::Iq(Box::new(error_iq))),
-        },
-    ];
-
-    let outcome = interpret(
-        events,
-        &Deps::registry_with_user_registry(&registry, &user_registry),
-    )
-    .await;
-
-    assert!(
-        outcome.frames.is_empty(),
-        "IQ result/error stanzas must not receive synthesized service-unavailable bounces: {:?}",
-        outcome.frames
-    );
-}
-
 #[tokio::test]
 async fn route_to_connection_bare_jid_selects_highest_priority_available_resources() {
     // RFC 6121 §8.5.2.1 resource selection: deliver to every
@@ -3355,6 +3183,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
+        sfu: None,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(alice));
@@ -3718,6 +3547,7 @@ fn offline_pass_deps<'a>(
         message_dispatcher: Some(dispatcher),
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     }
 }
 
@@ -4593,6 +4423,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         message_dispatcher: None,
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     };
 
     let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
@@ -4868,6 +4699,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
+        sfu: None,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(sender));
@@ -5540,6 +5372,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         message_dispatcher: Some(&dispatcher),
         pending_delivery_storage: None,
         ordered_relay_origin: None,
+        sfu: None,
     };
 
     let msg = chat_msg("alice@example.com/web", "bob@example.com", "must arrive");
