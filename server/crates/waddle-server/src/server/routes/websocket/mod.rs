@@ -74,7 +74,6 @@ mod connection;
 mod frame;
 mod frame_backstop;
 pub(crate) mod interpret_loop;
-mod isr_resume;
 pub(crate) mod link_preview_refs;
 pub(crate) mod link_preview_telemetry;
 pub(crate) mod muc_call_sfu;

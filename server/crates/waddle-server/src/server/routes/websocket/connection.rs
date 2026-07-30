@@ -1251,7 +1251,6 @@ async fn cleanup_frame_authority_revocation(state: &WebSocketState, conn: &mut W
         {
             warn!(%stream_id, %error, "Failed to release SM resume claim after authority revocation");
         }
-        state.deps.protocol.resumable_sessions.remove(&stream_id);
     }
 }
 

@@ -43,10 +43,6 @@ pub struct SmEnable {
     pub resume: bool,
     /// Maximum resumption time in seconds (optional)
     pub max: Option<u32>,
-    /// XEP-0397 `<isr-enable mechanism='...'/>` inline child (ADR-0017
-    /// Phase 3 Slice 8), if present — the client is requesting an Instant
-    /// Stream Resumption token pinned to the named SASL mechanism.
-    pub isr_enable_mechanism: Option<String>,
 }
 
 impl SmEnable {
@@ -60,7 +56,6 @@ impl SmEnable {
         Self {
             resume: true,
             max: max_seconds,
-            isr_enable_mechanism: None,
         }
     }
 
@@ -79,13 +74,7 @@ impl SmEnable {
             .map(parse_xs_boolean)
             .unwrap_or(false);
         let max = element.attr("max").and_then(|s| s.parse().ok());
-        let isr_enable_mechanism =
-            crate::isr::IsrEnable::from_element(element).map(|isr_enable| isr_enable.mechanism);
-        Self {
-            resume,
-            max,
-            isr_enable_mechanism,
-        }
+        Self { resume, max }
     }
 }
 
@@ -102,11 +91,6 @@ pub struct SmEnabled {
     pub max: Option<u32>,
     /// Server location hint for resumption (optional)
     pub location: Option<String>,
-    /// XEP-0397 `<isr-enabled token='...'/>` inline child to append
-    /// (ADR-0017 Phase 3 Slice 8), set only when a token was actually
-    /// minted (clustering.enabled && Postgres, and the client requested one
-    /// via `<isr-enable/>`).
-    pub isr_token: Option<String>,
 }
 
 impl SmEnabled {
@@ -117,7 +101,6 @@ impl SmEnabled {
             resume: false,
             max: None,
             location: None,
-            isr_token: None,
         }
     }
 
@@ -128,14 +111,7 @@ impl SmEnabled {
             resume: true,
             max: Some(max_seconds),
             location: None,
-            isr_token: None,
         }
-    }
-
-    /// Attach a XEP-0397 ISR token to this reply (ADR-0017 Phase 3 Slice 8).
-    pub fn with_isr_token(mut self, token: String) -> Self {
-        self.isr_token = Some(token);
-        self
     }
 
     /// Serialize to an `<enabled/>` XML string.
@@ -155,9 +131,6 @@ impl SmEnabled {
         }
         if let Some(location) = self.location.as_deref() {
             builder = builder.attr(minidom::rxml::xml_ncname!("location").to_owned(), location);
-        }
-        if let Some(token) = self.isr_token.as_deref() {
-            builder = builder.append(crate::isr::isr_enabled_element(token));
         }
         element_to_xml(builder.build())
     }

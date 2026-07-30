@@ -53,7 +53,6 @@ pub struct SessionInventory {
     /// it nullable here rather than collapsing to `0` so the gap is
     /// visually distinct from "zero sessions live".
     pub sm_live_sessions: Option<usize>,
-    pub resumable_sessions: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,10 +152,7 @@ pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
             profile_publish_tracker_in_flight: protocol.profile_publish_tracker.len(),
             provider_dispatch_tasks_in_flight: deps.provider_dispatch_tasks.len(),
         },
-        sessions: SessionInventory {
-            sm_live_sessions,
-            resumable_sessions: protocol.resumable_sessions.len(),
-        },
+        sessions: SessionInventory { sm_live_sessions },
         caps: CapsInventory {
             caps_cache: protocol.caps_resolver.cache().len(),
             pending_resolutions: protocol.caps_resolver.pending_len(),

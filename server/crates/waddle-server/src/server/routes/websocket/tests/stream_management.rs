@@ -247,7 +247,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
 #[tokio::test]
 async fn sm_features_advertise_sm_namespace() {
     // Stream features after successful auth must include <sm/>.
-    let features = build_stream_features_xml(true, false);
+    let features = build_stream_features_xml(true);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         el.children()
@@ -764,11 +764,6 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
         })
         .await
         .expect("store");
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.to_string(), resumed_session.clone());
 
     let resume_frame = resume_frame_xml(stream_id, 0);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -3478,11 +3473,6 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         })
         .await
         .expect("store");
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), Session::new("uid", "alice", "alice"));
 
     // Wait a hair so the 0-second TTL is definitely in the past.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3497,8 +3487,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].stream_id, stream_id);
 
-    // The janitor body: remove sidecar + MUC occupant + any routing slot.
-    state.deps.protocol.resumable_sessions.remove(&stream_id);
+    // The janitor body: remove MUC occupant and any routing slot.
     state
         .deps
         .protocol
@@ -3506,11 +3495,6 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         .unregister(&drained[0].jid);
     cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
 
-    assert!(!state
-        .deps
-        .protocol
-        .resumable_sessions
-        .contains_key(&stream_id));
     assert!(
         snapshot_room(state.as_ref(), &room_jid)
             .await

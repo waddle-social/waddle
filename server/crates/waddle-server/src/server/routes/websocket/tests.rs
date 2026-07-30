@@ -44,7 +44,6 @@ mod dispatch;
 mod frame_parsing;
 mod iq;
 #[cfg(feature = "clustering")]
-mod isr_resume;
 mod messages;
 mod misc;
 mod muc;
@@ -569,7 +568,6 @@ async fn create_test_websocket_state_with_extension_manager(
                         .unwrap_or_else(|| Arc::new(InMemorySmSessionRegistry::new())),
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),
-                    resumable_sessions: Arc::new(dashmap::DashMap::new()),
                     caps_resolver: Arc::new(
                         crate::server::caps_resolution::CapsResolver::default(),
                     ),

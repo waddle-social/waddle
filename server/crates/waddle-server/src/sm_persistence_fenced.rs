@@ -130,11 +130,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::sync::OnceCell;
+use waddle_xmpp::auth::AuthenticatedPrincipalRef;
+use waddle_xmpp::auth::{AuthContextId, AuthContextVersion, PrincipalAuthEpoch};
 use waddle_xmpp::ownership::{
     ClaimError, ClaimStore, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
 };
-use waddle_xmpp::auth::AuthenticatedPrincipalRef;
-use waddle_xmpp::auth::{AuthContextId, AuthContextVersion, PrincipalAuthEpoch};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
@@ -728,7 +728,9 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .get::<String>(0)
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?
             .parse()
-            .map_err(|error| SmPersistenceError::Other(format!("invalid SM principal JID: {error}")))?;
+            .map_err(|error| {
+                SmPersistenceError::Other(format!("invalid SM principal JID: {error}"))
+            })?;
         let context_id = row
             .get::<uuid::Uuid>(1)
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
@@ -1224,10 +1226,15 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 auth_context_version = EXCLUDED.auth_context_version, \
                 principal_auth_epoch = EXCLUDED.principal_auth_epoch",
             crate::db_params![
-                stream_id.as_str().to_string(), principal.bare_jid().to_string(),
+                stream_id.as_str().to_string(),
+                principal.bare_jid().to_string(),
                 principal.auth_context_id().as_uuid().to_string(),
-                i64::try_from(principal.auth_context_version().get()).map_err(|_| SmPersistenceError::Other("auth context version overflows i64".to_string()))?,
-                i64::try_from(principal.auth_epoch().get()).map_err(|_| SmPersistenceError::Other("principal auth epoch overflows i64".to_string()))?,
+                i64::try_from(principal.auth_context_version().get()).map_err(|_| {
+                    SmPersistenceError::Other("auth context version overflows i64".to_string())
+                })?,
+                i64::try_from(principal.auth_epoch().get()).map_err(|_| {
+                    SmPersistenceError::Other("principal auth epoch overflows i64".to_string())
+                })?,
             ],
         )
         .await
@@ -1243,7 +1250,9 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         }
-        tx.commit().await.map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         Ok(())
     }
 

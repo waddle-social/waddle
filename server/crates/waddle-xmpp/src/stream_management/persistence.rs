@@ -34,8 +34,8 @@ use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
-use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::auth::AuthenticatedPrincipalRef;
+use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
 use crate::Stanza;
 

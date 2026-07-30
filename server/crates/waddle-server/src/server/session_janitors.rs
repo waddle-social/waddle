@@ -87,25 +87,6 @@ const USER_ACTOR_REAPER_INTERVAL: Duration = Duration::from_secs(300);
 /// harmless for the child-less `ListUsers`/`UserCount` reads, which reply fast.
 const REAPER_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): TTL for a
-/// `clustering_isr_tokens` row that has never been consumed. A token is
-/// minted per `<isr-enable/>` and only ever reaped by an ordinary
-/// `consume` (match or mismatch); one that's issued and never resumed
-/// (client never reconnects, or the SM session is later expired/reaped by
-/// [`run_orphan_reaper_sweep`] itself) would otherwise sit forever. Age is
-/// only a backstop after the corresponding typed SM-session claim is absent;
-/// a live or detached claimed stream retains its token regardless of age.
-/// 24h bounds genuinely orphaned rows without shortening a stream's resume
-/// lifetime.
-#[cfg(feature = "clustering")]
-const ISR_TOKEN_SWEEP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Upper bound on the ISR token sweep's own DB call (FIX 4) — a wedged
-/// Postgres connection must never hang the orphan-reaper sweep this rides
-/// alongside, mirroring [`REAPER_ASK_TIMEOUT`]'s own bounded-ask discipline.
-#[cfg(feature = "clustering")]
-const ISR_TOKEN_SWEEP_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Per-sweep cap for the stale-node watchdog that runs before the orphaned
 /// SM-session claim scan. This bounds the raw-heartbeat discovery pass; each
 /// candidate still has to pass `NodeLeaseStore::expire`'s CAS before any
@@ -198,7 +179,6 @@ fn notification_outbox_prune_batch_from_env() -> usize {
 pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
     // XEP-0198 expired-session janitor. Without this, detached SM sessions
     // whose resume window elapses leave MUC occupants in their rooms forever
-    // and the `resumable_sessions` sidecar grows unbounded.
     let weak_state = Arc::downgrade(websocket_state);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -489,11 +469,6 @@ async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             {
                 sweep_failed = true;
             }
-            state
-                .deps
-                .protocol
-                .resumable_sessions
-                .remove(&session.stream_id);
             // ADR-0017 Phase 1 (Greptile P1 on PR #1177): gate the DashMap
             // removal on the EXPIRED session's own SM stream id, not a plain
             // `unregister`. A plain unregister removes whatever currently
@@ -4706,40 +4681,6 @@ async fn run_orphan_reaper_sweep_with_workers(
             );
         }
 
-        // Council-adjudicated FIX 4 (ADR-0017 Phase 3 Slice 8): a
-        // `clustering_isr_tokens` row is never reaped by the ordinary
-        // `consume` path alone (a token issued but never resumed, or whose SM
-        // session this very sweep just reaped above, leaves an otherwise
-        // -permanent orphan). No cascade hook exists from the SM session
-        // claim's own release/reap paths — the SM session registry
-        // (`waddle-xmpp`) has no reason to depend on ISR (`waddle-server`
-        // -local, Postgres-only) at all, the same crate separation
-        // `ClaimStore`/`IsrTokenStore` already keep — so this rides the same
-        // janitor cadence as a bounded, deadline-armed TTL sweep instead.
-        if let Some(isr_token_store) = clustering.isr_token_store() {
-            match tokio::time::timeout(
-                ISR_TOKEN_SWEEP_TIMEOUT,
-                isr_token_store.sweep_expired(ISR_TOKEN_SWEEP_MAX_AGE),
-            )
-            .await
-            {
-                Ok(Ok(deleted)) if deleted > 0 => {
-                    info!(deleted, "orphan reaper: swept expired ISR tokens");
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    sweep_failed = true;
-                    warn!(%error, "orphan reaper: ISR token sweep failed");
-                }
-                Err(_timeout) => {
-                    sweep_failed = true;
-                    warn!(
-                        timeout = ?ISR_TOKEN_SWEEP_TIMEOUT,
-                        "orphan reaper: ISR token sweep timed out"
-                    );
-                }
-            }
-        }
         !sweep_failed
     }
     .instrument(janitor_sweep_span(Janitor::OrphanReaper))

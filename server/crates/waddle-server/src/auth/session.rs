@@ -352,9 +352,9 @@ impl SessionManager {
 
 fn integer_column(row: &[crate::db::Value], index: usize, name: &str) -> Result<u64, AuthError> {
     match row_value(row, index).map_err(|error| AuthError::DatabaseError(error.to_string()))? {
-        crate::db::Value::Integer(value) => (*value).try_into().map_err(|_| {
-            AuthError::DatabaseError(format!("invalid {name}: {value}"))
-        }),
+        crate::db::Value::Integer(value) => (*value)
+            .try_into()
+            .map_err(|_| AuthError::DatabaseError(format!("invalid {name}: {value}"))),
         value => Err(AuthError::DatabaseError(format!(
             "invalid {name} value: {value:?}"
         ))),
@@ -413,7 +413,10 @@ mod tests {
         let principal = session
             .authenticated_principal_ref()
             .expect("typed principal");
-        manager.create_session(&session).await.expect("create session");
+        manager
+            .create_session(&session)
+            .await
+            .expect("create session");
 
         match manager
             .resolve_principal(&principal)

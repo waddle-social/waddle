@@ -321,7 +321,6 @@ pub(super) async fn cleanup_connection_shutdown(
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
     if superseded {
-        conn.unpublished_isr_cleanup.take();
         return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
@@ -333,7 +332,6 @@ pub(super) async fn cleanup_connection_shutdown(
     // the main loop.
 
     let Some(jid) = conn.phase.cleanup_jid().cloned() else {
-        conn.unpublished_isr_cleanup.take();
         return ConnectionShutdownOutcome::NotPersisted;
     };
 
@@ -352,11 +350,9 @@ pub(super) async fn cleanup_connection_shutdown(
                 {
                     warn!(stream_id = %stream_id, error = %error, "Failed to release pending SM resume claim during cleanup");
                 }
-                state.deps.protocol.resumable_sessions.remove(&stream_id);
             }
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
-            conn.unpublished_isr_cleanup.take();
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
             return ConnectionShutdownOutcome::NotPersisted;
         };
@@ -371,7 +367,6 @@ pub(super) async fn cleanup_connection_shutdown(
             .connection_registry
             .entry_if_owner(&jid, owner)
         else {
-            conn.unpublished_isr_cleanup.take();
             super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
             return ConnectionShutdownOutcome::NotPersisted;
@@ -536,7 +531,6 @@ pub(super) async fn cleanup_connection_shutdown(
                                 );
                             }
                         }
-                        conn.unpublished_isr_cleanup.take();
                         return ConnectionShutdownOutcome::NotPersisted;
                     }
                     // ADR-0017 Phase 1: prune the actor-tree entry at detach
@@ -573,13 +567,6 @@ pub(super) async fn cleanup_connection_shutdown(
                         Some(&stream_id),
                     )
                     .await;
-                    if let Some(session) = conn.authenticated_session.clone() {
-                        state
-                            .deps
-                            .protocol
-                            .resumable_sessions
-                            .insert(stream_id.clone(), session);
-                    }
                     // Remove the routing entry only — the MUC occupant
                     // slot stays. On a successful resume we'll re-register
                     // the same FullJid and presence is preserved.
@@ -588,14 +575,10 @@ pub(super) async fn cleanup_connection_shutdown(
                         stream_id = %stream_id,
                         "SM session detached; awaiting resume"
                     );
-                    if let Some(reservation) = conn.unpublished_isr_cleanup.take() {
-                        reservation.disarm();
-                    }
                     return ConnectionShutdownOutcome::Detached;
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                    state.deps.protocol.resumable_sessions.remove(&stream_id);
                     let detach_fail_removed = state
                         .deps
                         .protocol
@@ -630,7 +613,6 @@ pub(super) async fn cleanup_connection_shutdown(
                     if !detach_fail_removed {
                         cleanup_muc_presence(state, &jid).await;
                     }
-                    conn.unpublished_isr_cleanup.take();
                     return ConnectionShutdownOutcome::NotPersisted;
                 }
             }
@@ -677,7 +659,6 @@ pub(super) async fn cleanup_connection_shutdown(
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
-    conn.unpublished_isr_cleanup.take();
     ConnectionShutdownOutcome::NotPersisted
 }
 
@@ -1190,11 +1171,6 @@ pub(super) async fn cleanup_invalidated_detached_session(
     detached: waddle_xmpp::stream_management::DetachedSession,
     replacement_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .remove(&detached.stream_id);
     // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
     // DashMap entry. It gates whether we attempt cleanup at all: if the
     // replacement (the freshly-bound session that triggered this invalidation)

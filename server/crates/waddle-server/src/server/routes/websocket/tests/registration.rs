@@ -182,11 +182,6 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     state
         .deps
         .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), session.clone());
-    state
-        .deps
-        .protocol
         .sm_session_registry
         .store_session(DetachedSession {
             stream_id: stream_id.clone(),
@@ -279,12 +274,6 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     assert!(state
         .deps
         .protocol
-        .resumable_sessions
-        .get(&stream_id)
-        .is_none());
-    assert!(state
-        .deps
-        .protocol
         .sm_session_registry
         .peek_session(&stream_id)
         .await
@@ -323,11 +312,6 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "registration-resume-revoked-after-finalization".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), session.clone());
     state
         .deps
         .protocol
@@ -447,11 +431,6 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
     let stream_id = "registration-resume-gap-stream".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
 
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), session.clone());
     state
         .deps
         .protocol

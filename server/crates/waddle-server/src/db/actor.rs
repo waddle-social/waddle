@@ -127,8 +127,12 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                 .bind(&msg.user_jid)
                 .bind(&msg.token_hash)
                 .bind(msg.auth_context_id.to_string())
-                .bind(i64::try_from(msg.auth_context_version).map_err(|_| DatabaseError::QueryFailed("auth context version overflow".to_string()))?)
-                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| DatabaseError::QueryFailed("principal auth epoch overflow".to_string()))?)
+                .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
+                    DatabaseError::QueryFailed("auth context version overflow".to_string())
+                })?)
+                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| {
+                    DatabaseError::QueryFailed("principal auth epoch overflow".to_string())
+                })?)
                 .bind(&msg.expires_at)
                 .bind(&msg.created_at)
                 .bind(&msg.last_used_at)
@@ -167,8 +171,12 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                 .bind(&msg.user_jid)
                 .bind(&msg.token_hash)
                 .bind(msg.auth_context_id)
-                .bind(i64::try_from(msg.auth_context_version).map_err(|_| DatabaseError::QueryFailed("auth context version overflow".to_string()))?)
-                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| DatabaseError::QueryFailed("principal auth epoch overflow".to_string()))?)
+                .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
+                    DatabaseError::QueryFailed("auth context version overflow".to_string())
+                })?)
+                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| {
+                    DatabaseError::QueryFailed("principal auth epoch overflow".to_string())
+                })?)
                 .bind(&msg.expires_at)
                 .bind(&msg.created_at)
                 .bind(&msg.last_used_at)

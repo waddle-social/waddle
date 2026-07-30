@@ -1224,17 +1224,6 @@ pub struct WebSocketDeps {
     pub shutdown: waddle_ecdysis::ShutdownHandle,
 }
 
-impl WebSocketDeps {
-    /// XEP-0397 is available only when both its durable backend exists and
-    /// the externally configured WebSocket endpoint is TLS protected.
-    pub fn isr_available(&self) -> bool {
-        // P0.3 retires the incomplete ISR path until a conformant,
-        // non-bearer persistence design exists. Do not advertise or enable
-        // a feature whose storage would retain raw authentication material.
-        false
-    }
-}
-
 pub struct ProtocolServices {
     /// Registry for tracking active connections by JID.
     pub connection_registry: Arc<ConnectionRegistry>,
@@ -1344,12 +1333,6 @@ pub struct ProtocolServices {
     /// where the empty `<metadata/>` is published but vcard-temp
     /// PHOTO is still set.
     pub profile_publish_tracker: tokio_util::task::TaskTracker,
-    /// Sidecar map keyed by SM stream id, holding the authenticated `Session`
-    /// so that a resumed stream doesn't lose its authorization context and
-    /// can serve IQs that check channel membership, etc. Entries are
-    /// populated on detach and removed on take/resume (or swept when the
-    /// corresponding SM session expires).
-    pub resumable_sessions: Arc<dashmap::DashMap<String, Session>>,
     /// PEP → community feed bridge. Observes successful PEP publishes
     /// (mood / activity / tune / avatar / vCard4) and shadow-publishes
     /// a typed feed entry on `community.<domain>` so the community
@@ -1502,10 +1485,6 @@ pub(super) struct WsConnState {
     /// remains guarded and SM stays locally disabled; dropping the
     /// connection or failing the write terminalizes the exact claim.
     pub(super) pending_sm_enable_commit: Option<super::stream_management::SmEnableCommit>,
-    /// Exact provisional ISR cleanup retained only when `<enabled/>` was
-    /// written but the connection lost the owner-gated publication race.
-    /// Terminal cleanup drops the armed reservation and activates revocation.
-    pub(super) unpublished_isr_cleanup: Option<waddle_xmpp::isr::IsrRevocationReservation>,
     /// Inbound text frames pulled off the socket by the mid-batch ack
     /// drain (issue #1089) that were NOT `<a/>` acks. The batch writer
     /// may only consume acks out of order; everything else must reach
@@ -1583,7 +1562,6 @@ impl WsConnState {
             registry_owner: None,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
-            unpublished_isr_cleanup: None,
             deferred_inbound: std::collections::VecDeque::new(),
             send_window_pause_deadline: None,
             send_window_last_request_acked: 0,
@@ -1634,7 +1612,7 @@ impl WsConnState {
             return;
         };
         let bound_jid = self.phase.bound_jid().cloned();
-        self.unpublished_isr_cleanup = commit.publish(
+        commit.publish(
             state,
             &mut self.sm_state,
             bound_jid.as_ref(),

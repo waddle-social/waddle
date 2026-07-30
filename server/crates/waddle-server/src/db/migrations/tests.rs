@@ -21,7 +21,9 @@ async fn test_migration_runner_global() {
 
 #[tokio::test]
 async fn migration_runner_refuses_unknown_history_without_dropping_tracking() {
-    let db = Database::in_memory("migration-history-is-authority").await.unwrap();
+    let db = Database::in_memory("migration-history-is-authority")
+        .await
+        .unwrap();
     let conn = db.guard().await.unwrap();
     conn.execute(
         r#"
@@ -41,9 +43,12 @@ async fn migration_runner_refuses_unknown_history_without_dropping_tracking() {
     )
     .await
     .unwrap();
-    conn.execute("CREATE TABLE forward_schema_sentinel (id INTEGER PRIMARY KEY)", ())
-        .await
-        .unwrap();
+    conn.execute(
+        "CREATE TABLE forward_schema_sentinel (id INTEGER PRIMARY KEY)",
+        (),
+    )
+    .await
+    .unwrap();
     drop(conn);
 
     let error = MigrationRunner::global().run(&db).await.unwrap_err();

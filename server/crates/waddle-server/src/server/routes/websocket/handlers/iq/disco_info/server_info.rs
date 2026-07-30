@@ -51,17 +51,6 @@ pub(super) async fn handle_server_disco_info<'a>(
     let identities = vec![Identity::server(Some("Waddle"))];
     let mut features = waddle_xmpp::disco::info::server_features();
     features.push(Feature::new("jabber:iq:search"));
-    // ADR-0017 Phase 3 Slice 8 (Q8): XEP-0397 ISR is advertised ONLY when
-    // `clustering.enabled && Postgres && configured TLS transport` —
-    // `WebSocketDeps::isr_available()` is the single source of truth, so
-    // the advertised capability can never drift from what is actually
-    // wired. Corrected premise (FIX 8): before this slice ISR was NOT
-    // unadvertised — it was advertised UNCONDITIONALLY and
-    // non-conformantly (the wrong namespace, `urn:xmpp:isr:0`, with no
-    // gating at all). This slice is what first gates it correctly.
-    if state.deps.isr_available() {
-        features.push(Feature::new(waddle_xmpp::isr::ISR_NS));
-    }
     features.extend(extension_features_for_disco(state));
     // Advertise XMPP-native A/V calling only when the Jingle handler
     // is registered. `register_call_handlers` is invoked at startup

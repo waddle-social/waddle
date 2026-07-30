@@ -14,6 +14,7 @@ use crate::ownership::{
 use super::persistence_codec::{
     detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
 };
+use super::traits::SmSessionRegistry;
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -946,7 +947,9 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         storage
-            .get_session_principal(&crate::pending_delivery::SmSessionId::new(stream_id.to_string()))
+            .get_session_principal(&crate::pending_delivery::SmSessionId::new(
+                stream_id.to_string(),
+            ))
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))
     }
@@ -2013,12 +2016,14 @@ impl InMemorySmSessionRegistry {
             .get(&session.stream_id)
             .cloned();
         match principal {
-            Some(principal) => storage
-                .store_session_atomic_with_principal(&principal, persisted, unacked_rows)
-                .await,
+            Some(principal) => {
+                storage
+                    .store_session_atomic_with_principal(&principal, persisted, unacked_rows)
+                    .await
+            }
             None => storage.store_session_atomic(persisted, unacked_rows).await,
         }
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+        .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
 
     /// Durably delete the named unacked rows for a stream — exact

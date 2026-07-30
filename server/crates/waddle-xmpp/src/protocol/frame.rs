@@ -38,18 +38,6 @@ pub enum InboundFrame {
     /// SASL `<response>` continuation message (e.g. SCRAM
     /// client-final-message). The body is the base64-encoded payload.
     SaslResponse(String),
-    /// XEP-0397 (ADR-0017 Phase 3 Slice 8) Instant Stream Resumption: a
-    /// SASL2 (XEP-0388) `<authenticate/>` carrying an inline
-    /// `<inst-resume with-isr-token='true'>` wrapping a XEP-0198
-    /// `<resume/>`. This is the **only** `<authenticate/>` shape this
-    /// server accepts — general SASL2 authentication (an `<authenticate/>`
-    /// with no inline ISR resume request) is out of scope for this slice;
-    /// see the phase plan's Slice 8 deviations.
-    IsrResumeAuthenticate {
-        mechanism: String,
-        initial_response: String,
-        resume: crate::stream_management::SmResume,
-    },
     /// A typed XMPP stanza (IQ, message, or presence).
     ///
     /// Uses [`crate::Stanza`] for uniformity with the rest of
@@ -89,12 +77,6 @@ pub enum ParseError {
     /// was otherwise malformed.
     #[error("malformed SASL frame: {0}")]
     MalformedSasl(&'static str),
-    /// A SASL2 `<authenticate/>` was recognised but did not match the one
-    /// shape this server accepts (ADR-0017 Phase 3 Slice 8: an inline
-    /// `<inst-resume with-isr-token='true'>` wrapping a XEP-0198
-    /// `<resume/>`).
-    #[error("malformed or unsupported SASL2 authenticate: {0}")]
-    MalformedIsrAuthenticate(&'static str),
     /// The payload parsed as XML but `xmpp_parsers` could not convert it
     /// into the expected stanza type.
     #[error("invalid {kind} stanza: {err}")]
@@ -132,7 +114,6 @@ pub fn parse_frame(frame: &str) -> Result<InboundFrame, ParseError> {
         "close" => parse_close(trimmed),
         "auth" => parse_auth(trimmed),
         "response" => parse_response(trimmed),
-        "authenticate" => parse_isr_resume_authenticate(trimmed),
         "iq" | "message" | "presence" => parse_stanza(trimmed, root),
         other => Err(ParseError::UnknownRoot(other.to_string())),
     }
@@ -170,43 +151,6 @@ fn parse_auth(frame: &str) -> Result<InboundFrame, ParseError> {
     Ok(InboundFrame::Auth {
         mechanism,
         data: element.text().trim().to_string(),
-    })
-}
-
-/// Parse a SASL2 (XEP-0388) `<authenticate/>` nonza. Only the XEP-0397
-/// (ADR-0017 Phase 3 Slice 8) instant-resume shape is accepted: an inline
-/// `<inst-resume with-isr-token='true'>` wrapping a XEP-0198 `<resume/>`.
-/// Any other `<authenticate/>` — general SASL2 login, `with-isr-token`
-/// `false`, missing `<inst-resume/>` — is rejected as malformed/unsupported,
-/// mapped by the caller to a SASL2 `<failure/>` reply.
-fn parse_isr_resume_authenticate(frame: &str) -> Result<InboundFrame, ParseError> {
-    let element =
-        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
-    require_namespace(&element, "authenticate", crate::ns::SASL2)?;
-    let mechanism = element
-        .attr("mechanism")
-        .ok_or(ParseError::MalformedSasl("missing mechanism attribute"))?
-        .to_string();
-    let initial_response = element
-        .get_child("initial-response", crate::ns::SASL2)
-        .map(|child| child.text().trim().to_string())
-        .unwrap_or_default();
-    let inst_resume = crate::isr::InstResume::from_element(&element).ok_or(
-        ParseError::MalformedIsrAuthenticate(
-            "authenticate must carry an inline <inst-resume/> wrapping <resume/> \
-             (this server only accepts the XEP-0397 instant-resume shape)",
-        ),
-    )?;
-    if !inst_resume.with_isr_token {
-        return Err(ParseError::MalformedIsrAuthenticate(
-            "with-isr-token='false' is not supported; general SASL2 authentication is out \
-             of scope for this implementation",
-        ));
-    }
-    Ok(InboundFrame::IsrResumeAuthenticate {
-        mechanism,
-        initial_response,
-        resume: inst_resume.resume,
     })
 }
 
