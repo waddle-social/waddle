@@ -93,6 +93,7 @@ impl MessageHandler for RouteHandler {
                 HandlerOutcome::Continue(vec![OutboundEvent::RouteToConnection {
                     jid: jid.clone(),
                     stanza: Box::new(Stanza::Message(message.clone())),
+                    call_setup: None,
                 }])
             }
             // Recipient pass — write to local wire.

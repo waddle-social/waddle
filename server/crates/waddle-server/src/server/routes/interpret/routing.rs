@@ -272,7 +272,7 @@ pub(super) async fn run_fanout_recipient_pass(
                 }
                 processed = Some(boxed);
             }
-            OutboundEvent::RouteToConnection { jid, stanza } => {
+            OutboundEvent::RouteToConnection { jid, stanza, .. } => {
                 side_routes.push((jid, stanza));
             }
             other => remaining.push(other),

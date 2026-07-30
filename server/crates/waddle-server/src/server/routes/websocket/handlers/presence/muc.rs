@@ -419,6 +419,7 @@ pub(crate) async fn route_room_presence_to_occupant(
         jid::Jid::from(recipient.clone()),
         Box::new(stanza),
         0,
+        None,
     )
     .await;
     #[cfg(feature = "clustering")]

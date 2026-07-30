@@ -467,8 +467,14 @@ async fn interpret_with_depth(
             // user content, and their `Debug` impls would leak that
             // content into logs.
             // -------------------------------------------------------
-            OutboundEvent::RouteToConnection { jid, stanza } => {
-                for stanza in route_to_connection(deps, jid, stanza, recursion_depth).await {
+            OutboundEvent::RouteToConnection {
+                jid,
+                stanza,
+                call_setup,
+            } => {
+                for stanza in
+                    route_to_connection(deps, jid, stanza, recursion_depth, call_setup).await
+                {
                     match stanza.to_element_string() {
                         Ok(xml) => outcome.frames.push(xml),
                         Err(err) => {

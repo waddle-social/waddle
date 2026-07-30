@@ -3988,6 +3988,7 @@ async fn route_local_bare_jid_with_timeout(
             jid::Jid::from(target.clone()),
             Box::new(stanza.clone()),
             0,
+            None,
         ),
     )
     .await

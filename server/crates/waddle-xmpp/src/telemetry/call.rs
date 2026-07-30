@@ -48,13 +48,13 @@ fn add_call_setup_attempted(count: u64) {
 /// (a join token was issued and the negotiation stanza was forwarded
 /// or accepted).
 ///
-/// Precisely: `ok` means the server authorized the attempt and handed
-/// the invite to the router. A 1:1 invite whose peer then turns out to
-/// be unroutable (offline/stale full JID) still counts `ok` — the
-/// undeliverable IQ error is interpreted after the sans-I/O boundary,
-/// where this tracker is out of scope. Client-side `chat.call.lifecycle`
-/// telemetry captures that failure mode; folding the route disposition
-/// into this counter is tracked as a follow-up (#1452 review).
+/// Precisely: `ok` means the server authorized the attempt and the
+/// invite reached the peer's routing layer with a usable destination.
+/// For the Muji path that is token mint + registration; for the 1:1
+/// path the handler defers to the routing interpreter via
+/// [`PendingCallSetupRoute`], so an invite whose full JID turns out to
+/// be unroutable counts `failed{reason=peer_unavailable}` instead of
+/// `ok` (#1488).
 pub fn increment_call_setup_ok() {
     add_call_setup_ok(1);
 }
@@ -93,6 +93,38 @@ pub(super) fn register_call_setup_counters() {
     add_call_setup_ok(0);
     for reason in CallSetupFailureReason::ALL {
         add_call_setup_failed(0, reason);
+    }
+}
+
+/// An open 1:1 call-setup attempt handed off to the routing layer
+/// (#1488).
+///
+/// The Jingle handler counts `attempted` when it opens the attempt,
+/// but for a routed 1:1 `session-initiate` the outcome is only known
+/// after the sans-I/O boundary, when the interpreter has resolved the
+/// addressed full JID against live and detached resources. The handler
+/// therefore attaches this ticket to the routing effect instead of
+/// counting `ok` at emit time, and the interpreter MUST close it
+/// exactly once from the route disposition: [`Self::delivered`] when
+/// the invite reached a live resource, a detached XEP-0198 session, or
+/// an ambiguous-but-possibly-committed cluster relay;
+/// [`Self::undeliverable`] when no usable destination existed and the
+/// caller got the undeliverable bounce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingCallSetupRoute;
+
+impl PendingCallSetupRoute {
+    /// The routed invite reached a usable destination: close the
+    /// attempt as `ok`.
+    pub fn delivered(self) {
+        increment_call_setup_ok();
+    }
+
+    /// No live or detached resource could take the invite (or the
+    /// delivery was dropped): close the attempt as
+    /// `failed{reason=peer_unavailable}`.
+    pub fn undeliverable(self) {
+        increment_call_setup_failed(CallSetupFailureReason::PeerUnavailable);
     }
 }
 

@@ -56,6 +56,7 @@ async fn route_to_connection_offline_full_jid_call_iq_returns_service_unavailabl
             &alice,
             &bob,
         )))),
+        call_setup: None,
     }];
 
     let outcome = interpret(
@@ -169,6 +170,7 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     let events = vec![OutboundEvent::RouteToConnection {
         jid: jid::Jid::from(bob.clone()),
         stanza: Box::new(Stanza::Iq(Box::new(initiate))),
+        call_setup: None,
     }];
 
     let mut deps = Deps::registry_with_user_registry(&registry, &user_registry);
@@ -242,6 +244,7 @@ async fn route_to_connection_offline_full_jid_session_terminate_is_acked() {
     let events = vec![OutboundEvent::RouteToConnection {
         jid: jid::Jid::from(bob.clone()),
         stanza: Box::new(Stanza::Iq(Box::new(terminate))),
+        call_setup: None,
     }];
 
     let outcome = interpret(
@@ -304,10 +307,12 @@ async fn route_to_connection_offline_full_jid_call_iq_result_error_do_not_bounce
         OutboundEvent::RouteToConnection {
             jid: jid::Jid::from(bob.clone()),
             stanza: Box::new(Stanza::Iq(Box::new(result_iq))),
+            call_setup: None,
         },
         OutboundEvent::RouteToConnection {
             jid: jid::Jid::from(bob),
             stanza: Box::new(Stanza::Iq(Box::new(error_iq))),
+            call_setup: None,
         },
     ];
 
@@ -321,5 +326,121 @@ async fn route_to_connection_offline_full_jid_call_iq_result_error_do_not_bounce
         outcome.frames.is_empty(),
         "IQ result/error stanzas must not receive synthesized service-unavailable bounces: {:?}",
         outcome.frames
+    );
+}
+
+// -----------------------------------------------------------------
+// #1488 — route-disposition call-setup accounting. The Jingle handler
+// counts `attempted` only and attaches a `PendingCallSetupRoute`
+// ticket to the routing effect; the interpreter closes the attempt
+// from the actual delivery outcome. Asserted through the in-memory
+// reader seam, never instrument internals.
+// -----------------------------------------------------------------
+
+fn session_initiate_iq_for_route_test(id: &str, from: &jid::FullJid, to: &jid::FullJid) -> Iq {
+    Iq::Set {
+        from: Some(jid::Jid::from(from.clone())),
+        to: Some(jid::Jid::from(to.clone())),
+        id: id.to_string(),
+        payload: jingle_payload_for_route_test("session-initiate", "disposition-sid"),
+    }
+}
+
+#[tokio::test]
+async fn unroutable_session_initiate_counts_peer_unavailable_not_ok() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+    // Bob has no live channel and no detached session: confirmed
+    // offline, so the caller gets the undeliverable bounce.
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: jid::Jid::from(bob.clone()),
+        stanza: Box::new(Stanza::Iq(Box::new(session_initiate_iq_for_route_test(
+            "call-unroutable-1",
+            &alice,
+            &bob,
+        )))),
+        call_setup: Some(PendingCallSetupRoute),
+    }];
+
+    let outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "unroutable invite must still bounce to the caller: {:?}",
+        outcome.frames
+    );
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.call.setup.failed",
+            &[("reason", "peer_unavailable")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        metrics
+            .counter_sum("waddle.call.setup.ok", &[])
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[tokio::test]
+async fn delivered_session_initiate_counts_ok() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    register_into_both_tiers(&registry, &user_registry, &bob, tx).await;
+
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: jid::Jid::from(bob.clone()),
+        stanza: Box::new(Stanza::Iq(Box::new(session_initiate_iq_for_route_test(
+            "call-delivered-1",
+            &alice,
+            &bob,
+        )))),
+        call_setup: Some(PendingCallSetupRoute),
+    }];
+
+    let outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert!(
+        outcome.frames.is_empty(),
+        "a delivered invite produces no caller-facing bounce: {:?}",
+        outcome.frames
+    );
+    assert!(
+        rx.try_recv().is_ok(),
+        "the invite must have landed on bob's live channel"
+    );
+    assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+    assert_eq!(
+        metrics
+            .counter_sum(
+                "waddle.call.setup.failed",
+                &[("reason", "peer_unavailable")]
+            )
+            .unwrap_or(0),
+        0
     );
 }

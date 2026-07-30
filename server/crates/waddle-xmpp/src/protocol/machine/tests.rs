@@ -753,7 +753,7 @@ fn rfc6120_to_less_message_routes_to_own_bare_jid() {
     let route = events
         .iter()
         .find_map(|event| match event {
-            OutboundEvent::RouteToConnection { jid, stanza } => Some((jid, stanza)),
+            OutboundEvent::RouteToConnection { jid, stanza, .. } => Some((jid, stanza)),
             _ => None,
         })
         .expect("to-less message must route, not be discarded");

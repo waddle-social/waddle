@@ -213,7 +213,7 @@ fn xep0184_client_generated_ack_routes_to_the_requester_verbatim() {
     let routed: Vec<&Message> = events
         .iter()
         .filter_map(|event| match event {
-            OutboundEvent::RouteToConnection { jid, stanza } => match stanza.as_ref() {
+            OutboundEvent::RouteToConnection { jid, stanza, .. } => match stanza.as_ref() {
                 Stanza::Message(message) if has_receipt_received(message) => {
                     assert_eq!(jid.to_string(), "alice@example.com/web");
                     Some(message)

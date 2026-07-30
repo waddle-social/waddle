@@ -790,10 +790,12 @@ fn groupchat_retry_batch(
         OutboundEvent::RouteToConnection {
             jid: jid::Jid::from(sender.clone()),
             stanza: Box::new(Stanza::Message(sender_reflection)),
+            call_setup: None,
         },
         OutboundEvent::RouteToConnection {
             jid: jid::Jid::from(other.clone()),
             stanza: Box::new(Stanza::Message(other_reflection)),
+            call_setup: None,
         },
         OutboundEvent::ProjectGroupchatInbox {
             owner: sender.to_bare(),
@@ -926,6 +928,7 @@ async fn groupchat_origin_retry_suppresses_non_sender_fanout_and_rewrites_sender
         OutboundEvent::RouteToConnection {
             jid: jid::Jid::from(sender_second),
             stanza: Box::new(Stanza::Message(second_reflection)),
+            call_setup: None,
         },
     );
 
@@ -1166,10 +1169,12 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_deduplicati
             OutboundEvent::RouteToConnection {
                 jid: jid::Jid::from(other),
                 stanza: Box::new(Stanza::Message(other_reflection)),
+                call_setup: None,
             },
             OutboundEvent::RouteToConnection {
                 jid: jid::Jid::from(sender),
                 stanza: Box::new(Stanza::Message(sender_reflection)),
+                call_setup: None,
             },
         ],
         &deps,
@@ -1299,10 +1304,12 @@ async fn tombstoned_retraction_retry_still_heals_target_tombstone_silently() {
             OutboundEvent::RouteToConnection {
                 jid: jid::Jid::from(other),
                 stanza: Box::new(Stanza::Message(other_reflection)),
+                call_setup: None,
             },
             OutboundEvent::RouteToConnection {
                 jid: jid::Jid::from(sender),
                 stanza: Box::new(Stanza::Message(sender_reflection)),
+                call_setup: None,
             },
         ],
         &deps,
@@ -1463,6 +1470,7 @@ async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
         OutboundEvent::RouteToConnection {
             jid: jid::Jid::from(recipient),
             stanza: Box::new(Stanza::Message(recipient_reflection)),
+            call_setup: None,
         },
         OutboundEvent::CloseTransport,
     ]);
@@ -2657,6 +2665,7 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
     let events = vec![OutboundEvent::RouteToConnection {
         jid: jid::Jid::from(bob.clone()),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _outcome = interpret(
         events,
@@ -2705,6 +2714,7 @@ async fn route_to_connection_bare_jid_selects_highest_priority_available_resourc
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _outcome = interpret(
         events,
@@ -2760,6 +2770,7 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _outcome = interpret(
         events,
@@ -2796,6 +2807,7 @@ async fn route_to_connection_bare_jid_ignores_resource_absent_from_actor() {
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _outcome = interpret(
         events,
@@ -2860,6 +2872,7 @@ async fn route_to_connection_bare_jid_sole_stale_extra_self_heals_via_dropped_cl
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -2952,6 +2965,7 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
             "bob@example.com",
             "first",
         ))),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -2996,6 +3010,7 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
             "bob@example.com",
             "second",
         ))),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -3032,6 +3047,7 @@ async fn route_to_connection_bare_jid_degrades_to_offline_on_dead_user_registry(
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _outcome = interpret(
         events,
@@ -3596,6 +3612,7 @@ async fn offline_recipient_pass_persists_archive_for_bare_jid_target() {
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -3634,6 +3651,7 @@ async fn offline_recipient_pass_persists_inbox_for_bare_jid_target() {
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -3682,6 +3700,7 @@ async fn route_to_connection_at_max_recursion_depth_drops_without_persistence() 
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let outcome = interpret_with_depth(events, &deps, MAX_RECIPIENT_PASS_DEPTH).await;
 
@@ -3731,6 +3750,7 @@ async fn offline_recipient_pass_drops_send_stanza_no_wire() {
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let outcome = interpret(events, &deps).await;
 
@@ -3769,6 +3789,7 @@ async fn offline_recipient_pass_blocklist_loaded_from_storage_blocks_filtered_me
     let events = vec![OutboundEvent::RouteToConnection {
         jid: jid::Jid::from(bob.clone()),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -3829,6 +3850,7 @@ async fn offline_recipient_pass_blocklist_storage_error_skips_recipient_persiste
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -4012,6 +4034,7 @@ async fn offline_recipient_pass_skipped_for_remote_domain() {
             .parse::<jid::Jid>()
             .expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -5379,6 +5402,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
+        call_setup: None,
     }];
     let _ = interpret(events, &deps).await;
 
@@ -5448,6 +5472,7 @@ async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(dm())),
+            call_setup: None,
         }],
         &deps,
     )
@@ -5461,6 +5486,7 @@ async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(dm())),
+            call_setup: None,
         }],
         &deps,
     )
@@ -5543,6 +5569,7 @@ async fn route_full_jid_dm_offline_resource_falls_back_to_other_live_resource() 
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com/gone".parse::<jid::Jid>().expect("full"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -5601,6 +5628,7 @@ async fn route_full_jid_dm_no_resources_stores_offline() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com/gone".parse::<jid::Jid>().expect("full"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -5687,6 +5715,7 @@ async fn route_full_jid_dm_to_detached_resource_runs_recipient_pipeline() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com/phone".parse::<jid::Jid>().expect("full"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -5768,6 +5797,7 @@ async fn route_bare_jid_message_to_nonexistent_local_user_bounces() {
         vec![OutboundEvent::RouteToConnection {
             jid: "typo@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -5854,6 +5884,7 @@ async fn route_bare_jid_message_to_existing_oidc_user_persists_offline() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -5905,6 +5936,7 @@ async fn route_to_connection_bare_jid_skips_negative_priority_resources() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &Deps::registry_with_user_registry(&registry, &user_registry),
     )
@@ -5958,6 +5990,7 @@ async fn route_to_connection_bare_jid_all_negative_priority_goes_offline() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -6037,6 +6070,7 @@ async fn route_full_jid_dm_to_detached_drops_when_blocklist_load_fails() {
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com/phone".parse::<jid::Jid>().expect("full"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -6086,6 +6120,7 @@ async fn route_bare_jid_dm_to_detached_only_recipient_runs_recipient_pipeline() 
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )
@@ -6165,6 +6200,7 @@ async fn route_bare_jid_dm_from_blocked_sender_to_detached_only_recipient_is_fil
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
         }],
         &deps,
     )

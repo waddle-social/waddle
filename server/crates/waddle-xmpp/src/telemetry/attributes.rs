@@ -543,12 +543,21 @@ pub enum CallSetupFailureReason {
     /// outages out of the membership bucket is what stops a clustering
     /// incident from reading as a permissions problem.
     OwnerUnreachable,
+    /// The 1:1 invite was authorized and forwarded, but the routing
+    /// layer could not hand it to any live or detached resource of
+    /// the addressed full JID — confirmed-offline peer, or the
+    /// delivery was dropped (closed channel / replay-buffer failure)
+    /// — and the caller received the undeliverable bounce instead of
+    /// a peer answer (#1488). Recorded by the routing interpreter,
+    /// not the Jingle handler: the disposition is only known after
+    /// the sans-I/O boundary.
+    PeerUnavailable,
 }
 
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -559,6 +568,7 @@ impl CallSetupFailureReason {
         Self::TokenMintFailed,
         Self::MembershipCheckFailed,
         Self::OwnerUnreachable,
+        Self::PeerUnavailable,
     ];
 }
 
@@ -579,6 +589,7 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::TokenMintFailed => "token_mint_failed",
             Self::MembershipCheckFailed => "membership_check_failed",
             Self::OwnerUnreachable => "owner_unreachable",
+            Self::PeerUnavailable => "peer_unavailable",
         }
     }
 }
