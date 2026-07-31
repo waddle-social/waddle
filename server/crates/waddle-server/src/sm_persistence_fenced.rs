@@ -712,7 +712,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
         let mut rows = self
             .guard_query(
-                "SELECT bare_jid, auth_context_id, auth_context_version, principal_auth_epoch \
+                "SELECT bare_jid, CAST(auth_context_id AS TEXT), auth_context_version, principal_auth_epoch \
                  FROM sm_session_principals WHERE stream_id = ?",
                 crate::db_params![stream_id.as_str().to_string()],
             )
@@ -732,8 +732,12 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 SmPersistenceError::Other(format!("invalid SM principal JID: {error}"))
             })?;
         let context_id = row
-            .get::<uuid::Uuid>(1)
-            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            .get::<String>(1)
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+            .parse::<uuid::Uuid>()
+            .map_err(|error| {
+                SmPersistenceError::Other(format!("invalid SM auth context id: {error}"))
+            })?;
         let context_version = u64::try_from(
             row.get::<i64>(2)
                 .map_err(|error| SmPersistenceError::Other(error.to_string()))?,

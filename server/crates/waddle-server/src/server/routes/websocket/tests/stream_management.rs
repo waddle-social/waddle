@@ -564,10 +564,9 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 
     let registry = Arc::new(
-        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(Arc::new(
-                waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
-            )),
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_persistence(
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new()),
+        ),
     );
     let state = create_test_websocket_state_with_sm_registry(registry).await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -650,13 +649,12 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
 
 #[tokio::test]
 async fn sm_resume_matching_authenticated_identity_preserves_current_session_without_sidecar() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
 
     let registry = Arc::new(
-        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(Arc::new(
-                waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
-            )),
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_persistence(
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new()),
+        ),
     );
     let state = create_test_websocket_state_with_sm_registry(registry).await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -754,7 +752,6 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
         "the production IQ dispatcher must retain the resolved principal after resume"
     );
 
-    let room_jid: BareJid = "resume-private@muc.example.com".parse().expect("room jid");
     crate::server::xmpp_state::upsert_xmpp_channel(
         state.deps.app_state.db_pool.global_actor().clone(),
         &crate::server::xmpp_state::XmppChannelUpsert {
@@ -808,13 +805,14 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
 
 #[tokio::test]
 async fn sm_resume_revoked_between_principal_checks_fails_closed_without_publishing() {
-    use waddle_xmpp::stream_management::{DetachedSession, DetachedUnackedStanza, SmSessionRegistry};
+    use waddle_xmpp::stream_management::{
+        DetachedSession, DetachedUnackedStanza, SmSessionRegistry,
+    };
 
     let registry = Arc::new(
-        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(Arc::new(
-                waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
-            )),
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_persistence(
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new()),
+        ),
     );
     let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -915,8 +913,14 @@ async fn sm_resume_revoked_between_principal_checks_fails_closed_without_publish
     assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
     assert!(!conn.phase.is_ready());
     assert!(!conn.phase.is_resumed());
-    assert!(conn.authenticated_session.is_none(), "no Session fallback is installed");
-    assert!(conn.registry_owner.is_none(), "resume never registered a connection");
+    assert!(
+        conn.authenticated_session.is_none(),
+        "no Session fallback is installed"
+    );
+    assert!(
+        conn.registry_owner.is_none(),
+        "resume never registered a connection"
+    );
     assert!(!state
         .deps
         .protocol
@@ -4029,7 +4033,6 @@ mod fix3_shutdown_race {
             room_local_claims: None,
             user_local_claims: None,
             muc_durable_store: None,
-            isr_token_store: None,
             node_lease: None,
             lease_ttl: None,
             pod_template_hash: None,
@@ -4361,7 +4364,6 @@ mod fix_a_post_cas_shutdown {
             room_local_claims: None,
             user_local_claims: None,
             muc_durable_store: None,
-            isr_token_store: None,
             node_lease: None,
             lease_ttl: None,
             pod_template_hash: None,

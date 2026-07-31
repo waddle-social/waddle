@@ -4981,7 +4981,6 @@ mod orphan_reaper_sweep_tests {
             room_local_claims: None,
             user_local_claims: None,
             muc_durable_store: Some(Arc::clone(&muc_store_dyn)),
-            isr_token_store: None,
             node_lease: Some(sweeper_node_lease),
             lease_ttl: Some(lease_ttl),
             pod_template_hash: None,

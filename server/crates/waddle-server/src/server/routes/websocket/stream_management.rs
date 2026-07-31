@@ -509,7 +509,7 @@ async fn handle_sm_enable(
     } else {
         None
     };
-    let mut claim_guard = claim_publication.map(|publication| {
+    let claim_guard = claim_publication.map(|publication| {
         SmEnableClaimGuard::new(
             state.deps.protocol.sm_session_registry.clone(),
             waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
