@@ -4844,6 +4844,15 @@ impl waddle_sfu::SfuService for RecordingSfu {
 
     fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
 
+    fn register_call_participant_observed(
+        &self,
+        _: &waddle_sfu::CallId,
+        _: &waddle_sfu::Identity,
+        _: &waddle_sfu::ObservedCallSids,
+    ) -> waddle_sfu::SidObservationDisposition {
+        waddle_sfu::SidObservationDisposition::Applied
+    }
+
     fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
         false
     }

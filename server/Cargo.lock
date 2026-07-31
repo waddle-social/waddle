@@ -7741,6 +7741,7 @@ dependencies = [
  "base64",
  "chrono",
  "dashmap",
+ "futures",
  "hmac 0.13.0",
  "jid",
  "jsonwebtoken",

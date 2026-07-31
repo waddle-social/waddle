@@ -120,3 +120,70 @@ pub fn increment_call_teardown_stale_dropped() {
         1,
     );
 }
+
+/// Record the wall-clock duration of one LiveKit reconciliation pass.
+pub fn record_reconcile_pass_duration(seconds: f64) {
+    crate::histogram_record!(
+        "waddle.call.reconcile.pass_duration",
+        "s",
+        "Wall-clock duration of one LiveKit call reconciliation pass.",
+        buckets: crate::telemetry::SECOND_SCALE_BUCKETS,
+        seconds,
+    );
+}
+
+/// Add the number of rooms whose occupancy was examined in a pass.
+pub fn add_reconcile_rooms_examined(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.rooms_examined",
+        "1",
+        "LiveKit rooms examined by call reconciliation.",
+        count,
+    );
+}
+
+/// Add the number of LiveKit rooms adopted into the local registry.
+pub fn add_reconcile_rooms_adopted(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.rooms_adopted",
+        "1",
+        "LiveKit rooms adopted into the local call registry.",
+        count,
+    );
+}
+
+/// Add the number of rooms from which at least one ghost was swept.
+pub fn add_reconcile_rooms_swept(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.rooms_swept",
+        "1",
+        "LiveKit rooms with registry ghosts swept by reconciliation.",
+        count,
+    );
+}
+
+/// Add failed per-room occupancy probes.
+///
+/// This is alert-worthy operational evidence, but unlike the #1436
+/// reliability-rate families it must not be startup zero-registered:
+/// absence means no failure has ever ticked in this process.
+pub fn add_reconcile_occupancy_failures(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.occupancy_failures",
+        "1",
+        "LiveKit room occupancy probes failed during call reconciliation.",
+        count,
+    );
+}

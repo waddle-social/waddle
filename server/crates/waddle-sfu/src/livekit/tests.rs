@@ -8,6 +8,7 @@ use super::*;
 use crate::config::{ApiKey, ApiSecret, TurnSharedSecret};
 use chrono::Duration;
 use jid::FullJid;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use url::Url;
 
 fn fixture_config() -> SfuConfig {
@@ -54,6 +55,37 @@ fn observed_sids(room_sid: Option<&str>, participant_sid: Option<&str>) -> Obser
         room_sid.map(fixture_room_sid),
         participant_sid.map(fixture_participant_sid),
     )
+}
+
+#[test]
+fn observed_join_registers_after_restart_and_rejects_conflicting_room_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("restart@muc.waddle.social").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = observed_sids(Some("RM_current"), Some("PA_current"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &current),
+        SidObservationDisposition::Applied
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(stored_room_sid(&sfu, &call), current.room_sid);
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        current.participant_sid
+    );
+
+    let bob = fixture_identity("bob");
+    let stale = observed_sids(Some("RM_old"), Some("PA_old"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &bob, &stale),
+        SidObservationDisposition::StaleSid
+    );
+    assert!(
+        !sfu.has_call_participant(&call, &bob),
+        "a join from an old room incarnation must not be registered"
+    );
+    assert_eq!(sfu.participant_count(&call), 1);
 }
 
 fn stored_generation(sfu: &LiveKitSfu, call_id: &CallId) -> Option<CallGeneration> {
@@ -415,12 +447,15 @@ fn unknown_identity_teardown_does_not_teach_room_sid() {
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::admin::LiveKitAdmin;
 
 #[derive(Default)]
 struct RecordingAdmin {
+    rooms: Mutex<Vec<crate::admin::ListedRoom>>,
+    list_rooms_errors: Mutex<bool>,
     remove_calls: Mutex<Vec<(CallId, Identity)>>,
     delete_calls: Mutex<Vec<CallId>>,
     update_calls: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
@@ -446,9 +481,32 @@ struct RecordingAdmin {
     list_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// Signalled once a parked `room_occupancy` call has been entered.
     list_entered: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    occupancy_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    occupancy_calls: AtomicUsize,
+    occupancy_in_flight: AtomicUsize,
+    max_occupancy_in_flight: AtomicUsize,
 }
 
 impl RecordingAdmin {
+    fn set_rooms(&self, rooms: Vec<crate::admin::ListedRoom>) {
+        *self.rooms.lock().expect("recording lock") = rooms;
+    }
+
+    fn fail_list_rooms(&self) {
+        *self.list_rooms_errors.lock().expect("recording lock") = true;
+    }
+
+    fn hold_all_occupancy(&self) {
+        *self.occupancy_gate.lock().expect("recording lock") =
+            Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    }
+
+    fn release_occupancy(&self, permits: usize) {
+        if let Some(gate) = self.occupancy_gate.lock().expect("recording lock").as_ref() {
+            gate.add_permits(permits);
+        }
+    }
+
     fn remove_snapshot(&self) -> Vec<(CallId, Identity)> {
         self.remove_calls.lock().expect("recording lock").clone()
     }
@@ -477,6 +535,25 @@ impl RecordingAdmin {
             .lock()
             .expect("recording lock")
             .insert(call.clone(), count);
+    }
+
+    fn max_occupancy_in_flight(&self) -> usize {
+        self.max_occupancy_in_flight.load(Ordering::SeqCst)
+    }
+
+    async fn await_occupancy_calls(&self, expected: usize, within: StdDuration) {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let observed = self.occupancy_calls.load(Ordering::Acquire);
+            if observed >= expected || tokio::time::Instant::now() >= deadline {
+                assert!(
+                    observed >= expected,
+                    "expected occupancy probes to reach {expected} before timeout, saw {observed}"
+                );
+                return;
+            }
+            tokio::time::sleep(StdDuration::from_millis(1)).await;
+        }
     }
 
     /// Park the next `room_occupancy` call until [`Self::release_list`].
@@ -533,6 +610,20 @@ impl RecordingAdmin {
 }
 
 impl LiveKitAdmin for RecordingAdmin {
+    fn list_rooms(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<crate::admin::ListedRoom>, SfuError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            if *self.list_rooms_errors.lock().expect("recording lock") {
+                return Err(SfuError::InvalidCallId(
+                    "simulated ListRooms failure".into(),
+                ));
+            }
+            Ok(self.rooms.lock().expect("recording lock").clone())
+        })
+    }
+
     fn remove_participant<'a>(
         &'a self,
         room: &'a CallId,
@@ -594,7 +685,20 @@ impl LiveKitAdmin for RecordingAdmin {
     {
         let room = room.clone();
         Box::pin(async move {
+            self.occupancy_calls.fetch_add(1, Ordering::SeqCst);
+            let in_flight = self.occupancy_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_occupancy_in_flight
+                .fetch_max(in_flight, Ordering::SeqCst);
+            let occupancy_gate = self.occupancy_gate.lock().expect("recording lock").clone();
+            if let Some(gate) = occupancy_gate {
+                let permit = gate
+                    .acquire_owned()
+                    .await
+                    .expect("test occupancy semaphore stays open");
+                permit.forget();
+            }
             if *self.list_errors.lock().expect("recording lock") {
+                self.occupancy_in_flight.fetch_sub(1, Ordering::SeqCst);
                 return Err(SfuError::InvalidCallId("simulated list failure".into()));
             }
             let gate = self.list_gate.lock().expect("recording lock").clone();
@@ -605,7 +709,7 @@ impl LiveKitAdmin for RecordingAdmin {
                 }
                 waiter.await;
             }
-            Ok(crate::admin::RoomOccupancy {
+            let occupancy = crate::admin::RoomOccupancy {
                 waddle: self
                     .live
                     .lock()
@@ -620,7 +724,9 @@ impl LiveKitAdmin for RecordingAdmin {
                     .get(&room)
                     .copied()
                     .unwrap_or(0),
-            })
+            };
+            self.occupancy_in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(occupancy)
         })
     }
 }
@@ -1403,7 +1509,7 @@ async fn reconcile_sweeps_ghost_absent_from_livekit() {
 
     let first_pass = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert!(
-        first_pass.is_empty(),
+        first_pass.swept.is_empty(),
         "one absent observation must not sweep (#1127): {first_pass:?}"
     );
     assert!(
@@ -1413,7 +1519,7 @@ async fn reconcile_sweeps_ghost_absent_from_livekit() {
 
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
-    assert_eq!(swept, vec![(call.clone(), bob.clone())]);
+    assert_eq!(swept.swept, vec![(call.clone(), bob.clone())]);
     assert!(sfu.has_call_participant(&call, &alice), "Alice must remain");
     assert!(
         !sfu.has_call_participant(&call, &bob),
@@ -1444,7 +1550,7 @@ async fn reconcile_respects_registration_grace_window() {
         .await;
 
     assert!(
-        swept.is_empty(),
+        swept.swept.is_empty(),
         "a participant inside the grace window must not be swept"
     );
     assert_eq!(sfu.participant_count(&call), 1);
@@ -1461,7 +1567,10 @@ async fn reconcile_keeps_genuinely_connected_participants() {
 
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
-    assert!(swept.is_empty(), "connected participant must not be swept");
+    assert!(
+        swept.swept.is_empty(),
+        "connected participant must not be swept"
+    );
     assert!(sfu.has_call_participant(&call, &alice));
 }
 
@@ -1479,7 +1588,7 @@ async fn reconcile_skips_calls_it_cannot_confirm() {
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
     assert!(
-        swept.is_empty(),
+        swept.swept.is_empty(),
         "a call whose participant list could not be fetched must not be swept"
     );
     assert_eq!(sfu.participant_count(&call), 1);
@@ -1501,7 +1610,10 @@ async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
 
     // Pass 1: restart — LiveKit knows no rooms (both list empty).
     let pass1 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert!(pass1.is_empty(), "restart pass must not sweep: {pass1:?}");
+    assert!(
+        pass1.swept.is_empty(),
+        "restart pass must not sweep: {pass1:?}"
+    );
     assert_eq!(sfu.participant_count(&call_a), 1);
     assert_eq!(sfu.participant_count(&call_b), 1);
 
@@ -1509,14 +1621,17 @@ async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
     admin.set_live(&call_a, vec![alice.clone()]);
     admin.set_live(&call_b, vec![bob.clone()]);
     let pass2 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert!(pass2.is_empty(), "reconnected clients must not be swept");
+    assert!(
+        pass2.swept.is_empty(),
+        "reconnected clients must not be swept"
+    );
 
     // Pass 3: streaks were reset by the connected observation, so
     // a later single absent blip still does not sweep.
     admin.set_live(&call_a, vec![]);
     let pass3 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert!(
-        pass3.is_empty(),
+        pass3.swept.is_empty(),
         "streak must have been reset by the connected pass: {pass3:?}"
     );
     assert!(sfu.has_call_participant(&call_a, &alice));
@@ -1538,24 +1653,26 @@ async fn reconcile_failed_pass_resets_absence_streak() {
     assert!(sfu
         .reconcile_active_calls(ChronoDuration::zero())
         .await
+        .swept
         .is_empty());
     // Failed pass → streak reset.
     admin.set_list_failing(true);
     assert!(sfu
         .reconcile_active_calls(ChronoDuration::zero())
         .await
+        .swept
         .is_empty());
     admin.set_list_failing(false);
     // Absent pass again → streak restarts at 1, still no sweep.
     let third = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert!(
-        third.is_empty(),
+        third.swept.is_empty(),
         "failed pass must reset the streak: {third:?}"
     );
     assert_eq!(sfu.participant_count(&call), 1);
     // Second CONSECUTIVE absent pass → swept.
     let fourth = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert_eq!(fourth, vec![(call.clone(), alice)]);
+    assert_eq!(fourth.swept, vec![(call.clone(), alice)]);
     assert_eq!(sfu.participant_count(&call), 0);
 }
 
@@ -1574,6 +1691,7 @@ async fn reconcile_streak_resets_on_reregistration() {
     assert!(sfu
         .reconcile_active_calls(ChronoDuration::zero())
         .await
+        .swept
         .is_empty());
     // Rejoin between passes.
     sfu.register_call_participant(&call, &alice);
@@ -1581,10 +1699,108 @@ async fn reconcile_streak_resets_on_reregistration() {
     assert!(
         sfu.reconcile_active_calls(ChronoDuration::zero())
             .await
+            .swept
             .is_empty(),
         "re-registration must reset the absence streak"
     );
     assert_eq!(sfu.participant_count(&call), 1);
+}
+
+#[tokio::test]
+async fn reconcile_discovers_listed_livekit_rooms_and_sweeps_disconnected_after_grace() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("recovered@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: call.as_str().to_owned(),
+        sid: Some(RoomSid::new("RM_recovered").expect("room sid")),
+        num_participants: None,
+    }]);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let adopted = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(adopted.rooms_examined, 1);
+    assert_eq!(adopted.rooms_adopted, 1);
+    assert!(adopted.swept.is_empty());
+    assert_eq!(adopted.rooms_swept, 0);
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(
+        stored_room_sid(&sfu, &call),
+        Some(RoomSid::new("RM_recovered").expect("room sid"))
+    );
+
+    admin.set_live(&call, vec![]);
+    let first_absent = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(first_absent.rooms_swept, 0);
+    assert!(first_absent.swept.is_empty());
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    let second_absent = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(second_absent.rooms_swept, 1);
+    assert_eq!(second_absent.swept, vec![(call.clone(), alice.clone())]);
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn reconcile_list_rooms_error_does_not_skip_registry_pass() {
+    let admin = Arc::new(RecordingAdmin::default());
+    admin.fail_list_rooms();
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: "listed@muc.waddle.social".to_owned(),
+        sid: None,
+        num_participants: None,
+    }]);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("recovery@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let first = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(first.rooms_examined, 1);
+    assert_eq!(first.rooms_adopted, 0);
+    assert!(first.swept.is_empty());
+    let second = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(second.swept, vec![(call.clone(), alice.clone())]);
+    assert_eq!(admin.occupancy_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(admin.delete_snapshot().len(), 0);
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn reconcile_limits_concurrent_room_occupancy_probes() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    admin.hold_all_occupancy();
+
+    let room_count = RECONCILE_CONCURRENCY + 4;
+    for i in 0..room_count {
+        let call = CallId::new(format!("bulk-{i}.muc.waddle.social")).unwrap();
+        sfu.register_call_participant(&call, &fixture_identity("alice"));
+        admin.set_live(&call, vec![]);
+    }
+
+    let reconcile =
+        tokio::spawn(async move { sfu.reconcile_active_calls(ChronoDuration::zero()).await });
+
+    admin
+        .await_occupancy_calls(RECONCILE_CONCURRENCY, StdDuration::from_secs(1))
+        .await;
+    admin.release_occupancy(room_count);
+
+    let summary = reconcile
+        .await
+        .expect("reconcile task must finish once occupancy gate is released");
+
+    assert_eq!(summary.rooms_examined, room_count as u64);
+    assert_eq!(
+        admin.occupancy_calls.load(Ordering::SeqCst),
+        room_count,
+        "every room in the backlog must reach room_occupancy"
+    );
+    assert!(admin.max_occupancy_in_flight() <= RECONCILE_CONCURRENCY);
+    assert_eq!(admin.max_occupancy_in_flight(), RECONCILE_CONCURRENCY);
 }
 
 // -------- #1129 teardown/join race --------

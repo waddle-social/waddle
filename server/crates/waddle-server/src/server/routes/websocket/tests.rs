@@ -218,6 +218,13 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
 /// the production code paths under test only touch the teardown
 /// surfaces.
 pub(crate) struct RecordingSfu {
+    registered_calls: std::sync::Mutex<
+        Vec<(
+            waddle_sfu::CallId,
+            waddle_sfu::Identity,
+            waddle_sfu::ObservedCallSids,
+        )>,
+    >,
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
     note_calls: std::sync::Mutex<
         Vec<(
@@ -247,6 +254,7 @@ pub(crate) struct RecordingSfu {
 impl Default for RecordingSfu {
     fn default() -> Self {
         Self {
+            registered_calls: std::sync::Mutex::new(Vec::new()),
             calls: std::sync::Mutex::new(Vec::new()),
             note_calls: std::sync::Mutex::new(Vec::new()),
             note_disposition: std::sync::Mutex::new(None),
@@ -258,6 +266,19 @@ impl Default for RecordingSfu {
 }
 
 impl RecordingSfu {
+    pub(crate) fn registered_with_sids_snapshot(
+        &self,
+    ) -> Vec<(
+        waddle_sfu::CallId,
+        waddle_sfu::Identity,
+        waddle_sfu::ObservedCallSids,
+    )> {
+        self.registered_calls
+            .lock()
+            .expect("recording lock")
+            .clone()
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
         self.calls.lock().expect("recording lock").clone()
     }
@@ -328,6 +349,26 @@ impl waddle_sfu::SfuService for RecordingSfu {
     }
 
     fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
+
+    fn register_call_participant_observed(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        observed_sids: &waddle_sfu::ObservedCallSids,
+    ) -> waddle_sfu::SidObservationDisposition {
+        if matches!(
+            *self.note_disposition.lock().expect("recording lock"),
+            Some(waddle_sfu::TeardownDisposition::StaleSid)
+        ) {
+            return waddle_sfu::SidObservationDisposition::StaleSid;
+        }
+        self.registered_calls.lock().expect("recording lock").push((
+            call_id.clone(),
+            identity.clone(),
+            observed_sids.clone(),
+        ));
+        waddle_sfu::SidObservationDisposition::Applied
+    }
 
     fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
         false

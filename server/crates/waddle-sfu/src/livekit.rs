@@ -10,6 +10,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
+use futures::{stream, StreamExt};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
@@ -68,6 +69,13 @@ pub const RECONCILE_GRACE_SECONDS: i64 = 120;
 /// reconcile interval" while still reaping genuinely departed
 /// participants within ~2 passes.
 pub(crate) const RECONCILE_ABSENT_PASSES: u32 = 2;
+
+/// Maximum concurrent `ListParticipants` probes in one reconcile pass.
+/// Each probe has a five-second HTTP timeout. Eight-way fan-out reduces
+/// a pathological 100-room all-timeout pass from 500 seconds serially to
+/// 13 waves (about 65 seconds), and keeps it under the 60-second interval
+/// whenever at least one wave completes before the hard timeout.
+pub const RECONCILE_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone)]
 struct ParticipantState {
@@ -253,6 +261,43 @@ impl std::fmt::Debug for LiveKitSfu {
 }
 
 impl LiveKitSfu {
+    fn adopt_discovered_call(
+        &self,
+        call_id: &CallId,
+        room_sid: Option<RoomSid>,
+        participants: &[Identity],
+        now: DateTime<Utc>,
+    ) -> bool {
+        if participants.is_empty() {
+            return false;
+        }
+        let dashmap::Entry::Vacant(entry) = self.calls.entry(call_id.clone()) else {
+            return false;
+        };
+        let generation = {
+            let mut last_generation = self.call_generations.entry(call_id.clone()).or_insert(0);
+            *last_generation += 1;
+            CallGeneration::new(*last_generation)
+        };
+        let participant_states: HashMap<Identity, ParticipantState> = participants
+            .iter()
+            .cloned()
+            .map(|identity| (identity, ParticipantState::new()))
+            .collect();
+        entry.insert(CallEntry {
+            generation,
+            room_sid,
+            participants: participant_states,
+        });
+        for identity in participants {
+            self.registered_at
+                .insert((call_id.clone(), identity.clone()), now);
+            self.absent_streak
+                .remove(&(call_id.clone(), identity.clone()));
+        }
+        true
+    }
+
     /// Build a [`LiveKitSfu`] backed by the production reqwest admin
     /// client. Captures the current Tokio runtime handle if one is
     /// active so the teardown hot path can fire `RemoveParticipant` +
@@ -740,16 +785,18 @@ impl LiveKitSfu {
 
     /// One reconciliation pass against LiveKit's ground truth.
     ///
-    /// For every call in the local registry, ask LiveKit who is
-    /// actually connected (`ListParticipants`) and sweep any locally
+    /// List active LiveKit rooms, union them with the local registry,
+    /// ask who is actually connected (`ListParticipants`), adopt
+    /// Waddle-owned occupants missing after a process restart, and sweep any locally
     /// registered identity that LiveKit no longer reports — but only
     /// once that identity has been registered longer than `grace`, so
     /// a participant still ringing/connecting (the registry is
     /// populated at `session-initiate`, before the WebSocket connects)
-    /// is never mistaken for a ghost. Returns the `(call, identity)`
-    /// pairs that were swept so the caller (the webhook route's
-    /// reconciliation task) can clear their MUC Muji presence via the
-    /// same idempotent path the `participant_left` webhook uses.
+    /// is never mistaken for a ghost. The returned summary carries the
+    /// `(call, identity)` pairs swept so the caller can clear their MUC
+    /// Muji presence via the same idempotent path the
+    /// `participant_left` webhook uses, plus pass-level counts for
+    /// telemetry emitted by `waddle-server`.
     ///
     /// Swept entries are cleared with [`Self::clear_local_state`]
     /// (registry removal + JWT revocation) only — no admin
@@ -773,29 +820,82 @@ impl LiveKitSfu {
     /// empty participant lists) only marks streaks, clients silently
     /// rejoin, and the second pass observes them connected and clears
     /// the streaks.
-    async fn reconcile_active_calls_inner(&self, grace: ChronoDuration) -> Vec<(CallId, Identity)> {
+    async fn reconcile_active_calls_inner(
+        &self,
+        grace: ChronoDuration,
+    ) -> crate::ReconcilePassSummary {
         let now = Utc::now();
         // Snapshot the registry into owned values up front so no
         // DashMap guard is held across the `.await` on the admin call.
-        let snapshot: Vec<(CallId, Vec<Identity>)> = self
+        let mut rooms: HashMap<CallId, (Vec<Identity>, Option<RoomSid>, bool)> = self
             .calls
             .iter()
             .map(|entry| {
                 (
                     entry.key().clone(),
-                    entry.value().participants.keys().cloned().collect(),
+                    (
+                        entry.value().participants.keys().cloned().collect(),
+                        None,
+                        true,
+                    ),
                 )
             })
             .collect();
 
+        match self.admin.list_rooms().await {
+            Ok(listed) => {
+                for room in listed {
+                    let Ok(call_id) = CallId::new(room.name) else {
+                        tracing::debug!("SFU reconcile: ignoring non-Waddle LiveKit room name");
+                        continue;
+                    };
+                    rooms
+                        .entry(call_id)
+                        .and_modify(|(_, listed_sid, _)| {
+                            if listed_sid.is_none() {
+                                listed_sid.clone_from(&room.sid);
+                            }
+                        })
+                        .or_insert_with(|| (Vec::new(), room.sid, false));
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "SFU reconcile: ListRooms failed; continuing with registry rooms only"
+                );
+            }
+        }
+
+        let rooms_examined = rooms.len() as u64;
+        let probes = stream::iter(rooms.into_iter().map(
+            |(call_id, (registered, listed_room_sid, was_registered))| async move {
+                let occupancy = self.admin.room_occupancy(&call_id).await;
+                (
+                    call_id,
+                    registered,
+                    listed_room_sid,
+                    was_registered,
+                    occupancy,
+                )
+            },
+        ))
+        .buffer_unordered(RECONCILE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
         let mut swept = Vec::new();
-        for (call_id, registered) in snapshot {
+        let mut rooms_adopted = 0_u64;
+        let mut occupancy_failures = 0_u64;
+        let mut swept_rooms = HashSet::new();
+        for (call_id, registered, listed_room_sid, was_registered, occupancy) in probes {
             // Ghost detection reasons only about participants we
             // minted; a foreign participant (recorder, SIP) is by
             // definition not one of our registry entries.
-            let live = match self.admin.room_occupancy(&call_id).await {
+            let live = match occupancy {
                 Ok(occupancy) => occupancy.waddle,
                 Err(err) => {
+                    occupancy_failures += 1;
                     tracing::warn!(
                         call_id = %call_id,
                         error = %err,
@@ -810,6 +910,19 @@ impl LiveKitSfu {
                     }
                     continue;
                 }
+            };
+            let registered = if was_registered {
+                registered
+            } else {
+                if self.adopt_discovered_call(&call_id, listed_room_sid, &live, now) {
+                    rooms_adopted += 1;
+                    tracing::info!(
+                        call_id = %call_id,
+                        participants = live.len(),
+                        "SFU reconcile: adopted active LiveKit room missing from local registry"
+                    );
+                }
+                live.clone()
             };
             let live_set: HashSet<String> =
                 live.iter().map(Identity::as_livekit_identity).collect();
@@ -868,11 +981,25 @@ impl LiveKitSfu {
                         identity = %identity.as_livekit_identity(),
                         "SFU reconcile: swept ghost participant LiveKit no longer reports"
                     );
+                    swept_rooms.insert(call_id.clone());
                     swept.push((call_id.clone(), identity));
                 }
             }
         }
-        swept
+        swept.sort_by(|(left_call, left_identity), (right_call, right_identity)| {
+            left_call.as_str().cmp(right_call.as_str()).then_with(|| {
+                left_identity
+                    .as_livekit_identity()
+                    .cmp(&right_identity.as_livekit_identity())
+            })
+        });
+        crate::ReconcilePassSummary {
+            swept,
+            rooms_examined,
+            rooms_adopted,
+            rooms_swept: swept_rooms.len() as u64,
+            occupancy_failures,
+        }
     }
 }
 
@@ -992,6 +1119,70 @@ impl SfuService for LiveKitSfu {
             .insert((call_id.clone(), identity.clone()), Utc::now());
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
+    }
+
+    fn register_call_participant_observed(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: &ObservedCallSids,
+    ) -> SidObservationDisposition {
+        match self.calls.entry(call_id.clone()) {
+            dashmap::Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                if matches!(
+                    Self::guard_and_learn_observed_sids(
+                        call_id,
+                        identity,
+                        entry,
+                        Some(observed_sids),
+                    ),
+                    SidGuardDisposition::StaleSid
+                ) {
+                    return SidObservationDisposition::StaleSid;
+                }
+                if entry.participants.is_empty() {
+                    let mut last_generation =
+                        self.call_generations.entry(call_id.clone()).or_insert(0);
+                    *last_generation += 1;
+                    entry.generation = CallGeneration::new(*last_generation);
+                }
+                entry
+                    .participants
+                    .entry(identity.clone())
+                    .or_insert_with(|| ParticipantState {
+                        participant_sid: observed_sids.participant_sid.clone(),
+                    });
+                if entry.room_sid.is_none() {
+                    entry.room_sid.clone_from(&observed_sids.room_sid);
+                }
+            }
+            dashmap::Entry::Vacant(vacant) => {
+                let generation = {
+                    let mut last_generation =
+                        self.call_generations.entry(call_id.clone()).or_insert(0);
+                    *last_generation += 1;
+                    CallGeneration::new(*last_generation)
+                };
+                let mut participants = HashMap::new();
+                participants.insert(
+                    identity.clone(),
+                    ParticipantState {
+                        participant_sid: observed_sids.participant_sid.clone(),
+                    },
+                );
+                vacant.insert(CallEntry {
+                    generation,
+                    room_sid: observed_sids.room_sid.clone(),
+                    participants,
+                });
+            }
+        }
+        self.registered_at
+            .insert((call_id.clone(), identity.clone()), Utc::now());
+        self.absent_streak
+            .remove(&(call_id.clone(), identity.clone()));
+        SidObservationDisposition::Applied
     }
 
     fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool {

@@ -33,7 +33,7 @@ mod token;
 mod turn;
 mod webhook;
 
-pub use admin::{LiveKitAdmin, RoomOccupancy};
+pub use admin::{ListedRoom, LiveKitAdmin, RoomOccupancy};
 pub use call::{
     CallGeneration, CallId, CallState, Identity, MediaCapabilities, ObservedCallSids,
     ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
@@ -41,7 +41,7 @@ pub use call::{
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
 pub use error::SfuError;
-pub use livekit::{LiveKitSfu, RECONCILE_GRACE_SECONDS};
+pub use livekit::{LiveKitSfu, RECONCILE_CONCURRENCY, RECONCILE_GRACE_SECONDS};
 pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
 pub use webhook::{
@@ -78,6 +78,21 @@ pub trait SfuService: Send + Sync + 'static {
     /// Record that `identity` has joined `call_id`. Idempotent within
     /// one call generation: a repeat join is a no-op.
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity);
+
+    /// Register a participant learned from an authoritative
+    /// `participant_joined` webhook and atomically learn its observed
+    /// room/participant SIDs. Unlike token issuance, this only restores
+    /// local bookkeeping after a process restart.
+    ///
+    /// If an existing call entry has a conflicting SID, the event is
+    /// stale and MUST be a no-op so an old room incarnation cannot be
+    /// resurrected under a reused [`CallId`].
+    fn register_call_participant_observed(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: &ObservedCallSids,
+    ) -> SidObservationDisposition;
 
     /// Return whether `identity` is currently registered in
     /// `call_id`. Call teardown uses this as the authorization check
@@ -220,10 +235,20 @@ pub trait SfuService: Send + Sync + 'static {
     fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
 }
 
-/// Future returned by [`SfuReconciler::reconcile_active_calls`],
-/// resolving to the `(call, identity)` pairs swept this pass. Named so
-/// the boxed-future shape stays readable at the trait + impl sites.
-pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Vec<(CallId, Identity)>> + Send + 'a>>;
+/// Future returned by [`SfuReconciler::reconcile_active_calls`]. Named
+/// so the boxed-future shape stays readable at the trait + impl sites.
+pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = ReconcilePassSummary> + Send + 'a>>;
+
+/// Typed, telemetry-free result of one LiveKit reconciliation pass.
+/// `waddle-server` translates these values into process metrics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcilePassSummary {
+    pub swept: Vec<(CallId, Identity)>,
+    pub rooms_examined: u64,
+    pub rooms_adopted: u64,
+    pub rooms_swept: u64,
+    pub occupancy_failures: u64,
+}
 
 /// Periodic reconciliation against the SFU's ground truth.
 ///
@@ -236,11 +261,10 @@ pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Vec<(CallId, Identity
 /// LiveKit, not our in-memory registry, is the authority on who is
 /// actually connected.
 pub trait SfuReconciler: Send + Sync + 'static {
-    /// Sweep registry entries LiveKit no longer reports as connected,
-    /// respecting a registration grace window so still-connecting
-    /// participants are not mistaken for ghosts. Returns the
-    /// `(call, identity)` pairs swept so the caller can clear the
-    /// corresponding MUC Muji presence idempotently.
+    /// Discover active LiveKit rooms, adopt missing registry entries,
+    /// and sweep entries LiveKit no longer reports as connected while
+    /// respecting the registration grace window. The summary includes
+    /// swept identities for idempotent MUC Muji presence cleanup.
     fn reconcile_active_calls(&self, grace: chrono::Duration) -> ReconcileFuture<'_>;
 
     /// The identities the SFU itself reports as currently connected to

@@ -27,7 +27,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::call::{CallId, Identity, MediaCapabilities};
+use crate::call::{CallId, Identity, MediaCapabilities, RoomSid};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 use crate::token::JWT_CLOCK_SKEW;
@@ -62,6 +62,18 @@ pub struct RoomOccupancy {
     pub foreign: usize,
 }
 
+/// An active LiveKit room returned by `RoomService.ListRooms`.
+///
+/// The room name stays a string at the admin boundary because LiveKit
+/// may contain rooms not owned by Waddle. Reconciliation converts only
+/// names accepted by [`CallId::new`] and ignores the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedRoom {
+    pub name: String,
+    pub sid: Option<RoomSid>,
+    pub num_participants: Option<u64>,
+}
+
 impl RoomOccupancy {
     /// True when the only connected participant LiveKit reports is
     /// `departing` (or nobody at all). LiveKit's list can still echo
@@ -80,6 +92,12 @@ impl RoomOccupancy {
 /// production implementation is [`ReqwestLiveKitAdmin`] and is
 /// constructed automatically by [`crate::LiveKitSfu::new`].
 pub trait LiveKitAdmin: Send + Sync + 'static {
+    /// List every active LiveKit room. This uses the cluster-wide
+    /// `roomList` grant rather than a room-scoped `roomAdmin` grant.
+    fn list_rooms(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>>;
+
     fn remove_participant<'a>(
         &'a self,
         room: &'a CallId,
@@ -158,6 +176,22 @@ impl ReqwestLiveKitAdmin {
     }
 
     fn mint_admin_token(&self, room: &CallId) -> Result<String, SfuError> {
+        self.mint_token(AdminGrant {
+            room: Some(room.as_str().to_string()),
+            room_admin: true,
+            room_list: false,
+        })
+    }
+
+    fn mint_list_rooms_token(&self) -> Result<String, SfuError> {
+        self.mint_token(AdminGrant {
+            room: None,
+            room_admin: false,
+            room_list: true,
+        })
+    }
+
+    fn mint_token(&self, video: AdminGrant) -> Result<String, SfuError> {
         let now = Utc::now();
         let claims = AdminClaims {
             iss: self.api_key.as_str().to_string(),
@@ -171,10 +205,7 @@ impl ReqwestLiveKitAdmin {
             iat: now.timestamp(),
             nbf: (now - JWT_CLOCK_SKEW).timestamp(),
             exp: (now + ADMIN_JWT_TTL).timestamp(),
-            video: AdminGrant {
-                room: room.as_str().to_string(),
-                room_admin: true,
-            },
+            video,
         };
         let key = EncodingKey::from_secret(self.api_secret.as_bytes());
         encode(&Header::new(jsonwebtoken::Algorithm::HS256), &claims, &key)
@@ -262,6 +293,39 @@ impl ReqwestLiveKitAdmin {
 }
 
 impl LiveKitAdmin for ReqwestLiveKitAdmin {
+    fn list_rooms(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>> {
+        Box::pin(async move {
+            let token = self.mint_list_rooms_token()?;
+            let url = self
+                .base_url
+                .join("twirp/livekit.RoomService/ListRooms")
+                .map_err(SfuError::AdminUrl)?;
+            let response = self
+                .http
+                .post(url)
+                .bearer_auth(token)
+                .json(&ListRoomsRequest::default())
+                .send()
+                .await
+                .map_err(SfuError::AdminRequest)?;
+            let status = response.status();
+            if status.is_success() {
+                let response = response
+                    .json::<ListRoomsResponse>()
+                    .await
+                    .map_err(SfuError::AdminRequest)?;
+                return Ok(response.rooms);
+            }
+            let body = response.text().await.unwrap_or_default();
+            Err(SfuError::AdminCallFailed {
+                status: status.as_u16(),
+                body: truncate(body, 256),
+            })
+        })
+    }
+
     fn remove_participant<'a>(
         &'a self,
         room: &'a CallId,
@@ -383,9 +447,73 @@ struct AdminGrant {
     /// Room-scoped grant for least-privilege: the admin token may
     /// only touch the call we're tearing down. LiveKit honours
     /// per-room scoping of `roomAdmin`.
-    room: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room: Option<String>,
     #[serde(rename = "roomAdmin")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     room_admin: bool,
+    #[serde(rename = "roomList")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    room_list: bool,
+}
+
+/// Twirp body for `livekit.RoomService/ListRooms`. An empty `names`
+/// filter requests all active rooms.
+#[derive(Default, Serialize)]
+struct ListRoomsRequest {
+    names: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ListRoomsResponse {
+    #[serde(default)]
+    rooms: Vec<ListedRoom>,
+}
+
+#[derive(Deserialize)]
+struct ListedRoomWire {
+    name: String,
+    sid: Option<RoomSid>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    #[serde(rename = "numParticipants")]
+    num_participants: Option<u64>,
+}
+
+impl From<ListedRoomWire> for ListedRoom {
+    fn from(room: ListedRoomWire) -> Self {
+        Self {
+            name: room.name,
+            sid: room.sid,
+            num_participants: room.num_participants,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ListedRoom {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        ListedRoomWire::deserialize(deserializer).map(Into::into)
+    }
+}
+
+fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireU64 {
+        Number(u64),
+        String(String),
+    }
+
+    match Option::<WireU64>::deserialize(deserializer)? {
+        Some(WireU64::Number(value)) => Ok(Some(value)),
+        Some(WireU64::String(value)) => value.parse().map(Some).map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
 }
 
 /// Twirp body for `livekit.RoomService/RemoveParticipant`. Typed so
@@ -584,6 +712,47 @@ mod tests {
 
         let empty: ListParticipantsResponse = serde_json::from_str(r#"{}"#).expect("empty parses");
         assert!(empty.participants.is_empty());
+    }
+
+    #[test]
+    fn list_rooms_response_parses_livekit_wire_shape() {
+        let body = r#"{"rooms":[
+            {"name":"general@muc.waddle.social","sid":"RM_1","numParticipants":"2"},
+            {"name":"empty@muc.waddle.social","numParticipants":0}
+        ]}"#;
+        let parsed: ListRoomsResponse = serde_json::from_str(body).expect("parses");
+        assert_eq!(
+            parsed.rooms,
+            vec![
+                ListedRoom {
+                    name: "general@muc.waddle.social".to_owned(),
+                    sid: Some(RoomSid::new("RM_1").expect("room sid")),
+                    num_participants: Some(2),
+                },
+                ListedRoom {
+                    name: "empty@muc.waddle.social".to_owned(),
+                    sid: None,
+                    num_participants: Some(0),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn list_rooms_request_and_grant_use_cluster_wide_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(ListRoomsRequest::default()).expect("request serializes"),
+            serde_json::json!({ "names": [] })
+        );
+        assert_eq!(
+            serde_json::to_value(AdminGrant {
+                room: None,
+                room_admin: false,
+                room_list: true,
+            })
+            .expect("grant serializes"),
+            serde_json::json!({ "roomList": true })
+        );
     }
 
     #[test]

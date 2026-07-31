@@ -222,9 +222,11 @@ async fn livekit_webhook_handler(
             }
         }
         LiveKitWebhookEvent::ParticipantJoined(env) => {
-            // Registry-wise this is informational (the join already
-            // flowed through Jingle session-initiate →
-            // `register_call_participant`), but it is the ONLY moment
+            // Normally the join already flowed through Jingle
+            // session-initiate → `register_call_participant`, but after
+            // a process restart this webhook is also the authoritative
+            // recovery signal that restores local registry membership.
+            // It is the ONLY moment
             // we learn that a specific token was actually redeemed —
             // and therefore the only place a stale token can be
             // caught.
@@ -240,7 +242,7 @@ async fn livekit_webhook_handler(
             // Re-deriving their current voice here and pushing it
             // converges them within one webhook round-trip.
             let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
-            if observe_participant_sids(&state, env, &observed_sids)
+            if register_participant_from_join(&state, env, &observed_sids)
                 == SidObservationDisposition::StaleSid
             {
                 WebhookEffectOutcome::Completed
@@ -363,7 +365,7 @@ fn observed_sids_for_room(room: &RoomInfo) -> ObservedCallSids {
     ObservedCallSids::new(room.sid.clone(), None)
 }
 
-fn observe_participant_sids(
+fn register_participant_from_join(
     state: &WebSocketState,
     env: &ParticipantEnvelope,
     observed_sids: &ObservedCallSids,
@@ -377,11 +379,15 @@ fn observe_participant_sids(
     let Ok(full_jid) = env.participant.identity.parse::<FullJid>() else {
         return SidObservationDisposition::Applied;
     };
-    sfu.observe_call_participant_sids(
+    let disposition = sfu.register_call_participant_observed(
         &call_id,
         &waddle_sfu::Identity::from_jid(full_jid),
-        Some(observed_sids),
-    )
+        observed_sids,
+    );
+    if disposition == SidObservationDisposition::StaleSid {
+        increment_call_teardown_stale_dropped();
+    }
+    disposition
 }
 
 /// How often the reconciliation backstop polls LiveKit for the true
@@ -440,13 +446,19 @@ async fn reconcile_once(
     grace: chrono::Duration,
     non_occupant_streaks: &mut super::sfu_voice_reconcile::NonOccupantStreaks,
 ) {
-    let swept = reconciler.reconcile_active_calls(grace).await;
-    if !swept.is_empty() {
+    let started = std::time::Instant::now();
+    let summary = reconciler.reconcile_active_calls(grace).await;
+    waddle_xmpp::telemetry::call::record_reconcile_pass_duration(started.elapsed().as_secs_f64());
+    waddle_xmpp::telemetry::call::add_reconcile_rooms_examined(summary.rooms_examined);
+    waddle_xmpp::telemetry::call::add_reconcile_rooms_adopted(summary.rooms_adopted);
+    waddle_xmpp::telemetry::call::add_reconcile_rooms_swept(summary.rooms_swept);
+    waddle_xmpp::telemetry::call::add_reconcile_occupancy_failures(summary.occupancy_failures);
+    if !summary.swept.is_empty() {
         info!(
-            count = swept.len(),
+            count = summary.swept.len(),
             "SFU reconciliation swept ghost participants; clearing MUC Muji presence"
         );
-        for (call_id, identity) in swept {
+        for (call_id, identity) in summary.swept {
             if is_muc_call(call_id.as_str()) {
                 process_participant_left_for_identity(
                     state,
@@ -675,6 +687,29 @@ mod tests {
         }
     }
 
+    struct FixedSummaryReconciler {
+        summary: Mutex<Option<waddle_sfu::ReconcilePassSummary>>,
+    }
+
+    impl waddle_sfu::SfuReconciler for FixedSummaryReconciler {
+        fn reconcile_active_calls(&self, _: chrono::Duration) -> waddle_sfu::ReconcileFuture<'_> {
+            Box::pin(async move {
+                self.summary
+                    .lock()
+                    .expect("summary lock")
+                    .take()
+                    .unwrap_or_default()
+            })
+        }
+
+        fn live_participants<'a>(
+            &'a self,
+            _: &'a CallId,
+        ) -> waddle_sfu::LiveParticipantsFuture<'a> {
+            Box::pin(async { Some(Vec::new()) })
+        }
+    }
+
     fn signed_webhook_headers(secret: &[u8], body: &[u8]) -> HeaderMap {
         let mut hasher = Sha256::new();
         hasher.update(body);
@@ -740,6 +775,55 @@ mod tests {
                 "webhook series ({event}, {outcome}) missing from startup zero-registration"
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_pass_summary_emits_duration_and_room_counters() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let reconciler = FixedSummaryReconciler {
+            summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
+                swept: Vec::new(),
+                rooms_examined: 3,
+                rooms_adopted: 2,
+                rooms_swept: 1,
+                occupancy_failures: 4,
+            })),
+        };
+        let mut streaks = super::super::sfu_voice_reconcile::NonOccupantStreaks::default();
+
+        reconcile_once(
+            state.as_ref(),
+            &reconciler,
+            chrono::Duration::zero(),
+            &mut streaks,
+        )
+        .await;
+
+        assert_eq!(
+            metrics.histogram_count("waddle.call.reconcile.pass_duration", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.reconcile.rooms_examined", &[]),
+            Some(3)
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.reconcile.rooms_adopted", &[]),
+            Some(2)
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.reconcile.rooms_swept", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.reconcile.occupancy_failures", &[]),
+            Some(4)
+        );
+        assert_eq!(
+            metrics.metric_unit("waddle.call.reconcile.pass_duration"),
+            Some("s".to_owned())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1552,7 +1636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn participant_joined_threads_observed_sids_to_sfu() {
+    async fn participant_joined_reregisters_unknown_participant_with_observed_sids() {
         let recorder = Arc::new(RecordingSfu::default());
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let env = ParticipantEnvelope {
@@ -1570,11 +1654,11 @@ mod tests {
         let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
 
         assert_eq!(
-            observe_participant_sids(state.as_ref(), &env, &observed_sids),
+            register_participant_from_join(state.as_ref(), &env, &observed_sids),
             SidObservationDisposition::Applied
         );
 
-        let observations = recorder.observed_with_sids_snapshot();
+        let observations = recorder.registered_with_sids_snapshot();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].0.as_str(), env.room.name);
         assert_eq!(
@@ -1582,6 +1666,40 @@ mod tests {
             env.participant.identity
         );
         assert_eq!(observations[0].2, observed_sids);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn participant_joined_conflicting_room_sid_is_stale_noop_and_counted() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let recorder = Arc::new(RecordingSfu::default());
+        recorder.set_note_disposition(TeardownDisposition::StaleSid);
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let env = ParticipantEnvelope {
+            id: Some("EV_joined_stale".to_owned()),
+            room: RoomInfo {
+                name: "alice@example.com::dm-stale".to_owned(),
+                sid: Some(RoomSid::new("RM_old").expect("room sid")),
+            },
+            participant: ParticipantInfo {
+                identity: "bob@example.com/phone".to_owned(),
+                sid: Some(ParticipantSid::new("PA_old").expect("participant sid")),
+                state: None,
+            },
+        };
+        let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+
+        assert_eq!(
+            register_participant_from_join(state.as_ref(), &env, &observed_sids),
+            SidObservationDisposition::StaleSid
+        );
+        assert!(
+            recorder.registered_with_sids_snapshot().is_empty(),
+            "a stale join must not recreate registry membership"
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.teardown.stale_dropped", &[]),
+            Some(1)
+        );
     }
 
     #[tokio::test]

@@ -648,6 +648,19 @@ impl RecordingAdmin {
 }
 
 impl waddle_sfu::LiveKitAdmin for RecordingAdmin {
+    fn list_rooms(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<waddle_sfu::ListedRoom>, waddle_sfu::SfuError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn remove_participant<'a>(
         &'a self,
         room: &'a waddle_sfu::CallId,
