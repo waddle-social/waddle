@@ -109,11 +109,16 @@ pub(super) async fn drain_due_at(
             }
         }
 
-        if stale_superseded_by_live_participant(state.deps.protocol.sfu.as_deref(), &job.intent) {
+        if stale_superseded_by_live_participant(
+            state.deps.protocol.sfu.as_deref(),
+            &job.intent,
+            job.created_at_ms,
+        ) {
             tracing::info!(
                 call_id = %job.intent.call_id,
                 intent_id = %job.intent_id.as_str(),
-                "call teardown intent was superseded by a live rejoin; skipping stale drain item"
+                "call teardown intent was superseded by a rejoin registered after the \
+                 intent was created; skipping stale drain item"
             );
             if store.mark_done(&job).await? {
                 summary.drained += 1;
@@ -152,9 +157,17 @@ pub(super) async fn drain_due_at(
     Ok(summary)
 }
 
+/// A live registration alone does NOT prove a rejoin: on the room-claim
+/// owner the registration legitimately survives exactly because the
+/// departure this intent represents was never applied there (that is
+/// why the intent exists). Only a registration that POSTDATES the
+/// intent's creation is a rejoin; anything else (equal, earlier, or an
+/// implementation that does not track times) must let the intent
+/// execute (#1449 review N1).
 fn stale_superseded_by_live_participant(
     sfu: Option<&dyn SfuService>,
     intent: &CallTeardownIntent,
+    intent_created_at_ms: i64,
 ) -> bool {
     let Some(sfu) = sfu else {
         return false;
@@ -164,7 +177,8 @@ fn stale_superseded_by_live_participant(
         TeardownTarget::MujiPresenceClear { departed, .. } => departed,
         TeardownTarget::Room => return false,
     };
-    sfu.has_call_participant(&intent.call_id, &Identity::from_jid(participant.clone()))
+    sfu.participant_registered_at(&intent.call_id, &Identity::from_jid(participant.clone()))
+        .is_some_and(|registered_at| registered_at.timestamp_millis() > intent_created_at_ms)
 }
 
 async fn room_is_globally_unclaimed(
@@ -202,6 +216,13 @@ async fn room_is_globally_unclaimed(
     }
 }
 
+/// A stale lease also occurs transiently between an owner's lease
+/// expiring and its successor claiming (failover blip). Dead-lettering
+/// during that blip is accepted (#1449 review N4): it additionally
+/// requires the intent to be 24h old AND this node's local ownership
+/// check to have already missed, and a presence-clear that old has
+/// near-zero remaining value — the reconciler converged the room long
+/// ago.
 fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
     claim.is_none_or(|snapshot| !snapshot.owner_lease_fresh)
 }

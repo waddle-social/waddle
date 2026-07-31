@@ -1263,34 +1263,10 @@ impl LiveKitSfu {
                     continue;
                 }
             };
-            if was_registered {
-                if let Some(listed_room_sid) = listed_room_sid.as_ref() {
-                    if let Some(mut entry) = self.calls.get_mut(&call_id) {
-                        if let Some(stored_room_sid) = entry.room_sid.as_ref() {
-                            if stored_room_sid != listed_room_sid {
-                                let next_generation = {
-                                    let mut last_generation =
-                                        self.call_generations.entry(call_id.clone()).or_insert(0);
-                                    *last_generation += 1;
-                                    CallGeneration::new(*last_generation)
-                                };
-                                tracing::info!(
-                                    call_id = %call_id,
-                                    stored_room_sid = %stored_room_sid,
-                                    listed_room_sid = %listed_room_sid,
-                                    generation = %next_generation,
-                                    "SFU reconcile: detected new LiveKit room incarnation; rotated stored sid"
-                                );
-                                entry.generation = next_generation;
-                                entry.room_sid = Some(listed_room_sid.clone());
-                                for participant in entry.participants.values_mut() {
-                                    participant.participant_sid = None;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Sid rotation for registered rooms is handled once per
+            // pass by `rotate_room_incarnation_from_listing` (called
+            // on the listing before per-room probes), so by this
+            // point `entry.room_sid` already matches the listed sid.
             let registered = if was_registered {
                 registered
             } else {
@@ -1571,6 +1547,19 @@ impl SfuService for LiveKitSfu {
         self.calls
             .get(call_id)
             .is_some_and(|entry| entry.participants.contains_key(identity))
+    }
+
+    fn participant_registered_at(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> Option<DateTime<Utc>> {
+        if !self.has_call_participant(call_id, identity) {
+            return None;
+        }
+        self.registered_at
+            .get(&(call_id.clone(), identity.clone()))
+            .map(|at| *at)
     }
 
     fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti) {

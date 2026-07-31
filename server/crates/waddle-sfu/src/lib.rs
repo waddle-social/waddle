@@ -103,6 +103,22 @@ pub trait SfuService: Send + Sync + 'static {
     /// before revoking any other participant's token state.
     fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool;
 
+    /// Wall-clock instant `identity`'s CURRENT registration in
+    /// `call_id` was recorded, or `None` when not registered (or when
+    /// the implementation does not track registration times). The
+    /// durable teardown drain compares this against an intent's
+    /// creation time: only a registration that POSTDATES the intent
+    /// proves a rejoin — a mere live registration can equally mean
+    /// the departure this intent represents was never applied on this
+    /// node (#1449 review N1).
+    fn participant_registered_at(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+
     /// Record that `identity` has left `call_id` and report whether
     /// the call is still active. When the last participant leaves,
     /// the call entry is removed and [`CallState::Ended`] is

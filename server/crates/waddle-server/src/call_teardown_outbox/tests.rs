@@ -372,13 +372,31 @@ async fn drain_marks_higher_generation_stale_without_admin_call() {
         fixture_config(),
         Arc::clone(&admin) as Arc<_>,
     ));
-    let call_id = CallId::new("alice@example.test:stale-call").expect("call id");
-    let identity =
-        Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    // A MUC-style (bare-JID) call id: its generation record survives
+    // the empty->re-register cycle, which is the reuse the guard
+    // exists for. (1:1-style ids drop their record on final clear
+    // because they are never reused -- see call_generations pruning.)
+    // The room actor makes this node the room's owner so the drain's
+    // ownership gate lets the intent through.
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "stale-room@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
     sfu.register_call_participant(&call_id, &identity);
     let _ = sfu.note_participant_left(&call_id, &identity, None);
     sfu.register_call_participant(&call_id, &identity);
-    let state = state_with_executor(Arc::clone(&sfu)).await;
     let intent = CallTeardownIntent {
         call_id,
         target: TeardownTarget::Participant {
@@ -607,15 +625,22 @@ async fn unfenced_participant_rejoin_is_skipped_without_admin_call() {
         .deps
         .protocol
         .call_teardown_outbox
-        .enqueue(CallTeardownIntent {
-            call_id: call_id.clone(),
-            target: TeardownTarget::Participant {
-                identity: identity.as_jid().clone(),
-                participant_sid: None,
+        // Backdate the intent: only a registration that POSTDATES the
+        // intent is a rejoin (N1) — the fence must not fire for the
+        // owner-node case where the registration merely predates the
+        // never-applied departure.
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: call_id.clone(),
+                target: TeardownTarget::Participant {
+                    identity: identity.as_jid().clone(),
+                    participant_sid: None,
+                },
+                generation: None,
+                room_sid: None,
             },
-            generation: None,
-            room_sid: None,
-        })
+            crate::time::now_ms() - 60_000,
+        )
         .await
         .expect("enqueue");
 
@@ -726,15 +751,19 @@ async fn unfenced_muji_presence_clear_rejoin_is_skipped_and_preserves_room_muji_
         .deps
         .protocol
         .call_teardown_outbox
-        .enqueue(CallTeardownIntent {
-            call_id: call_id.clone(),
-            target: TeardownTarget::MujiPresenceClear {
-                room_jid: room_jid.clone(),
-                departed: alice.clone(),
+        // Backdated for the same N1 reason as the participant test.
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: call_id.clone(),
+                target: TeardownTarget::MujiPresenceClear {
+                    room_jid: room_jid.clone(),
+                    departed: alice.clone(),
+                },
+                generation: None,
+                room_sid: None,
             },
-            generation: None,
-            room_sid: None,
-        })
+            crate::time::now_ms() - 60_000,
+        )
         .await
         .expect("enqueue");
 
@@ -1064,4 +1093,58 @@ async fn old_room_scoped_intent_survives_a_live_foreign_owner_claim() {
         .expect("stored intent");
     assert_eq!(stored.status, CallTeardownStatus::Queued);
     assert_eq!(stored.last_error, None);
+}
+
+/// N1's primary scenario: on the room-claim owner the registration
+/// legitimately SURVIVES the failed cross-node departure — that is why
+/// the intent exists. A live registration that merely PREDATES the
+/// intent must not read as a rejoin: the intent must execute.
+#[tokio::test]
+async fn live_registration_predating_the_intent_still_executes_removal() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "owner-room@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
+    sfu.register_call_participant(&call_id, &identity);
+    let _intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: TeardownTarget::Participant {
+                identity: identity.as_jid().clone(),
+                participant_sid: None,
+            },
+            generation: None,
+            room_sid: None,
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert_eq!(
+        admin.remove_calls.lock().expect("recording lock").len(),
+        1,
+        "a registration predating the intent is the never-applied departure, not a rejoin"
+    );
 }

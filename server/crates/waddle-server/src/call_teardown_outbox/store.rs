@@ -92,6 +92,29 @@ impl CallTeardownOutboxStore {
         let (action, identity, room_jid, participant_sid) = encode_target(&intent.target);
         let generation = encode_generation(intent.generation)?;
         let connection = self.db.guard().await?;
+        // Dedupe queued work (#1449 review N2): the relay-failure
+        // fallback and the subsequent local presence-clear both enqueue
+        // for the same departure, and the drained effects are
+        // idempotent, so an identical still-queued intent makes a new
+        // row pure noise. A racing duplicate insert is harmless.
+        let mut existing = connection
+            .query(
+                "SELECT intent_id FROM call_teardown_outbox \
+                 WHERE status = ? AND call_id = ? AND action = ? \
+                   AND identity IS NOT DISTINCT FROM ? \
+                 LIMIT 1",
+                crate::db_params![
+                    STATUS_QUEUED,
+                    intent.call_id.as_str(),
+                    action,
+                    identity.clone()
+                ],
+            )
+            .await?;
+        if let Some(row) = existing.next().await? {
+            let existing_id = row.get::<String>(0)?;
+            return Ok(CallTeardownIntentId::from_stored(existing_id));
+        }
         connection
             .execute(
                 "INSERT INTO call_teardown_outbox (\

@@ -12,6 +12,12 @@ impl CallTeardownIntentId {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
+    /// Rehydrate an id we previously wrote (the queued-dedupe read
+    /// path); never used for externally-supplied strings.
+    pub(crate) fn from_stored(value: String) -> Self {
+        Self(value)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
