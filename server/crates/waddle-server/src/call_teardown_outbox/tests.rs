@@ -20,7 +20,9 @@ use crate::server::routes::websocket::{
         create_test_websocket_state_with_sfu, snapshot_room,
     },
 };
-use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity};
+use waddle_xmpp::ownership::{
+    ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+};
 
 async fn store(name: &str) -> CallTeardownOutboxStore {
     CallTeardownOutboxStore::new(Database::in_memory(name).await.unwrap())
@@ -62,6 +64,99 @@ async fn enqueue_claim_and_complete_round_trip() {
     let stored = store.find(&intent_id).await.unwrap().unwrap();
     assert_eq!(stored.status, CallTeardownStatus::Done);
     assert_eq!(stored.attempt_count, 0);
+}
+
+#[tokio::test]
+async fn raw_one_to_one_intent_round_trips_its_typed_producing_node() {
+    let database = Database::in_memory("call-teardown-producing-node")
+        .await
+        .expect("database");
+    let producing_identity = NodeIdentity::new("node-a", "epoch-a");
+    let store = CallTeardownOutboxStore::new_with_node_identity(
+        database,
+        SharedNodeIdentity::new(producing_identity.clone()),
+    )
+    .await
+    .expect("store");
+
+    let intent_id = store.enqueue(participant_intent()).await.expect("enqueue");
+    let stored = store
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+
+    assert_eq!(
+        stored.producing_node,
+        Some(CallTeardownProducingNode::from_node_identity(
+            producing_identity
+        ))
+    );
+}
+
+#[tokio::test]
+async fn producing_node_guard_blocks_identity_rotation_until_the_durable_boundary_finishes() {
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+    let store = CallTeardownOutboxStore::new_with_node_identity(
+        Database::in_memory("call-teardown-producing-node-guard")
+            .await
+            .expect("database"),
+        identity.clone(),
+    )
+    .await
+    .expect("store");
+    let guard = store
+        .producing_node_guard(true)
+        .await
+        .expect("guard lookup")
+        .expect("producer guard");
+    let rotate = tokio::spawn({
+        let identity = identity.clone();
+        async move {
+            identity
+                .rotate(NodeIdentity::new("node-b", "epoch-b"))
+                .await;
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !rotate.is_finished(),
+        "identity rotation must wait for the guarded durable boundary"
+    );
+
+    drop(guard);
+    rotate.await.expect("rotation task");
+    assert_eq!(identity.current(), NodeIdentity::new("node-b", "epoch-b"));
+}
+
+#[tokio::test]
+async fn identical_one_to_one_intents_from_different_nodes_do_not_dedupe() {
+    let database = Database::in_memory("call-teardown-producing-node-dedupe")
+        .await
+        .expect("database");
+    let node_a = CallTeardownOutboxStore::new_with_node_identity(
+        database.clone(),
+        SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a")),
+    )
+    .await
+    .expect("node A store");
+    let node_b = CallTeardownOutboxStore::new_with_node_identity(
+        database,
+        SharedNodeIdentity::new(NodeIdentity::new("node-b", "epoch-b")),
+    )
+    .await
+    .expect("node B store");
+
+    let first = node_a
+        .enqueue(participant_intent())
+        .await
+        .expect("node A enqueue");
+    let second = node_b
+        .enqueue(participant_intent())
+        .await
+        .expect("node B enqueue");
+
+    assert_ne!(first, second);
 }
 
 #[tokio::test]
@@ -255,6 +350,7 @@ async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
     let intent_id = store.enqueue(intent.clone()).await.unwrap();
     let stored = store.find(&intent_id).await.unwrap().unwrap();
     assert_eq!(stored.intent, intent);
+    assert_eq!(stored.producing_node, None);
 }
 
 #[tokio::test]
@@ -380,6 +476,7 @@ async fn producer_retry_supervisor_coalesces_duplicate_batches() {
 #[derive(Default)]
 struct RecordingAdmin {
     remove_calls: Mutex<Vec<(CallId, Identity)>>,
+    remove_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     fail_remove: bool,
     occupancy: Mutex<RoomOccupancy>,
 }
@@ -404,6 +501,13 @@ impl LiveKitAdmin for RecordingAdmin {
                 .lock()
                 .expect("recording lock")
                 .push((room.clone(), identity.clone()));
+            let remove_gate = self.remove_gate.lock().expect("recording lock").clone();
+            if let Some(remove_gate) = remove_gate {
+                let _permit = remove_gate
+                    .acquire()
+                    .await
+                    .expect("remove gate remains open");
+            }
             if self.fail_remove {
                 Err(SfuError::InvalidCallId("simulated admin failure".into()))
             } else {
@@ -516,6 +620,108 @@ async fn drain_executes_admin_call_and_marks_intent_done() {
 
     assert_eq!(summary.drained, 1);
     assert_eq!(admin.remove_calls.lock().expect("recording lock").len(), 1);
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn one_to_one_drain_holds_the_producer_fence_through_execution_and_completion() {
+    let remove_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let admin = Arc::new(RecordingAdmin {
+        remove_gate: Mutex::new(Some(remove_gate.clone())),
+        ..RecordingAdmin::default()
+    });
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let node_identity = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+    let mut state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            node_identity: Some(node_identity.clone()),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let protocol = &mut Arc::get_mut(&mut state)
+        .expect("test state has one strong reference")
+        .deps
+        .protocol;
+    let sfu_service: Arc<dyn SfuService> = sfu.clone();
+    protocol.sfu = Some(sfu_service);
+    protocol.call_teardown_executor = Some(sfu.teardown_executor());
+
+    let intent = participant_intent();
+    let identity = Identity::from_jid(
+        FullJid::from_str("alice@example.test/device").expect("participant JID"),
+    );
+    assert_eq!(
+        sfu.register_call_participant_observed(
+            &intent.call_id,
+            &identity,
+            &ObservedCallSids::new(
+                intent.room_sid.clone(),
+                Some(ParticipantSid::new("PA_test").expect("participant sid")),
+            ),
+        ),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(intent)
+        .await
+        .expect("enqueue");
+    let drain = tokio::spawn({
+        let state = state.clone();
+        async move { drain_due(&state, 8).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if admin.remove_calls.lock().expect("recording lock").len() == 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drain reaches blocked admin execution");
+
+    let mut rotate = tokio::spawn({
+        let node_identity = node_identity.clone();
+        async move {
+            node_identity
+                .rotate(NodeIdentity::new("node-b", "epoch-b"))
+                .await;
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut rotate)
+            .await
+            .is_err(),
+        "producer identity must not rotate during an in-flight fenced effect"
+    );
+
+    remove_gate.add_permits(1);
+    let summary = drain.await.expect("drain task").expect("drain");
+    rotate.await.expect("rotation task");
+    assert_eq!(summary.drained, 1);
+    assert_eq!(
+        node_identity.current(),
+        NodeIdentity::new("node-b", "epoch-b")
+    );
     assert_eq!(
         state
             .deps
@@ -773,7 +979,7 @@ async fn occupied_room_intent_is_requeued_not_consumed() {
         Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
     let admin = Arc::new(RecordingAdmin {
         occupancy: Mutex::new(RoomOccupancy {
-            waddle: vec![alice],
+            waddle: vec![(alice, None)],
             foreign: 0,
         }),
         ..RecordingAdmin::default()
@@ -1358,6 +1564,151 @@ async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid(
     );
 }
 
+#[tokio::test]
+async fn muji_room_sweep_clears_actor_advertisement_absent_from_sfu_registry() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-room-sweep-actor@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: active_muji(),
+        })
+        .await
+        .expect("muji update")
+        .expect("occupant update");
+    assert!(
+        sfu.participants_for_call(&call_id).is_empty(),
+        "the regression requires actor-only Muji state"
+    );
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id,
+            target: TeardownTarget::MujiRoomSweep {
+                room_jid: room_jid.clone(),
+            },
+            generation: None,
+            room_sid: Some(RoomSid::new("RM_actor_only").expect("room sid")),
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.muji_for_session("alice", &alice).is_none(),
+        "room sweep must enumerate and clear actor-held Muji state even when the local SFU registry is empty"
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn muji_room_sweep_retries_when_the_owned_actor_disappears_before_enumeration() {
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::new(RecordingAdmin::default()),
+    ));
+    let state = state_with_executor(sfu).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-room-sweep-race@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .kill();
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: CallId::new(room_jid.to_string()).expect("call id"),
+            target: TeardownTarget::MujiRoomSweep {
+                room_jid: room_jid.clone(),
+            },
+            generation: None,
+            room_sid: Some(RoomSid::new("RM_actor_race").expect("room sid")),
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.requeued, 1);
+    let stored = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+    assert_eq!(stored.status, CallTeardownStatus::Queued);
+    assert_eq!(
+        stored.last_error,
+        Some(CallTeardownLastError::Retryable(
+            CallTeardownRetryReason::MujiPresenceClear
+        ))
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn muji_room_sweep_stale_room_sid_preserves_room_muji_state_and_counts_once() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -1542,6 +1893,93 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
             .expect("fresh row")
             .status,
         CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn foreign_node_one_to_one_intent_is_released_without_execution() {
+    let producing_node = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            node_identity: Some(producing_node.clone()),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let now_ms = 2_000_000_i64;
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(participant_intent(), now_ms - 1)
+        .await
+        .expect("enqueue");
+    producing_node
+        .rotate(NodeIdentity::new("node-b", "epoch-b"))
+        .await;
+
+    let summary = super::drain::drain_due_at(&state, 8, now_ms)
+        .await
+        .expect("drain");
+
+    assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 0);
+    assert_eq!(summary.failed, 0);
+    let stored = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+    assert_eq!(stored.status, CallTeardownStatus::Queued);
+    assert_eq!(stored.attempt_count, 0);
+    assert_eq!(stored.last_error, None);
+    assert!(stored.next_attempt_at_ms.is_some_and(|due| due > now_ms));
+}
+
+#[tokio::test]
+async fn foreign_node_one_to_one_intent_older_than_a_day_dead_letters() {
+    let producing_node = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            node_identity: Some(producing_node.clone()),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let now_ms = 2_000_000_i64;
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(participant_intent(), now_ms - (24 * 60 * 60 * 1_000) - 1)
+        .await
+        .expect("enqueue");
+    producing_node
+        .rotate(NodeIdentity::new("node-b", "epoch-b"))
+        .await;
+
+    let summary = super::drain::drain_due_at(&state, 8, now_ms)
+        .await
+        .expect("drain");
+
+    assert_eq!(summary.failed, 1);
+    let stored = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+    assert_eq!(stored.status, CallTeardownStatus::Failed);
+    assert_eq!(
+        stored.last_error,
+        Some(CallTeardownLastError::ProducerNeverDrained)
     );
 }
 

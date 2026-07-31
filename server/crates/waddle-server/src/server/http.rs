@@ -557,12 +557,22 @@ async fn create_websocket_state(
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
 
+    let call_teardown_node_identity = state
+        .clustering_claims
+        .node_identity
+        .clone()
+        .unwrap_or_else(|| {
+            waddle_xmpp::ownership::SharedNodeIdentity::new(
+                waddle_xmpp::ownership::NodeIdentity::local(),
+            )
+        });
     let call_teardown_outbox = Arc::new(
-        crate::call_teardown_outbox::CallTeardownOutboxStore::new(state.db_pool.global().clone())
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("failed to initialize call teardown outbox: {error}")
-            })?,
+        crate::call_teardown_outbox::CallTeardownOutboxStore::new_with_node_identity(
+            state.db_pool.global().clone(),
+            call_teardown_node_identity,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to initialize call teardown outbox: {error}"))?,
     );
     let call_teardown_persistence =
         crate::call_teardown_outbox::CallTeardownPersistenceSupervisor::new(

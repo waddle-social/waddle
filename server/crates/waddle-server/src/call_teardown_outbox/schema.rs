@@ -3,6 +3,7 @@ use crate::db::Database;
 
 pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxError> {
     let timestamp_type = crate::db::i64_sql_type(db.driver());
+    let driver = db.driver();
     let connection = db.guard().await?;
     connection
         .execute(
@@ -16,6 +17,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
                     generation INTEGER NULL CHECK (generation IS NULL OR generation > 0), \
                     room_sid TEXT NULL, \
                     participant_sid TEXT NULL, \
+                    producing_node TEXT NULL CHECK (producing_node IS NULL OR producing_node <> ''), \
                     status TEXT NOT NULL CHECK (status IN ('queued','in-progress','done','failed')), \
                     attempt_count INTEGER NOT NULL DEFAULT 0, \
                     last_error TEXT NULL, \
@@ -35,6 +37,20 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
             (),
         )
         .await?;
+    let add_producing_node = match driver {
+        crate::db::DatabaseDriver::Postgres => {
+            "ALTER TABLE call_teardown_outbox ADD COLUMN IF NOT EXISTS producing_node TEXT NULL CHECK (producing_node IS NULL OR producing_node <> '')"
+        }
+        crate::db::DatabaseDriver::Sqlite => {
+            "ALTER TABLE call_teardown_outbox ADD COLUMN producing_node TEXT NULL CHECK (producing_node IS NULL OR producing_node <> '')"
+        }
+    };
+    if let Err(error) = connection.execute(add_producing_node, ()).await {
+        let message = error.to_string().to_lowercase();
+        if !message.contains("duplicate column") && !message.contains("already exists") {
+            return Err(error.into());
+        }
+    }
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_status_due \

@@ -9,6 +9,7 @@ use waddle_sfu::{
     CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, ObservedCallSids, SfuService,
     TeardownExecution, TeardownTargetLite,
 };
+use waddle_xmpp::muc::room_actor::GetActiveMujiSessions;
 use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::ownership::{ClaimSnapshot, Entity, EntityType};
 
@@ -17,7 +18,7 @@ use super::{
     CallTeardownRetryReason, TeardownTarget,
 };
 use crate::server::routes::muc_muji_clear::WebhookEffectOutcome;
-use crate::server::routes::websocket::WebSocketState;
+use crate::server::routes::websocket::{get_room_actor_result, WebSocketState};
 
 const ROOM_OWNERSHIP_LOOKUP_TIMEOUT: std::time::Duration =
     waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT;
@@ -33,7 +34,8 @@ pub(crate) struct CallTeardownDrainSummary {
 
 /// Drain a bounded batch. Muji call IDs are room JIDs and therefore run only
 /// on the node whose room registry currently owns that room. A raw 1:1 call
-/// ID is process-local and may be drained by any node.
+/// ID is process-local and runs only on the exact process incarnation that
+/// produced it.
 pub(crate) async fn drain_due(
     state: &WebSocketState,
     batch_size: usize,
@@ -48,7 +50,7 @@ pub(super) async fn drain_due_at(
 ) -> Result<CallTeardownDrainSummary, CallTeardownOutboxError> {
     let store = &state.deps.protocol.call_teardown_outbox;
     let jobs = store.claim_due_at(batch_size, now_ms).await?;
-    let needs_room_ownership = jobs.iter().any(|job| room_scope(&job.intent).is_some());
+    let needs_room_ownership = jobs.iter().any(|job| job.intent.room_scope().is_some());
     let local_rooms = if needs_room_ownership {
         local_room_jids(&state.deps.protocol.room_registry).await
     } else {
@@ -57,7 +59,45 @@ pub(super) async fn drain_due_at(
     let mut summary = CallTeardownDrainSummary::default();
 
     for job in jobs {
-        if let Some(room_jid) = room_scope(&job.intent) {
+        let room_scope = job.intent.room_scope();
+        let _producing_node_guard = if room_scope.is_none() {
+            let guard = match job.producing_node.as_ref() {
+                Some(producer) => store.guard_if_current_producer(producer).await,
+                None => None,
+            };
+            match guard {
+                Some(guard) => Some(guard),
+                None => {
+                    let old_enough =
+                        now_ms.saturating_sub(job.created_at_ms) >= OWNERSHIP_DEAD_LETTER_MS;
+                    if old_enough {
+                        tracing::warn!(
+                            call_id = %job.intent.call_id,
+                            intent_id = %job.intent_id.as_str(),
+                            age_ms = now_ms.saturating_sub(job.created_at_ms),
+                            "call teardown 1:1 intent never reached its producing node; dead-lettering"
+                        );
+                        if store
+                            .fail_claim_at(
+                                &job,
+                                CallTeardownLastError::ProducerNeverDrained,
+                                now_ms,
+                            )
+                            .await?
+                        {
+                            summary.failed += 1;
+                        }
+                    } else {
+                        store.release_claim_at(&job, now_ms).await?;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(room_jid) = room_scope {
             let owned = match &local_rooms {
                 Ok(rooms) => rooms.contains(&room_jid),
                 Err(()) => {
@@ -101,7 +141,7 @@ pub(super) async fn drain_due_at(
         }
 
         if let TeardownTarget::Participant { identity, .. } = &job.intent.target {
-            if room_scope(&job.intent).is_some()
+            if job.intent.room_scope().is_some()
                 && store
                     .has_pending_muji_presence_clear(&job.intent.call_id, identity)
                     .await?
@@ -257,19 +297,6 @@ async fn local_room_jids(
         })
 }
 
-fn room_scope(intent: &CallTeardownIntent) -> Option<BareJid> {
-    match &intent.target {
-        TeardownTarget::MujiPresenceClear { room_jid, .. } => Some(room_jid.clone()),
-        TeardownTarget::MujiRoomSweep { room_jid } => Some(room_jid.clone()),
-        TeardownTarget::Participant { .. } | TeardownTarget::Room => {
-            // Muji uses the bare room JID verbatim as CallId. Raw 1:1 call
-            // IDs are scoped opaque identifiers and do not parse as JIDs;
-            // their registries are node-local, so any node may retry them.
-            intent.call_id.as_str().parse().ok()
-        }
-    }
-}
-
 enum IntentExecution {
     Done,
     Stale,
@@ -328,13 +355,50 @@ async fn execute_intent(
             return IntentExecution::Done;
         };
         let observed_sids = ObservedCallSids::new(Some(room_sid), None);
-        for identity in sfu.participants_for_call(&intent.call_id) {
+        let mut departed: HashSet<_> = sfu
+            .participants_for_call(&intent.call_id)
+            .into_iter()
+            .map(|identity| identity.as_jid().clone())
+            .collect();
+        match get_room_actor_result(state, room_jid).await {
+            Ok(Some(actor)) => match actor
+                .ask(GetActiveMujiSessions)
+                .reply_timeout(ROOM_OWNERSHIP_LOOKUP_TIMEOUT)
+                .await
+            {
+                Ok(actor_sessions) => departed.extend(actor_sessions),
+                Err(error) => {
+                    tracing::warn!(
+                        room = %room_jid,
+                        error = ?error,
+                        "muji room sweep could not enumerate actor-held advertisements"
+                    );
+                    return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(
+                    room = %room_jid,
+                    "muji room sweep lost its locally owned room actor before enumeration"
+                );
+                return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %room_jid,
+                    %error,
+                    "muji room sweep could not resolve the room actor"
+                );
+                return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+            }
+        }
+        for departed_jid in departed {
             let outcome = match tokio::time::timeout(
                 ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
                 crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
                     state,
                     room_jid,
-                    identity.as_jid(),
+                    &departed_jid,
                     Some(&observed_sids),
                 ),
             )

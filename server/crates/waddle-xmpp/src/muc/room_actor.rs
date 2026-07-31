@@ -47,10 +47,10 @@ pub use mediated_invites::{
     PrepareMediatedInviteGrantRollback,
 };
 pub use occupancy_handlers::{
-    ClearMujiPresence, InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation,
-    LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData,
-    ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome, SyncResolverAffiliation,
-    UpsertInCallState, UpsertMujiPresence,
+    ClearMujiPresence, GetActiveMujiSessions, InCallPresenceUpdateOutcome, JoinAffiliationGrant,
+    JoinWithAffiliation, LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck,
+    PresenceUpdateData, ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome,
+    SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,

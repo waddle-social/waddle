@@ -267,26 +267,30 @@ async fn livekit_webhook_handler(
             // Re-deriving their current voice here and pushing it
             // converges them within one webhook round-trip.
             let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
-            if register_participant_from_join(&state, env, &observed_sids)
-                == SidObservationDisposition::StaleSid
-            {
-                WebhookEffectOutcome::Completed
-            } else if reassert_voice_grants_on_join(
-                &state,
-                &env.room.name,
-                &env.participant.identity,
-            )
-            .await
-                == ReassertOutcome::RetryableFailure
-            {
-                warn!(
-                    room = %env.room.name,
-                    call.id = %call_id_field,
-                    "asking LiveKit to retry participant_joined after a transient failure",
-                );
-                WebhookEffectOutcome::Retryable("voice_grant_reassert_failed")
-            } else {
-                WebhookEffectOutcome::Completed
+            match register_participant_from_join(&state, env, &observed_sids) {
+                SidObservationDisposition::RoomRotationPending => {
+                    WebhookEffectOutcome::Retryable("room_sid_rotation_pending")
+                }
+                SidObservationDisposition::StaleSid => WebhookEffectOutcome::Completed,
+                SidObservationDisposition::Applied => {
+                    if reassert_voice_grants_on_join(
+                        &state,
+                        &env.room.name,
+                        &env.participant.identity,
+                    )
+                    .await
+                        == ReassertOutcome::RetryableFailure
+                    {
+                        warn!(
+                            room = %env.room.name,
+                            call.id = %call_id_field,
+                            "asking LiveKit to retry participant_joined after a transient failure",
+                        );
+                        WebhookEffectOutcome::Retryable("voice_grant_reassert_failed")
+                    } else {
+                        WebhookEffectOutcome::Completed
+                    }
+                }
             }
         }
         LiveKitWebhookEvent::Other => WebhookEffectOutcome::Completed,
@@ -1930,7 +1934,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn participant_joined_conflicting_room_sid_is_stale_noop_and_counted() {
+    async fn participant_joined_room_rotation_pending_returns_service_unavailable() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_writer(CaptureWriter(buffer.clone()))
+                .finish(),
+        );
+        let recorder = Arc::new(RecordingSfu::default());
+        recorder.set_register_disposition(SidObservationDisposition::RoomRotationPending);
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("recording SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_joined",
+            "id": "EV_room_rotation_pending",
+            "room": {
+                "name": "alice@example.com::dm-rotation",
+                "sid": "RM_new"
+            },
+            "participant": {
+                "identity": "bob@example.com/phone",
+                "sid": "PA_new"
+            }
+        }))
+        .expect("serialize joined webhook body");
+        let store =
+            Arc::new(super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default());
+
+        let response = livekit_webhook_handler(
+            Extension(state),
+            State(test_router_state_with(store.clone())),
+            signed_webhook_headers(&secret, &body),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            store
+                .status("EV_room_rotation_pending")
+                .expect("processing status"),
+            Some(WebhookDeliveryObservation::Processing),
+            "the pending join must remain eligible for LiveKit redelivery"
+        );
+        assert!(
+            recorder.registered_with_sids_snapshot().is_empty(),
+            "a join awaiting room rotation must not mutate participant registration"
+        );
+        let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+            .expect("captured logs are UTF-8");
+        assert!(logs.contains("room_sid_rotation_pending"), "{logs}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn participant_joined_stale_disposition_is_a_noop_and_counted() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let recorder = Arc::new(RecordingSfu::default());
         recorder.set_note_disposition(TeardownDisposition::StaleSid);

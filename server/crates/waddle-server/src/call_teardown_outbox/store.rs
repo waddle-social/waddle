@@ -2,11 +2,13 @@ use std::str::FromStr;
 
 use jid::{BareJid, FullJid};
 use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid};
+use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, NodeIdentity, SharedNodeIdentity};
 
 use super::{
     schema, CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownLastError,
-    CallTeardownOutboxError, CallTeardownQueueStats, CallTeardownRetryOutcome,
-    CallTeardownRetryReason, CallTeardownStatus, ClaimToken, TeardownTarget,
+    CallTeardownOutboxError, CallTeardownProducingNode, CallTeardownQueueStats,
+    CallTeardownRetryOutcome, CallTeardownRetryReason, CallTeardownStatus, ClaimToken,
+    TeardownTarget,
 };
 use crate::db::{Database, Row};
 
@@ -26,12 +28,44 @@ const STATUS_FAILED: &str = "failed";
 #[derive(Clone)]
 pub struct CallTeardownOutboxStore {
     db: Database,
+    node_identity: SharedNodeIdentity,
 }
 
 impl CallTeardownOutboxStore {
     pub async fn new(db: Database) -> Result<Self, CallTeardownOutboxError> {
+        Self::new_with_node_identity(db, SharedNodeIdentity::new(NodeIdentity::local())).await
+    }
+
+    pub async fn new_with_node_identity(
+        db: Database,
+        node_identity: SharedNodeIdentity,
+    ) -> Result<Self, CallTeardownOutboxError> {
         schema::initialize(&db).await?;
-        Ok(Self { db })
+        Ok(Self { db, node_identity })
+    }
+
+    pub(super) async fn producing_node_guard(
+        &self,
+        required: bool,
+    ) -> Result<Option<CurrentNodeIdentityGuard>, CallTeardownOutboxError> {
+        if !required {
+            return Ok(None);
+        }
+        let expected = self.node_identity.current();
+        self.node_identity
+            .guard_if_current(&expected)
+            .await
+            .map(Some)
+            .ok_or(CallTeardownOutboxError::ProducingNodeIdentityChanged)
+    }
+
+    pub(crate) async fn guard_if_current_producer(
+        &self,
+        producer: &CallTeardownProducingNode,
+    ) -> Option<CurrentNodeIdentityGuard> {
+        self.node_identity
+            .guard_if_current(producer.node_identity())
+            .await
     }
 
     pub async fn enqueue(
@@ -49,19 +83,24 @@ impl CallTeardownOutboxStore {
         intents: &[CallTeardownIntent],
     ) -> Result<Vec<CallTeardownIntentId>, CallTeardownOutboxError> {
         let now_ms = crate::time::now_ms();
+        let producing_node_guard = self
+            .producing_node_guard(intents.iter().any(|intent| intent.room_scope().is_none()))
+            .await?;
         let mut transaction = self.db.begin().await?;
         let mut intent_ids = Vec::with_capacity(intents.len());
         for intent in intents {
             let intent_id = CallTeardownIntentId::new();
             let (action, identity, room_jid, participant_sid) = encode_target(&intent.target);
             let generation = encode_generation(intent.generation)?;
+            let producing_node =
+                Self::encode_producing_node(intent, producing_node_guard.as_ref())?;
             transaction
                 .execute(
                     "INSERT INTO call_teardown_outbox (\
                         intent_id, call_id, identity, room_jid, action, generation, \
-                        room_sid, participant_sid, status, attempt_count, last_error, \
+                        room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
                         next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
                     crate::db_params![
                         intent_id.as_str(),
                         intent.call_id.as_str(),
@@ -71,6 +110,7 @@ impl CallTeardownOutboxStore {
                         generation,
                         intent.room_sid.as_ref().map(RoomSid::as_str),
                         participant_sid,
+                        producing_node,
                         STATUS_QUEUED,
                         now_ms,
                         now_ms,
@@ -81,6 +121,7 @@ impl CallTeardownOutboxStore {
             intent_ids.push(intent_id);
         }
         transaction.commit().await?;
+        drop(producing_node_guard);
         Ok(intent_ids)
     }
 
@@ -89,9 +130,13 @@ impl CallTeardownOutboxStore {
         intent: CallTeardownIntent,
         now_ms: i64,
     ) -> Result<CallTeardownIntentId, CallTeardownOutboxError> {
+        let producing_node_guard = self
+            .producing_node_guard(intent.room_scope().is_none())
+            .await?;
         let intent_id = CallTeardownIntentId::new();
         let (action, identity, room_jid, participant_sid) = encode_target(&intent.target);
         let generation = encode_generation(intent.generation)?;
+        let producing_node = Self::encode_producing_node(&intent, producing_node_guard.as_ref())?;
         let connection = self.db.guard().await?;
         // Dedupe queued work (#1449 review N2): the relay-failure
         // fallback and the subsequent local presence-clear both enqueue
@@ -107,6 +152,7 @@ impl CallTeardownOutboxStore {
                    AND generation IS NOT DISTINCT FROM ? \
                    AND room_sid IS NOT DISTINCT FROM ? \
                    AND participant_sid IS NOT DISTINCT FROM ? \
+                   AND producing_node IS NOT DISTINCT FROM ? \
                  LIMIT 1",
                 crate::db_params![
                     STATUS_QUEUED,
@@ -117,6 +163,7 @@ impl CallTeardownOutboxStore {
                     generation,
                     intent.room_sid.as_ref().map(RoomSid::as_str),
                     participant_sid,
+                    producing_node.clone(),
                 ],
             )
             .await?;
@@ -128,9 +175,9 @@ impl CallTeardownOutboxStore {
             .execute(
                 "INSERT INTO call_teardown_outbox (\
                     intent_id, call_id, identity, room_jid, action, generation, \
-                    room_sid, participant_sid, status, attempt_count, last_error, \
+                    room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
                     next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
                 crate::db_params![
                     intent_id.as_str(),
                     intent.call_id.as_str(),
@@ -140,6 +187,7 @@ impl CallTeardownOutboxStore {
                     generation,
                     intent.room_sid.as_ref().map(RoomSid::as_str),
                     participant_sid,
+                    producing_node,
                     STATUS_QUEUED,
                     now_ms,
                     now_ms,
@@ -147,7 +195,23 @@ impl CallTeardownOutboxStore {
                 ],
             )
             .await?;
+        drop(producing_node_guard);
         Ok(intent_id)
+    }
+
+    fn encode_producing_node(
+        intent: &CallTeardownIntent,
+        guard: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<Option<String>, CallTeardownOutboxError> {
+        intent
+            .room_scope()
+            .is_none()
+            .then(|| {
+                let guard = guard.ok_or(CallTeardownOutboxError::ProducingNodeIdentityChanged)?;
+                CallTeardownProducingNode::from_node_identity(guard.identity().clone())
+                    .as_db_value()
+            })
+            .transpose()
     }
 
     pub async fn claim_due(
@@ -495,7 +559,7 @@ pub fn retry_delay_ms(attempt_count: i64) -> i64 {
 
 fn select_columns() -> &'static str {
     "SELECT intent_id, call_id, identity, room_jid, action, generation, \
-            room_sid, participant_sid, status, attempt_count, last_error, \
+            room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
             next_attempt_at_ms, claim_token, created_at_ms \
      FROM call_teardown_outbox"
 }
@@ -558,14 +622,18 @@ fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutboxError> {
                 .map(RoomSid::new)
                 .transpose()?,
         },
-        status: CallTeardownStatus::from_db_value(row.get(8)?)?,
-        attempt_count: row.get(9)?,
+        producing_node: row
+            .get::<Option<String>>(8)?
+            .map(CallTeardownProducingNode::from_db_value)
+            .transpose()?,
+        status: CallTeardownStatus::from_db_value(row.get(9)?)?,
+        attempt_count: row.get(10)?,
         last_error: row
-            .get::<Option<String>>(10)?
+            .get::<Option<String>>(11)?
             .map(CallTeardownLastError::from_db_value),
-        next_attempt_at_ms: row.get(11)?,
-        claim_token: row.get::<Option<String>>(12)?.map(ClaimToken::from_stored),
-        created_at_ms: row.get(13)?,
+        next_attempt_at_ms: row.get(12)?,
+        claim_token: row.get::<Option<String>>(13)?.map(ClaimToken::from_stored),
+        created_at_ms: row.get(14)?,
     })
 }
 

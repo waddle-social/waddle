@@ -316,6 +316,10 @@ pub enum TeardownDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidObservationDisposition {
     Applied,
+    /// A join named a different LiveKit room incarnation than the
+    /// registry currently stores. Reconciliation must rotate the room
+    /// fence before the delivery can be applied safely.
+    RoomRotationPending,
     StaleSid,
 }
 

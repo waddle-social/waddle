@@ -402,6 +402,12 @@ pub struct ClearMujiPresence {
     pub sender_jid: FullJid,
 }
 
+/// Read the full JIDs of occupant sessions currently advertising active
+/// XEP-0272 Muji contents. This narrow query lets room-scoped convergence
+/// enumerate actor-owned state without exposing the actor's complete room
+/// snapshot or relying on a node-local SFU registry.
+pub struct GetActiveMujiSessions;
+
 #[derive(Debug, Clone)]
 pub struct MujiPresenceUpdateOutcome {
     pub update: PresenceUpdateOutcome,
@@ -503,6 +509,27 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
             session_mujis: muji_state.session_mujis,
             active_call_started: muji_state.active_call_started,
         }))
+    }
+}
+
+impl kameo::message::Message<GetActiveMujiSessions> for RoomActor {
+    type Reply = Result<Vec<FullJid>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetActiveMujiSessions,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut sessions: Vec<FullJid> = self
+            .room
+            .muji_state
+            .values()
+            .flat_map(|entries| entries.iter())
+            .filter(|(_, muji)| muji.is_active())
+            .map(|(session, _)| session.clone())
+            .collect();
+        sessions.sort_by_key(ToString::to_string);
+        Ok(sessions)
     }
 }
 

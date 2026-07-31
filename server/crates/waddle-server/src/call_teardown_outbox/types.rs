@@ -1,6 +1,7 @@
 use jid::{BareJid, FullJid};
 use thiserror::Error;
 use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid, SfuError};
+use waddle_xmpp::ownership::NodeIdentity;
 
 use crate::db::DatabaseError;
 
@@ -40,6 +41,36 @@ impl ClaimToken {
     }
 }
 
+/// The exact process incarnation that produced a node-local 1:1 teardown.
+///
+/// The outbox can live in a clustered database, while raw 1:1 call
+/// registries are process-local. Keeping this typed instead of passing the
+/// stored `TEXT` through the drain prevents a foreign process from treating
+/// an opaque database string as local authority.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallTeardownProducingNode(NodeIdentity);
+
+impl CallTeardownProducingNode {
+    pub(crate) fn from_node_identity(identity: NodeIdentity) -> Self {
+        Self(identity)
+    }
+
+    pub(crate) fn node_identity(&self) -> &NodeIdentity {
+        &self.0
+    }
+
+    pub(crate) fn as_db_value(&self) -> Result<String, CallTeardownOutboxError> {
+        serde_json::to_string(&(&self.0.node_id, &self.0.node_epoch))
+            .map_err(CallTeardownOutboxError::EncodeProducingNode)
+    }
+
+    pub(crate) fn from_db_value(value: String) -> Result<Self, CallTeardownOutboxError> {
+        let (node_id, node_epoch): (String, String) = serde_json::from_str(&value)
+            .map_err(|source| CallTeardownOutboxError::InvalidProducingNode { value, source })?;
+        Ok(Self(NodeIdentity::new(node_id, node_epoch)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TeardownTarget {
     Participant {
@@ -69,6 +100,20 @@ pub struct CallTeardownIntent {
     /// only by a SID when one is present.
     pub generation: Option<CallGeneration>,
     pub room_sid: Option<RoomSid>,
+}
+
+impl CallTeardownIntent {
+    pub(crate) fn room_scope(&self) -> Option<BareJid> {
+        match &self.target {
+            TeardownTarget::MujiPresenceClear { room_jid, .. }
+            | TeardownTarget::MujiRoomSweep { room_jid } => Some(room_jid.clone()),
+            TeardownTarget::Participant { .. } | TeardownTarget::Room => {
+                // Muji uses the bare room JID verbatim as CallId. Raw 1:1
+                // call IDs are opaque values which do not parse as JIDs.
+                self.call_id.as_str().parse().ok()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,12 +171,14 @@ impl CallTeardownRetryReason {
 pub enum CallTeardownLastError {
     Retryable(CallTeardownRetryReason),
     RoomNeverOwned,
+    ProducerNeverDrained,
 }
 
 impl CallTeardownLastError {
     pub(crate) fn from_db_value(value: String) -> Self {
         match value.as_str() {
             "room_never_owned" => Self::RoomNeverOwned,
+            "producer_never_drained" => Self::ProducerNeverDrained,
             _ => Self::Retryable(CallTeardownRetryReason::from_db_value(value.as_str())),
         }
     }
@@ -140,6 +187,7 @@ impl CallTeardownLastError {
         match self {
             Self::Retryable(reason) => reason.as_db_value(),
             Self::RoomNeverOwned => "room_never_owned",
+            Self::ProducerNeverDrained => "producer_never_drained",
         }
     }
 }
@@ -148,6 +196,7 @@ impl CallTeardownLastError {
 pub struct CallTeardownJob {
     pub intent_id: CallTeardownIntentId,
     pub intent: CallTeardownIntent,
+    pub producing_node: Option<CallTeardownProducingNode>,
     pub status: CallTeardownStatus,
     pub attempt_count: i64,
     pub last_error: Option<CallTeardownLastError>,
@@ -189,4 +238,13 @@ pub enum CallTeardownOutboxError {
     GenerationOverflow(u64),
     #[error("call teardown outbox row has an invalid target shape for action '{0}'")]
     InvalidTargetShape(String),
+    #[error("failed to encode call teardown producing node: {0}")]
+    EncodeProducingNode(serde_json::Error),
+    #[error("call teardown outbox row has invalid producing node '{value}': {source}")]
+    InvalidProducingNode {
+        value: String,
+        source: serde_json::Error,
+    },
+    #[error("call teardown producing node identity changed before the durable boundary")]
+    ProducingNodeIdentityChanged,
 }

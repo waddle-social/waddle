@@ -27,7 +27,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::call::{CallId, Identity, MediaCapabilities, RoomSid};
+use crate::call::{CallId, Identity, MediaCapabilities, ParticipantSid, RoomSid};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 use crate::token::JWT_CLOCK_SKEW;
@@ -56,8 +56,11 @@ const ADMIN_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 /// the recorder would kill the recording.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoomOccupancy {
-    /// Connected participants this server minted tokens for.
-    pub waddle: Vec<Identity>,
+    /// Connected participants this server minted tokens for, with the
+    /// LiveKit participant SID when the listing supplied one. Reconciliation
+    /// carries that SID into restored registry entries so SID-fenced teardown
+    /// remains decidable after a process restart.
+    pub waddle: Vec<(Identity, Option<ParticipantSid>)>,
     /// Connected participants whose identity is not one of ours.
     pub foreign: usize,
 }
@@ -82,7 +85,11 @@ impl RoomOccupancy {
     /// Waddle participant (typically registered by another replica)
     /// or ANY foreign participant does.
     pub fn is_empty_except(&self, departing: &Identity) -> bool {
-        self.foreign == 0 && self.waddle.iter().all(|identity| identity == departing)
+        self.foreign == 0
+            && self
+                .waddle
+                .iter()
+                .all(|(identity, _participant_sid)| identity == departing)
     }
 }
 
@@ -395,7 +402,9 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
             let mut occupancy = RoomOccupancy::default();
             for participant in resp.participants {
                 match participant.identity.parse::<jid::FullJid>() {
-                    Ok(jid) => occupancy.waddle.push(Identity::from_jid(jid)),
+                    Ok(jid) => occupancy
+                        .waddle
+                        .push((Identity::from_jid(jid), participant.sid)),
                     Err(_) => occupancy.foreign += 1,
                 }
             }
@@ -572,9 +581,9 @@ struct ListParticipantsRequest {
 
 /// Twirp response for `livekit.RoomService/ListParticipants`. LiveKit
 /// returns a `participants` array of `ParticipantInfo`; only the
-/// `identity` is load-bearing for ghost reconciliation. Other fields
-/// (`sid`, `state`, `tracks`, …) are ignored via serde's default
-/// unknown-field handling.
+/// `identity` and `sid` are load-bearing for ghost reconciliation. Other
+/// fields (`state`, `tracks`, …) are ignored via serde's default unknown-field
+/// handling.
 #[derive(Deserialize)]
 struct ListParticipantsResponse {
     #[serde(default)]
@@ -585,6 +594,8 @@ struct ListParticipantsResponse {
 struct ListedParticipant {
     #[serde(default)]
     identity: String,
+    #[serde(default)]
+    sid: Option<ParticipantSid>,
 }
 
 /// Twirp error envelope: a JSON object with `code` and `msg` fields
@@ -690,23 +701,30 @@ mod tests {
     #[test]
     fn list_participants_response_parses_livekit_wire_shape() {
         // Lock the LiveKit `ListParticipantsResponse` wire shape: a
-        // `participants` array whose elements carry at least `identity`
-        // (plus fields we ignore). Absent/empty array must parse too.
+        // `participants` array whose elements carry typed `identity` and
+        // participant `sid` values (plus fields we ignore). Absent/empty
+        // array must parse too.
         let body = r#"{"participants":[
             {"sid":"PA_1","identity":"alice@waddle.social/desktop","state":"ACTIVE"},
             {"sid":"PA_2","identity":"bob@waddle.social/mobile"}
         ]}"#;
         let parsed: ListParticipantsResponse = serde_json::from_str(body).expect("parses");
-        let identities: Vec<String> = parsed
+        let participants: Vec<(String, Option<ParticipantSid>)> = parsed
             .participants
             .into_iter()
-            .map(|p| p.identity)
+            .map(|participant| (participant.identity, participant.sid))
             .collect();
         assert_eq!(
-            identities,
+            participants,
             vec![
-                "alice@waddle.social/desktop".to_string(),
-                "bob@waddle.social/mobile".to_string()
+                (
+                    "alice@waddle.social/desktop".to_string(),
+                    Some(ParticipantSid::new("PA_1").expect("participant sid")),
+                ),
+                (
+                    "bob@waddle.social/mobile".to_string(),
+                    Some(ParticipantSid::new("PA_2").expect("participant sid")),
+                ),
             ]
         );
 

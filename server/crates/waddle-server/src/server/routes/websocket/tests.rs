@@ -233,6 +233,7 @@ pub(crate) struct RecordingSfu {
         )>,
     >,
     note_disposition: std::sync::Mutex<Option<waddle_sfu::TeardownDisposition>>,
+    register_disposition: std::sync::Mutex<Option<waddle_sfu::SidObservationDisposition>>,
     observed_calls: std::sync::Mutex<
         Vec<(
             waddle_sfu::CallId,
@@ -257,6 +258,7 @@ impl Default for RecordingSfu {
             calls: std::sync::Mutex::new(Vec::new()),
             note_calls: std::sync::Mutex::new(Vec::new()),
             note_disposition: std::sync::Mutex::new(None),
+            register_disposition: std::sync::Mutex::new(None),
             observed_calls: std::sync::Mutex::new(Vec::new()),
             participants: std::sync::Mutex::new(Vec::new()),
             update_calls: std::sync::Mutex::new(Vec::new()),
@@ -303,6 +305,13 @@ impl RecordingSfu {
 
     pub(crate) fn set_note_disposition(&self, disposition: waddle_sfu::TeardownDisposition) {
         *self.note_disposition.lock().expect("recording lock") = Some(disposition);
+    }
+
+    pub(crate) fn set_register_disposition(
+        &self,
+        disposition: waddle_sfu::SidObservationDisposition,
+    ) {
+        *self.register_disposition.lock().expect("recording lock") = Some(disposition);
     }
 
     pub(crate) fn observed_with_sids_snapshot(
@@ -355,6 +364,9 @@ impl waddle_sfu::SfuService for RecordingSfu {
         identity: &waddle_sfu::Identity,
         observed_sids: &waddle_sfu::ObservedCallSids,
     ) -> waddle_sfu::SidObservationDisposition {
+        if let Some(disposition) = *self.register_disposition.lock().expect("recording lock") {
+            return disposition;
+        }
         if matches!(
             *self.note_disposition.lock().expect("recording lock"),
             Some(waddle_sfu::TeardownDisposition::StaleSid)
@@ -629,9 +641,19 @@ async fn create_test_websocket_state_with_extension_manager(
         .await
         .expect("notification outbox"),
     );
+    let call_teardown_node_identity = app_state
+        .clustering_claims
+        .node_identity
+        .clone()
+        .unwrap_or_else(|| {
+            waddle_xmpp::ownership::SharedNodeIdentity::new(
+                waddle_xmpp::ownership::NodeIdentity::local(),
+            )
+        });
     let call_teardown_outbox = Arc::new(
-        crate::call_teardown_outbox::CallTeardownOutboxStore::new(
+        crate::call_teardown_outbox::CallTeardownOutboxStore::new_with_node_identity(
             app_state.db_pool.global().clone(),
+            call_teardown_node_identity,
         )
         .await
         .expect("call teardown outbox"),

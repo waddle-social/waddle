@@ -2,8 +2,9 @@
 //!
 //! The outbox stores typed teardown intent before the server-specific drain
 //! decides whether this node owns the relevant clustered scope and executes
-//! the effect. Raw 1:1 call IDs have no room JID and may be drained by any
-//! node because their live call registries are node-local.
+//! the effect. Raw 1:1 call IDs have no room JID and are fenced to the exact
+//! process incarnation that produced them because their live registries are
+//! node-local.
 
 mod drain;
 mod producer;
@@ -20,8 +21,9 @@ pub use store::{
 };
 pub use types::{
     CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownLastError,
-    CallTeardownOutboxError, CallTeardownQueueStats, CallTeardownRetryOutcome,
-    CallTeardownRetryReason, CallTeardownStatus, ClaimToken, TeardownTarget,
+    CallTeardownOutboxError, CallTeardownProducingNode, CallTeardownQueueStats,
+    CallTeardownRetryOutcome, CallTeardownRetryReason, CallTeardownStatus, ClaimToken,
+    TeardownTarget,
 };
 
 #[cfg(test)]

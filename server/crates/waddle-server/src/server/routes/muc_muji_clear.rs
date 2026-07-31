@@ -310,13 +310,20 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(
         }
 
         let deps = build_interpret_deps(state, None);
-        let _ = super::interpret::broadcast_room_system_message(
+        if super::interpret::broadcast_room_system_message(
             &deps,
             room_jid.clone(),
             Box::new(message),
         )
-        .await;
-        state.deps.protocol.call_threads.remove(room_jid);
+        .await
+        .is_none()
+        {
+            // `mark_call_thread_ended` has upsert-style overwrite semantics,
+            // so retaining the active entry and re-running persistence on a
+            // LiveKit redelivery is safe.
+            return WebhookEffectOutcome::Retryable("call_thread_end_broadcast_failed");
+        }
+        remove_completed_call_thread(state, room_jid, &active);
         WebhookEffectOutcome::Completed
     }
     .await;
@@ -325,6 +332,21 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(
         Arc::ptr_eq(current, &room_lock) && Arc::strong_count(current) == 2
     });
     outcome
+}
+
+fn remove_completed_call_thread(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    completed: &crate::server::routes::websocket::ActiveCallThread,
+) {
+    state
+        .deps
+        .protocol
+        .call_threads
+        .remove_if(room_jid, |_, current| {
+            current.thread_id == completed.thread_id
+                && current.anchor_origin_id == completed.anchor_origin_id
+        });
 }
 
 fn build_call_thread_ended_message(
@@ -363,12 +385,27 @@ fn format_call_thread_duration(duration: chrono::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_muji_presence_for_departure, WebhookEffectOutcome};
-    use crate::server::routes::websocket::tests::{
-        create_test_websocket_state_with_sfu, RecordingSfu,
+    use super::{
+        clear_muji_presence_for_departure, maybe_broadcast_call_thread_ended,
+        remove_completed_call_thread, WebhookEffectOutcome,
     };
+    use crate::server::routes::websocket::handlers::presence::handle_muc_join;
+    use crate::server::routes::websocket::tests::{
+        create_test_server_owner_session, create_test_websocket_state_with_sfu, RecordingSfu,
+    };
+    use crate::server::routes::websocket::ActiveCallThread;
     use jid::{BareJid, FullJid};
     use std::sync::Arc;
+
+    fn active_call_thread(initiator: BareJid) -> ActiveCallThread {
+        ActiveCallThread {
+            anchor_origin_id: "anchor-origin-id".to_owned(),
+            initiator,
+            media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+            started: chrono::Utc::now() - chrono::Duration::minutes(5),
+            thread_id: "call-thread-id".to_owned(),
+        }
+    }
 
     #[tokio::test]
     async fn absent_room_outbox_enqueue_failure_is_retryable() {
@@ -390,5 +427,90 @@ mod tests {
             outcome,
             WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed")
         );
+    }
+
+    #[tokio::test]
+    async fn failed_call_thread_end_broadcast_is_retryable_and_retains_entry() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let room_jid: BareJid = "missing-call-room@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let initiator: BareJid = "alice@example.com".parse().expect("initiator jid");
+        state
+            .deps
+            .protocol
+            .call_threads
+            .insert(room_jid.clone(), active_call_thread(initiator));
+
+        let outcome = maybe_broadcast_call_thread_ended(state.as_ref(), &room_jid).await;
+
+        assert_eq!(
+            outcome,
+            WebhookEffectOutcome::Retryable("call_thread_end_broadcast_failed")
+        );
+        assert!(
+            state.deps.protocol.call_threads.contains_key(&room_jid),
+            "a failed ended fastening must retain the active entry for redelivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_call_thread_end_broadcast_removes_entry() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let room_jid: BareJid = "live-call-room@muc.example.com".parse().expect("room jid");
+        let initiator: FullJid = "alice@example.com/web".parse().expect("initiator jid");
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &initiator,
+            "alice",
+            None,
+            &Some(owner_session),
+        )
+        .await;
+        state
+            .deps
+            .protocol
+            .call_threads
+            .insert(room_jid.clone(), active_call_thread(initiator.to_bare()));
+
+        let outcome = maybe_broadcast_call_thread_ended(state.as_ref(), &room_jid).await;
+
+        assert_eq!(outcome, WebhookEffectOutcome::Completed);
+        assert!(
+            !state.deps.protocol.call_threads.contains_key(&room_jid),
+            "a successfully broadcast ended fastening must consume the active entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_old_call_thread_never_removes_a_same_room_replacement() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let room_jid: BareJid = "reused-call-room@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let initiator: BareJid = "alice@example.com".parse().expect("initiator jid");
+        let completed = active_call_thread(initiator.clone());
+        let mut replacement = active_call_thread(initiator);
+        replacement.anchor_origin_id = "replacement-anchor".to_owned();
+        replacement.thread_id = "replacement-thread".to_owned();
+        state
+            .deps
+            .protocol
+            .call_threads
+            .insert(room_jid.clone(), replacement.clone());
+
+        remove_completed_call_thread(state.as_ref(), &room_jid, &completed);
+
+        let retained = state
+            .deps
+            .protocol
+            .call_threads
+            .get(&room_jid)
+            .expect("replacement remains");
+        assert_eq!(retained.thread_id, replacement.thread_id);
+        assert_eq!(retained.anchor_origin_id, replacement.anchor_origin_id);
     }
 }

@@ -88,9 +88,10 @@ pub trait SfuService: Send + Sync + 'static {
     /// room/participant SIDs. Unlike token issuance, this only restores
     /// local bookkeeping after a process restart.
     ///
-    /// If an existing call entry has a conflicting SID, the event is
-    /// stale and MUST be a no-op so an old room incarnation cannot be
-    /// resurrected under a reused [`CallId`].
+    /// If an existing call entry has a conflicting room SID, the event
+    /// MUST return [`SidObservationDisposition::RoomRotationPending`]
+    /// without mutation. The webhook can then be redelivered after an
+    /// authoritative room listing rotates the stored incarnation.
     fn register_call_participant_observed(
         &self,
         call_id: &CallId,
@@ -205,7 +206,9 @@ pub trait SfuService: Send + Sync + 'static {
     ///
     /// Implementations MUST NOT create new call or participant entries
     /// from this method. If either is unknown, the observation is
-    /// ignored and reported as applied.
+    /// ignored and reported as applied. A join-side room-SID mismatch
+    /// is pending until reconciliation rotates the stored incarnation;
+    /// a leave-side mismatch is stale and remains a no-op.
     fn observe_call_participant_sids(
         &self,
         call_id: &CallId,

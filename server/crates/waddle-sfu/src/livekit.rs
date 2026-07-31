@@ -203,6 +203,7 @@ struct ClearOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidGuardDisposition {
     Applied { participant_rejoined: bool },
+    RoomRotationPending,
     StaleSid,
 }
 
@@ -596,7 +597,7 @@ impl LiveKitSfu {
         &self,
         call_id: &CallId,
         room_sid: Option<RoomSid>,
-        participants: &[Identity],
+        participants: &[(Identity, Option<ParticipantSid>)],
         now: DateTime<Utc>,
     ) -> bool {
         if participants.is_empty() {
@@ -609,14 +610,16 @@ impl LiveKitSfu {
         let participant_states: HashMap<Identity, ParticipantState> = participants
             .iter()
             .cloned()
-            .map(|identity| (identity, ParticipantState::restored(now, None)))
+            .map(|(identity, participant_sid)| {
+                (identity, ParticipantState::restored(now, participant_sid))
+            })
             .collect();
         entry.insert(CallEntry {
             generation,
             room_sid,
             participants: participant_states,
         });
-        for identity in participants {
+        for (identity, _participant_sid) in participants {
             self.registered_at
                 .insert((call_id.clone(), identity.clone()), now);
             self.absent_streak
@@ -638,7 +641,7 @@ impl LiveKitSfu {
     fn merge_live_identities(
         &self,
         call_id: &CallId,
-        live: &[Identity],
+        live: &[(Identity, Option<ParticipantSid>)],
         now: DateTime<Utc>,
     ) -> usize {
         let mut merged = 0;
@@ -646,17 +649,22 @@ impl LiveKitSfu {
             let Some(mut entry) = self.calls.get_mut(call_id) else {
                 return 0;
             };
-            for identity in live {
-                if !entry.participants.contains_key(identity) {
-                    entry
-                        .participants
-                        .insert(identity.clone(), ParticipantState::restored(now, None));
+            for (identity, participant_sid) in live {
+                if let Some(participant) = entry.participants.get_mut(identity) {
+                    if participant.participant_sid.is_none() && participant_sid.is_some() {
+                        participant.participant_sid.clone_from(participant_sid);
+                    }
+                } else {
+                    entry.participants.insert(
+                        identity.clone(),
+                        ParticipantState::restored(now, participant_sid.clone()),
+                    );
                     merged += 1;
                 }
             }
         }
         if merged > 0 {
-            for identity in live {
+            for (identity, _participant_sid) in live {
                 let key = (call_id.clone(), identity.clone());
                 self.registered_at.entry(key.clone()).or_insert(now);
                 self.absent_streak.remove(&key);
@@ -856,21 +864,35 @@ impl LiveKitSfu {
         let identity_is_tracked = entry.participants.contains_key(identity);
         let mut participant_rejoined = false;
 
-        // Validate the room SID before mutating the entry. A room-SID
-        // mismatch is always a true no-op. Participant-SID mismatches are
-        // strict no-ops for leaves, while joins advance the incarnation only
-        // after this room fence has passed.
+        // Validate the room SID before mutating the entry. A join from a
+        // different room incarnation is retryable: the authoritative room
+        // listing must rotate the stored fence before a redelivery may
+        // advance participant state. Leaves remain strict stale no-ops.
         if let Some(room_sid) = observed_sids.room_sid.as_ref() {
             if let Some(stored_room_sid) = entry.room_sid.as_ref() {
                 if stored_room_sid != room_sid {
-                    tracing::warn!(
-                        call_id = %call_id,
-                        identity = %identity.as_livekit_identity(),
-                        room_sid = %room_sid,
-                        stored_room_sid = %stored_room_sid,
-                        "LiveKit event ignored as stale: room sid mismatch"
-                    );
-                    return SidGuardDisposition::StaleSid;
+                    return match direction {
+                        SidObservationDirection::Join => {
+                            tracing::info!(
+                                call_id = %call_id,
+                                identity = %identity.as_livekit_identity(),
+                                room_sid = %room_sid,
+                                stored_room_sid = %stored_room_sid,
+                                "LiveKit join deferred until room sid rotation is reconciled"
+                            );
+                            SidGuardDisposition::RoomRotationPending
+                        }
+                        SidObservationDirection::Leave => {
+                            tracing::warn!(
+                                call_id = %call_id,
+                                identity = %identity.as_livekit_identity(),
+                                room_sid = %room_sid,
+                                stored_room_sid = %stored_room_sid,
+                                "LiveKit event ignored as stale: room sid mismatch"
+                            );
+                            SidGuardDisposition::StaleSid
+                        }
+                    };
                 }
             }
         }
@@ -1066,11 +1088,11 @@ impl LiveKitSfu {
     /// `teardown_failure_sink` for durable retry. The availability gate
     /// bounds both in-flight calls and spawned tasks during a teardown burst.
     ///
-    /// The participant intent is reported before spawning the inline admin
-    /// future whenever we are about to attempt `RemoveParticipant`. That
-    /// closes the local-clear-before-spawn crash window. The residual gap is
-    /// the sink's own async enqueue; fully persisting before the side effect
-    /// would require an async `SfuService` surface.
+    /// The participant intent and, for the last participant, the room intent
+    /// are reported before spawning the inline admin future. That closes the
+    /// local-clear-before-spawn crash window for both effects. The residual
+    /// gap is the sink's own async enqueue; fully persisting before the side
+    /// effect would require an async `SfuService` surface.
     fn schedule_remote_teardown(
         &self,
         call_id: CallId,
@@ -1117,9 +1139,9 @@ impl LiveKitSfu {
                 return;
             }
         };
-        self.teardown_reporter.report([participant_intent.clone()]);
+        self.teardown_reporter
+            .report(std::iter::once(participant_intent.clone()).chain(room_intent.clone()));
         let executor = self.inline_teardown_executor();
-        let reporter = self.teardown_reporter.clone();
         runtime.spawn(async move {
             let _permit = permit;
             let _ = executor
@@ -1136,8 +1158,8 @@ impl LiveKitSfu {
                     },
                 )
                 .await;
-            if we_just_emptied
-                && executor
+            if we_just_emptied {
+                let _ = executor
                     .delete_room_if_empty(
                         &call_id,
                         Some(&identity),
@@ -1146,12 +1168,7 @@ impl LiveKitSfu {
                             .as_ref()
                             .and_then(|intent| intent.room_sid.as_ref()),
                     )
-                    .await
-                    .is_err()
-            {
-                if let Some(intent) = room_intent {
-                    reporter.report([intent]);
-                }
+                    .await;
             }
         });
     }
@@ -1469,14 +1486,18 @@ impl LiveKitSfu {
                         "SFU reconcile: adopted active LiveKit room missing from local registry"
                     );
                 }
-                live.clone()
+                live.iter()
+                    .map(|(identity, _participant_sid)| identity.clone())
+                    .collect()
             };
-            let live_set: HashSet<String> =
-                live.iter().map(Identity::as_livekit_identity).collect();
+            let live_set: HashSet<Identity> = live
+                .iter()
+                .map(|(identity, _participant_sid)| identity.clone())
+                .collect();
 
             for identity in registered {
                 let key = (call_id.clone(), identity.clone());
-                if live_set.contains(&identity.as_livekit_identity()) {
+                if live_set.contains(&identity) {
                     // Genuinely connected — not a ghost. Clear any
                     // absence streak from a transient not-found
                     // observation (e.g. a LiveKit restart).
@@ -1563,7 +1584,13 @@ impl crate::SfuReconciler for LiveKitSfu {
     fn live_participants<'a>(&'a self, call_id: &'a CallId) -> crate::LiveParticipantsFuture<'a> {
         Box::pin(async move {
             match self.admin.room_occupancy(call_id).await {
-                Ok(occupancy) => Some(occupancy.waddle),
+                Ok(occupancy) => Some(
+                    occupancy
+                        .waddle
+                        .into_iter()
+                        .map(|(identity, _participant_sid)| identity)
+                        .collect(),
+                ),
                 Err(error) => {
                     // `None`, never an empty vec: an outage must not be
                     // mistaken for "nobody is connected", which would
@@ -1692,18 +1719,21 @@ impl SfuService for LiveKitSfu {
         match self.calls.entry(call_id.clone()) {
             dashmap::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
-                if matches!(
-                    Self::guard_and_learn_observed_sids(
-                        call_id,
-                        identity,
-                        entry,
-                        Some(observed_sids),
-                        SidObservationDirection::Join,
-                        now,
-                    ),
-                    SidGuardDisposition::StaleSid
+                match Self::guard_and_learn_observed_sids(
+                    call_id,
+                    identity,
+                    entry,
+                    Some(observed_sids),
+                    SidObservationDirection::Join,
+                    now,
                 ) {
-                    return SidObservationDisposition::StaleSid;
+                    SidGuardDisposition::Applied { .. } => {}
+                    SidGuardDisposition::RoomRotationPending => {
+                        return SidObservationDisposition::RoomRotationPending;
+                    }
+                    SidGuardDisposition::StaleSid => {
+                        return SidObservationDisposition::StaleSid;
+                    }
                 }
                 if entry.participants.is_empty() {
                     entry.generation =
@@ -1949,6 +1979,9 @@ impl SfuService for LiveKitSfu {
                         .remove(&(call_id.clone(), identity.clone()));
                 }
                 SidObservationDisposition::Applied
+            }
+            SidGuardDisposition::RoomRotationPending => {
+                SidObservationDisposition::RoomRotationPending
             }
             SidGuardDisposition::StaleSid => SidObservationDisposition::StaleSid,
         };
