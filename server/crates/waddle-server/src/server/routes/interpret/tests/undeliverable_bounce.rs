@@ -365,7 +365,7 @@ async fn unroutable_session_initiate_counts_peer_unavailable_not_ok() {
             &alice,
             &bob,
         )))),
-        call_setup: Some(PendingCallSetupRoute),
+        call_setup: Some(PendingCallSetupRoute::open()),
     }];
 
     let outcome = interpret(
@@ -415,7 +415,7 @@ async fn delivered_session_initiate_counts_ok() {
             &alice,
             &bob,
         )))),
-        call_setup: Some(PendingCallSetupRoute),
+        call_setup: Some(PendingCallSetupRoute::open()),
     }];
 
     let outcome = interpret(
@@ -495,7 +495,7 @@ async fn detached_queued_session_initiate_counts_ok() {
             &alice,
             &bob,
         )))),
-        call_setup: Some(PendingCallSetupRoute),
+        call_setup: Some(PendingCallSetupRoute::open()),
     }];
 
     let outcome = interpret(events, &deps).await;

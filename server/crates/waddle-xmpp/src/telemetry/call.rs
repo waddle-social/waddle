@@ -110,21 +110,60 @@ pub(super) fn register_call_setup_counters() {
 /// an ambiguous-but-possibly-committed cluster relay;
 /// [`Self::undeliverable`] when no usable destination existed and the
 /// caller got the undeliverable bounce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PendingCallSetupRoute;
+///
+/// Exactly-once is enforced at the type level (Qodo review on PR
+/// #1611): the ticket is a shared one-shot guard, so clones — e.g.
+/// through `OutboundEvent`'s derived `Clone` — share the same closed
+/// bit and the first `delivered`/`undeliverable` wins. A second close
+/// is a counted-nowhere no-op that logs at warn, and fabrication is
+/// discouraged by the [`Self::open`] constructor being the only way
+/// to build one.
+#[derive(Debug, Clone)]
+pub struct PendingCallSetupRoute(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl PendingCallSetupRoute {
+    /// Open a ticket for a routed 1:1 `session-initiate`. Only the
+    /// Jingle handler (and tests standing in for it) should call
+    /// this; everything downstream receives the ticket through
+    /// `OutboundEvent::RouteToConnection`.
+    pub fn open() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+    }
+
+    /// Flip the shared closed bit; `true` iff this call performed the
+    /// close and may count.
+    fn close(&self) -> bool {
+        self.0
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
     /// The routed invite reached a usable destination: close the
     /// attempt as `ok`.
     pub fn delivered(self) {
-        increment_call_setup_ok();
+        if self.close() {
+            increment_call_setup_ok();
+        } else {
+            tracing::warn!("call-setup ticket closed twice (delivered); second close ignored");
+        }
     }
 
     /// No live or detached resource could take the invite (or the
     /// delivery was dropped): close the attempt as
     /// `failed{reason=peer_unavailable}`.
     pub fn undeliverable(self) {
-        increment_call_setup_failed(CallSetupFailureReason::PeerUnavailable);
+        if self.close() {
+            increment_call_setup_failed(CallSetupFailureReason::PeerUnavailable);
+        } else {
+            tracing::warn!("call-setup ticket closed twice (undeliverable); second close ignored");
+        }
     }
 }
 
@@ -140,4 +179,32 @@ impl PendingCallSetupRoute {
 pub fn record_call_setup_rejected(reason: CallSetupFailureReason) {
     increment_call_setup_attempted();
     increment_call_setup_failed(reason);
+}
+
+#[cfg(test)]
+mod pending_call_setup_route_tests {
+    use super::PendingCallSetupRoute;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cloned_ticket_closes_exactly_once() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let ticket = PendingCallSetupRoute::open();
+        let clone = ticket.clone();
+
+        ticket.delivered();
+        // The second close (via the clone, with the opposite verdict)
+        // must be a counted-nowhere no-op.
+        clone.undeliverable();
+
+        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "waddle.call.setup.failed",
+                    &[("reason", "peer_unavailable")]
+                )
+                .unwrap_or(0),
+            0
+        );
+    }
 }

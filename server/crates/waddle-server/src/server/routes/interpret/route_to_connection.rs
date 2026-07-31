@@ -263,8 +263,13 @@ async fn route_to_full_jid(
     // here. When the relay declines (`None`), the local delivery path
     // closes the ticket from its own outcome via the shared
     // [`close_call_setup_from_outcome`] mapping.
+    // The clone is sound: the ticket is a shared one-shot guard, so
+    // the relay path's copy and the local fallback's copy share the
+    // same closed bit and at most one of them counts.
     let delivery =
-        match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), call_setup).await {
+        match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), call_setup.clone())
+            .await
+        {
             Some(outcome) => outcome,
             None => {
                 let outcome =

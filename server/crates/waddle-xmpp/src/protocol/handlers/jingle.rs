@@ -97,7 +97,7 @@ impl CallSetupAttempt {
     /// interpreter closes the attempt via the returned ticket.
     fn handed_to_router(self) -> Option<crate::telemetry::call::PendingCallSetupRoute> {
         self.live
-            .then_some(crate::telemetry::call::PendingCallSetupRoute)
+            .then(crate::telemetry::call::PendingCallSetupRoute::open)
     }
 
     fn failed(self, reason: CallSetupFailureReason) {
@@ -2278,7 +2278,7 @@ mod tests {
             matches!(
                 events[0],
                 OutboundEvent::RouteToConnection {
-                    call_setup: Some(crate::telemetry::call::PendingCallSetupRoute),
+                    call_setup: Some(_),
                     ..
                 }
             ),
@@ -2317,13 +2317,17 @@ mod tests {
         let jid = test_ctx_jid();
         let handler = JingleHandler::new(fixture_sfu());
 
-        let events = handler.handle(&iq, &ctx(&jid));
+        let event = handler
+            .handle(&iq, &ctx(&jid))
+            .into_iter()
+            .next()
+            .expect("one event");
         let OutboundEvent::RouteToConnection {
             call_setup: Some(ticket),
             ..
-        } = events[0]
+        } = event
         else {
-            panic!("expected a routed invite carrying a call-setup ticket: {events:?}");
+            panic!("expected a routed invite carrying a call-setup ticket: {event:?}");
         };
 
         ticket.delivered();
@@ -2346,13 +2350,17 @@ mod tests {
         let jid = test_ctx_jid();
         let handler = JingleHandler::new(fixture_sfu());
 
-        let events = handler.handle(&iq, &ctx(&jid));
+        let event = handler
+            .handle(&iq, &ctx(&jid))
+            .into_iter()
+            .next()
+            .expect("one event");
         let OutboundEvent::RouteToConnection {
             call_setup: Some(ticket),
             ..
-        } = events[0]
+        } = event
         else {
-            panic!("expected a routed invite carrying a call-setup ticket: {events:?}");
+            panic!("expected a routed invite carrying a call-setup ticket: {event:?}");
         };
 
         ticket.undeliverable();
