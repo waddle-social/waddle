@@ -5,7 +5,7 @@ use super::super::{
     handlers::{self, presence::handle_muc_join},
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
-    state::WsConnState,
+    state::{WebSocketState, WsConnState},
     stream_management::is_countable_stanza,
     transport_xml::{build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml},
 };
@@ -14,7 +14,6 @@ use super::{
     create_test_websocket_state_with_sm_registry, message_frame_xml_with_id,
     register_test_native_user, scram_client_final_from_challenge, snapshot_room,
 };
-use crate::auth::Session;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use jid::{BareJid, FullJid};
 use std::str::FromStr;
@@ -27,6 +26,33 @@ use waddle_xmpp::{
     Stanza,
 };
 use xmpp_parsers::minidom::Element;
+
+async fn store_session_with_test_principal(
+    state: &WebSocketState,
+    detached: waddle_xmpp::stream_management::DetachedSession,
+) -> Result<
+    Vec<waddle_xmpp::stream_management::DetachedSession>,
+    waddle_xmpp::stream_management::SmRegistryError,
+> {
+    let username = detached
+        .jid
+        .node()
+        .expect("test detached resource has a localpart")
+        .as_str()
+        .to_string();
+    let session = create_test_session(state, &username).await;
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session_with_principal(
+            detached,
+            session
+                .authenticated_principal_ref()
+                .expect("test session has a typed principal"),
+        )
+        .await
+}
 
 struct HangingEnsureClaimStore {
     inner: waddle_xmpp::ownership::InProcessClaimStore,
@@ -527,11 +553,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         );
     }
     assert_eq!(detached.replay_gap_through, Some(1));
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(detached.clone())
+    store_session_with_test_principal(state.as_ref(), detached.clone())
         .await
         .expect("store");
 
@@ -971,12 +993,9 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
 
     let stream_id = "stream-auth-match-with-sidecar";
     let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
-    let resumed_session = Session::new(&fresh_session.user_jid, "bob", "bob");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.to_string(),
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
@@ -996,9 +1015,10 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let resume_frame = resume_frame_xml(stream_id, 0);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -1017,8 +1037,8 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
     assert_eq!(
         conn.authenticated_session
             .as_ref()
-            .map(|saved| saved.id.as_str()),
-        Some(resumed_session.id.as_str())
+            .map(|saved| saved.user_jid.as_str()),
+        Some(fresh_session.user_jid.as_str())
     );
     assert_ne!(
         conn.authenticated_session
@@ -1747,11 +1767,9 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-half-window".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -1771,9 +1789,10 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -1808,11 +1827,9 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-regressed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -1832,9 +1849,10 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -1901,11 +1919,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     };
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(detached)
+    store_session_with_test_principal(state.as_ref(), detached)
         .await
         .expect("store");
 
@@ -1950,11 +1964,9 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-too-far".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -1978,9 +1990,10 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -2036,11 +2049,9 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "stream-roster-replay".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -2060,9 +2071,10 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let recorded = state
             .deps
@@ -2111,11 +2123,9 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let stream_id = "stream-detached-direct-message".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -2135,9 +2145,10 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice");
+        },
+    )
+    .await
+    .expect("store detached alice");
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
@@ -2182,11 +2193,9 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
     let stream_id = "stream-detached-bare-message".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -2206,9 +2215,10 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice");
+        },
+    )
+    .await
+    .expect("store detached alice");
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
@@ -2265,11 +2275,9 @@ async fn message_carbons_record_for_detached_enabled_resources() {
     let alice_laptop: FullJid = "alice@example.com/laptop".parse().expect("alice laptop");
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let sent_stream_id = "stream-detached-sent-carbon".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: sent_stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_laptop.clone(),
@@ -2289,9 +2297,10 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice laptop");
+        },
+    )
+    .await
+    .expect("store detached alice laptop");
 
     let mut alice = WsConnState::new();
     alice.phase = ConnectionPhase::ready(alice_phone.clone(), false);
@@ -2330,11 +2339,9 @@ async fn message_carbons_record_for_detached_enabled_resources() {
     );
 
     let received_stream_id = "stream-detached-received-carbon".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: received_stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_laptop,
@@ -2354,9 +2361,10 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice laptop again");
+        },
+    )
+    .await
+    .expect("store detached alice laptop again");
 
     // Build alice/phone's per-connection state machine so we can
     // drive the recipient-pass carbon fan-out the dispatcher path
@@ -2521,11 +2529,9 @@ async fn roster_set_records_push_for_detached_interested_resource() {
     let detached_jid: FullJid = "alice@example.com/web".parse().expect("detached jid");
     let source_jid: FullJid = "alice@example.com/phone".parse().expect("source jid");
     let stream_id = "stream-roster-fanout".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
@@ -2545,9 +2551,10 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached session");
+        },
+    )
+    .await
+    .expect("store detached session");
 
     let mut source = WsConnState::new();
     source.phase = ConnectionPhase::ready(source_jid, false);
@@ -2587,11 +2594,9 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
     let detached_jid: FullJid = "alice@example.com/web".parse().expect("detached jid");
     let source_jid: FullJid = "alice@example.com/phone".parse().expect("source jid");
     let stream_id = "stream-blocking-fanout".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
@@ -2611,9 +2616,10 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached session");
+        },
+    )
+    .await
+    .expect("store detached session");
 
     let mut source = WsConnState::new();
     source.phase = ConnectionPhase::ready(source_jid, false);
@@ -2683,11 +2689,9 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
     while bob_rx.try_recv().is_ok() {}
 
     let stream_id = "stream-detached-current-presence".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id,
             user_id: "alice@example.com".to_string(),
             jid: alice_web_jid.clone(),
@@ -2707,9 +2711,10 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             presence_priority: 7,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice web");
+        },
+    )
+    .await
+    .expect("store detached alice web");
 
     let mut alice_phone = WsConnState::new();
     alice_phone.phase = ConnectionPhase::ready(alice_phone_jid, false);
@@ -2773,11 +2778,9 @@ async fn presence_probe_returns_detached_available_resource_presence() {
     .await;
     while bob_rx.try_recv().is_ok() {}
 
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-detached-probe".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -2797,9 +2800,10 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             presence_priority: 5,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice");
+        },
+    )
+    .await
+    .expect("store detached alice");
 
     bob.phase = ConnectionPhase::ready(bob_jid, false);
     let responses = handle_xmpp_frame(
@@ -2874,11 +2878,9 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
             "tablet detail",
         ),
     ] {
-        state
-            .deps
-            .protocol
-            .sm_session_registry
-            .store_session(DetachedSession {
+        store_session_with_test_principal(
+            state.as_ref(),
+            DetachedSession {
                 stream_id: stream_id.to_string(),
                 user_id: "alice@example.com".to_string(),
                 jid,
@@ -2898,9 +2900,10 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 presence_priority: 5,
                 presence_payloads: Vec::new(),
                 pending_subscribes_flushed: false,
-            })
-            .await
-            .expect("store detached alice resource");
+            },
+        )
+        .await
+        .expect("store detached alice resource");
     }
 
     let responses = handle_xmpp_frame(
@@ -2948,11 +2951,9 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
     // dual-registered exactly as production bind does. The privacy guarantee
     // (no detached presence leaked to an unauthorized prober) is unchanged.
     super::register_test_connection(state.as_ref(), &mallory_jid, mallory_tx).await;
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-detached-probe-denied".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -2972,9 +2973,10 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             presence_priority: 5,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice");
+        },
+    )
+    .await
+    .expect("store detached alice");
 
     let mut mallory = WsConnState::new();
     mallory.phase = ConnectionPhase::ready(mallory_jid, false);
@@ -3107,11 +3109,9 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
     .await;
 
     let stream_id = "stream-detached-subscription-roster-push".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
@@ -3131,9 +3131,10 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached bob");
+        },
+    )
+    .await
+    .expect("store detached bob");
 
     let mut alice = WsConnState::new();
     alice.phase = ConnectionPhase::ready(alice_jid, false);
@@ -3168,11 +3169,9 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
     let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let stream_id = "stream-detached-subscribe-recipient".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid.clone(),
@@ -3192,9 +3191,10 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice");
+        },
+    )
+    .await
+    .expect("store detached alice");
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid, false);
@@ -3247,11 +3247,9 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
     .await;
 
     let stream_id = "stream-detached-presence-broadcast".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
@@ -3271,9 +3269,10 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached bob");
+        },
+    )
+    .await
+    .expect("store detached bob");
 
     let _ = handle_xmpp_frame(
             r#"<presence xmlns="jabber:client"><show>away</show><status>broadcast while detached</status><priority>5</priority></presence>"#,
@@ -3360,11 +3359,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     };
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(detached)
+    store_session_with_test_principal(state.as_ref(), detached)
         .await
         .expect("store");
 
@@ -3681,11 +3676,9 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
 
     // Seed an immediately-expired detached session for that JID.
     let stream_id = "already-expired".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -3705,9 +3698,10 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     // Wait a hair so the 0-second TTL is definitely in the past.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3798,11 +3792,9 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "replayed-iq")
             .build(),
     );
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-replay-delay".to_string(),
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
@@ -3833,9 +3825,10 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let resume_frame = resume_frame_xml("stream-replay-delay", 0);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -4297,30 +4290,6 @@ mod fix_a_post_cas_shutdown {
             .with_claim_store(owner_claim_store, owner_identity);
 
         let jid: FullJid = "alice@example.com/phone".parse().expect("valid full jid");
-        owner_registry
-            .store_session(DetachedSession {
-                stream_id: "stream-post-cas-shutdown".to_string(),
-                user_id: "alice@example.com".to_string(),
-                jid: jid.clone(),
-                inbound_count: 0,
-                outbound_count: 0,
-                last_acked: 0,
-                replay_gap_through: None,
-                unacked_stanzas: Vec::new(),
-                max_resume_time: Some(300),
-                detached_at: std::time::Instant::now(),
-                carbons_enabled: false,
-                roster_interested: false,
-                blocklist_interested: false,
-                presence_available: false,
-                presence_show: None,
-                presence_status: None,
-                presence_priority: 0,
-                presence_payloads: Vec::new(),
-                pending_subscribes_flushed: false,
-            })
-            .await
-            .expect("owner stores the detached session");
 
         // Resuming node: the one wired into the websocket state under
         // test. Its `ClaimStore` is gated on `ensure_claimed` — the call
@@ -4382,6 +4351,37 @@ mod fix_a_post_cas_shutdown {
             .deps
             .shutdown = graceful.handle();
 
+        let session = create_test_session(state.as_ref(), "alice").await;
+        owner_registry
+            .store_session_with_principal(
+                DetachedSession {
+                    stream_id: "stream-post-cas-shutdown".to_string(),
+                    user_id: "alice@example.com".to_string(),
+                    jid: jid.clone(),
+                    inbound_count: 0,
+                    outbound_count: 0,
+                    last_acked: 0,
+                    replay_gap_through: None,
+                    unacked_stanzas: Vec::new(),
+                    max_resume_time: Some(300),
+                    detached_at: std::time::Instant::now(),
+                    carbons_enabled: false,
+                    roster_interested: false,
+                    blocklist_interested: false,
+                    presence_available: false,
+                    presence_show: None,
+                    presence_status: None,
+                    presence_priority: 0,
+                    presence_payloads: Vec::new(),
+                    pending_subscribes_flushed: false,
+                },
+                session
+                    .authenticated_principal_ref()
+                    .expect("test session has a typed principal"),
+            )
+            .await
+            .expect("owner stores the principal-bound detached session");
+
         let frame = resume_frame_xml("stream-post-cas-shutdown", 0);
         let state_for_task = Arc::clone(&state);
         let handle = tokio::spawn(async move {
@@ -4433,11 +4433,9 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-wrapped".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4475,9 +4473,10 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4522,11 +4521,9 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
             .expect("timestamp")
             .with_timezone(&chrono::Utc),
     );
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-idle".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4546,9 +4543,10 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
             presence_priority: 0,
             presence_payloads: vec![idle.clone()],
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4598,11 +4596,9 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-claimed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4624,9 +4620,10 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: true,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4678,11 +4675,9 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-claimed-unavail".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4704,9 +4699,10 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: true,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4755,11 +4751,9 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-unclaimed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4779,9 +4773,10 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4896,11 +4891,9 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_session_with_test_principal(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-regressed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4924,9 +4917,10 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await
+    .expect("store");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);

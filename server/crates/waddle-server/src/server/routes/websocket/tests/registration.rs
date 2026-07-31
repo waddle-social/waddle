@@ -183,38 +183,43 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
         .deps
         .protocol
         .sm_session_registry
-        .store_session(DetachedSession {
-            stream_id: stream_id.clone(),
-            user_id: session.user_jid.clone(),
-            jid: jid.clone(),
-            inbound_count: 4,
-            outbound_count: 10,
-            last_acked: 8,
-            replay_gap_through: None,
-            unacked_stanzas: vec![
-                DetachedUnackedStanza {
-                    sequence: 9,
-                    stanza_xml: "<message id='m9'/>".to_string(),
-                    original_receipt_at: chrono::Utc::now(),
-                },
-                DetachedUnackedStanza {
-                    sequence: 10,
-                    stanza_xml: "<message id='m10'/>".to_string(),
-                    original_receipt_at: chrono::Utc::now(),
-                },
-            ],
-            max_resume_time: Some(300),
-            detached_at: std::time::Instant::now(),
-            carbons_enabled: true,
-            roster_interested: true,
-            blocklist_interested: false,
-            presence_available: true,
-            presence_show: Some(xmpp_parsers::presence::Show::Chat),
-            presence_status: Some("back".to_string()),
-            presence_priority: 5,
-            presence_payloads: Vec::new(),
-            pending_subscribes_flushed: false,
-        })
+        .store_session_with_principal(
+            DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: session.user_jid.clone(),
+                jid: jid.clone(),
+                inbound_count: 4,
+                outbound_count: 10,
+                last_acked: 8,
+                replay_gap_through: None,
+                unacked_stanzas: vec![
+                    DetachedUnackedStanza {
+                        sequence: 9,
+                        stanza_xml: "<message id='m9'/>".to_string(),
+                        original_receipt_at: chrono::Utc::now(),
+                    },
+                    DetachedUnackedStanza {
+                        sequence: 10,
+                        stanza_xml: "<message id='m10'/>".to_string(),
+                        original_receipt_at: chrono::Utc::now(),
+                    },
+                ],
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: true,
+                roster_interested: true,
+                blocklist_interested: false,
+                presence_available: true,
+                presence_show: Some(xmpp_parsers::presence::Show::Chat),
+                presence_status: Some("back".to_string()),
+                presence_priority: 5,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            },
+            session
+                .authenticated_principal_ref()
+                .expect("typed principal"),
+        )
         .await
         .expect("store detached session");
 
@@ -316,27 +321,32 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
         .deps
         .protocol
         .sm_session_registry
-        .store_session(DetachedSession {
-            stream_id: stream_id.clone(),
-            user_id: session.user_jid.clone(),
-            jid: jid.clone(),
-            inbound_count: 4,
-            outbound_count: 0,
-            last_acked: 0,
-            replay_gap_through: None,
-            unacked_stanzas: Vec::new(),
-            max_resume_time: Some(300),
-            detached_at: std::time::Instant::now(),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-            pending_subscribes_flushed: false,
-        })
+        .store_session_with_principal(
+            DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: session.user_jid.clone(),
+                jid: jid.clone(),
+                inbound_count: 4,
+                outbound_count: 0,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            },
+            session
+                .authenticated_principal_ref()
+                .expect("typed principal"),
+        )
         .await
         .expect("store detached session");
 
@@ -376,10 +386,20 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
         (outcome, conn)
     });
 
-    reached.notified().await;
+    if tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+        .await
+        .is_err()
+    {
+        release.notify_waiters();
+        registration.abort();
+        panic!("registration did not reach the post-SM-finalization hook");
+    }
     lifecycle.begin_fenced_recovery();
     release.notify_one();
-    let (outcome, mut conn) = registration.await.expect("registration task");
+    let (outcome, mut conn) = tokio::time::timeout(std::time::Duration::from_secs(5), registration)
+        .await
+        .expect("registration completes after post-finalization release")
+        .expect("registration task");
     assert!(matches!(
         outcome,
         RegistrationAfterFrame::AuthorityRevokedAfterSmFinalization
@@ -435,27 +455,32 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
         .deps
         .protocol
         .sm_session_registry
-        .store_session(DetachedSession {
-            stream_id: stream_id.clone(),
-            user_id: session.user_jid.clone(),
-            jid: jid.clone(),
-            inbound_count: 4,
-            outbound_count: 0,
-            last_acked: 0,
-            replay_gap_through: None,
-            unacked_stanzas: Vec::new(),
-            max_resume_time: Some(300),
-            detached_at: std::time::Instant::now(),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: true,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-            pending_subscribes_flushed: false,
-        })
+        .store_session_with_principal(
+            DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: session.user_jid.clone(),
+                jid: jid.clone(),
+                inbound_count: 4,
+                outbound_count: 0,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: true,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            },
+            session
+                .authenticated_principal_ref()
+                .expect("typed principal"),
+        )
         .await
         .expect("store detached session");
 

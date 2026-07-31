@@ -1223,7 +1223,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         tx.execute(
             "INSERT INTO sm_session_principals \
              (stream_id, bare_jid, auth_context_id, auth_context_version, principal_auth_epoch) \
-             VALUES (?, ?, ?, ?, ?) \
+             VALUES (?, ?, CAST(? AS UUID), ?, ?) \
              ON CONFLICT (stream_id) DO UPDATE SET \
                 bare_jid = EXCLUDED.bare_jid, \
                 auth_context_id = EXCLUDED.auth_context_id, \

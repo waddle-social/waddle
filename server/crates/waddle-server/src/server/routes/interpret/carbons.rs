@@ -163,22 +163,38 @@ pub(crate) async fn send_carbons_to_registry(
             waddle_xmpp::registry::SendResult::NotConnected => {
                 // Race between get_other_carbon_resources and
                 // send_to — the resource transitioned to
-                // detached. Benign: if it's resumable the
-                // detached pass below picks it up;
-                // otherwise the carbon is dropped per
-                // standard offline-delivery semantics.
+                // detached after the detached-target snapshot. Re-check
+                // the exact target so a resumable session gets the carbon;
+                // otherwise it is dropped per standard offline-delivery
+                // semantics.
                 debug!(
                     target = %target,
                     kind = ?kind,
-                    "SendCarbons: target offline at fan-out time, dropping"
+                    "SendCarbons: target offline at fan-out time; checking detached session"
                 );
+                queue_carbon_for_detached_resource(
+                    sm_session_registry,
+                    &target,
+                    kind,
+                    &message,
+                    &owner_str,
+                )
+                .await;
             }
             waddle_xmpp::registry::SendResult::ChannelClosed => {
-                warn!(
+                debug!(
                     target = %target,
                     kind = ?kind,
-                    "SendCarbons: target channel closed, dropping"
+                    "SendCarbons: target channel closed; checking detached session"
                 );
+                queue_carbon_for_detached_resource(
+                    sm_session_registry,
+                    &target,
+                    kind,
+                    &message,
+                    &owner_str,
+                )
+                .await;
             }
         }
     }
@@ -186,47 +202,59 @@ pub(crate) async fn send_carbons_to_registry(
     // when the resource resumes its XEP-0198 session.
     if let Some(sm) = sm_session_registry {
         for target in detached_targets {
-            let envelope = match build_carbon_envelope(kind, &message, &owner_str, &target) {
-                Ok(env) => env,
-                Err(error) => {
-                    warn!(
-                        target = %target,
-                        kind = ?kind,
-                        %error,
-                        "SendCarbons: failed to build detached envelope; skipping"
-                    );
-                    continue;
-                }
-            };
-            let stanza = Stanza::Message(envelope);
-            match sm
-                .record_stanza_for_detached_bound_resource(&target, &stanza, chrono::Utc::now())
-                .await
-            {
-                Ok(true) => {
-                    debug!(
-                        target = %target,
-                        kind = ?kind,
-                        "SendCarbons: queued for detached XEP-0198 resume"
-                    );
-                }
-                Ok(false) => {
-                    debug!(
-                        target = %target,
-                        kind = ?kind,
-                        "SendCarbons: detached session expired between enumeration \
-                         and queue; dropping"
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        target = %target,
-                        kind = ?kind,
-                        %error,
-                        "SendCarbons: failed to queue carbon for detached resource"
-                    );
-                }
-            }
+            queue_carbon_for_detached_resource(Some(sm), &target, kind, &message, &owner_str).await;
+        }
+    }
+}
+
+async fn queue_carbon_for_detached_resource(
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &FullJid,
+    kind: CarbonKind,
+    message: &Message,
+    owner: &str,
+) {
+    let Some(sm) = sm_session_registry else {
+        return;
+    };
+    let envelope = match build_carbon_envelope(kind, message, owner, target) {
+        Ok(env) => env,
+        Err(error) => {
+            warn!(
+                target = %target,
+                kind = ?kind,
+                %error,
+                "SendCarbons: failed to build detached envelope; skipping"
+            );
+            return;
+        }
+    };
+    let stanza = Stanza::Message(envelope);
+    match sm
+        .record_stanza_for_detached_bound_resource(target, &stanza, chrono::Utc::now())
+        .await
+    {
+        Ok(true) => {
+            debug!(
+                target = %target,
+                kind = ?kind,
+                "SendCarbons: queued for detached XEP-0198 resume"
+            );
+        }
+        Ok(false) => {
+            debug!(
+                target = %target,
+                kind = ?kind,
+                "SendCarbons: no detached resumable session for carbon"
+            );
+        }
+        Err(error) => {
+            warn!(
+                target = %target,
+                kind = ?kind,
+                %error,
+                "SendCarbons: failed to queue carbon for detached resource"
+            );
         }
     }
 }

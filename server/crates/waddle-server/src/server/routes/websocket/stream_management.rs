@@ -1,8 +1,6 @@
 use super::transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml};
 use super::*;
 
-const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-
 struct SmEnableClaimGuard {
     registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
     stream_id: waddle_xmpp::pending_delivery::SmSessionId,
