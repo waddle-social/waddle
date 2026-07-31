@@ -22,8 +22,8 @@ use tokio::sync::Semaphore;
 use crate::admin::{admin_base_url_from_ws, LiveKitAdmin, ReqwestLiveKitAdmin};
 use crate::call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
-    TeardownTargetLite,
+    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDirection, SidObservationDisposition,
+    TeardownDisposition, TeardownTargetLite,
 };
 use crate::config::{SfuConfig, WebsocketUrl};
 use crate::error::SfuError;
@@ -76,6 +76,10 @@ pub const RECONCILE_GRACE_SECONDS: i64 = 120;
 /// participants within ~2 passes.
 pub(crate) const RECONCILE_ABSENT_PASSES: u32 = 2;
 
+/// Generation tombstones survive a fully-cleared call long enough to
+/// fence delayed teardown effects and quick rejoins across replicas.
+const GENERATION_TOMBSTONE_TTL_HOURS: i64 = 25;
+
 /// Maximum concurrent `ListParticipants` probes in one reconcile pass.
 /// Each probe has a five-second HTTP timeout. Eight-way fan-out reduces
 /// a pathological 100-room all-timeout pass from 500 seconds serially to
@@ -116,6 +120,41 @@ struct CallEntry {
     generation: CallGeneration,
     room_sid: Option<RoomSid>,
     participants: HashMap<Identity, ParticipantState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GenerationEntry {
+    last_generation: u64,
+    last_cleared_at: Option<DateTime<Utc>>,
+}
+
+impl GenerationEntry {
+    fn new(last_generation: u64) -> Self {
+        Self {
+            last_generation,
+            last_cleared_at: None,
+        }
+    }
+
+    fn next_generation(&mut self, floor: u64) -> CallGeneration {
+        self.last_generation = self.last_generation.max(floor) + 1;
+        self.last_cleared_at = None;
+        CallGeneration::new(self.last_generation)
+    }
+
+    fn current_generation(&self) -> Option<CallGeneration> {
+        (self.last_generation > 0).then(|| CallGeneration::new(self.last_generation))
+    }
+
+    fn mark_cleared(&mut self, generation: CallGeneration, cleared_at: DateTime<Utc>) {
+        self.last_generation = self.last_generation.max(generation.as_u64());
+        self.last_cleared_at = Some(cleared_at);
+    }
+
+    fn tombstone_expired(&self, cutoff: DateTime<Utc>) -> bool {
+        self.last_cleared_at
+            .is_some_and(|cleared_at| cleared_at <= cutoff)
+    }
 }
 
 /// Shared registry of in-call participants. Held in an `Arc` so the
@@ -163,7 +202,7 @@ struct ClearOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidGuardDisposition {
-    Applied,
+    Applied { participant_rejoined: bool },
     StaleSid,
 }
 
@@ -397,7 +436,7 @@ impl LiveKitTeardownExecutor {
 pub struct LiveKitSfu {
     config: SfuConfig,
     calls: CallRegistry,
-    call_generations: Arc<DashMap<CallId, u64>>,
+    call_generations: Arc<DashMap<CallId, GenerationEntry>>,
     /// Live JWT identifiers per `(call, identity)`, each carrying
     /// its `exp` so revocation entries can be swept once the token
     /// would have lapsed anyway. Capped at
@@ -418,6 +457,12 @@ pub struct LiveKitSfu {
     /// with `calls`: written in `register_call_participant`, removed
     /// in `clear_local_state`.
     registered_at: DashMap<(CallId, Identity), DateTime<Utc>>,
+    /// Wall-clock instant the SFU last minted a join token for the
+    /// current `(call, identity)` registration. Used by higher layers
+    /// that need to distinguish a locally-minted rejoin from a
+    /// participant that was merely observed after reconnecting through
+    /// another node or an older still-valid token.
+    last_minted_at: DashMap<(CallId, Identity), DateTime<Utc>>,
     /// Consecutive reconciliation passes each `(call, identity)` has
     /// been observed absent from LiveKit's `ListParticipants` (#1127).
     /// A participant is only swept once the streak reaches
@@ -494,6 +539,32 @@ impl std::fmt::Debug for LiveKitSfu {
 }
 
 impl LiveKitSfu {
+    fn next_call_generation(&self, call_id: &CallId, floor: u64) -> CallGeneration {
+        self.call_generations
+            .entry(call_id.clone())
+            .or_insert_with(|| GenerationEntry::new(floor))
+            .next_generation(floor)
+    }
+
+    fn mark_call_cleared(
+        &self,
+        call_id: &CallId,
+        generation: CallGeneration,
+        cleared_at: DateTime<Utc>,
+    ) {
+        self.call_generations
+            .entry(call_id.clone())
+            .or_insert_with(|| GenerationEntry::new(generation.as_u64()))
+            .mark_cleared(generation, cleared_at);
+    }
+
+    fn prune_generation_tombstones(&self, now: DateTime<Utc>) {
+        let cutoff = now - ChronoDuration::hours(GENERATION_TOMBSTONE_TTL_HOURS);
+        self.call_generations.retain(|call_id, entry| {
+            self.calls.contains_key(call_id) || !entry.tombstone_expired(cutoff)
+        });
+    }
+
     fn rotate_room_incarnation_from_listing(&self, call_id: &CallId, listed_room_sid: &RoomSid) {
         let Some(mut entry) = self.calls.get_mut(call_id) else {
             return;
@@ -505,14 +576,7 @@ impl LiveKitSfu {
         if current_room_sid == listed_room_sid {
             return;
         }
-        let next_generation = {
-            let mut last_generation = self
-                .call_generations
-                .entry(call_id.clone())
-                .or_insert(entry.generation.as_u64());
-            *last_generation = (*last_generation).max(entry.generation.as_u64()) + 1;
-            CallGeneration::new(*last_generation)
-        };
+        let next_generation = self.next_call_generation(call_id, entry.generation.as_u64());
         tracing::info!(
             call_id = %call_id,
             old_room_sid = %current_room_sid,
@@ -541,11 +605,7 @@ impl LiveKitSfu {
         let dashmap::Entry::Vacant(entry) = self.calls.entry(call_id.clone()) else {
             return false;
         };
-        let generation = {
-            let mut last_generation = self.call_generations.entry(call_id.clone()).or_insert(0);
-            *last_generation += 1;
-            CallGeneration::new(*last_generation)
-        };
+        let generation = self.next_call_generation(call_id, 0);
         let participant_states: HashMap<Identity, ParticipantState> = participants
             .iter()
             .cloned()
@@ -633,6 +693,7 @@ impl LiveKitSfu {
             call_generations: Arc::new(DashMap::new()),
             issued: DashMap::new(),
             registered_at: DashMap::new(),
+            last_minted_at: DashMap::new(),
             absent_streak: DashMap::new(),
             revoked: DashMap::new(),
             pending_revocation_ejects: DashMap::new(),
@@ -758,7 +819,7 @@ impl LiveKitSfu {
             (
                 self.call_generations
                     .get(call_id)
-                    .map(|generation| CallGeneration::new(*generation)),
+                    .and_then(|generation| generation.current_generation()),
                 None,
                 None,
             )
@@ -784,15 +845,21 @@ impl LiveKitSfu {
         identity: &Identity,
         entry: &mut CallEntry,
         observed_sids: Option<&ObservedCallSids>,
+        direction: SidObservationDirection,
+        observed_at: DateTime<Utc>,
     ) -> SidGuardDisposition {
         let Some(observed_sids) = observed_sids else {
-            return SidGuardDisposition::Applied;
+            return SidGuardDisposition::Applied {
+                participant_rejoined: false,
+            };
         };
         let identity_is_tracked = entry.participants.contains_key(identity);
+        let mut participant_rejoined = false;
 
-        // Validate every learned value before mutating the entry. A
-        // participant-SID mismatch must be a true no-op, including when
-        // the same event also carries the first room SID we have seen.
+        // Validate the room SID before mutating the entry. A room-SID
+        // mismatch is always a true no-op. Participant-SID mismatches are
+        // strict no-ops for leaves, while joins advance the incarnation only
+        // after this room fence has passed.
         if let Some(room_sid) = observed_sids.room_sid.as_ref() {
             if let Some(stored_room_sid) = entry.room_sid.as_ref() {
                 if stored_room_sid != room_sid {
@@ -809,17 +876,34 @@ impl LiveKitSfu {
         }
 
         if let Some(participant_sid) = observed_sids.participant_sid.as_ref() {
-            if let Some(state) = entry.participants.get(identity) {
+            if let Some(state) = entry.participants.get_mut(identity) {
                 if let Some(stored_participant_sid) = state.participant_sid.as_ref() {
                     if stored_participant_sid != participant_sid {
-                        tracing::warn!(
-                            call_id = %call_id,
-                            identity = %identity.as_livekit_identity(),
-                            participant_sid = %participant_sid,
-                            stored_participant_sid = %stored_participant_sid,
-                            "LiveKit event ignored as stale: participant sid mismatch"
-                        );
-                        return SidGuardDisposition::StaleSid;
+                        match direction {
+                            SidObservationDirection::Join => {
+                                tracing::info!(
+                                    call_id = %call_id,
+                                    identity = %identity.as_livekit_identity(),
+                                    participant_sid = %participant_sid,
+                                    stored_participant_sid = %stored_participant_sid,
+                                    "LiveKit join advanced the participant sid for a new participant incarnation"
+                                );
+                                state.participant_sid = Some(participant_sid.clone());
+                                state.first_registered_at = observed_at;
+                                state.registered_without_mint = true;
+                                participant_rejoined = true;
+                            }
+                            SidObservationDirection::Leave => {
+                                tracing::warn!(
+                                    call_id = %call_id,
+                                    identity = %identity.as_livekit_identity(),
+                                    participant_sid = %participant_sid,
+                                    stored_participant_sid = %stored_participant_sid,
+                                    "LiveKit event ignored as stale: participant sid mismatch"
+                                );
+                                return SidGuardDisposition::StaleSid;
+                            }
+                        }
                     }
                 }
             }
@@ -836,7 +920,9 @@ impl LiveKitSfu {
             }
         }
 
-        SidGuardDisposition::Applied
+        SidGuardDisposition::Applied {
+            participant_rejoined,
+        }
     }
 
     /// Drop `identity` from the in-memory registry and revoke every
@@ -861,6 +947,7 @@ impl LiveKitSfu {
         identity: &Identity,
         observed_sids: Option<&ObservedCallSids>,
     ) -> ClearDisposition {
+        let now = Utc::now();
         let mut entry = match self.calls.get_mut(call_id) {
             Some(entry) => entry,
             None => return ClearDisposition::NoCall,
@@ -870,7 +957,9 @@ impl LiveKitSfu {
                 call_id,
                 identity,
                 entry.value_mut(),
-                observed_sids
+                observed_sids,
+                SidObservationDirection::Leave,
+                now,
             ),
             SidGuardDisposition::StaleSid
         ) {
@@ -899,6 +988,8 @@ impl LiveKitSfu {
             }
         }
         self.registered_at
+            .remove(&(call_id.clone(), identity.clone()));
+        self.last_minted_at
             .remove(&(call_id.clone(), identity.clone()));
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
@@ -942,8 +1033,8 @@ impl LiveKitSfu {
                 .map(|entry| entry.participants.len())
                 .unwrap_or(0)
         };
-        if emptied && call_id.as_str().parse::<jid::BareJid>().is_err() {
-            self.call_generations.remove(call_id);
+        if emptied {
+            self.mark_call_cleared(call_id, generation, now);
         }
 
         ClearDisposition::Cleared(ClearOutcome {
@@ -1262,6 +1353,7 @@ impl LiveKitSfu {
         grace: ChronoDuration,
     ) -> crate::ReconcilePassSummary {
         let now = Utc::now();
+        self.prune_generation_tombstones(now);
         // Snapshot the registry into owned values up front so no
         // DashMap guard is held across the `.await` on the admin call.
         let mut rooms: HashMap<CallId, (Vec<Identity>, Option<RoomSid>, bool)> = self
@@ -1524,6 +1616,8 @@ impl SfuService for LiveKitSfu {
             .entry((call_id.clone(), identity.clone()))
             .or_default();
         self.clear_pending_revocation_eject(call_id, identity);
+        self.last_minted_at
+            .insert((call_id.clone(), identity.clone()), Utc::now());
         let mut protected_from_empty_bucket_eject = false;
         if let Some(mut call_entry) = self.calls.get_mut(call_id) {
             if let Some(participant) = call_entry.participants.get_mut(identity) {
@@ -1556,10 +1650,8 @@ impl SfuService for LiveKitSfu {
             dashmap::Entry::Occupied(mut entry) => {
                 let entry = entry.get_mut();
                 if entry.participants.is_empty() {
-                    let mut last_generation =
-                        self.call_generations.entry(call_id.clone()).or_insert(0);
-                    *last_generation += 1;
-                    entry.generation = CallGeneration::new(*last_generation);
+                    entry.generation =
+                        self.next_call_generation(call_id, entry.generation.as_u64());
                     entry.room_sid = None;
                 }
                 entry
@@ -1568,12 +1660,7 @@ impl SfuService for LiveKitSfu {
                     .or_insert_with(|| ParticipantState::new(now));
             }
             dashmap::Entry::Vacant(entry) => {
-                let generation = {
-                    let mut last_generation =
-                        self.call_generations.entry(call_id.clone()).or_insert(0);
-                    *last_generation += 1;
-                    CallGeneration::new(*last_generation)
-                };
+                let generation = self.next_call_generation(call_id, 0);
                 let mut participants = HashMap::new();
                 participants.insert(identity.clone(), ParticipantState::new(now));
                 entry.insert(CallEntry {
@@ -1611,16 +1698,16 @@ impl SfuService for LiveKitSfu {
                         identity,
                         entry,
                         Some(observed_sids),
+                        SidObservationDirection::Join,
+                        now,
                     ),
                     SidGuardDisposition::StaleSid
                 ) {
                     return SidObservationDisposition::StaleSid;
                 }
                 if entry.participants.is_empty() {
-                    let mut last_generation =
-                        self.call_generations.entry(call_id.clone()).or_insert(0);
-                    *last_generation += 1;
-                    entry.generation = CallGeneration::new(*last_generation);
+                    entry.generation =
+                        self.next_call_generation(call_id, entry.generation.as_u64());
                 }
                 entry
                     .participants
@@ -1633,12 +1720,7 @@ impl SfuService for LiveKitSfu {
                 }
             }
             dashmap::Entry::Vacant(vacant) => {
-                let generation = {
-                    let mut last_generation =
-                        self.call_generations.entry(call_id.clone()).or_insert(0);
-                    *last_generation += 1;
-                    CallGeneration::new(*last_generation)
-                };
+                let generation = self.next_call_generation(call_id, 0);
                 let mut participants = HashMap::new();
                 participants.insert(
                     identity.clone(),
@@ -1681,6 +1763,19 @@ impl SfuService for LiveKitSfu {
         })
     }
 
+    fn participant_last_minted_at(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> Option<DateTime<Utc>> {
+        if !self.has_call_participant(call_id, identity) {
+            return None;
+        }
+        self.last_minted_at
+            .get(&(call_id.clone(), identity.clone()))
+            .map(|entry| *entry.value())
+    }
+
     fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti) {
         let key = (call_id.clone(), identity.clone());
         let mut revoked_issuance = None;
@@ -1712,6 +1807,7 @@ impl SfuService for LiveKitSfu {
             .is_some();
         self.revoked.insert(jti.clone(), revoked_issuance.exp);
         if bucket_emptied {
+            self.last_minted_at.remove(&key);
             if revoked_issuance.protected_from_empty_bucket_eject {
                 tracing::warn!(
                     call_id = %call_id,
@@ -1826,6 +1922,7 @@ impl SfuService for LiveKitSfu {
         call_id: &CallId,
         identity: &Identity,
         observed_sids: Option<&ObservedCallSids>,
+        direction: SidObservationDirection,
     ) -> SidObservationDisposition {
         let Some(mut entry) = self.calls.get_mut(call_id) else {
             return SidObservationDisposition::Applied;
@@ -1833,13 +1930,26 @@ impl SfuService for LiveKitSfu {
         if !entry.participants.contains_key(identity) {
             return SidObservationDisposition::Applied;
         }
+        let now = Utc::now();
         let disposition = match Self::guard_and_learn_observed_sids(
             call_id,
             identity,
             entry.value_mut(),
             observed_sids,
+            direction,
+            now,
         ) {
-            SidGuardDisposition::Applied => SidObservationDisposition::Applied,
+            SidGuardDisposition::Applied {
+                participant_rejoined,
+            } => {
+                if participant_rejoined {
+                    self.registered_at
+                        .insert((call_id.clone(), identity.clone()), now);
+                    self.absent_streak
+                        .remove(&(call_id.clone(), identity.clone()));
+                }
+                SidObservationDisposition::Applied
+            }
             SidGuardDisposition::StaleSid => SidObservationDisposition::StaleSid,
         };
         drop(entry);

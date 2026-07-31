@@ -761,6 +761,7 @@ async fn enqueue_muji_relay_teardown_fallback(
             target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
                 room_jid: room_jid.clone(),
                 departed: departed.clone(),
+                participant_sid: None,
             },
             generation: None,
             room_sid: None,
@@ -1021,6 +1022,7 @@ mod tests {
             _: &CallId,
             _: &Identity,
             _: Option<&waddle_sfu::ObservedCallSids>,
+            _: waddle_sfu::SidObservationDirection,
         ) -> waddle_sfu::SidObservationDisposition {
             unimplemented!("not exercised by these tests")
         }

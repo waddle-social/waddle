@@ -239,21 +239,107 @@ async fn a_new_store_over_the_same_pool_drains_enqueued_work() {
 }
 
 #[tokio::test]
-async fn muji_intent_round_trips_without_generation_or_sid_sentinels() {
+async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
     let store = store("call-teardown-muji").await;
     let intent = CallTeardownIntent {
         call_id: CallId::new("room@conference.example.test").unwrap(),
         target: TeardownTarget::MujiPresenceClear {
             room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
             departed: FullJid::from_str("alice@example.test/device").unwrap(),
+            participant_sid: Some(ParticipantSid::new("PA_muji").unwrap()),
         },
         generation: None,
-        room_sid: None,
+        room_sid: Some(RoomSid::new("RM_muji").unwrap()),
     };
 
     let intent_id = store.enqueue(intent.clone()).await.unwrap();
     let stored = store.find(&intent_id).await.unwrap().unwrap();
     assert_eq!(stored.intent, intent);
+}
+
+#[tokio::test]
+async fn muji_room_sweep_round_trips_with_webhook_room_sid() {
+    let store = store("call-teardown-muji-room-sweep").await;
+    let intent = CallTeardownIntent {
+        call_id: CallId::new("room@conference.example.test").unwrap(),
+        target: TeardownTarget::MujiRoomSweep {
+            room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
+        },
+        generation: None,
+        room_sid: Some(RoomSid::new("RM_sweep").unwrap()),
+    };
+
+    let intent_id = store.enqueue(intent.clone()).await.unwrap();
+    let stored = store.find(&intent_id).await.unwrap().unwrap();
+    assert_eq!(stored.intent, intent);
+}
+
+#[tokio::test]
+async fn muji_presence_clear_dedupe_is_exact_match_on_participant_sid() {
+    let store = store("call-teardown-muji-dedupe").await;
+    let first = CallTeardownIntent {
+        call_id: CallId::new("room@conference.example.test").unwrap(),
+        target: TeardownTarget::MujiPresenceClear {
+            room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
+            departed: FullJid::from_str("alice@example.test/device").unwrap(),
+            participant_sid: Some(ParticipantSid::new("PA_same").unwrap()),
+        },
+        generation: None,
+        room_sid: Some(RoomSid::new("RM_same").unwrap()),
+    };
+    let second = first.clone();
+    let third = CallTeardownIntent {
+        target: TeardownTarget::MujiPresenceClear {
+            room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
+            departed: FullJid::from_str("alice@example.test/device").unwrap(),
+            participant_sid: Some(ParticipantSid::new("PA_other").unwrap()),
+        },
+        ..first.clone()
+    };
+
+    let first_id = store.enqueue(first).await.unwrap();
+    let second_id = store.enqueue(second).await.unwrap();
+    let third_id = store.enqueue(third).await.unwrap();
+
+    assert_eq!(second_id, first_id);
+    assert_ne!(third_id, first_id);
+}
+
+#[tokio::test]
+async fn muji_room_sweep_schema_requires_webhook_room_sid() {
+    let (database, _store) = store_with_db("call-teardown-muji-room-sweep-check").await;
+    let connection = database.guard().await.unwrap();
+
+    let error = connection
+        .execute(
+            "INSERT INTO call_teardown_outbox (\
+                intent_id, call_id, identity, room_jid, action, generation, room_sid, \
+                participant_sid, status, attempt_count, last_error, next_attempt_at_ms, \
+                claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+            crate::db_params![
+                "invalid-muji-room-sweep",
+                "room@conference.example.test",
+                Option::<&str>::None,
+                Some("room@conference.example.test"),
+                "muji_room_sweep",
+                Option::<i64>::None,
+                Option::<&str>::None,
+                Option::<&str>::None,
+                "queued",
+                1_i64,
+                1_i64,
+                1_i64,
+            ],
+        )
+        .await
+        .expect_err("missing room_sid must violate the action CHECK");
+
+    let error_text = error.to_string();
+    assert!(
+        error_text.contains("CHECK") || error_text.contains("constraint"),
+        "unexpected error: {error_text}"
+    );
 }
 
 #[tokio::test]
@@ -657,6 +743,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
             target: TeardownTarget::MujiPresenceClear {
                 room_jid: room,
                 departed: departed.clone(),
+                participant_sid: None,
             },
             generation: None,
             room_sid: None,
@@ -872,6 +959,7 @@ async fn unfenced_muji_presence_clear_rejoin_is_skipped_and_preserves_room_muji_
                 target: TeardownTarget::MujiPresenceClear {
                     room_jid: room_jid.clone(),
                     departed: alice.clone(),
+                    participant_sid: None,
                 },
                 generation: None,
                 room_sid: None,
@@ -952,6 +1040,7 @@ async fn unfenced_muji_presence_clear_without_live_registration_still_clears_roo
             target: TeardownTarget::MujiPresenceClear {
                 room_jid: room_jid.clone(),
                 departed: alice.clone(),
+                participant_sid: None,
             },
             generation: None,
             room_sid: None,
@@ -966,6 +1055,382 @@ async fn unfenced_muji_presence_clear_without_live_registration_still_clears_roo
     assert!(
         room.muji_for_session("alice", &alice).is_none(),
         "non-stale clear must remove the Muji advertisement"
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sid_fenced_muji_presence_clear_stale_rejoin_preserves_room_muji_state_and_counts_once() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-sid-stale@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
+    let room_sid = RoomSid::new("RM_shared").expect("room sid");
+    let old_sids = ObservedCallSids::new(
+        Some(room_sid.clone()),
+        Some(ParticipantSid::new("PA_old").expect("participant sid")),
+    );
+    let current_sids = ObservedCallSids::new(
+        Some(room_sid.clone()),
+        Some(ParticipantSid::new("PA_current").expect("participant sid")),
+    );
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: active_muji(),
+        })
+        .await
+        .expect("muji update")
+        .expect("occupant update");
+    assert_eq!(
+        sfu.register_call_participant_observed(&call_id, &identity, &old_sids),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
+    assert!(matches!(
+        sfu.note_participant_left(&call_id, &identity, Some(&old_sids)),
+        waddle_sfu::TeardownDisposition::Applied(_)
+    ));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call_id, &identity, &current_sids),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: TeardownTarget::MujiPresenceClear {
+                room_jid: room_jid.clone(),
+                departed: alice.clone(),
+                participant_sid: old_sids.participant_sid.clone(),
+            },
+            generation: None,
+            room_sid: old_sids.room_sid.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert!(sfu.has_call_participant(&call_id, &identity));
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.muji_for_session("alice", &alice).is_some(),
+        "stale SID must not clear the rejoined participant's Muji state"
+    );
+    assert_eq!(
+        metrics.counter_sum("waddle.call.teardown.stale_dropped", &[]),
+        Some(1)
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_state() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-sid-clear@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
+    let observed_sids = ObservedCallSids::new(
+        Some(RoomSid::new("RM_match").expect("room sid")),
+        Some(ParticipantSid::new("PA_match").expect("participant sid")),
+    );
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: active_muji(),
+        })
+        .await
+        .expect("muji update")
+        .expect("occupant update");
+    assert_eq!(
+        sfu.register_call_participant_observed(&call_id, &identity, &observed_sids),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: TeardownTarget::MujiPresenceClear {
+                room_jid: room_jid.clone(),
+                departed: alice.clone(),
+                participant_sid: observed_sids.participant_sid.clone(),
+            },
+            generation: None,
+            room_sid: observed_sids.room_sid.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert!(
+        !sfu.has_call_participant(&call_id, &identity),
+        "matching SID should allow the queued clear to remove the stale registration"
+    );
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.muji_for_session("alice", &alice).is_none(),
+        "matching SID should clear the Muji advertisement"
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-room-sweep@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
+    let observed_sids = ObservedCallSids::new(
+        Some(RoomSid::new("RM_sweep").expect("room sid")),
+        Some(ParticipantSid::new("PA_sweep").expect("participant sid")),
+    );
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: active_muji(),
+        })
+        .await
+        .expect("muji update")
+        .expect("occupant update");
+    assert_eq!(
+        sfu.register_call_participant_observed(&call_id, &identity, &observed_sids),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: TeardownTarget::MujiRoomSweep {
+                room_jid: room_jid.clone(),
+            },
+            generation: None,
+            room_sid: observed_sids.room_sid.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert!(!sfu.has_call_participant(&call_id, &identity));
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.muji_for_session("alice", &alice).is_none(),
+        "owner-gated room sweep must clear remaining local Muji state"
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn muji_room_sweep_stale_room_sid_preserves_room_muji_state_and_counts_once() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-room-sweep-stale@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
+    let current_sids = ObservedCallSids::new(
+        Some(RoomSid::new("RM_current").expect("room sid")),
+        Some(ParticipantSid::new("PA_current").expect("participant sid")),
+    );
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: active_muji(),
+        })
+        .await
+        .expect("muji update")
+        .expect("occupant update");
+    assert_eq!(
+        sfu.register_call_participant_observed(&call_id, &identity, &current_sids),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: TeardownTarget::MujiRoomSweep {
+                room_jid: room_jid.clone(),
+            },
+            generation: None,
+            room_sid: Some(RoomSid::new("RM_stale").expect("room sid")),
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert!(sfu.has_call_participant(&call_id, &identity));
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert!(
+        room.muji_for_session("alice", &alice).is_some(),
+        "stale room SID must not clear the current Muji advertisement"
+    );
+    assert_eq!(
+        metrics.counter_sum("waddle.call.teardown.stale_dropped", &[]),
+        Some(1)
     );
     assert!(admin
         .remove_calls
@@ -1321,5 +1786,114 @@ async fn existing_participant_reobservation_does_not_reopen_the_swallow_window()
         admin.remove_calls.lock().expect("recording lock").len(),
         1,
         "re-observing an existing participant must not make a mid-window intent look newer than the original incarnation"
+    );
+}
+
+#[tokio::test]
+async fn later_local_token_mint_skips_an_older_queued_participant_eject() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let call_id = CallId::new("alice@example.test:later-mint-skip").expect("call id");
+    let identity =
+        Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
+
+    sfu.register_call_participant(&call_id, &identity);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let intent_created_at_ms = crate::time::now_ms();
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: call_id.clone(),
+                target: TeardownTarget::Participant {
+                    identity: identity.as_jid().clone(),
+                    participant_sid: None,
+                },
+                generation: None,
+                room_sid: None,
+            },
+            intent_created_at_ms,
+        )
+        .await
+        .expect("enqueue");
+
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    let _token = sfu
+        .issue_join_token(&call_id, &identity, MediaCapabilities::direct_call_peer())
+        .expect("join token");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert!(
+        sfu.has_call_participant(&call_id, &identity),
+        "a later local mint proves the participant is current and the queued eject must be swallowed"
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let call_id = CallId::new("alice@example.test:no-later-mint").expect("call id");
+    let identity =
+        Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
+
+    sfu.register_call_participant(&call_id, &identity);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let intent_created_at_ms = crate::time::now_ms();
+    let _intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: call_id.clone(),
+                target: TeardownTarget::Participant {
+                    identity: identity.as_jid().clone(),
+                    participant_sid: None,
+                },
+                generation: None,
+                room_sid: None,
+            },
+            intent_created_at_ms,
+        )
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert_eq!(
+        admin.remove_calls.lock().expect("recording lock").len(),
+        1,
+        "without a later mint, the queued eject must execute"
     );
 }

@@ -386,7 +386,12 @@ pub(crate) fn observe_participant_sids_from_webhook(
     let call_id = CallId::new(room_jid.to_string()).ok()?;
     let sfu = state.deps.protocol.sfu.as_ref()?;
     let identity = Identity::from_jid(jid.clone());
-    Some(sfu.observe_call_participant_sids(&call_id, &identity, observed_sids))
+    Some(sfu.observe_call_participant_sids(
+        &call_id,
+        &identity,
+        observed_sids,
+        waddle_sfu::SidObservationDirection::Leave,
+    ))
 }
 
 /// Raw-`CallId` variant of [`note_participant_left_from_webhook`] for

@@ -89,7 +89,23 @@ fn observed_join_registers_after_restart_and_rejects_conflicting_room_sid() {
 }
 
 fn stored_generation(sfu: &LiveKitSfu, call_id: &CallId) -> Option<CallGeneration> {
-    sfu.calls.get(call_id).map(|entry| entry.generation)
+    sfu.calls
+        .get(call_id)
+        .map(|entry| entry.generation)
+        .or_else(|| {
+            sfu.call_generations
+                .get(call_id)
+                .and_then(|entry| entry.current_generation())
+        })
+}
+
+fn stored_generation_tombstone_cleared_at(
+    sfu: &LiveKitSfu,
+    call_id: &CallId,
+) -> Option<DateTime<Utc>> {
+    sfu.call_generations
+        .get(call_id)
+        .and_then(|entry| entry.last_cleared_at)
 }
 
 fn stored_room_sid(sfu: &LiveKitSfu, call_id: &CallId) -> Option<RoomSid> {
@@ -163,6 +179,116 @@ fn participant_registered_at_keeps_the_first_current_registration_timestamp() {
 }
 
 #[test]
+fn participant_sid_advance_on_join_restamps_the_current_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-participant-sid-advance").expect("call id");
+    let alice = fixture_identity("alice");
+    let original = observed_sids(Some("RM_current"), Some("PA_original"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &original),
+        SidObservationDisposition::Applied
+    );
+    let first_registered_at = sfu
+        .participant_registered_at(&call, &alice)
+        .expect("first registration timestamp");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    let restamped_registered_at = sfu
+        .participant_registered_at(&call, &alice)
+        .expect("restamped registration timestamp");
+    assert!(
+        restamped_registered_at > first_registered_at,
+        "a new participant sid must start a new current-registration fence"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        rejoined.participant_sid
+    );
+    assert!(
+        sfu.calls
+            .get(&call)
+            .expect("call entry")
+            .participants
+            .get(&alice)
+            .expect("participant state")
+            .registered_without_mint,
+        "a rejoined participant stays pending until the first local mint of the new incarnation"
+    );
+}
+
+#[test]
+fn delayed_old_leave_with_a_superseded_participant_sid_is_stale() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-old-leave-stale").expect("call id");
+    let alice = fixture_identity("alice");
+    let original = observed_sids(Some("RM_current"), Some("PA_original"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &original),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&original)),
+        TeardownDisposition::StaleSid
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(sfu.participant_count(&call), 1);
+}
+
+#[test]
+fn current_leave_with_the_latest_participant_sid_tears_down() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-current-leave").expect("call id");
+    let alice = fixture_identity("alice");
+    let original = observed_sids(Some("RM_current"), Some("PA_original"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &original),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&rejoined)),
+        TeardownDisposition::Applied(CallState::Ended)
+    );
+    assert_eq!(sfu.participant_count(&call), 0);
+}
+
+#[test]
 fn registry_tracks_participants_per_call() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
     let call = CallId::new("r1").unwrap();
@@ -196,6 +322,46 @@ fn issue_join_token_returns_room_scoped_jwt() {
         .expect("token issued");
     assert_eq!(token.room, call);
     assert!(!token.jwt.as_str().is_empty());
+}
+
+#[test]
+fn participant_last_minted_at_tracks_the_current_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-last-minted-at").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_observed"), Some("PA_observed"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(sfu.participant_last_minted_at(&call, &alice), None);
+
+    let token = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token issued");
+
+    assert!(
+        sfu.participant_last_minted_at(&call, &alice)
+            .is_some_and(|minted_at| minted_at <= token.expires_at),
+        "the last-minted timestamp must be recorded for the current registration"
+    );
+    assert!(
+        !sfu.calls
+            .get(&call)
+            .expect("call entry")
+            .participants
+            .get(&alice)
+            .expect("participant state")
+            .registered_without_mint,
+        "the first local mint clears the pending restored-without-mint marker"
+    );
+
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&observed)),
+        TeardownDisposition::Applied(CallState::Ended)
+    );
+    assert_eq!(sfu.participant_last_minted_at(&call, &alice), None);
 }
 
 #[test]
@@ -297,6 +463,11 @@ fn revoke_issued_token_drops_the_emptied_issued_bucket() {
         !sfu.issued.contains_key(&(call.clone(), alice.clone())),
         "emptied issued bucket must be removed"
     );
+    assert!(
+        !sfu.last_minted_at
+            .contains_key(&(call.clone(), alice.clone())),
+        "emptying the issued bucket must also drop the last-minted tracker entry"
+    );
 
     // A pair with another live issuance keeps its bucket.
     let t1 = sfu
@@ -326,7 +497,12 @@ fn revoke_issued_token_reports_a_guarded_eject_intent() {
     let observed = observed_sids(Some("RM_revoked"), Some("PA_revoked"));
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&observed)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&observed),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
     let minted = sfu
@@ -509,7 +685,7 @@ fn register_is_idempotent() {
 #[test]
 fn generation_increments_only_when_a_call_is_recreated() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-generation").unwrap();
+    let call = CallId::new("alice@waddle.social::reused-client-sid").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -532,8 +708,13 @@ fn generation_increments_only_when_a_call_is_recreated() {
 
     let _ = sfu.unregister_call_participant(&call, &bob, None);
     assert!(
-        stored_generation(&sfu, &call).is_none(),
-        "empty calls are removed from the live registry"
+        !sfu.calls.contains_key(&call),
+        "empty calls must still be removed from the live registry"
+    );
+    assert_eq!(
+        stored_generation(&sfu, &call),
+        Some(first_generation),
+        "the final clear must retain the last generation as a tombstone fence"
     );
 
     sfu.register_call_participant(&call, &alice);
@@ -541,6 +722,11 @@ fn generation_increments_only_when_a_call_is_recreated() {
     assert!(
         second_generation > first_generation,
         "re-registering after the call emptied must advance the generation"
+    );
+    assert_ne!(
+        second_generation.as_u64(),
+        1,
+        "direct-call reuse must never reset the generation counter to one"
     );
 }
 
@@ -554,7 +740,12 @@ fn sid_learning_stores_the_first_sid_and_rejects_conflicts() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&first)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&first),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
     assert_eq!(stored_room_sid(&sfu, &call), first.room_sid);
@@ -564,7 +755,12 @@ fn sid_learning_stores_the_first_sid_and_rejects_conflicts() {
     );
 
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&conflicting)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&conflicting),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::StaleSid
     );
     assert_eq!(stored_room_sid(&sfu, &call), first.room_sid);
@@ -595,7 +791,12 @@ fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
     sfu.register_call_participant(&call, &alice);
     let observed = observed_sids(Some("RM_observed"), Some("PA_observed"));
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&observed)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&observed),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
 
@@ -616,26 +817,36 @@ fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
 }
 
 #[test]
-fn conflicting_participant_sid_does_not_partially_learn_room_sid() {
+fn join_side_participant_sid_advance_can_learn_the_first_room_sid() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
     let call = CallId::new("c-atomic-sid-learning").unwrap();
     let alice = fixture_identity("alice");
     let participant_only = observed_sids(None, Some("PA_current"));
-    let conflicting = observed_sids(Some("RM_stale"), Some("PA_stale"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&participant_only)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&participant_only),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&conflicting)),
-        SidObservationDisposition::StaleSid
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
     );
     assert_eq!(
         stored_room_sid(&sfu, &call),
-        None,
-        "a stale event must not partially teach the current call its room SID"
+        rejoined.room_sid,
+        "a join-side participant-sid advance may also learn the first room sid for the current incarnation"
     );
 }
 
@@ -655,7 +866,12 @@ fn unknown_identity_teardown_does_not_teach_room_sid() {
     ));
     assert_eq!(stored_room_sid(&sfu, &call), None);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&current)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&current),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
     assert_eq!(stored_room_sid(&sfu, &call), current.room_sid);
@@ -1765,7 +1981,12 @@ async fn stale_sid_webhook_is_dropped_after_same_call_id_is_reused() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&call_a)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_a),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
     assert!(matches!(
@@ -1775,7 +1996,12 @@ async fn stale_sid_webhook_is_dropped_after_same_call_id_is_reused() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&call_b)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_b),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
 
@@ -1805,7 +2031,12 @@ async fn matching_sid_webhook_still_tears_down() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&observed)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&observed),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
 
@@ -1825,7 +2056,12 @@ async fn teardown_without_sids_stays_backward_compatible() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&learned)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&learned),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
 
@@ -1846,7 +2082,12 @@ async fn stale_generation_skips_scheduled_remove_participant() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&call_a)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_a),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
     assert_eq!(
@@ -1856,7 +2097,12 @@ async fn stale_generation_skips_scheduled_remove_participant() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&call_b)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_b),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied
     );
     drain_admin_tasks().await;
@@ -2283,7 +2529,12 @@ async fn reconcile_room_sid_rotation_reincarnates_call_and_accepts_new_sid_obser
         "participant sids from the old room incarnation must be cleared"
     );
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&new_observed)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&new_observed),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::Applied,
         "a webhook from the new room sid must no longer be classified stale"
     );
@@ -2317,7 +2568,12 @@ async fn reconcile_listing_learns_a_missing_room_sid_without_rotating_generation
     assert_eq!(stored_room_sid(&sfu, &call), Some(learned_room_sid.clone()));
     assert_eq!(stored_generation(&sfu, &call), Some(original_generation));
     assert_eq!(
-        sfu.observe_call_participant_sids(&call, &alice, Some(&stale)),
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&stale),
+            SidObservationDirection::Join,
+        ),
         SidObservationDisposition::StaleSid,
         "once reconcile learns the room sid, an older webhook must be rejected"
     );
@@ -2616,7 +2872,7 @@ async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
 }
 
 #[test]
-fn final_direct_call_departure_reaps_generation_tracker() {
+fn final_direct_call_departure_retains_a_generation_tombstone() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
     let call = CallId::new("alice@waddle.social::dm-reap").unwrap();
     let alice = fixture_identity("alice");
@@ -2632,8 +2888,12 @@ fn final_direct_call_departure_reaps_generation_tracker() {
         CallState::Ended
     );
     assert!(
-        !sfu.call_generations.contains_key(&call),
-        "the last direct-call departure must reap the one-shot generation fence"
+        sfu.call_generations.contains_key(&call),
+        "the last direct-call departure must retain a tombstone generation fence"
+    );
+    assert!(
+        stored_generation_tombstone_cleared_at(&sfu, &call).is_some(),
+        "the retained generation entry must record when the call cleared"
     );
 }
 
@@ -2656,6 +2916,35 @@ fn final_muc_departure_retains_generation_tracker() {
     assert!(
         sfu.call_generations.contains_key(&call),
         "MUC call ids are stable room names, so their generation fence must survive teardown"
+    );
+    assert!(
+        stored_generation_tombstone_cleared_at(&sfu, &call).is_some(),
+        "the retained generation entry must also record the clear time for MUC calls"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_prunes_generation_tombstones_older_than_25_hours() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("alice@waddle.social::aged-tombstone").expect("call id");
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        applied_state(sfu.unregister_call_participant(&call, &alice, None)),
+        CallState::Ended
+    );
+    sfu.call_generations
+        .get_mut(&call)
+        .expect("generation tombstone")
+        .last_cleared_at = Some(Utc::now() - ChronoDuration::hours(26));
+
+    let _summary = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+    assert!(
+        !sfu.call_generations.contains_key(&call),
+        "reconcile must reap tombstones once they age past the 25h retention window"
     );
 }
 

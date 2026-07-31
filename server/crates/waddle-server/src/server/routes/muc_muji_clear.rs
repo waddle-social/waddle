@@ -45,6 +45,7 @@ fn call_thread_end_lock(room_jid: &BareJid) -> Arc<tokio::sync::Mutex<()>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebhookEffectOutcome {
     Completed,
+    Stale,
     Retryable(&'static str),
     Permanent(&'static str),
 }
@@ -69,8 +70,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
         observe_participant_sids_from_webhook(state, room_jid, full_jid, observed_sids),
         Some(waddle_sfu::SidObservationDisposition::StaleSid)
     ) {
-        increment_call_teardown_stale_dropped();
-        return WebhookEffectOutcome::Completed;
+        return WebhookEffectOutcome::Stale;
     }
 
     let actor = match get_room_actor_result(state, room_jid).await {
@@ -155,6 +155,7 @@ async fn enqueue_muji_presence_clear(
         target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
             room_jid: room_jid.clone(),
             departed: full_jid.clone(),
+            participant_sid: observed_sids.and_then(|sids| sids.participant_sid.clone()),
         },
         generation: None,
         room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),

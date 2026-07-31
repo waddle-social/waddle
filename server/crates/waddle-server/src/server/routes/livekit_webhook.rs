@@ -32,8 +32,8 @@ use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_sfu::{
     verify_webhook_signature, CallCorrelationId, CallId, LiveKitWebhookEvent, ObservedCallSids,
-    ParticipantEnvelope, ParticipantInfo, RoomInfo, SfuReconciler, SidObservationDisposition,
-    TeardownDisposition, WebhookVerifyError, RECONCILE_GRACE_SECONDS,
+    ParticipantEnvelope, ParticipantInfo, RoomInfo, RoomSid, SfuReconciler,
+    SidObservationDisposition, TeardownDisposition, WebhookVerifyError, RECONCILE_GRACE_SECONDS,
 };
 use waddle_xmpp::telemetry::attributes::{MetricAttribute, WebhookEventType, WebhookOutcome};
 use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
@@ -190,26 +190,51 @@ async fn livekit_webhook_handler(
             info!(room = %env.room.name, "LiveKit reported room finished; sweeping surviving participants");
             match CallId::new(env.room.name.clone()) {
                 Ok(call_id) => {
-                    let observed_sids = observed_sids_for_room(&env.room);
                     let survivors = sfu.participants_for_call(&call_id);
-                    let mut outcome = WebhookEffectOutcome::Completed;
-                    for identity in survivors {
-                        let survivor_outcome = process_participant_left_for_identity(
-                            &state,
-                            &env.room.name,
-                            identity.as_jid().to_string().as_str(),
-                            Some(&observed_sids),
-                        )
-                        .await;
-                        if matches!(survivor_outcome, WebhookEffectOutcome::Retryable(_)) {
-                            outcome = survivor_outcome;
-                            break;
+                    if survivors.is_empty() {
+                        if let Ok(room_jid) = env.room.name.parse::<BareJid>() {
+                            match env.room.sid.as_ref() {
+                                Some(room_sid) => {
+                                    let enqueue_outcome =
+                                        enqueue_muji_room_sweep(&state, &room_jid, room_sid).await;
+                                    match enqueue_outcome {
+                                        Ok(()) => WebhookEffectOutcome::Completed,
+                                        Err(_) => WebhookEffectOutcome::Retryable(
+                                            "teardown_outbox_enqueue_failed",
+                                        ),
+                                    }
+                                }
+                                None => {
+                                    warn!(
+                                        room = %env.room.name,
+                                        "LiveKit room_finished webhook omitted the room SID; cannot enqueue owner-gated survivor sweep",
+                                    );
+                                    WebhookEffectOutcome::Permanent("missing_room_sid")
+                                }
+                            }
+                        } else {
+                            WebhookEffectOutcome::Completed
                         }
-                        if matches!(survivor_outcome, WebhookEffectOutcome::Permanent(_)) {
-                            outcome = survivor_outcome;
+                    } else {
+                        let mut outcome = WebhookEffectOutcome::Completed;
+                        for identity in survivors {
+                            let survivor_outcome = process_participant_left_for_identity(
+                                &state,
+                                &env.room.name,
+                                identity.as_jid().to_string().as_str(),
+                                Some(&observed_sids_for_room(&env.room)),
+                            )
+                            .await;
+                            if matches!(survivor_outcome, WebhookEffectOutcome::Retryable(_)) {
+                                outcome = survivor_outcome;
+                                break;
+                            }
+                            if matches!(survivor_outcome, WebhookEffectOutcome::Permanent(_)) {
+                                outcome = survivor_outcome;
+                            }
                         }
+                        outcome
                     }
-                    outcome
                 }
                 Err(error) => {
                     warn!(
@@ -279,7 +304,9 @@ async fn livekit_webhook_handler(
             record_webhook_outcome(event_type, WebhookOutcome::RetryableFailure);
             StatusCode::SERVICE_UNAVAILABLE
         }
-        WebhookEffectOutcome::Completed | WebhookEffectOutcome::Permanent(_) => {
+        WebhookEffectOutcome::Completed
+        | WebhookEffectOutcome::Stale
+        | WebhookEffectOutcome::Permanent(_) => {
             if let WebhookEffectOutcome::Permanent(reason) = effect_outcome {
                 warn!(
                     event_id = ?event.event_id(),
@@ -363,6 +390,45 @@ fn observed_sids_for_participant(
 
 fn observed_sids_for_room(room: &RoomInfo) -> ObservedCallSids {
     ObservedCallSids::new(room.sid.clone(), None)
+}
+
+async fn enqueue_muji_room_sweep(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room_sid: &RoomSid,
+) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+    let call_id = match CallId::new(room_jid.to_string()) {
+        Ok(call_id) => call_id,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                %error,
+                "could not model room-finished survivor sweep as a typed teardown intent"
+            );
+            return Ok(());
+        }
+    };
+    let intent = crate::call_teardown_outbox::CallTeardownIntent {
+        call_id,
+        target: crate::call_teardown_outbox::TeardownTarget::MujiRoomSweep {
+            room_jid: room_jid.clone(),
+        },
+        generation: None,
+        room_sid: Some(room_sid.clone()),
+    };
+    let store = &state.deps.protocol.call_teardown_outbox;
+    let persistence = &state.deps.protocol.call_teardown_persistence;
+    if let Err(error) = store.enqueue(intent.clone()).await {
+        warn!(
+            room = %room_jid,
+            room_sid = %room_sid.as_str(),
+            %error,
+            "failed to persist owner-gated room-finished survivor sweep; keeping webhook retryable and retrying asynchronously"
+        );
+        persistence.retry_batch(vec![intent]);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn register_participant_from_join(
@@ -612,7 +678,12 @@ async fn process_participant_left_for_identity(
         }
     };
     if let Ok(room_jid) = room_name.parse::<BareJid>() {
-        return clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids).await;
+        let outcome =
+            clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids).await;
+        if outcome == WebhookEffectOutcome::Stale {
+            increment_call_teardown_stale_dropped();
+        }
+        return outcome;
     }
 
     let call_id = match CallId::new(room_name.to_owned()) {
@@ -645,6 +716,7 @@ async fn process_participant_left_for_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::websocket::get_room_actor;
     use crate::server::routes::websocket::handlers::iq::handle_iq;
     use crate::server::routes::websocket::tests::{
         create_test_server_owner_session, create_test_websocket_state_with_calls,
@@ -660,7 +732,10 @@ mod tests {
     use waddle_sfu::{
         Identity, MediaCapabilities, ObservedCallSids, ParticipantSid, RoomSid, TeardownDisposition,
     };
+    use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
     use waddle_xmpp::protocol::ConnectionPhase;
+    use waddle_xmpp::xep::xep0167::MediaKind;
+    use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
 
     #[derive(Clone, Default)]
     struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
@@ -744,6 +819,14 @@ mod tests {
 
     fn test_router_state_with(deliveries: Arc<dyn WebhookDeliveryStore>) -> WebhookRouterState {
         WebhookRouterState { deliveries }
+    }
+
+    fn active_muji() -> Muji {
+        Muji::with_contents(vec![MujiContent::new(
+            "audio",
+            Creator::Initiator,
+            MediaKind::Audio,
+        )])
     }
 
     /// #1436 acceptance for the webhook family: a pod that has received
@@ -948,6 +1031,120 @@ mod tests {
             Some(RoomSid::new("RM_finished").expect("room sid"))
         );
         assert_eq!(notes[0].2.participant_sid, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn room_finished_on_bare_room_with_empty_local_registry_enqueues_owner_gated_sweep() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("call fixture has SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let body = serde_json::to_vec(&json!({
+            "event": "room_finished",
+            "id": "EV_room_finished_enqueue",
+            "room": {
+                "name": "empty-room@muc.example.com",
+                "sid": "RM_enqueue"
+            }
+        }))
+        .expect("serialize webhook body");
+        let headers = signed_webhook_headers(&secret, &body);
+
+        let response = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(test_router_state()),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(recorder.note_with_sids_snapshot().is_empty());
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim room sweep");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].intent.target,
+            crate::call_teardown_outbox::TeardownTarget::MujiRoomSweep {
+                room_jid: "empty-room@muc.example.com".parse().expect("room jid"),
+            }
+        );
+        assert_eq!(
+            jobs[0].intent.room_sid,
+            Some(RoomSid::new("RM_enqueue").expect("room sid"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn room_finished_on_bare_room_with_local_survivor_keeps_immediate_sweep() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let survivor_jid: FullJid = "bob@example.com/phone".parse().expect("survivor jid");
+        recorder.set_participants(vec![Identity::from_jid(survivor_jid.clone())]);
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("call fixture has SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let body = serde_json::to_vec(&json!({
+            "event": "room_finished",
+            "id": "EV_room_finished_immediate",
+            "room": {
+                "name": "occupied-room@muc.example.com",
+                "sid": "RM_immediate"
+            }
+        }))
+        .expect("serialize webhook body");
+        let headers = signed_webhook_headers(&secret, &body);
+
+        let response = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(test_router_state()),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let notes = recorder.note_with_sids_snapshot();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].1.as_jid(), &survivor_jid);
+        assert_eq!(
+            notes[0].2.room_sid,
+            Some(RoomSid::new("RM_immediate").expect("room sid"))
+        );
+        let queued = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim queued work");
+        assert!(
+            queued.into_iter().all(|job| !matches!(
+                job.intent.target,
+                crate::call_teardown_outbox::TeardownTarget::MujiRoomSweep { .. }
+            )),
+            "local survivors should be swept immediately, not via a deferred room sweep"
+        );
     }
 
     #[tokio::test]
@@ -1766,6 +1963,169 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn webhook_old_participant_sid_acknowledges_without_clear_but_current_sid_clears() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "rotating-sid@muc.example.com".parse().expect("room jid");
+        let room_name = room_jid.to_string();
+        let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
+        let call_id = CallId::new(room_name.clone()).expect("call id");
+        let identity = Identity::from_jid(alice.clone());
+        let shared_room_sid = RoomSid::new("RM_rotate").expect("room sid");
+        let old_sids = ObservedCallSids::new(
+            Some(shared_room_sid.clone()),
+            Some(ParticipantSid::new("PA_old").expect("participant sid")),
+        );
+        let current_sids = ObservedCallSids::new(
+            Some(shared_room_sid.clone()),
+            Some(ParticipantSid::new("PA_current").expect("participant sid")),
+        );
+
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                muji: active_muji(),
+            })
+            .await
+            .expect("muji update")
+            .expect("occupant update");
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .sfu
+                .as_ref()
+                .expect("real SFU")
+                .register_call_participant_observed(&call_id, &identity, &old_sids),
+            SidObservationDisposition::Applied
+        );
+
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("call fixture has SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let joined_body = serde_json::to_vec(&json!({
+            "event": "participant_joined",
+            "id": "EV_rotate_join",
+            "room": {
+                "name": room_name,
+                "sid": shared_room_sid.as_str()
+            },
+            "participant": {
+                "identity": alice.as_str(),
+                "sid": current_sids
+                    .participant_sid
+                    .as_ref()
+                    .expect("participant sid")
+                    .as_str()
+            }
+        }))
+        .expect("serialize joined webhook body");
+        let joined_response = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(test_router_state()),
+            signed_webhook_headers(&secret, &joined_body),
+            Bytes::from(joined_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(joined_response.status(), StatusCode::OK);
+
+        let stale_leave_body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "id": "EV_rotate_old_leave",
+            "room": {
+                "name": room_jid.to_string(),
+                "sid": shared_room_sid.as_str()
+            },
+            "participant": {
+                "identity": alice.as_str(),
+                "sid": old_sids
+                    .participant_sid
+                    .as_ref()
+                    .expect("participant sid")
+                    .as_str()
+            }
+        }))
+        .expect("serialize old leave body");
+        let stale_leave_response = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(test_router_state()),
+            signed_webhook_headers(&secret, &stale_leave_body),
+            Bytes::from(stale_leave_body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(stale_leave_response.status(), StatusCode::OK);
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert!(
+            room.muji_for_session("alice", &alice).is_some(),
+            "a delayed old-SID leave must acknowledge without clearing the current Muji state"
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.teardown.stale_dropped", &[]),
+            Some(1)
+        );
+
+        let current_leave_body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "id": "EV_rotate_current_leave",
+            "room": {
+                "name": room_jid.to_string(),
+                "sid": shared_room_sid.as_str()
+            },
+            "participant": {
+                "identity": alice.as_str(),
+                "sid": current_sids
+                    .participant_sid
+                    .as_ref()
+                    .expect("participant sid")
+                    .as_str()
+            }
+        }))
+        .expect("serialize current leave body");
+        let current_leave_response = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(test_router_state()),
+            signed_webhook_headers(&secret, &current_leave_body),
+            Bytes::from(current_leave_body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(current_leave_response.status(), StatusCode::OK);
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert!(
+            room.muji_for_session("alice", &alice).is_none(),
+            "the current SID leave must clear the Muji advertisement"
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.teardown.stale_dropped", &[]),
+            Some(1),
+            "only the delayed old-SID leave should increment the stale counter"
+        );
+    }
+
     #[tokio::test]
     async fn stale_sid_drop_skips_muc_clear_and_counts_metric() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -1799,7 +2159,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome, WebhookEffectOutcome::Completed);
+        assert_eq!(outcome, WebhookEffectOutcome::Stale);
         let room = snapshot_room(state.as_ref(), &room_jid).await.room;
         assert_eq!(
             room.find_nick_by_real_jid(&alice),

@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use jid::BareJid;
 use kameo::actor::ActorRef;
 use waddle_sfu::{
-    CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, SfuService, TeardownExecution,
-    TeardownTargetLite,
+    CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, ObservedCallSids, SfuService,
+    TeardownExecution, TeardownTargetLite,
 };
 use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::ownership::{ClaimSnapshot, Entity, EntityType};
@@ -160,14 +160,15 @@ pub(super) async fn drain_due_at(
 /// A live registration alone does NOT prove a rejoin: on the room-claim
 /// owner the registration legitimately survives exactly because the
 /// departure this intent represents was never applied there (that is
-/// why the intent exists). Only a registration that POSTDATES the
-/// intent's creation PLUS a small cross-node clock-skew margin is a
-/// rejoin; anything else (equal, earlier, within the skew budget, or
-/// an implementation that does not track times) must let the intent
-/// execute. NTP should keep nodes comfortably inside this 2s budget,
-/// and the bias is intentionally toward EXECUTING the intent: the
-/// guarded effects are idempotent/no-op bounded, while silently
-/// swallowing a real teardown strands state (#1449 review N1/NN1).
+/// why the intent exists). Only a registration or later locally minted
+/// token that POSTDATES the intent's creation PLUS a small cross-node
+/// clock-skew margin proves the participant is current; anything else
+/// (equal, earlier, within the skew budget, or an implementation that
+/// does not track times) must let the intent execute. NTP should keep
+/// nodes comfortably inside this 2s budget, and the bias is
+/// intentionally toward EXECUTING the intent: the guarded effects are
+/// idempotent/no-op bounded, while silently swallowing a real teardown
+/// strands state (#1449 review N1/NN1/H3).
 fn stale_superseded_by_live_participant(
     sfu: Option<&dyn SfuService>,
     intent: &CallTeardownIntent,
@@ -179,13 +180,19 @@ fn stale_superseded_by_live_participant(
     let participant = match &intent.target {
         TeardownTarget::Participant { identity, .. } => identity,
         TeardownTarget::MujiPresenceClear { departed, .. } => departed,
-        TeardownTarget::Room => return false,
+        TeardownTarget::Room | TeardownTarget::MujiRoomSweep { .. } => return false,
     };
-    sfu.participant_registered_at(&intent.call_id, &Identity::from_jid(participant.clone()))
-        .is_some_and(|registered_at| {
-            registered_at.timestamp_millis()
-                > intent_created_at_ms.saturating_add(CLOCK_SKEW_MARGIN_MS)
-        })
+    let identity = Identity::from_jid(participant.clone());
+    [
+        sfu.participant_registered_at(&intent.call_id, &identity),
+        sfu.participant_last_minted_at(&intent.call_id, &identity),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .is_some_and(|current_at| {
+        current_at.timestamp_millis() > intent_created_at_ms.saturating_add(CLOCK_SKEW_MARGIN_MS)
+    })
 }
 
 async fn room_is_globally_unclaimed(
@@ -253,6 +260,7 @@ async fn local_room_jids(
 fn room_scope(intent: &CallTeardownIntent) -> Option<BareJid> {
     match &intent.target {
         TeardownTarget::MujiPresenceClear { room_jid, .. } => Some(room_jid.clone()),
+        TeardownTarget::MujiRoomSweep { room_jid } => Some(room_jid.clone()),
         TeardownTarget::Participant { .. } | TeardownTarget::Room => {
             // Muji uses the bare room JID verbatim as CallId. Raw 1:1 call
             // IDs are scoped opaque identifiers and do not parse as JIDs;
@@ -273,11 +281,23 @@ async fn execute_intent(
     executor: Option<&LiveKitTeardownExecutor>,
     intent: &CallTeardownIntent,
 ) -> IntentExecution {
-    if let TeardownTarget::MujiPresenceClear { room_jid, departed } = &intent.target {
+    if let TeardownTarget::MujiPresenceClear {
+        room_jid,
+        departed,
+        participant_sid,
+    } = &intent.target
+    {
+        let observed_sids = ObservedCallSids::new(intent.room_sid.clone(), participant_sid.clone());
+        let observed_sids = (observed_sids.room_sid.is_some()
+            || observed_sids.participant_sid.is_some())
+        .then_some(observed_sids);
         return match tokio::time::timeout(
             ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
             crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-                state, room_jid, departed, None,
+                state,
+                room_jid,
+                departed,
+                observed_sids.as_ref(),
             ),
         )
         .await
@@ -287,11 +307,53 @@ async fn execute_intent(
                 WebhookEffectOutcome::Completed | WebhookEffectOutcome::Permanent(_) => {
                     IntentExecution::Done
                 }
+                WebhookEffectOutcome::Stale => IntentExecution::Stale,
                 WebhookEffectOutcome::Retryable(_) => {
                     IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear)
                 }
             },
         };
+    }
+
+    if let TeardownTarget::MujiRoomSweep { room_jid } = &intent.target {
+        let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+            return IntentExecution::Retryable(CallTeardownRetryReason::LiveKitExecutorUnavailable);
+        };
+        let Some(room_sid) = intent.room_sid.clone() else {
+            tracing::warn!(
+                call_id = %intent.call_id,
+                room = %room_jid,
+                "muji room sweep intent is missing the webhook room SID; skipping"
+            );
+            return IntentExecution::Done;
+        };
+        let observed_sids = ObservedCallSids::new(Some(room_sid), None);
+        for identity in sfu.participants_for_call(&intent.call_id) {
+            let outcome = match tokio::time::timeout(
+                ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
+                crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
+                    state,
+                    room_jid,
+                    identity.as_jid(),
+                    Some(&observed_sids),
+                ),
+            )
+            .await
+            {
+                Err(_) => {
+                    return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+                }
+                Ok(outcome) => outcome,
+            };
+            match outcome {
+                WebhookEffectOutcome::Completed | WebhookEffectOutcome::Permanent(_) => {}
+                WebhookEffectOutcome::Stale => return IntentExecution::Stale,
+                WebhookEffectOutcome::Retryable(_) => {
+                    return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+                }
+            }
+        }
+        return IntentExecution::Done;
     }
 
     let Some(executor) = executor else {
@@ -306,7 +368,9 @@ async fn execute_intent(
             participant_sid: participant_sid.clone(),
         },
         TeardownTarget::Room => TeardownTargetLite::Room,
-        TeardownTarget::MujiPresenceClear { .. } => return IntentExecution::Done,
+        TeardownTarget::MujiPresenceClear { .. } | TeardownTarget::MujiRoomSweep { .. } => {
+            return IntentExecution::Done;
+        }
     };
     let lite = CallTeardownIntentLite {
         call_id: intent.call_id.clone(),

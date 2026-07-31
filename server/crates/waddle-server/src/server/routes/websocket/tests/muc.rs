@@ -4913,6 +4913,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
         _: &waddle_sfu::CallId,
         _: &waddle_sfu::Identity,
         _: Option<&waddle_sfu::ObservedCallSids>,
+        _: waddle_sfu::SidObservationDirection,
     ) -> waddle_sfu::SidObservationDisposition {
         waddle_sfu::SidObservationDisposition::Applied
     }

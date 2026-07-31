@@ -423,6 +423,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
         call_id: &waddle_sfu::CallId,
         identity: &waddle_sfu::Identity,
         observed_sids: Option<&waddle_sfu::ObservedCallSids>,
+        _: waddle_sfu::SidObservationDirection,
     ) -> waddle_sfu::SidObservationDisposition {
         self.observed_calls.lock().expect("recording lock").push((
             call_id.clone(),

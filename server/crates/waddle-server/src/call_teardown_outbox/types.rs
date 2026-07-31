@@ -50,6 +50,13 @@ pub enum TeardownTarget {
     MujiPresenceClear {
         room_jid: BareJid,
         departed: FullJid,
+        /// `None` is reserved for producers such as the sans-IO Muji
+        /// relay fallback, which cannot observe the participant
+        /// incarnation SID but still must persist the XEP-0272 leave.
+        participant_sid: Option<ParticipantSid>,
+    },
+    MujiRoomSweep {
+        room_jid: BareJid,
     },
 }
 

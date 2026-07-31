@@ -319,6 +319,16 @@ pub enum SidObservationDisposition {
     StaleSid,
 }
 
+/// Direction of an observed SID-bearing event. Join-side observations
+/// may advance the stored participant SID within the same room
+/// incarnation; leave-side observations must treat such mismatches as
+/// stale and avoid tearing down the current participant incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidObservationDirection {
+    Join,
+    Leave,
+}
+
 fn is_valid_printable_ascii_sid(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_SID_LEN

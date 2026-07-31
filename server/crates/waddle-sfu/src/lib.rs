@@ -36,8 +36,8 @@ mod webhook;
 pub use admin::{ListedRoom, LiveKitAdmin, RoomOccupancy};
 pub use call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
-    TeardownTargetLite,
+    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDirection, SidObservationDisposition,
+    TeardownDisposition, TeardownTargetLite,
 };
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
@@ -112,6 +112,21 @@ pub trait SfuService: Send + Sync + 'static {
     /// the departure this intent represents was never applied on this
     /// node (#1449 review N1).
     fn participant_registered_at(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+
+    /// Wall-clock instant `identity` most recently received a locally
+    /// minted join token for its CURRENT registration in `call_id`, or
+    /// `None` when not registered (or when the implementation does not
+    /// track mint times). Higher layers can combine this with
+    /// [`Self::participant_registered_at`] to distinguish a
+    /// freshly-observed participant that this node never minted for
+    /// from one that rejoined through a local token issuance.
+    fn participant_last_minted_at(
         &self,
         _call_id: &CallId,
         _identity: &Identity,
@@ -196,6 +211,7 @@ pub trait SfuService: Send + Sync + 'static {
         call_id: &CallId,
         identity: &Identity,
         observed_sids: Option<&ObservedCallSids>,
+        direction: SidObservationDirection,
     ) -> SidObservationDisposition;
 
     /// Push replacement media grants to a live participant after an
