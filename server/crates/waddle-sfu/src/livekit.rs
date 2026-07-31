@@ -461,6 +461,39 @@ impl std::fmt::Debug for LiveKitSfu {
 }
 
 impl LiveKitSfu {
+    fn rotate_room_incarnation_from_listing(&self, call_id: &CallId, listed_room_sid: &RoomSid) {
+        let Some(mut entry) = self.calls.get_mut(call_id) else {
+            return;
+        };
+        let Some(current_room_sid) = entry.room_sid.as_ref() else {
+            return;
+        };
+        if current_room_sid == listed_room_sid {
+            return;
+        }
+        let next_generation = {
+            let mut last_generation = self
+                .call_generations
+                .entry(call_id.clone())
+                .or_insert(entry.generation.as_u64());
+            *last_generation = (*last_generation).max(entry.generation.as_u64()) + 1;
+            CallGeneration::new(*last_generation)
+        };
+        tracing::info!(
+            call_id = %call_id,
+            old_room_sid = %current_room_sid,
+            new_room_sid = %listed_room_sid,
+            old_generation = %entry.generation,
+            new_generation = %next_generation,
+            "SFU reconcile: LiveKit room sid rotated; reincarnating the local call entry"
+        );
+        entry.generation = next_generation;
+        entry.room_sid = Some(listed_room_sid.clone());
+        for participant in entry.participants.values_mut() {
+            participant.participant_sid = None;
+        }
+    }
+
     fn adopt_discovered_call(
         &self,
         call_id: &CallId,
@@ -823,6 +856,9 @@ impl LiveKitSfu {
                 .map(|entry| entry.participants.len())
                 .unwrap_or(0)
         };
+        if emptied && call_id.as_str().parse::<jid::BareJid>().is_err() {
+            self.call_generations.remove(call_id);
+        }
 
         ClearDisposition::Cleared(ClearOutcome {
             was_present,
@@ -1162,6 +1198,9 @@ impl LiveKitSfu {
                         tracing::debug!("SFU reconcile: ignoring non-Waddle LiveKit room name");
                         continue;
                     };
+                    if let Some(listed_room_sid) = room.sid.as_ref() {
+                        self.rotate_room_incarnation_from_listing(&call_id, listed_room_sid);
+                    }
                     rooms
                         .entry(call_id)
                         .and_modify(|(_, listed_sid, _)| {
@@ -1224,6 +1263,34 @@ impl LiveKitSfu {
                     continue;
                 }
             };
+            if was_registered {
+                if let Some(listed_room_sid) = listed_room_sid.as_ref() {
+                    if let Some(mut entry) = self.calls.get_mut(&call_id) {
+                        if let Some(stored_room_sid) = entry.room_sid.as_ref() {
+                            if stored_room_sid != listed_room_sid {
+                                let next_generation = {
+                                    let mut last_generation =
+                                        self.call_generations.entry(call_id.clone()).or_insert(0);
+                                    *last_generation += 1;
+                                    CallGeneration::new(*last_generation)
+                                };
+                                tracing::info!(
+                                    call_id = %call_id,
+                                    stored_room_sid = %stored_room_sid,
+                                    listed_room_sid = %listed_room_sid,
+                                    generation = %next_generation,
+                                    "SFU reconcile: detected new LiveKit room incarnation; rotated stored sid"
+                                );
+                                entry.generation = next_generation;
+                                entry.room_sid = Some(listed_room_sid.clone());
+                                for participant in entry.participants.values_mut() {
+                                    participant.participant_sid = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let registered = if was_registered {
                 registered
             } else {

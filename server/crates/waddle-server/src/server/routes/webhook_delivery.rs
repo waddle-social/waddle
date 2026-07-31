@@ -12,6 +12,7 @@ use tokio::sync::OnceCell;
 use crate::db::{Database, DatabaseError};
 
 const DONE_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const PROCESSING_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 const PRUNE_BATCH_SIZE: i64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,7 @@ impl DatabaseWebhookDeliveryStore {
         self.initialize().await?;
         let mut transaction = self.db.begin_immediate().await?;
         let prune_before_ms = now_ms.saturating_sub(DONE_RETENTION_MS);
+        let processing_prune_before_ms = now_ms.saturating_sub(PROCESSING_RETENTION_MS);
         transaction
             .execute(
                 "DELETE FROM webhook_deliveries \
@@ -105,6 +107,20 @@ impl DatabaseWebhookDeliveryStore {
                      ORDER BY completed_at_ms ASC LIMIT ?\
                  )",
                 crate::db_params![prune_before_ms, PRUNE_BATCH_SIZE],
+            )
+            .await?;
+        // LiveKit abandons webhook retries within minutes. Reaping a
+        // day-old `processing` row therefore only re-opens idempotent
+        // reprocessing for a delivery we will not hear about again.
+        transaction
+            .execute(
+                "DELETE FROM webhook_deliveries \
+                 WHERE event_id IN (\
+                     SELECT event_id FROM webhook_deliveries \
+                     WHERE status = 'processing' AND first_seen_ms < ? \
+                     ORDER BY first_seen_ms ASC LIMIT ?\
+                 )",
+                crate::db_params![processing_prune_before_ms, PRUNE_BATCH_SIZE],
             )
             .await?;
 
@@ -365,7 +381,7 @@ mod tests {
         store.observe_at("EV_old", 0).await.expect("observe old");
         store.complete_at("EV_old", 1).await.expect("complete old");
         store
-            .observe_at("EV_processing", 0)
+            .observe_at("EV_processing", DONE_RETENTION_MS + 1)
             .await
             .expect("observe processing");
 
@@ -389,6 +405,39 @@ mod tests {
                 .expect("processing attempt count"),
             1,
             "processing rows are never pruned"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_prunes_processing_rows_older_than_a_day() {
+        let db = Database::in_memory("webhook-delivery-processing-prune")
+            .await
+            .expect("in-memory database");
+        let store = DatabaseWebhookDeliveryStore::new(db);
+        store
+            .observe_at("EV_stuck_processing", 0)
+            .await
+            .expect("seed processing row");
+
+        store
+            .observe_at("EV_trigger", PROCESSING_RETENTION_MS + 1)
+            .await
+            .expect("trigger prune");
+
+        assert_eq!(
+            store
+                .observe_at("EV_stuck_processing", PROCESSING_RETENTION_MS + 2)
+                .await
+                .expect("re-observe pruned processing row"),
+            WebhookDeliveryObservation::Processing,
+            "stale processing row was deleted and can be inserted fresh"
+        );
+        assert_eq!(
+            store
+                .attempt_count("EV_stuck_processing")
+                .await
+                .expect("attempt count after prune"),
+            1
         );
     }
 }

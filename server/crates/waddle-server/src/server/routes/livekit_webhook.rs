@@ -1113,6 +1113,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn absent_room_actor_enqueues_muji_clear_and_completes_delivery() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let store =
+            Arc::new(super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default());
+        let router_state = test_router_state_with(store.clone());
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "id": "EV_absent_room_actor",
+            "room": {
+                "name": "room@muc.example.com",
+                "sid": "RM_absent_actor"
+            },
+            "participant": {
+                "identity": "alice@example.com/web",
+                "sid": "PA_absent_actor"
+            }
+        }))
+        .expect("serialize webhook body");
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("recording SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+
+        let response = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(router_state),
+            signed_webhook_headers(&secret, &body),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(recorder.note_snapshot().len(), 1);
+        assert_eq!(
+            store
+                .status("EV_absent_room_actor")
+                .expect("delivery status"),
+            Some(WebhookDeliveryObservation::Done)
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .call_teardown_outbox
+                .has_pending_muji_presence_clear(
+                    &CallId::new("room@muc.example.com").expect("room call id"),
+                    &"alice@example.com/web"
+                        .parse::<FullJid>()
+                        .expect("full jid"),
+                )
+                .await
+                .expect("pending presence clear query"),
+            "missing owner-gated Muji clear fallback intent"
+        );
+    }
+
+    #[tokio::test]
     async fn permanent_bad_participant_jid_is_acknowledged_and_completed() {
         let recorder = Arc::new(RecordingSfu::default());
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;

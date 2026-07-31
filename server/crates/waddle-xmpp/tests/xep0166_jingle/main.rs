@@ -30,7 +30,10 @@ use waddle_sfu::{
     WebsocketUrl,
 };
 use waddle_xmpp::protocol::{
-    event::OutboundEvent, handlers::jingle::JingleHandler, traits::IqHandler, StanzaContext,
+    event::OutboundEvent,
+    handlers::{jingle::JingleHandler, session_initiate_rate_limit::DEFAULT_MAX_TERMINATES},
+    traits::IqHandler,
+    StanzaContext,
 };
 use waddle_xmpp::xep::xep0166::{
     reason_element, session_terminate, Action, Content, ContentId, Creator, Jingle, Reason,
@@ -1383,6 +1386,69 @@ fn xep_0166_duplicate_terminate_is_idempotent() {
         first_error_condition(&retry),
         Some(DefinedCondition::ItemNotFound),
         "duplicate terminate resolves to unknown-session: {retry:?}"
+    );
+}
+
+#[test]
+fn xep_0166_session_terminate_rate_limit_returns_policy_violation_without_touching_later_call() {
+    // 1:1 terminate floods are now visible at the protocol surface:
+    // after the default per-bare-JID budget is exhausted, the server
+    // rejects later terminates with `<policy-violation/>` and leaves
+    // that later call registered.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let alice_identity = Identity::from_jid(alice.clone());
+    let bob_identity = Identity::from_jid("bob@waddle.test/phone".parse().expect("valid JID"));
+
+    for idx in 0..DEFAULT_MAX_TERMINATES {
+        let sid = format!("dm-rate-ok-{idx}");
+        let call =
+            waddle_sfu::CallId::new(format!("alice@waddle.test::{sid}")).expect("valid call id");
+        sfu.register_call_participant(&call, &alice_identity);
+        sfu.register_call_participant(&call, &bob_identity);
+
+        let terminate = dm_jingle_iq(
+            Action::SessionTerminate,
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/phone",
+            &sid,
+        );
+        let events = handler.handle(&terminate, &ctx(&alice));
+        assert!(
+            has_route_to(&events, "bob@waddle.test/phone"),
+            "under-budget terminate should still route: {events:?}",
+        );
+        assert_eq!(
+            sfu.participant_count(&call),
+            0,
+            "successful terminate must clear the live call",
+        );
+    }
+
+    let blocked_sid = "dm-rate-blocked";
+    let blocked_call = waddle_sfu::CallId::new(format!("alice@waddle.test::{blocked_sid}"))
+        .expect("valid call id");
+    sfu.register_call_participant(&blocked_call, &alice_identity);
+    sfu.register_call_participant(&blocked_call, &bob_identity);
+
+    let blocked = dm_jingle_iq(
+        Action::SessionTerminate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        blocked_sid,
+    );
+    let events = handler.handle(&blocked, &ctx(&alice));
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::PolicyViolation),
+        "over-budget terminate must be rejected with policy-violation: {events:?}",
+    );
+    assert_eq!(
+        sfu.participant_count(&blocked_call),
+        2,
+        "rate-limited terminate must not tear down the later call",
     );
 }
 

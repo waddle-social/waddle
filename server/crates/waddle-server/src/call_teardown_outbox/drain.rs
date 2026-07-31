@@ -6,10 +6,11 @@ use std::collections::HashSet;
 use jid::BareJid;
 use kameo::actor::ActorRef;
 use waddle_sfu::{
-    CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, TeardownExecution,
+    CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, SfuService, TeardownExecution,
     TeardownTargetLite,
 };
 use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
+use waddle_xmpp::ownership::{ClaimSnapshot, Entity, EntityType};
 
 use super::{
     CallTeardownIntent, CallTeardownOutboxError, CallTeardownRetryOutcome, TeardownTarget,
@@ -19,6 +20,7 @@ use crate::server::routes::websocket::WebSocketState;
 
 const ROOM_OWNERSHIP_LOOKUP_TIMEOUT: std::time::Duration =
     waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT;
+const OWNERSHIP_DEAD_LETTER_MS: i64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CallTeardownDrainSummary {
@@ -34,8 +36,16 @@ pub(crate) async fn drain_due(
     state: &WebSocketState,
     batch_size: usize,
 ) -> Result<CallTeardownDrainSummary, CallTeardownOutboxError> {
+    drain_due_at(state, batch_size, crate::time::now_ms()).await
+}
+
+pub(super) async fn drain_due_at(
+    state: &WebSocketState,
+    batch_size: usize,
+    now_ms: i64,
+) -> Result<CallTeardownDrainSummary, CallTeardownOutboxError> {
     let store = &state.deps.protocol.call_teardown_outbox;
-    let jobs = store.claim_due(batch_size).await?;
+    let jobs = store.claim_due_at(batch_size, now_ms).await?;
     let needs_room_ownership = jobs.iter().any(|job| room_scope(&job.intent).is_some());
     let local_rooms = if needs_room_ownership {
         local_room_jids(&state.deps.protocol.room_registry).await
@@ -48,13 +58,42 @@ pub(crate) async fn drain_due(
         if let Some(room_jid) = room_scope(&job.intent) {
             let owned = match &local_rooms {
                 Ok(rooms) => rooms.contains(&room_jid),
-                Err(()) => false,
+                Err(()) => {
+                    // A registry timeout or stopped mailbox says nothing
+                    // about ownership. Preserve the row for a later healthy
+                    // lookup instead of converting a transient control-plane
+                    // failure into a permanent dead letter.
+                    store.release_claim_at(&job, now_ms).await?;
+                    continue;
+                }
             };
             if !owned {
+                let old_enough =
+                    now_ms.saturating_sub(job.created_at_ms) >= OWNERSHIP_DEAD_LETTER_MS;
+                let globally_unclaimed = old_enough
+                    && room_is_globally_unclaimed(state, &room_jid)
+                        .await
+                        .unwrap_or(false);
+                if globally_unclaimed {
+                    tracing::warn!(
+                        call_id = %job.intent.call_id,
+                        intent_id = %job.intent_id.as_str(),
+                        room = %room_jid,
+                        age_ms = now_ms.saturating_sub(job.created_at_ms),
+                        "call teardown room-scoped intent never reached an owning node; dead-lettering"
+                    );
+                    if store
+                        .fail_claim_at(&job, "room_never_owned".to_owned(), now_ms)
+                        .await?
+                    {
+                        summary.failed += 1;
+                    }
+                    continue;
+                }
                 // Ownership misses and lookup failures are not attempts. The
                 // claim is CAS-released immediately so the owning node need
                 // not wait for stale-claim recovery.
-                store.release_claim(&job).await?;
+                store.release_claim_at(&job, now_ms).await?;
                 continue;
             }
         }
@@ -65,9 +104,22 @@ pub(crate) async fn drain_due(
                     .has_pending_muji_presence_clear(&job.intent.call_id, identity)
                     .await?
             {
-                store.release_claim(&job).await?;
+                store.release_claim_at(&job, now_ms).await?;
                 continue;
             }
+        }
+
+        if stale_superseded_by_live_participant(state.deps.protocol.sfu.as_deref(), &job.intent) {
+            tracing::info!(
+                call_id = %job.intent.call_id,
+                intent_id = %job.intent_id.as_str(),
+                "call teardown intent was superseded by a live rejoin; skipping stale drain item"
+            );
+            if store.mark_done(&job).await? {
+                summary.drained += 1;
+                waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped();
+            }
+            continue;
         }
 
         match execute_intent(
@@ -98,6 +150,84 @@ pub(crate) async fn drain_due(
         }
     }
     Ok(summary)
+}
+
+fn stale_superseded_by_live_participant(
+    sfu: Option<&dyn SfuService>,
+    intent: &CallTeardownIntent,
+) -> bool {
+    let Some(sfu) = sfu else {
+        return false;
+    };
+    let participant = match &intent.target {
+        TeardownTarget::Participant { identity, .. } => identity,
+        TeardownTarget::MujiPresenceClear { departed, .. } => departed,
+        TeardownTarget::Room => return false,
+    };
+    sfu.has_call_participant(&intent.call_id, &Identity::from_jid(participant.clone()))
+}
+
+async fn room_is_globally_unclaimed(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Result<bool, ()> {
+    let Some(claim_store) = state.deps.app_state.clustering_claims.claim_store.as_ref() else {
+        // Without clustering, the successful local-room snapshot above is
+        // the complete ownership view for this process.
+        return Ok(true);
+    };
+    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+    match tokio::time::timeout(
+        ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
+        claim_store.current_claim(&entity),
+    )
+    .await
+    {
+        Ok(Ok(claim)) => Ok(claim_permits_dead_letter(claim.as_ref())),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                room = %room_jid,
+                %error,
+                "call teardown outbox could not confirm global room ownership; retaining intent"
+            );
+            Err(())
+        }
+        Err(_) => {
+            tracing::warn!(
+                room = %room_jid,
+                "call teardown outbox global room-ownership lookup timed out; retaining intent"
+            );
+            Err(())
+        }
+    }
+}
+
+fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
+    claim.is_none_or(|snapshot| !snapshot.owner_lease_fresh)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::claim_permits_dead_letter;
+    use waddle_xmpp::ownership::{ClaimEpoch, ClaimSnapshot, NodeIdentity};
+
+    #[test]
+    fn global_claim_dead_letter_requires_no_fresh_owner_lease() {
+        let fresh = ClaimSnapshot {
+            owner: NodeIdentity::new("fresh-node", "epoch-1"),
+            claim_epoch: ClaimEpoch(1),
+            owner_lease_fresh: true,
+        };
+        let stale = ClaimSnapshot {
+            owner: NodeIdentity::new("stale-node", "epoch-2"),
+            claim_epoch: ClaimEpoch(2),
+            owner_lease_fresh: false,
+        };
+
+        assert!(claim_permits_dead_letter(None));
+        assert!(!claim_permits_dead_letter(Some(&fresh)));
+        assert!(claim_permits_dead_letter(Some(&stale)));
+    }
 }
 
 async fn local_room_jids(

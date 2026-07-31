@@ -854,6 +854,12 @@ async fn create_websocket_state(
                 command_registry: websocket_command_registry,
                 extension_manager,
                 dispatcher: stanza_dispatcher,
+                muji_pre_dispatch_terminate_rate_limit: Arc::new(
+                    waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit::with_defaults(),
+                ),
+                muji_pre_dispatch_action_rate_limit: Arc::new(
+                    waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit::with_defaults(),
+                ),
                 pubsub_storage,
                 push_store,
                 push_service,

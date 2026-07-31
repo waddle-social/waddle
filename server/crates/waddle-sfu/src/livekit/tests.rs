@@ -2107,6 +2107,54 @@ async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
 }
 
 #[tokio::test]
+async fn reconcile_room_sid_rotation_reincarnates_call_and_accepts_new_sid_observation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("sid-rotation@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+    let old_observed = observed_sids(Some("RM_old"), Some("PA_old"));
+    let new_observed = observed_sids(Some("RM_new"), Some("PA_new"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &old_observed),
+        SidObservationDisposition::Applied
+    );
+    let old_generation = stored_generation(&sfu, &call).expect("old generation");
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: call.to_string(),
+        sid: new_observed.room_sid.clone(),
+        num_participants: Some(1),
+    }]);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let summary = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+    assert!(
+        summary.swept.is_empty(),
+        "room-sid rotation must not sweep a live participant"
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), new_observed.room_sid);
+    assert!(
+        stored_generation(&sfu, &call).expect("new generation") > old_generation,
+        "new room sid must advance the generation fence"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        None,
+        "participant sids from the old room incarnation must be cleared"
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(&call, &alice, Some(&new_observed)),
+        SidObservationDisposition::Applied,
+        "a webhook from the new room sid must no longer be classified stale"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        new_observed.participant_sid
+    );
+}
+
+#[tokio::test]
 async fn reconcile_failed_pass_resets_absence_streak() {
     // #1127 AC: the absence tracker resets on a failed pass — two
     // absent observations separated by a ListParticipants failure
@@ -2350,4 +2398,48 @@ async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
         "DeleteRoom must not fire while the fresh joiner is registered"
     );
     assert!(sfu.has_call_participant(&call, &bob));
+}
+
+#[test]
+fn final_direct_call_departure_reaps_generation_tracker() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("alice@waddle.social::dm-reap").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    assert!(
+        sfu.call_generations.contains_key(&call),
+        "registration seeds the generation tracker"
+    );
+
+    assert_eq!(
+        applied_state(sfu.unregister_call_participant(&call, &alice, None)),
+        CallState::Ended
+    );
+    assert!(
+        !sfu.call_generations.contains_key(&call),
+        "the last direct-call departure must reap the one-shot generation fence"
+    );
+}
+
+#[test]
+fn final_muc_departure_retains_generation_tracker() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("room@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    assert!(
+        sfu.call_generations.contains_key(&call),
+        "registration seeds the generation tracker"
+    );
+
+    assert_eq!(
+        applied_state(sfu.unregister_call_participant(&call, &alice, None)),
+        CallState::Ended
+    );
+    assert!(
+        sfu.call_generations.contains_key(&call),
+        "MUC call ids are stable room names, so their generation fence must survive teardown"
+    );
 }

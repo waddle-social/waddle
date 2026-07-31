@@ -117,7 +117,6 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry(
 /// populated and `state.deps.protocol.sm_session_registry` backed by a real
 /// durable, claim-fenced store rather than every other fixture in this
 /// module's plain in-memory default.
-#[cfg(feature = "clustering")]
 pub(crate) async fn create_test_websocket_state_with_clustering(
     clustering: crate::clustering::ClusteringHandles,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
@@ -702,6 +701,12 @@ async fn create_test_websocket_state_with_extension_manager(
                     },
                     extension_manager,
                     dispatcher: Arc::new(dispatcher),
+                    muji_pre_dispatch_terminate_rate_limit: Arc::new(
+                        waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit::with_defaults(),
+                    ),
+                    muji_pre_dispatch_action_rate_limit: Arc::new(
+                        waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit::with_defaults(),
+                    ),
                     pubsub_storage,
                     push_store: Arc::new(
                         crate::push_registrations::DatabasePushRegistrationStore::new(

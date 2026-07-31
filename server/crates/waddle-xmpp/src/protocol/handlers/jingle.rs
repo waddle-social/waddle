@@ -846,7 +846,18 @@ impl JingleHandler {
         if let Ok(call_id) = CallId::new(room_jid.to_string()) {
             let sender_identity = Identity::from_jid(ctx.full_jid.clone());
             if !self.sfu.has_call_participant(&call_id, &sender_identity) {
-                return unknown_session_reply(iq);
+                // Muji deviates from XEP-0166 §7.2's "unknown-session"
+                // error here because this `session-terminate` is a
+                // room-scoped leave in the SFU-focus interpretation,
+                // not a peer-scoped teardown. On the relay-fallback
+                // path the replica handling the IQ may legitimately be
+                // a non-owner whose local registry never held the
+                // participant, so returning an empty ack keeps hang-up
+                // idempotent across owner/non-owner dispatch without
+                // unregistering anyone or scheduling LiveKit admin
+                // work. The room-claim owner remains the only
+                // authoritative replica for membership.
+                return terminate_ack(iq);
             }
             let _ = self
                 .sfu

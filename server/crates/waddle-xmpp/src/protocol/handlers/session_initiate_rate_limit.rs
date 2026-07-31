@@ -6,8 +6,9 @@
 //!
 //! - `session-terminate`, so a compromised client cannot spam teardown
 //!   requests into the control plane.
-//! - Muji non-initiate actions, which can legitimately burst during ICE
-//!   but still need a ceiling.
+//! - Muji `session-terminate` plus other non-initiate actions, which can
+//!   fan out into room-locality checks, membership asks, or cross-node
+//!   relay attempts before they are rejected.
 //! - TURN credential issuance (`extdisco` requests that actually mint a
 //!   credential-bearing response).
 //!
@@ -34,7 +35,9 @@ pub const DEFAULT_MAX_INITIATES: usize = 5;
 /// A first legitimate hangup must not be blocked, so the terminate
 /// budget is deliberately generous.
 pub const DEFAULT_MAX_TERMINATES: usize = 20;
-/// ICE and similar post-join Muji chatter can legitimately burst.
+/// Unsupported Muji actions still receive protocol error replies. This
+/// budget absorbs ordinary client retry bursts while bounding the
+/// room-locality, membership, and relay work performed before rejection.
 pub const DEFAULT_MAX_MUJI_ACTIONS: usize = 60;
 /// TURN credentials are request-shaped and should stay comfortably
 /// available during login / reconnect loops.

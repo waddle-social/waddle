@@ -1064,7 +1064,7 @@ fn revoke_credential_minted_into_undeliverable_iq(
 /// Pure reply half of the bounce — no side effects. See the module
 /// doc above [`bounce_undeliverable_iq`] for the terminate-ack and
 /// credential-scrub rules.
-fn undeliverable_iq_reply(stanza: &Stanza) -> Option<Stanza> {
+pub(crate) fn undeliverable_iq_reply(stanza: &Stanza) -> Option<Stanza> {
     let Stanza::Iq(iq) = stanza else {
         return None;
     };

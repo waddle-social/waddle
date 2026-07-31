@@ -79,10 +79,11 @@ pub(crate) async fn clear_muji_presence_for_departure(
             warn!(
                 room = %room_jid,
                 identity = %full_jid,
-                "MUC room actor is absent during LiveKit departure cleanup; treating as permanently gone"
+                "MUC room actor is absent during LiveKit departure cleanup; queueing owner-gated Muji clear"
             );
+            enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids).await;
             record_participant_left(state, room_jid, full_jid, observed_sids);
-            return WebhookEffectOutcome::Permanent("room_actor_absent");
+            return WebhookEffectOutcome::Completed;
         }
         Err(error) => {
             warn!(
@@ -124,6 +125,46 @@ pub(crate) async fn clear_muji_presence_for_departure(
     broadcast_muji_clear(state, room_jid, full_jid, &outcome);
     record_participant_left(state, room_jid, full_jid, observed_sids);
     maybe_broadcast_call_thread_ended(state, room_jid).await
+}
+
+async fn enqueue_muji_presence_clear(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
+) {
+    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+        Ok(call_id) => call_id,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                identity = %full_jid,
+                %error,
+                "could not model absent-room Muji cleanup as a teardown intent"
+            );
+            return;
+        }
+    };
+    let intent = crate::call_teardown_outbox::CallTeardownIntent {
+        call_id,
+        target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
+            room_jid: room_jid.clone(),
+            departed: full_jid.clone(),
+        },
+        generation: None,
+        room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
+    };
+    let store = &state.deps.protocol.call_teardown_outbox;
+    let persistence = &state.deps.protocol.call_teardown_persistence;
+    if let Err(error) = store.enqueue(intent.clone()).await {
+        warn!(
+            room = %room_jid,
+            identity = %full_jid,
+            %error,
+            "failed to persist absent-room Muji clear; retrying asynchronously"
+        );
+        persistence.retry_batch(vec![intent]);
+    }
 }
 
 fn record_participant_left(

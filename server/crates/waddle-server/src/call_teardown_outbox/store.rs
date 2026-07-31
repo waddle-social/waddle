@@ -83,7 +83,7 @@ impl CallTeardownOutboxStore {
         Ok(intent_ids)
     }
 
-    async fn enqueue_at(
+    pub(super) async fn enqueue_at(
         &self,
         intent: CallTeardownIntent,
         now_ms: i64,
@@ -125,7 +125,7 @@ impl CallTeardownOutboxStore {
         self.claim_due_at(batch_size, crate::time::now_ms()).await
     }
 
-    async fn claim_due_at(
+    pub(super) async fn claim_due_at(
         &self,
         batch_size: usize,
         now_ms: i64,
@@ -194,7 +194,14 @@ impl CallTeardownOutboxStore {
     }
 
     pub async fn mark_done(&self, job: &CallTeardownJob) -> Result<bool, CallTeardownOutboxError> {
-        let now_ms = crate::time::now_ms();
+        self.mark_done_at(job, crate::time::now_ms()).await
+    }
+
+    pub(super) async fn mark_done_at(
+        &self,
+        job: &CallTeardownJob,
+        now_ms: i64,
+    ) -> Result<bool, CallTeardownOutboxError> {
         let connection = self.db.guard().await?;
         let affected = connection
             .execute(
@@ -248,7 +255,14 @@ impl CallTeardownOutboxStore {
         &self,
         job: &CallTeardownJob,
     ) -> Result<bool, CallTeardownOutboxError> {
-        let now_ms = crate::time::now_ms();
+        self.release_claim_at(job, crate::time::now_ms()).await
+    }
+
+    pub(super) async fn release_claim_at(
+        &self,
+        job: &CallTeardownJob,
+        now_ms: i64,
+    ) -> Result<bool, CallTeardownOutboxError> {
         let next_attempt_at_ms = now_ms.saturating_add(OWNERSHIP_RETRY_DELAY_MS);
         let connection = self.db.guard().await?;
         let affected = connection
@@ -270,6 +284,41 @@ impl CallTeardownOutboxStore {
         Ok(affected == 1)
     }
 
+    pub async fn fail_claim(
+        &self,
+        job: &CallTeardownJob,
+        error: impl Into<String>,
+    ) -> Result<bool, CallTeardownOutboxError> {
+        self.fail_claim_at(job, error.into(), crate::time::now_ms())
+            .await
+    }
+
+    pub(super) async fn fail_claim_at(
+        &self,
+        job: &CallTeardownJob,
+        error: String,
+        now_ms: i64,
+    ) -> Result<bool, CallTeardownOutboxError> {
+        let connection = self.db.guard().await?;
+        let affected = connection
+            .execute(
+                "UPDATE call_teardown_outbox \
+                 SET status = ?, last_error = ?, next_attempt_at_ms = NULL, \
+                     claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? \
+                 WHERE intent_id = ? AND status = ? AND claim_token = ?",
+                crate::db_params![
+                    STATUS_FAILED,
+                    error,
+                    now_ms,
+                    job.intent_id.as_str(),
+                    STATUS_IN_PROGRESS,
+                    job.claim_token.as_deref(),
+                ],
+            )
+            .await?;
+        Ok(affected == 1)
+    }
+
     pub async fn retry_or_fail(
         &self,
         job: &CallTeardownJob,
@@ -279,7 +328,7 @@ impl CallTeardownOutboxStore {
             .await
     }
 
-    async fn retry_or_fail_at(
+    pub(super) async fn retry_or_fail_at(
         &self,
         job: &CallTeardownJob,
         error: String,
@@ -354,17 +403,25 @@ impl CallTeardownOutboxStore {
         self.prune_failed_at(crate::time::now_ms()).await
     }
 
-    async fn prune_failed_at(&self, now_ms: i64) -> Result<u64, CallTeardownOutboxError> {
+    pub(super) async fn prune_failed_at(
+        &self,
+        now_ms: i64,
+    ) -> Result<u64, CallTeardownOutboxError> {
         let prune_before_ms = now_ms.saturating_sub(FAILED_RETENTION_MS);
         let connection = self.db.guard().await?;
         Ok(connection
             .execute(
                 "DELETE FROM call_teardown_outbox WHERE intent_id IN (\
                     SELECT intent_id FROM call_teardown_outbox \
-                    WHERE status = ? AND updated_at_ms < ? \
-                    ORDER BY updated_at_ms ASC LIMIT ?\
+                    WHERE status IN (?, ?) AND updated_at_ms < ? \
+                    ORDER BY updated_at_ms ASC, intent_id ASC LIMIT ?\
                  )",
-                crate::db_params![STATUS_FAILED, prune_before_ms, PRUNE_BATCH_SIZE],
+                crate::db_params![
+                    STATUS_DONE,
+                    STATUS_FAILED,
+                    prune_before_ms,
+                    PRUNE_BATCH_SIZE
+                ],
             )
             .await?)
     }

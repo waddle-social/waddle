@@ -1274,6 +1274,18 @@ pub struct ProtocolServices {
     /// carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.
     pub dispatcher: Arc<StanzaDispatcher>,
+    /// WebSocket-layer pre-dispatch limiter for Muji `session-terminate`.
+    /// This is intentionally a separate bucket set from the handler's
+    /// own defense-in-depth limiter: the websocket path must charge
+    /// before room-locality checks or cross-node relays fan out work.
+    pub muji_pre_dispatch_terminate_rate_limit:
+        Arc<waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit>,
+    /// WebSocket-layer pre-dispatch limiter for Muji non-initiate actions.
+    /// Kept separate from the handler-side limiter so the effective
+    /// budget remains unchanged while foreign-room and membership-gated
+    /// requests are metered before they trigger expensive checks.
+    pub muji_pre_dispatch_action_rate_limit:
+        Arc<waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit>,
     /// Shared PubSub/PEP storage (XEP-0060/XEP-0163).
     pub pubsub_storage: Arc<dyn PubSubStorage>,
     /// XEP-0357 push subscription storage.

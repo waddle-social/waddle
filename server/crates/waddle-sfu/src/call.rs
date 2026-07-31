@@ -270,6 +270,11 @@ impl MediaCapabilities {
     }
 
     pub fn from_muc_voice(voice: Voice) -> Self {
+        // XEP-0045 §7.5 gates both media-publish and text-send on the
+        // same `Role::voice` predicate. The SFU bridge only maps the
+        // media half here; the XMPP layer continues to enforce the text
+        // half separately, so both surfaces stay aligned on one source
+        // of truth for "voiced occupant".
         match voice {
             Voice::Voiced => Self {
                 can_publish: true,

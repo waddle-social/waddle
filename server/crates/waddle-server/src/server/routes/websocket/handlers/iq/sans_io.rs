@@ -111,12 +111,21 @@ pub(super) async fn handle_sans_io_iq(
             )]);
         };
         if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
-            if let Some(error) = peer_jingle_blocklist_error(state, full_jid, iq, domain).await {
+            if let Some(reply) = peer_jingle_blocklist_reply(state, full_jid, iq, domain).await {
+                return Some(vec![match reply {
+                    PeerJingleBlocklistReply::Bounce(stanza) => stanza_to_xml(&stanza),
+                    PeerJingleBlocklistReply::Error(error) => {
+                        build_iq_error_xml_typed(id, response_from, response_to, error)
+                    }
+                }]);
+            }
+            if let Some(rate_limit_error) = pre_dispatch_muji_rate_limit_error(state, full_jid, iq)
+            {
                 return Some(vec![build_iq_error_xml_typed(
                     id,
                     response_from,
                     response_to,
-                    error,
+                    rate_limit_error,
                 )]);
             }
         }
@@ -255,12 +264,17 @@ pub(super) async fn handle_sans_io_iq(
 ///
 /// Muji is membership-gated separately, and extdisco uses a different
 /// namespace, so neither surface enters this check.
-async fn peer_jingle_blocklist_error(
+enum PeerJingleBlocklistReply {
+    Bounce(Stanza),
+    Error(xmpp_parsers::stanza_error::StanzaError),
+}
+
+async fn peer_jingle_blocklist_reply(
     state: &WebSocketState,
     sender: &FullJid,
     iq: &xmpp_parsers::iq::Iq,
     local_domain: &str,
-) -> Option<xmpp_parsers::stanza_error::StanzaError> {
+) -> Option<PeerJingleBlocklistReply> {
     let xmpp_parsers::iq::Iq::Set { payload, to, .. } = iq else {
         return None;
     };
@@ -291,9 +305,10 @@ async fn peer_jingle_blocklist_error(
         .is_blocked_jid(&target.to_bare(), &Jid::from(sender.clone()))
         .await
     {
-        Ok(true) => Some(service_unavailable_iq_error(
-            "Service unavailable at this address.",
-        )),
+        Ok(true) => crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(
+            Box::new(iq.clone()),
+        ))
+        .map(PeerJingleBlocklistReply::Bounce),
         Ok(false) => None,
         Err(error) => {
             warn!(
@@ -302,9 +317,80 @@ async fn peer_jingle_blocklist_error(
                 sender = %sender,
                 "Failed to check blocklist before dispatching direct Jingle IQ"
             );
-            Some(internal_server_error_iq_error("Internal server error."))
+            Some(PeerJingleBlocklistReply::Error(
+                internal_server_error_iq_error("Internal server error."),
+            ))
         }
     }
+}
+
+/// Pre-dispatch limiter for the Muji actions that can be expensive
+/// before the sans-I/O Jingle handler sees them. These buckets are
+/// intentionally separate from the handler's own limiters: the
+/// websocket path must charge before room-locality checks, membership
+/// asks, or cross-node relays do any work, while the handler still
+/// defends non-websocket dispatch.
+fn pre_dispatch_muji_rate_limit_error(
+    state: &WebSocketState,
+    sender: &FullJid,
+    iq: &xmpp_parsers::iq::Iq,
+) -> Option<xmpp_parsers::stanza_error::StanzaError> {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != waddle_xmpp::xep::xep0166::NS_JINGLE
+        || payload.name() != "jingle"
+        || waddle_xmpp::xep::xep0272::find_muji(payload).is_none()
+    {
+        return None;
+    }
+    let action = xmpp_parsers::jingle::Jingle::try_from(payload.clone())
+        .ok()
+        .map(|jingle| jingle.action)?;
+    let sender_bare = sender.to_bare();
+    let rate_limited = match action {
+        xmpp_parsers::jingle::Action::SessionInitiate => return None,
+        xmpp_parsers::jingle::Action::SessionTerminate => state
+            .deps
+            .protocol
+            .muji_pre_dispatch_terminate_rate_limit
+            .check_and_record(&sender_bare)
+            .err()
+            .map(|exceeded| {
+                tracing::warn!(
+                    jid = %sender_bare,
+                    %exceeded,
+                    "rate-limit dropped Muji session-terminate before membership or relay checks"
+                );
+                waddle_xmpp::telemetry::call::increment_call_control_rate_limited(
+                    waddle_xmpp::telemetry::attributes::CallControlRateLimitedSurface::Terminate,
+                );
+                "session-terminate rate limit exceeded"
+            }),
+        _ => state
+            .deps
+            .protocol
+            .muji_pre_dispatch_action_rate_limit
+            .check_and_record(&sender_bare)
+            .err()
+            .map(|exceeded| {
+                tracing::warn!(
+                    jid = %sender_bare,
+                    %exceeded,
+                    "rate-limit dropped Muji non-initiate action before membership or relay checks"
+                );
+                waddle_xmpp::telemetry::call::increment_call_control_rate_limited(
+                    waddle_xmpp::telemetry::attributes::CallControlRateLimitedSurface::MujiAction,
+                );
+                "Muji action rate limit exceeded"
+            }),
+    }?;
+    Some(xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Cancel,
+        xmpp_parsers::stanza_error::DefinedCondition::PolicyViolation,
+        "en",
+        rate_limited,
+    ))
 }
 
 /// What the caller should do after a relay attempt.
@@ -1133,9 +1219,23 @@ mod tests {
 
         assert_eq!(responses.len(), 1, "blocked call gets one error reply");
         let response = &responses[0];
+        let expected = crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(
+            Box::new(parse_iq(&direct_jingle_frame(
+                "blocked-call-1",
+                "bob@example.com/phone",
+                "session-initiate",
+            ))),
+        ))
+        .map(|stanza| super::stanza_to_xml(&stanza))
+        .expect("blocked direct Jingle must produce a bounced IQ reply");
+        assert_eq!(
+            response, &expected,
+            "blocked direct Jingle must reuse the undeliverable reply builder exactly"
+        );
         assert!(
-            response.contains("type='error'") && response.contains("<service-unavailable"),
-            "blocked direct call must be unobservable service-unavailable: {response}"
+            response.contains("<service-unavailable")
+                && response.contains("<jingle xmlns='urn:xmpp:jingle:1'"),
+            "blocked direct call must carry the sanitized undeliverable Jingle echo: {response}"
         );
         assert!(
             bob_rx.try_recv().is_err(),
@@ -1220,19 +1320,31 @@ mod tests {
             "bob@example.com/phone",
             "session-accept",
         ));
-        let blocked_error = super::peer_jingle_blocklist_error(
+        let blocked_reply = super::peer_jingle_blocklist_reply(
             state.as_ref(),
             &alice,
             &blocked_accept,
             "example.com",
         )
         .await;
+        let Some(super::PeerJingleBlocklistReply::Bounce(stanza)) = blocked_reply else {
+            panic!("session-accept to a blocked local full JID must bounce via the shared helper");
+        };
+        let Stanza::Iq(reply) = stanza else {
+            panic!("expected IQ bounce");
+        };
+        let xmpp_parsers::iq::Iq::Error { error, payload, .. } = reply.as_ref() else {
+            panic!("expected IQ error bounce");
+        };
+        assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+        );
         assert!(
-            blocked_error
+            payload
                 .as_ref()
-                .is_some_and(|error| error.defined_condition
-                    == xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable),
-            "session-accept to a blocked local full JID must be rejected"
+                .is_some_and(|payload| payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)),
+            "shared bounce must echo the sanitized Jingle payload"
         );
 
         let muji_accept = parse_iq(&muji_jingle_frame(
@@ -1242,7 +1354,7 @@ mod tests {
             "general@muc.example.com",
         ));
         assert!(
-            super::peer_jingle_blocklist_error(state.as_ref(), &alice, &muji_accept, "example.com")
+            super::peer_jingle_blocklist_reply(state.as_ref(), &alice, &muji_accept, "example.com")
                 .await
                 .is_none(),
             "Muji Jingle is exempt from the direct-peer blocklist gate"
@@ -1254,7 +1366,7 @@ mod tests {
             "session-accept",
         ));
         assert!(
-            super::peer_jingle_blocklist_error(
+            super::peer_jingle_blocklist_reply(
                 state.as_ref(),
                 &alice,
                 &remote_accept,
@@ -1263,6 +1375,105 @@ mod tests {
             .await
             .is_none(),
             "non-local targets are exempt from the local pre-dispatch gate"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn muji_terminate_rate_limit_fires_before_gate_records_leave() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let max_terminates =
+            waddle_xmpp::protocol::handlers::session_initiate_rate_limit::DEFAULT_MAX_TERMINATES;
+
+        for attempt in 0..=max_terminates {
+            let frame = muji_jingle_frame(
+                &format!("term-pre-gate-{attempt}"),
+                "calls.example.com",
+                "session-terminate",
+                "ghost-room@muc.example.com",
+            );
+            let responses = super::super::handle_iq(
+                &frame,
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+            if attempt == max_terminates {
+                assert_eq!(responses.len(), 1);
+                assert!(
+                    responses[0].contains("<policy-violation"),
+                    "over-budget terminate must be rejected before the gate: {}",
+                    responses[0]
+                );
+            }
+        }
+
+        assert_eq!(
+            metrics.counter_sum("waddle.call.signaling", &[("event", "muji_leave")]),
+            Some(max_terminates as u64),
+            "the over-budget terminate must not reach the Muji gate's leave counter"
+        );
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.control.rate_limited",
+                &[("surface", "terminate")]
+            ),
+            Some(1),
+            "the websocket pre-gate limiter must report the terminate drop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn muji_non_initiate_rate_limit_fires_before_room_relay() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let max_actions =
+            waddle_xmpp::protocol::handlers::session_initiate_rate_limit::DEFAULT_MAX_MUJI_ACTIONS;
+
+        for attempt in 0..=max_actions {
+            let frame = muji_jingle_frame(
+                &format!("muji-action-{attempt}"),
+                "calls.example.com",
+                "transport-info",
+                "ghost-room@muc.example.com",
+            );
+            let responses = super::super::handle_iq(
+                &frame,
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+            assert_eq!(responses.len(), 1);
+            if attempt == 0 {
+                assert!(
+                    responses[0].contains("<forbidden"),
+                    "under-budget foreign-room Muji action should still hit the room-locality path"
+                );
+            }
+            if attempt == max_actions {
+                assert!(
+                    responses[0].contains("<policy-violation"),
+                    "over-budget Muji action must be rejected before room relay/membership work: {}",
+                    responses[0]
+                );
+            }
+        }
+
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.control.rate_limited",
+                &[("surface", "muji_action")]
+            ),
+            Some(1),
+            "the websocket pre-gate limiter must report the Muji-action drop"
         );
     }
 }

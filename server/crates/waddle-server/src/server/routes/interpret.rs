@@ -202,7 +202,9 @@ use room_pin::apply_pin_change_event;
 use room_subject::{
     persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
 };
-pub(crate) use route_to_connection::{bounce_undeliverable_iq, route_to_connection};
+pub(crate) use route_to_connection::{
+    bounce_undeliverable_iq, route_to_connection, undeliverable_iq_reply,
+};
 pub(crate) use routing::{deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome};
 use routing::{
     deliver_peer_to_live_only, deliver_to_detached, run_fanout_recipient_pass,

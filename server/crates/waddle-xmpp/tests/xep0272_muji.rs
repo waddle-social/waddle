@@ -426,9 +426,7 @@ fn first_error_condition(events: &[OutboundEvent]) -> Option<DefinedCondition> {
     })
 }
 
-fn first_stanza_error(
-    events: &[OutboundEvent],
-) -> Option<&xmpp_parsers::stanza_error::StanzaError> {
+fn first_result_ack(events: &[OutboundEvent]) -> Option<&Iq> {
     events.iter().find_map(|ev| {
         let OutboundEvent::SendStanza(stanza) = ev else {
             return None;
@@ -436,10 +434,7 @@ fn first_stanza_error(
         let Stanza::Iq(reply) = stanza.as_ref() else {
             return None;
         };
-        let Iq::Error { error, .. } = reply.as_ref() else {
-            return None;
-        };
-        Some(error)
+        matches!(reply.as_ref(), Iq::Result { .. }).then_some(reply.as_ref())
     })
 }
 
@@ -863,7 +858,7 @@ async fn muji_session_terminate_skips_delete_room_when_call_still_has_participan
 }
 
 #[tokio::test]
-async fn muji_unknown_participant_terminate_returns_unknown_session_without_admin_calls() {
+async fn muji_unknown_participant_terminate_acks_without_admin_calls() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
     let room_jid_str = "room@muc.waddle.test";
@@ -885,16 +880,15 @@ async fn muji_unknown_participant_terminate_returns_unknown_session_without_admi
 
     assert_eq!(
         first_error_condition(&events),
-        Some(DefinedCondition::ItemNotFound),
-        "unknown Muji terminator must get item-not-found: {events:?}",
+        None,
+        "unknown Muji terminator must get an idempotent ack: {events:?}",
     );
-    let error = first_stanza_error(&events).expect("stanza error present");
-    let unknown = error
-        .other
-        .as_ref()
-        .expect("application-specific condition present");
-    assert_eq!(unknown.name(), "unknown-session");
-    assert_eq!(unknown.ns(), "urn:xmpp:jingle:errors:1");
+    let ack = first_result_ack(&events).expect("result ack present");
+    assert_eq!(ack.id(), iq.id(), "ack must answer the terminate IQ");
+    assert!(
+        matches!(ack, Iq::Result { payload: None, .. }),
+        "Muji unknown terminate ack must be an empty IQ result"
+    );
     assert!(
         admin.remove_snapshot().is_empty(),
         "unknown Muji terminator must not schedule RemoveParticipant",
