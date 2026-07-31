@@ -169,14 +169,17 @@ async fn producer_retry_supervisor_coalesces_duplicate_batches() {
     supervisor.retry_batch(batch);
     assert_eq!(supervisor.state_snapshot(), (true, 1));
 
-    for _ in 0..100 {
-        let persisted = store.queue_stats().await.expect("queue stats").queued_count == 1;
-        if persisted && supervisor.state_snapshot() == (false, 0) {
-            return;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let persisted = store.queue_stats().await.expect("queue stats").queued_count == 1;
+            if persisted && supervisor.state_snapshot() == (false, 0) {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
-    panic!("supervised producer retry did not persist its batch");
+    })
+    .await
+    .expect("supervised producer retry must persist and quiesce");
 }
 
 #[derive(Default)]
