@@ -260,6 +260,131 @@ fn revoke_issued_token_drops_the_emptied_issued_bucket() {
 }
 
 #[test]
+fn revoke_issued_token_reports_a_guarded_eject_intent() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-bounce-eject").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_revoked"), Some("PA_revoked"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+
+    assert!(sfu.is_revoked(&minted.jti));
+    assert!(
+        sfu.has_call_participant(&call, &alice),
+        "targeted rollback revokes one issuance, not the registry entry"
+    );
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 1, "only RemoveParticipant should be queued");
+    assert_eq!(intents[0].call_id, call);
+    assert_eq!(intents[0].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[0].room_sid, observed.room_sid);
+    match &intents[0].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &observed.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("targeted rollback must not enqueue DeleteRoom"),
+    }
+}
+
+#[test]
+fn targeted_revocation_requeues_eject_when_the_holder_joins_late() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-bounce-late-join").expect("call id");
+    let alice = fixture_identity("alice");
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+    let observed = observed_sids(Some("RM_late"), Some("PA_late"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(
+        intents.len(),
+        2,
+        "the pending eject must fire again once the revoked holder becomes observable"
+    );
+    assert_eq!(intents[0].generation, None);
+    assert_eq!(intents[0].room_sid, None);
+    assert_eq!(intents[1].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[1].room_sid, observed.room_sid);
+    match &intents[1].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &observed.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("late join convergence must only enqueue eviction"),
+    }
+}
+
+#[test]
+fn targeted_revocation_keeps_other_live_issuances_authorized() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-targeted-authorized").expect("call id");
+    let alice = fixture_identity("alice");
+    let first = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+    let second = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    sfu.revoke_issued_token(&call, &alice, &second.jti);
+
+    assert!(
+        !sfu.is_revoked(&first.jti),
+        "revoking the bounced issuance must not downgrade another live token to nothing"
+    );
+    assert_eq!(
+        reported.lock().expect("sink lock").len(),
+        0,
+        "another outstanding issuance keeps the participant authorized, so no eject is queued"
+    );
+}
+
+#[test]
 fn issued_jti_vec_is_capped_per_participant() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
     let call = CallId::new("c-cap").unwrap();
@@ -395,6 +520,47 @@ fn sid_learning_stores_the_first_sid_and_rejects_conflicts() {
         stored_participant_sid(&sfu, &call, &alice),
         first.participant_sid
     );
+}
+
+#[test]
+fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-observe-pending-eject").expect("call id");
+    let alice = fixture_identity("alice");
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+    sfu.register_call_participant(&call, &alice);
+    let observed = observed_sids(Some("RM_observed"), Some("PA_observed"));
+    assert_eq!(
+        sfu.observe_call_participant_sids(&call, &alice, Some(&observed)),
+        SidObservationDisposition::Applied
+    );
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 2);
+    assert_eq!(intents[1].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[1].room_sid, observed.room_sid);
+    match &intents[1].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &observed.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("observe-path convergence must only enqueue eviction"),
+    }
 }
 
 #[test]
@@ -1336,14 +1502,14 @@ async fn unregister_last_participant_also_schedules_delete_room() {
 }
 
 #[tokio::test]
-async fn unregister_of_unknown_identity_fires_remove_participant_but_not_delete_room() {
+async fn unregister_of_unknown_identity_does_not_schedule_admin_work() {
     // Edge case: a session-terminate arrives without a matching
     // register (e.g. server-side state was lost, a client races
     // a re-init, a replayed terminate from a long-dead session).
-    // `RemoveParticipant` must still fire because LiveKit may
-    // hold the participant via a separate path. `DeleteRoom`
-    // MUST NOT fire — we don't know the call's true state, and
-    // tearing it down could evict participants we never tracked.
+    // With no registry evidence we must not schedule any admin work:
+    // the call may belong to a newer incarnation or another path,
+    // and the targeted revocation/eject flow now owns the "identity
+    // may still be live" convergence instead.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
     let call = CallId::new("r-ghost").unwrap();
@@ -1356,16 +1522,68 @@ async fn unregister_of_unknown_identity_fires_remove_participant_but_not_delete_
     );
     drain_admin_tasks().await;
 
-    let removes = admin.remove_snapshot();
-    assert_eq!(removes.len(), 1);
-    assert_eq!(
-        removes[0].1.as_livekit_identity(),
-        ghost.as_livekit_identity()
-    );
+    assert!(admin.remove_snapshot().is_empty());
     assert!(
         admin.delete_snapshot().is_empty(),
         "DeleteRoom must not fire when we never tracked the participant",
     );
+}
+
+#[test]
+fn unregister_requeues_eject_when_a_revoked_holder_rejoins_late() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("r-late-rejoin").expect("call id");
+    let alice = fixture_identity("alice");
+    let first_join = observed_sids(Some("RM_first"), Some("PA_first"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &first_join),
+        SidObservationDisposition::Applied
+    );
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, Some(&first_join)));
+    assert_eq!(state, CallState::Ended);
+    assert!(sfu.is_revoked(&minted.jti));
+
+    let second_join = observed_sids(Some("RM_second"), Some("PA_second"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &second_join),
+        SidObservationDisposition::Applied
+    );
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(
+        intents.len(),
+        3,
+        "late rejoin should append a fresh RemoveParticipant after the original participant+room intents"
+    );
+    assert!(matches!(
+        intents[0].target,
+        TeardownTargetLite::Participant { .. }
+    ));
+    assert!(matches!(intents[1].target, TeardownTargetLite::Room));
+    assert_eq!(intents[2].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[2].room_sid, second_join.room_sid);
+    match &intents[2].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &second_join.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("late rejoin convergence must only enqueue eviction"),
+    }
 }
 
 #[tokio::test]

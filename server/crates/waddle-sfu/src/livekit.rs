@@ -399,13 +399,20 @@ pub struct LiveKitSfu {
     /// belonged to. Entries are swept lazily once `Utc::now() > exp`:
     /// a revoked token past its expiry cannot be replayed regardless
     /// of whether the SFU still remembers its jti, so keeping it in
-    /// the map after that point is pure overhead. Bookkeeping today —
-    /// LiveKit itself doesn't call back to verify jti, so a stolen
-    /// token stays usable until its `exp`. Documented limitation; the
-    /// path-to-real-revocation needs LiveKit cooperation (webhook
-    /// validation hook) or a shared revocation store (Redis) once
-    /// Waddle scales past a single SFU instance.
+    /// the map after that point is pure overhead. LiveKit still does
+    /// not consult this map on join, so every revocation path that
+    /// should actively eject a live holder must ALSO schedule a
+    /// guarded admin-side convergence (`RemoveParticipant` for
+    /// revoke-to-nothing, `UpdateParticipant` for downgrades).
     revoked: DashMap<Jti, DateTime<Utc>>,
+    /// Participant identities that must be ejected if they become
+    /// observable again before their revoked token would have expired.
+    /// This closes the late-join hole where `RemoveParticipant` runs
+    /// before the holder of a now-revoked token actually connects:
+    /// `participant_joined` / SID observation / reconcile adoption
+    /// will re-arm the guarded eject until either a fresh authorized
+    /// issuance clears this key or the revoked token lapses.
+    pending_revocation_ejects: DashMap<ParticipantKey, DateTime<Utc>>,
     /// Latest media grants that SHOULD be in effect per
     /// `(call, identity)`, written before a push task is spawned and
     /// consumed by whichever task wins that key's lock. Last writer
@@ -487,6 +494,7 @@ impl LiveKitSfu {
                 .insert((call_id.clone(), identity.clone()), now);
             self.absent_streak
                 .remove(&(call_id.clone(), identity.clone()));
+            self.schedule_pending_revocation_eject_if_needed(call_id, identity);
         }
         true
     }
@@ -520,6 +528,7 @@ impl LiveKitSfu {
             registered_at: DashMap::new(),
             absent_streak: DashMap::new(),
             revoked: DashMap::new(),
+            pending_revocation_ejects: DashMap::new(),
             desired_grants: Arc::new(DashMap::new()),
             grant_locks: Arc::new(DashMap::new()),
             admin,
@@ -588,6 +597,67 @@ impl LiveKitSfu {
     /// bounded under steady call churn.
     fn sweep_expired_revoked(&self, now: DateTime<Utc>) {
         self.revoked.retain(|_, exp| *exp > now);
+        self.pending_revocation_ejects.retain(|_, exp| *exp > now);
+    }
+
+    fn arm_pending_revocation_eject(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        expires_at: DateTime<Utc>,
+    ) {
+        self.pending_revocation_ejects
+            .insert((call_id.clone(), identity.clone()), expires_at);
+    }
+
+    fn has_pending_revocation_eject(&self, call_id: &CallId, identity: &Identity) -> bool {
+        self.pending_revocation_ejects
+            .get(&(call_id.clone(), identity.clone()))
+            .is_some_and(|entry| *entry.value() > Utc::now())
+    }
+
+    fn clear_pending_revocation_eject(&self, call_id: &CallId, identity: &Identity) {
+        self.pending_revocation_ejects
+            .remove(&(call_id.clone(), identity.clone()));
+    }
+
+    /// A revoked JTI is only local state until LiveKit is told to act
+    /// on it. Reuse the same participant-eviction path as a full
+    /// unregister so the Lane D sink/outbox picks up runtime absence,
+    /// saturation, or transient admin failures.
+    fn schedule_revocation_eject(&self, call_id: &CallId, identity: &Identity) {
+        let (generation, room_sid, participant_sid) = if let Some(entry) = self.calls.get(call_id) {
+            (
+                Some(entry.generation),
+                entry.room_sid.clone(),
+                entry
+                    .participants
+                    .get(identity)
+                    .and_then(|state| state.participant_sid.clone()),
+            )
+        } else {
+            (
+                self.call_generations
+                    .get(call_id)
+                    .map(|generation| CallGeneration::new(*generation)),
+                None,
+                None,
+            )
+        };
+        self.schedule_remote_teardown(
+            call_id.clone(),
+            identity.clone(),
+            false,
+            generation,
+            room_sid,
+            participant_sid,
+        );
+    }
+
+    fn schedule_pending_revocation_eject_if_needed(&self, call_id: &CallId, identity: &Identity) {
+        if self.has_pending_revocation_eject(call_id, identity) {
+            self.schedule_revocation_eject(call_id, identity);
+        }
     }
 
     fn guard_and_learn_observed_sids(
@@ -698,8 +768,15 @@ impl LiveKitSfu {
         drop(entry);
 
         if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
+            let mut latest_exp = None;
             for issued in issued {
+                latest_exp = Some(
+                    latest_exp.map_or(issued.exp, |current: DateTime<Utc>| current.max(issued.exp)),
+                );
                 self.revoked.insert(issued.jti, issued.exp);
+            }
+            if let Some(latest_exp) = latest_exp {
+                self.arm_pending_revocation_eject(call_id, identity, latest_exp);
             }
         }
         self.registered_at
@@ -870,11 +947,11 @@ impl LiveKitSfu {
     /// call (listen-only), and their pre-downgrade tokens are marked
     /// spent.
     ///
-    /// This is local bookkeeping, NOT enforcement: LiveKit reads
-    /// permissions off the JWT at join and never asks us about the
-    /// jti (see the `revoked` field docs). Enforcement for a rejoin
-    /// with a stale token comes from re-asserting permissions on the
-    /// `participant_joined` webhook.
+    /// LiveKit ignores the revoked map on join, so the active
+    /// enforcement here is the paired `UpdateParticipant` push, not
+    /// the map write itself. A later join with a stale token is
+    /// converged by re-asserting the latest grants on
+    /// `participant_joined`.
     fn revoke_issued_tokens(&self, call_id: &CallId, identity: &Identity) {
         if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
             for issued in issued {
@@ -1295,6 +1372,7 @@ impl SfuService for LiveKitSfu {
             .issued
             .entry((call_id.clone(), identity.clone()))
             .or_default();
+        self.clear_pending_revocation_eject(call_id, identity);
         while entry.len() >= MAX_ISSUED_PER_PARTICIPANT {
             entry.remove(0);
         }
@@ -1418,6 +1496,7 @@ impl SfuService for LiveKitSfu {
             .insert((call_id.clone(), identity.clone()), Utc::now());
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
+        self.schedule_pending_revocation_eject_if_needed(call_id, identity);
         SidObservationDisposition::Applied
     }
 
@@ -1443,6 +1522,11 @@ impl SfuService for LiveKitSfu {
         // fresh mint is always still in the window at bounce time, so
         // the #1444 compensation is unaffected.
         let Some(exp) = exp else { return };
+        let bucket_emptied = self
+            .issued
+            .get(&key)
+            .map(|issuances| issuances.is_empty())
+            .unwrap_or(true);
         // Don't leave an empty bucket behind for the common
         // mint-then-immediately-revoke bounce case; `remove_if`
         // re-checks under the shard lock so a concurrent mint that
@@ -1450,6 +1534,10 @@ impl SfuService for LiveKitSfu {
         self.issued
             .remove_if(&key, |_, issuances| issuances.is_empty());
         self.revoked.insert(jti.clone(), exp);
+        if bucket_emptied {
+            self.arm_pending_revocation_eject(call_id, identity, exp);
+            self.schedule_revocation_eject(call_id, identity);
+        }
     }
 
     fn unregister_call_participant(
@@ -1477,18 +1565,6 @@ impl SfuService for LiveKitSfu {
             ),
             ClearDisposition::StaleSid => return TeardownDisposition::StaleSid,
             ClearDisposition::NoCall => {
-                let generation = self
-                    .call_generations
-                    .get(call_id)
-                    .map(|generation| CallGeneration::new(*generation));
-                self.schedule_remote_teardown(
-                    call_id.clone(),
-                    identity.clone(),
-                    false,
-                    generation,
-                    observed_sids.and_then(|sids| sids.room_sid.clone()),
-                    observed_sids.and_then(|sids| sids.participant_sid.clone()),
-                );
                 return TeardownDisposition::Applied(CallState::Active { remaining: 0 });
             }
         };
@@ -1572,7 +1648,7 @@ impl SfuService for LiveKitSfu {
         if !entry.participants.contains_key(identity) {
             return SidObservationDisposition::Applied;
         }
-        match Self::guard_and_learn_observed_sids(
+        let disposition = match Self::guard_and_learn_observed_sids(
             call_id,
             identity,
             entry.value_mut(),
@@ -1580,7 +1656,12 @@ impl SfuService for LiveKitSfu {
         ) {
             SidGuardDisposition::Applied => SidObservationDisposition::Applied,
             SidGuardDisposition::StaleSid => SidObservationDisposition::StaleSid,
+        };
+        drop(entry);
+        if matches!(disposition, SidObservationDisposition::Applied) {
+            self.schedule_pending_revocation_eject_if_needed(call_id, identity);
         }
+        disposition
     }
 
     fn update_participant_capabilities(

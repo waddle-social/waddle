@@ -253,6 +253,10 @@ impl Identity {
 pub struct MediaCapabilities {
     pub can_publish: bool,
     pub can_subscribe: bool,
+    /// `false` by default after #1449 defect 10: LiveKit's data
+    /// channel bypasses the XMPP-layer blocklist, archiving, and
+    /// moderation controls. Re-enable only with a reviewed,
+    /// protocol-level justification.
     pub can_publish_data: bool,
 }
 
@@ -261,7 +265,7 @@ impl MediaCapabilities {
         Self {
             can_publish: true,
             can_subscribe: true,
-            can_publish_data: true,
+            can_publish_data: false,
         }
     }
 
@@ -270,7 +274,7 @@ impl MediaCapabilities {
             Voice::Voiced => Self {
                 can_publish: true,
                 can_subscribe: true,
-                can_publish_data: true,
+                can_publish_data: false,
             },
             Voice::Muted => Self::listen_only(),
         }
@@ -285,7 +289,7 @@ impl MediaCapabilities {
     }
 
     pub fn is_listen_only(&self) -> bool {
-        !self.can_publish && !self.can_publish_data
+        !self.can_publish
     }
 }
 
@@ -323,7 +327,8 @@ mod tests {
     #[test]
     fn voice_grant_table() {
         let voiced = MediaCapabilities::from_muc_voice(Voice::Voiced);
-        assert!(voiced.can_publish && voiced.can_publish_data && voiced.can_subscribe);
+        assert!(voiced.can_publish && voiced.can_subscribe);
+        assert!(!voiced.can_publish_data);
         assert!(!voiced.is_listen_only());
 
         let muted = MediaCapabilities::from_muc_voice(Voice::Muted);
@@ -335,9 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_call_peers_get_full_grants() {
+    fn direct_call_peers_get_media_grants_without_data_publish() {
         let caps = MediaCapabilities::direct_call_peer();
-        assert!(caps.can_publish && caps.can_subscribe && caps.can_publish_data);
+        assert!(caps.can_publish && caps.can_subscribe);
+        assert!(!caps.can_publish_data);
         assert!(!caps.is_listen_only());
     }
 

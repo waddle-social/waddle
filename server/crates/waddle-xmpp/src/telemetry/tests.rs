@@ -2,8 +2,8 @@
 //! samples through the in-memory reader seam, never internal state.
 
 use super::attributes::{
-    Janitor, MessageKind, MetricAttribute, SessionInitFailureReason, StanzaErrorCondition,
-    SweepOutcome,
+    CallControlRateLimitedSurface, Janitor, MessageKind, MetricAttribute, SessionInitFailureReason,
+    StanzaErrorCondition, SweepOutcome,
 };
 use super::test_support;
 use super::validate_metric_name;
@@ -302,5 +302,10 @@ fn attribute_enums_expose_stable_keys_and_values() {
     assert_eq!(
         SessionInitFailureReason::AuthoritativeRegistration.value(),
         "authoritative_registration"
+    );
+    assert_eq!(CallControlRateLimitedSurface::Turn.key(), "surface");
+    assert_eq!(
+        CallControlRateLimitedSurface::MujiAction.value(),
+        "muji_action"
     );
 }

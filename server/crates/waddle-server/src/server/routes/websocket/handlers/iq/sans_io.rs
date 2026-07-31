@@ -110,6 +110,16 @@ pub(super) async fn handle_sans_io_iq(
                 not_authorized_iq_error("Authentication required."),
             )]);
         };
+        if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
+            if let Some(error) = peer_jingle_blocklist_error(state, full_jid, iq, domain).await {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    error,
+                )]);
+            }
+        }
         if let Some(enabled) = carbons_toggle {
             *conn_state.carbons_enabled = enabled;
             let _ = state
@@ -238,6 +248,65 @@ pub(super) async fn handle_sans_io_iq(
     None
 }
 
+/// Enforce the target account's XEP-0191 blocklist before a direct-call
+/// negotiation reaches the Jingle handler. That handler mints credentials and
+/// registers both identities, so filtering only at the later routing boundary
+/// is too late even though it prevents delivery to the blocked peer.
+///
+/// Muji is membership-gated separately, and extdisco uses a different
+/// namespace, so neither surface enters this check.
+async fn peer_jingle_blocklist_error(
+    state: &WebSocketState,
+    sender: &FullJid,
+    iq: &xmpp_parsers::iq::Iq,
+    local_domain: &str,
+) -> Option<xmpp_parsers::stanza_error::StanzaError> {
+    let xmpp_parsers::iq::Iq::Set { payload, to, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != waddle_xmpp::xep::xep0166::NS_JINGLE
+        || payload.name() != "jingle"
+        || waddle_xmpp::xep::xep0272::find_muji(payload).is_some()
+    {
+        return None;
+    }
+    let action = xmpp_parsers::jingle::Jingle::try_from(payload.clone())
+        .ok()
+        .map(|jingle| jingle.action);
+    if !matches!(
+        action,
+        Some(
+            xmpp_parsers::jingle::Action::SessionInitiate
+                | xmpp_parsers::jingle::Action::SessionAccept
+        )
+    ) {
+        return None;
+    }
+    let target = to
+        .as_ref()
+        .filter(|target| target.resource().is_some() && target.domain().as_str() == local_domain)?;
+
+    let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+    match blocking
+        .is_blocked_jid(&target.to_bare(), &Jid::from(sender.clone()))
+        .await
+    {
+        Ok(true) => Some(service_unavailable_iq_error(
+            "Service unavailable at this address.",
+        )),
+        Ok(false) => None,
+        Err(error) => {
+            warn!(
+                error = %error,
+                target = %target,
+                sender = %sender,
+                "Failed to check blocklist before dispatching direct Jingle IQ"
+            );
+            Some(internal_server_error_iq_error("Internal server error."))
+        }
+    }
+}
+
 /// What the caller should do after a relay attempt.
 #[cfg(feature = "clustering")]
 enum MujiRelayOutcome {
@@ -305,6 +374,13 @@ async fn relay_muji_to_room_owner(
     // — evaluating them eagerly would fabricate `room_not_found`
     // denials on every cross-node teardown.
     let is_terminate = super::jingle_muji_gate::muji_session_terminate_room(iq).is_some();
+    let is_session_initiate = matches!(
+        iq,
+        xmpp_parsers::iq::Iq::Set { payload, .. }
+            if payload.ns() == waddle_xmpp::xep::xep0166::NS_JINGLE
+                && payload.name() == "jingle"
+                && payload.attr("action") == Some("session-initiate")
+    );
     let unrelayable = |enqueue_owner_cleanup: bool, frames: &dyn Fn() -> Vec<String>| {
         if is_terminate {
             MujiRelayOutcome::ProcessLocally {
@@ -345,7 +421,11 @@ async fn relay_muji_to_room_owner(
             reply.id,
             reply.response_from,
             reply.response_to,
-            *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
+            *if is_session_initiate {
+                super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare())
+            } else {
+                super::jingle_muji_gate::deny_room_not_found_without_setup_telemetry()
+            },
         )]
     };
     let relay_error_frames = || {
@@ -367,9 +447,11 @@ async fn relay_muji_to_room_owner(
     // `sfu_token.denied` / `membership_check_failed` would make a
     // clustering incident read as a permissions problem.
     let relay_failed = || {
-        waddle_xmpp::telemetry::call::record_call_setup_rejected(
-            waddle_xmpp::telemetry::attributes::CallSetupFailureReason::OwnerUnreachable,
-        );
+        if is_session_initiate {
+            waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                waddle_xmpp::telemetry::attributes::CallSetupFailureReason::OwnerUnreachable,
+            );
+        }
         relay_error_frames()
     };
     // The owner MAY have executed this already and recorded its own
@@ -525,11 +607,22 @@ async fn relay_muji_to_room_owner(
             enqueue_owner_cleanup: false,
         };
     }
+    let denial = if matches!(
+        iq,
+        xmpp_parsers::iq::Iq::Set { payload, .. }
+            if payload.ns() == waddle_xmpp::xep::xep0166::NS_JINGLE
+                && payload.name() == "jingle"
+                && payload.attr("action") == Some("session-initiate")
+    ) {
+        super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare())
+    } else {
+        super::jingle_muji_gate::deny_room_not_found_without_setup_telemetry()
+    };
     MujiRelayOutcome::Frames(vec![build_iq_error_xml_typed(
         reply.id,
         reply.response_from,
         reply.response_to,
-        *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
+        *denial,
     )])
 }
 
@@ -632,11 +725,195 @@ async fn mirror_remote_carbons_update(
 #[cfg(test)]
 mod tests {
     use crate::call_teardown_outbox::TeardownTarget;
-    use crate::server::routes::websocket::tests::create_test_websocket_state_with_calls;
+    use crate::db::actor::DbExecute;
+    use crate::db::blocking::DatabaseBlockingStorage;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state_with_calls, create_test_websocket_state_with_sfu,
+        register_test_connection, RecordingSfu,
+    };
+    use chrono::Utc;
+    use jid::{FullJid, Jid};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use waddle_sfu::{
+        ApiSecret, CallId, Identity, JoinToken, Jti, Jwt, MediaCapabilities, SfuError, SfuService,
+        TurnCredential, TurnHost, WebsocketUrl,
+    };
+    use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
+    use waddle_xmpp::registry::OutboundStanza;
     use waddle_xmpp::xep::xep0167::MediaKind;
     use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::iq::Iq;
     use xmpp_parsers::jingle::{Action, Jingle, SessionId};
+
+    #[derive(Default)]
+    struct RecordingCallSfu {
+        issued: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
+        registered: Mutex<Vec<(CallId, Identity)>>,
+    }
+
+    impl RecordingCallSfu {
+        fn issued_snapshot(&self) -> Vec<(CallId, Identity, MediaCapabilities)> {
+            self.issued.lock().expect("recording lock").clone()
+        }
+
+        fn registered_snapshot(&self) -> Vec<(CallId, Identity)> {
+            self.registered.lock().expect("recording lock").clone()
+        }
+    }
+
+    impl SfuService for RecordingCallSfu {
+        fn issue_join_token(
+            &self,
+            call_id: &CallId,
+            identity: &Identity,
+            capabilities: MediaCapabilities,
+        ) -> Result<JoinToken, SfuError> {
+            self.issued.lock().expect("recording lock").push((
+                call_id.clone(),
+                identity.clone(),
+                capabilities,
+            ));
+            Ok(JoinToken {
+                url: WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+                    .expect("valid ws url"),
+                room: call_id.clone(),
+                identity: identity.clone(),
+                jwt: Jwt::from_wire("test.jwt".to_string()),
+                jti: Jti::new(),
+                expires_at: Utc::now(),
+            })
+        }
+
+        fn issue_turn_credentials(&self, _: &Identity) -> Result<TurnCredential, SfuError> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn register_call_participant(&self, call_id: &CallId, identity: &Identity) {
+            self.registered
+                .lock()
+                .expect("recording lock")
+                .push((call_id.clone(), identity.clone()));
+        }
+
+        fn register_call_participant_observed(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: &waddle_sfu::ObservedCallSids,
+        ) -> waddle_sfu::SidObservationDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn has_call_participant(&self, _: &CallId, _: &Identity) -> bool {
+            false
+        }
+
+        fn revoke_issued_token(&self, _: &CallId, _: &Identity, _: &Jti) {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn unregister_call_participant(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: Option<&waddle_sfu::ObservedCallSids>,
+        ) -> waddle_sfu::TeardownDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn note_participant_left(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: Option<&waddle_sfu::ObservedCallSids>,
+        ) -> waddle_sfu::TeardownDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn observe_call_participant_sids(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: Option<&waddle_sfu::ObservedCallSids>,
+        ) -> waddle_sfu::SidObservationDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn update_participant_capabilities(&self, _: &CallId, _: &Identity, _: MediaCapabilities) {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn is_revoked(&self, _: &Jti) -> bool {
+            false
+        }
+
+        fn ws_url(&self) -> &WebsocketUrl {
+            static URL: std::sync::OnceLock<WebsocketUrl> = std::sync::OnceLock::new();
+            URL.get_or_init(|| {
+                WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+                    .expect("valid ws url")
+            })
+        }
+
+        fn turn_host(&self) -> &TurnHost {
+            static HOST: std::sync::OnceLock<TurnHost> = std::sync::OnceLock::new();
+            HOST.get_or_init(|| TurnHost::new("turn.test"))
+        }
+
+        fn webhook_secret(&self) -> &ApiSecret {
+            static SECRET: std::sync::OnceLock<ApiSecret> = std::sync::OnceLock::new();
+            SECRET.get_or_init(|| {
+                ApiSecret::from_text("recording-webhook-secret-32-bytes")
+                    .expect("recording webhook secret meets minimum length")
+            })
+        }
+
+        fn participants_for_call(&self, _: &CallId) -> Vec<Identity> {
+            Vec::new()
+        }
+    }
+
+    fn ready_phase(jid: &FullJid) -> waddle_xmpp::protocol::ConnectionPhase {
+        waddle_xmpp::protocol::ConnectionPhase::ready(jid.clone(), false)
+    }
+
+    fn parse_iq(xml: &str) -> Iq {
+        match parse_frame(xml).expect("iq parses") {
+            InboundFrame::Stanza(stanza) => match *stanza {
+                Stanza::Iq(iq) => *iq,
+                _ => panic!("expected iq stanza"),
+            },
+            _ => panic!("expected iq stanza"),
+        }
+    }
+
+    fn direct_jingle_frame(id: &str, target: &str, action: &str) -> String {
+        format!(
+            "<iq xmlns='jabber:client' id='{id}' type='set' to='{target}'>\
+               <jingle xmlns='urn:xmpp:jingle:1' action='{action}' sid='dmcall1' initiator='alice@example.com/web'>\
+                 <content creator='initiator' name='audio'>\
+                   <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'>\
+                     <payload-type id='111' name='opus' clockrate='48000' channels='2'/>\
+                     <rtcp-mux/>\
+                   </description>\
+                   <transport xmlns='urn:waddle:transports:livekit:0'/>\
+                 </content>\
+               </jingle>\
+             </iq>"
+        )
+    }
+
+    fn muji_jingle_frame(id: &str, target: &str, action: &str, room: &str) -> String {
+        format!(
+            "<iq xmlns='jabber:client' id='{id}' type='set' to='{target}'>\
+               <jingle xmlns='urn:xmpp:jingle:1' action='{action}' sid='muji1' initiator='alice@example.com/web'>\
+                 <muji xmlns='urn:xmpp:jingle:muji:0' room='{room}'/>\
+               </jingle>\
+             </iq>"
+        )
+    }
 
     fn muji_initiate_iq(room: &str) -> Iq {
         let jingle = Jingle::new(Action::SessionInitiate, SessionId("i-sid".into()));
@@ -824,6 +1101,168 @@ mod tests {
                 .unwrap_or(0),
             0,
             "a hangup is not a call-setup attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_direct_jingle_initiate_returns_service_unavailable_without_mint_or_register() {
+        let sfu = Arc::new(RecordingCallSfu::default());
+        let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+            .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
+            .await
+            .expect("seed blocklist");
+
+        let responses = super::super::handle_iq(
+            &direct_jingle_frame(
+                "blocked-call-1",
+                "bob@example.com/phone",
+                "session-initiate",
+            ),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ready_phase(&alice),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "blocked call gets one error reply");
+        let response = &responses[0];
+        assert!(
+            response.contains("type='error'") && response.contains("<service-unavailable"),
+            "blocked direct call must be unobservable service-unavailable: {response}"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "blocked direct call must not reach the peer connection"
+        );
+        assert!(
+            sfu.issued_snapshot().is_empty(),
+            "blocked direct call must not mint a LiveKit token"
+        );
+        assert!(
+            sfu.registered_snapshot().is_empty(),
+            "blocked direct call must not register a participant"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocklist_storage_failure_returns_internal_server_error_before_dispatch() {
+        let sfu = Arc::new(RecordingCallSfu::default());
+        let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "DROP TABLE blocking_list".to_string(),
+                params: Vec::new(),
+            })
+            .await
+            .expect("drop blocking table");
+
+        let responses = super::super::handle_iq(
+            &direct_jingle_frame(
+                "blocked-call-2",
+                "bob@example.com/phone",
+                "session-initiate",
+            ),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ready_phase(&alice),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "storage failure gets one error reply");
+        let response = &responses[0];
+        assert!(
+            response.contains("type='error'") && response.contains("<internal-server-error"),
+            "blocklist failures must fail closed with internal-server-error: {response}"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "fail-closed blocklist error must not dispatch to the peer connection"
+        );
+        assert!(
+            sfu.issued_snapshot().is_empty(),
+            "fail-closed blocklist error must not mint a LiveKit token"
+        );
+        assert!(
+            sfu.registered_snapshot().is_empty(),
+            "fail-closed blocklist error must not register a participant"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_jingle_blocklist_helper_blocks_session_accept_only_for_local_non_muji_targets() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+        DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+            .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
+            .await
+            .expect("seed blocklist");
+
+        let blocked_accept = parse_iq(&direct_jingle_frame(
+            "blocked-call-3",
+            "bob@example.com/phone",
+            "session-accept",
+        ));
+        let blocked_error = super::peer_jingle_blocklist_error(
+            state.as_ref(),
+            &alice,
+            &blocked_accept,
+            "example.com",
+        )
+        .await;
+        assert!(
+            blocked_error
+                .as_ref()
+                .is_some_and(|error| error.defined_condition
+                    == xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable),
+            "session-accept to a blocked local full JID must be rejected"
+        );
+
+        let muji_accept = parse_iq(&muji_jingle_frame(
+            "blocked-call-4",
+            "bob@example.com/phone",
+            "session-accept",
+            "general@muc.example.com",
+        ));
+        assert!(
+            super::peer_jingle_blocklist_error(state.as_ref(), &alice, &muji_accept, "example.com")
+                .await
+                .is_none(),
+            "Muji Jingle is exempt from the direct-peer blocklist gate"
+        );
+
+        let remote_accept = parse_iq(&direct_jingle_frame(
+            "blocked-call-5",
+            "bob@remote.example/phone",
+            "session-accept",
+        ));
+        assert!(
+            super::peer_jingle_blocklist_error(
+                state.as_ref(),
+                &alice,
+                &remote_accept,
+                "example.com"
+            )
+            .await
+            .is_none(),
+            "non-local targets are exempt from the local pre-dispatch gate"
         );
     }
 }

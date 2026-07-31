@@ -234,14 +234,12 @@ async fn jmi_proceed_round_trips_back_to_caller() {
     assert!(proceed.contains("urn:xmpp:jingle-message:0"));
 }
 
-/// XEP-0191 incoming-block must apply to peer-routed Jingle IQs:
-/// an authenticated user who has bob@domain on their blocklist
-/// must not receive bob's session-initiate. The JingleHandler
-/// rewrites the transport regardless (it cannot see the
-/// recipient's blocklist), but the recipient's state machine
-/// drops the IQ before writing to the wire.
+/// XEP-0191 incoming-block must apply before peer-routed Jingle IQs reach the
+/// credential-minting handler. The sender sees the same
+/// `service-unavailable` shape as an unreachable target, while the target sees
+/// no negotiation stanza.
 #[tokio::test]
-async fn session_initiate_from_blocked_peer_is_dropped() {
+async fn session_initiate_from_blocked_peer_is_rejected_before_dispatch() {
     let (_server, mut alice, mut bob) = start_pair().await;
 
     let alice_full = alice.full_jid.clone().expect("alice bound");
@@ -280,12 +278,25 @@ async fn session_initiate_from_blocked_peer_is_dropped() {
         .await
         .expect("alice session-initiate");
 
-    let dropped = bob
+    let rejection = alice
         .recv_matching(|frame| {
+            frame.contains(&format!(r#"id='ji-{sid}'"#)) && frame.contains("service-unavailable")
+        })
+        .await
+        .expect("blocked initiator receives an unobservable routing error");
+    assert!(
+        !rejection.contains("token="),
+        "pre-dispatch blocklist rejection must not carry credentials: {rejection}"
+    );
+
+    let dropped = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+        bob.recv_matching(|frame| {
             frame.contains("session-initiate") && frame.contains(&format!(r#"sid='{sid}'"#))
                 || frame.contains(&format!(r#"sid='{sid}'"#))
         })
-        .await;
+        .await
+    })
+    .await;
     assert!(
         dropped.is_err(),
         "blocked peer's session-initiate must not reach bob; got: {dropped:?}"
@@ -1552,7 +1563,10 @@ async fn muji_join_by_voiced_occupant_mints_publishing_token_end_to_end() {
         "an occupant with voice must be able to publish: {accept}"
     );
     assert!(grant.can_subscribe);
-    assert!(grant.can_publish_data);
+    assert!(
+        !grant.can_publish_data,
+        "direct-call participants must not receive data-publish rights: {accept}"
+    );
 }
 
 /// End-to-end pin for the security property: an occupant who has been

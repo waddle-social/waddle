@@ -679,6 +679,28 @@ impl MetricAttribute for RequestOutcome {
     }
 }
 
+/// `surface` — which call-control request surface hit a rate limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallControlRateLimitedSurface {
+    Terminate,
+    MujiAction,
+    Turn,
+}
+
+impl sealed::Sealed for CallControlRateLimitedSurface {}
+impl MetricAttribute for CallControlRateLimitedSurface {
+    fn key(&self) -> &'static str {
+        "surface"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Terminate => "terminate",
+            Self::MujiAction => "muji_action",
+            Self::Turn => "turn",
+        }
+    }
+}
+
 /// `stage` — where in the push-notification pipeline a sample was
 /// taken (#531). One variant per observable pipeline transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

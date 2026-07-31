@@ -2,7 +2,7 @@
 //! the protocol-layer Jingle handler and the server-side Muji gate so
 //! one family is never emitted from divergent macro sites.
 
-use super::attributes::{CallSetupFailureReason, SfuDenialReason};
+use super::attributes::{CallControlRateLimitedSurface, CallSetupFailureReason, SfuDenialReason};
 
 /// Count a minted LiveKit SFU token.
 pub fn increment_sfu_token_minted() {
@@ -108,6 +108,18 @@ pub(super) fn register_call_setup_counters() {
 pub fn record_call_setup_rejected(reason: CallSetupFailureReason) {
     increment_call_setup_attempted();
     increment_call_setup_failed(reason);
+}
+
+/// Count a call-control request rejected by a local sliding-window
+/// limiter.
+pub fn increment_call_control_rate_limited(surface: CallControlRateLimitedSurface) {
+    crate::counter_add!(
+        "waddle.call.control.rate_limited",
+        "1",
+        "Call-control requests rejected by local rate limits.",
+        1,
+        surface,
+    );
 }
 
 /// Count a webhook-driven teardown dropped because its observed SID

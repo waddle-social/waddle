@@ -25,9 +25,13 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use waddle_sfu::{CallCorrelationId, CallId, Identity, MediaCapabilities, SfuError, SfuService};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
-use crate::protocol::handlers::session_initiate_rate_limit::SessionInitiateRateLimit;
+use crate::protocol::handlers::session_initiate_rate_limit::{
+    MujiActionRateLimit, SessionInitiateRateLimit, TerminateRateLimit,
+};
 use crate::protocol::traits::IqHandler;
-use crate::telemetry::attributes::{CallSetupFailureReason, MetricAttribute, SfuDenialReason};
+use crate::telemetry::attributes::{
+    CallControlRateLimitedSurface, CallSetupFailureReason, MetricAttribute, SfuDenialReason,
+};
 use crate::xep::xep0166::NS_JINGLE;
 use crate::xep::xep0272::{find_muji, Muji};
 use crate::xep::xep_waddle_livekit_transport::{
@@ -150,7 +154,9 @@ pub struct JingleHandler {
     // Per-bare-JID rate limit on `session-initiate` only. Shared via
     // Arc so cloning the handler (the dispatcher clones it on
     // registration) keeps every clone hitting the same bucket map.
-    rate_limit: Arc<SessionInitiateRateLimit>,
+    session_initiate_rate_limit: Arc<SessionInitiateRateLimit>,
+    terminate_rate_limit: Arc<TerminateRateLimit>,
+    muji_action_rate_limit: Arc<MujiActionRateLimit>,
 }
 
 #[derive(Clone, Debug)]
@@ -189,7 +195,9 @@ impl JingleHandler {
         Self {
             sfu,
             pending_dm_invites: Arc::new(Mutex::new(HashMap::new())),
-            rate_limit: Arc::new(SessionInitiateRateLimit::with_defaults()),
+            session_initiate_rate_limit: Arc::new(SessionInitiateRateLimit::with_defaults()),
+            terminate_rate_limit: Arc::new(TerminateRateLimit::with_defaults()),
+            muji_action_rate_limit: Arc::new(MujiActionRateLimit::with_defaults()),
         }
     }
 
@@ -202,7 +210,25 @@ impl JingleHandler {
         Self {
             sfu,
             pending_dm_invites: Arc::new(Mutex::new(HashMap::new())),
-            rate_limit,
+            session_initiate_rate_limit: rate_limit,
+            terminate_rate_limit: Arc::new(TerminateRateLimit::with_defaults()),
+            muji_action_rate_limit: Arc::new(MujiActionRateLimit::with_defaults()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_rate_limits(
+        sfu: Arc<dyn SfuService>,
+        session_initiate_rate_limit: Arc<SessionInitiateRateLimit>,
+        terminate_rate_limit: Arc<TerminateRateLimit>,
+        muji_action_rate_limit: Arc<MujiActionRateLimit>,
+    ) -> Self {
+        Self {
+            sfu,
+            pending_dm_invites: Arc::new(Mutex::new(HashMap::new())),
+            session_initiate_rate_limit,
+            terminate_rate_limit,
+            muji_action_rate_limit,
         }
     }
 }
@@ -313,7 +339,10 @@ impl IqHandler for JingleHandler {
                 // existing initiate doesn't grow registry footprint
                 // beyond what the matching initiate already paid for.
                 let initiator_bare = ctx.full_jid.to_bare();
-                if let Err(exceeded) = self.rate_limit.check_and_record(&initiator_bare) {
+                if let Err(exceeded) = self
+                    .session_initiate_rate_limit
+                    .check_and_record(&initiator_bare)
+                {
                     tracing::warn!(jid = %initiator_bare, %exceeded, "rate-limit dropped session-initiate");
                     crate::telemetry::call::record_call_setup_rejected(
                         CallSetupFailureReason::RateLimited,
@@ -327,7 +356,12 @@ impl IqHandler for JingleHandler {
                 self.handle_session_negotiation(iq, jingle, peer, ctx)
             }
             Action::SessionAccept => self.handle_session_negotiation(iq, jingle, peer, ctx),
-            Action::SessionTerminate => self.handle_session_terminate(iq, jingle, peer, ctx),
+            Action::SessionTerminate => {
+                if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
+                    return reply;
+                }
+                self.handle_session_terminate(iq, jingle, peer, ctx)
+            }
             Action::SessionInfo
             | Action::TransportInfo
             | Action::ContentAdd
@@ -559,7 +593,10 @@ impl JingleHandler {
             // relay — so the unlimited Muji branch would be the
             // cheapest amplification primitive in the call path.
             let initiator_bare = ctx.full_jid.to_bare();
-            if let Err(exceeded) = self.rate_limit.check_and_record(&initiator_bare) {
+            if let Err(exceeded) = self
+                .session_initiate_rate_limit
+                .check_and_record(&initiator_bare)
+            {
                 tracing::warn!(
                     jid = %initiator_bare,
                     %exceeded,
@@ -617,13 +654,37 @@ impl JingleHandler {
                 self.handle_muji_session_initiate(iq, jingle, room_jid, ctx, attempt)
             }
             Action::SessionTerminate => {
+                if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
+                    return reply;
+                }
                 self.handle_muji_session_terminate(iq, jingle, room_jid, ctx)
             }
-            _ => error_reply(
-                iq,
-                DefinedCondition::BadRequest,
-                "Muji Jingle supports only session-initiate and session-terminate",
-            ),
+            _ => {
+                let initiator_bare = ctx.full_jid.to_bare();
+                if let Err(exceeded) = self
+                    .muji_action_rate_limit
+                    .check_and_record(&initiator_bare)
+                {
+                    tracing::warn!(
+                        jid = %initiator_bare,
+                        %exceeded,
+                        "rate-limit dropped Muji non-initiate action"
+                    );
+                    crate::telemetry::call::increment_call_control_rate_limited(
+                        CallControlRateLimitedSurface::MujiAction,
+                    );
+                    return error_reply(
+                        iq,
+                        DefinedCondition::PolicyViolation,
+                        "Muji action rate limit exceeded",
+                    );
+                }
+                error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    "Muji Jingle supports only session-initiate and session-terminate",
+                )
+            }
         }
     }
 
@@ -783,11 +844,13 @@ impl JingleHandler {
         // Same CallId derivation as session-initiate so the
         // unregister matches the original registration.
         if let Ok(call_id) = CallId::new(room_jid.to_string()) {
-            let _ = self.sfu.unregister_call_participant(
-                &call_id,
-                &Identity::from_jid(ctx.full_jid.clone()),
-                None,
-            );
+            let sender_identity = Identity::from_jid(ctx.full_jid.clone());
+            if !self.sfu.has_call_participant(&call_id, &sender_identity) {
+                return unknown_session_reply(iq);
+            }
+            let _ = self
+                .sfu
+                .unregister_call_participant(&call_id, &sender_identity, None);
         }
         // Empty IQ result per XEP-0166 §6.7.
         let mixer: Jid = calls_mixer_jid(ctx.domain).into();
@@ -927,6 +990,32 @@ impl JingleHandler {
             tracing::warn!("recovering poisoned pending DM invite lock");
             err.into_inner()
         })
+    }
+
+    fn check_terminate_rate_limit(
+        &self,
+        iq: &Iq,
+        ctx: &StanzaContext<'_>,
+    ) -> Option<Vec<OutboundEvent>> {
+        let initiator_bare = ctx.full_jid.to_bare();
+        match self.terminate_rate_limit.check_and_record(&initiator_bare) {
+            Ok(()) => None,
+            Err(exceeded) => {
+                tracing::warn!(
+                    jid = %initiator_bare,
+                    %exceeded,
+                    "rate-limit dropped session-terminate"
+                );
+                crate::telemetry::call::increment_call_control_rate_limited(
+                    CallControlRateLimitedSurface::Terminate,
+                );
+                Some(error_reply(
+                    iq,
+                    DefinedCondition::PolicyViolation,
+                    "session-terminate rate limit exceeded",
+                ))
+            }
+        }
     }
 }
 
@@ -1455,6 +1544,44 @@ mod tests {
             id: "muji-observe".into(),
             payload,
         }
+    }
+
+    fn muji_transport_info_iq(room: &str, sid: &str) -> Iq {
+        let mut jingle = Jingle::new(Action::TransportInfo, SessionId(sid.into()));
+        jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
+        let mut payload: Element = jingle.into();
+        payload.append_child(Muji::for_room(room.parse().expect("valid room JID")).to_element());
+        Iq::Set {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("calls.waddle.test".parse().unwrap()),
+            id: format!("muji-transport-{sid}"),
+            payload,
+        }
+    }
+
+    fn session_terminate_iq(initiator: &str, responder: &str, sid: &str) -> Iq {
+        let jingle = Jingle::new(Action::SessionTerminate, SessionId(sid.into())).set_reason(
+            xep0166::reason_element(xmpp_parsers::jingle::Reason::Success),
+        );
+        Iq::Set {
+            from: Some(initiator.parse().unwrap()),
+            to: Some(responder.parse().unwrap()),
+            id: format!("terminate-{sid}"),
+            payload: jingle.into(),
+        }
+    }
+
+    fn register_dm_call(
+        sfu: &Arc<LiveKitSfu>,
+        initiator: &str,
+        responder: &str,
+        sid: &str,
+    ) -> waddle_sfu::CallId {
+        let initiator_bare: BareJid = initiator.parse::<FullJid>().unwrap().to_bare();
+        let call = scoped_call_id(&initiator_bare, sid).unwrap();
+        sfu.register_call_participant(&call, &Identity::from_jid(initiator.parse().unwrap()));
+        sfu.register_call_participant(&call, &Identity::from_jid(responder.parse().unwrap()));
+        call
     }
 
     fn assert_error_condition(events: &[OutboundEvent], condition: DefinedCondition) {
@@ -2207,6 +2334,76 @@ mod tests {
             },
             other => panic!("expected SendStanza, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rate_limited_session_terminate_returns_policy_violation() {
+        let sfu = fixture_livekit_sfu();
+        register_dm_call(
+            &sfu,
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/desktop",
+            "t1",
+        );
+        register_dm_call(
+            &sfu,
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/desktop",
+            "t2",
+        );
+        let handler = JingleHandler::with_rate_limits(
+            sfu,
+            Arc::new(SessionInitiateRateLimit::with_defaults()),
+            Arc::new(TerminateRateLimit::new(
+                1,
+                std::time::Duration::from_secs(30),
+            )),
+            Arc::new(MujiActionRateLimit::with_defaults()),
+        );
+        let jid = test_ctx_jid();
+
+        let first = handler.handle(
+            &session_terminate_iq("alice@waddle.test/desktop", "bob@waddle.test/desktop", "t1"),
+            &ctx(&jid),
+        );
+        assert!(
+            first
+                .iter()
+                .any(|ev| matches!(ev, OutboundEvent::RouteToConnection { .. })),
+            "first terminate should still route"
+        );
+
+        let second = handler.handle(
+            &session_terminate_iq("alice@waddle.test/desktop", "bob@waddle.test/desktop", "t2"),
+            &ctx(&jid),
+        );
+        assert_error_condition(&second, DefinedCondition::PolicyViolation);
+    }
+
+    #[test]
+    fn rate_limited_muji_non_initiate_action_returns_policy_violation() {
+        let handler = JingleHandler::with_rate_limits(
+            fixture_sfu(),
+            Arc::new(SessionInitiateRateLimit::with_defaults()),
+            Arc::new(TerminateRateLimit::with_defaults()),
+            Arc::new(MujiActionRateLimit::new(
+                1,
+                std::time::Duration::from_secs(30),
+            )),
+        );
+        let jid = test_ctx_jid();
+
+        let first = handler.handle(
+            &muji_transport_info_iq("general@muc.waddle.test", "muji-ti-1"),
+            &ctx(&jid),
+        );
+        assert_error_condition(&first, DefinedCondition::BadRequest);
+
+        let second = handler.handle(
+            &muji_transport_info_iq("general@muc.waddle.test", "muji-ti-2"),
+            &ctx(&jid),
+        );
+        assert_error_condition(&second, DefinedCondition::PolicyViolation);
     }
 
     #[test]

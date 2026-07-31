@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(claims.video.room, call_id.as_str());
         assert!(claims.video.can_publish);
         assert!(claims.video.can_subscribe);
-        assert!(claims.video.can_publish_data);
+        assert!(!claims.video.can_publish_data);
     }
 
     /// The role → grant mapping must survive all the way into the

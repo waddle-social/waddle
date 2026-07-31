@@ -126,14 +126,22 @@ pub trait SfuService: Send + Sync + 'static {
         observed_sids: Option<&ObservedCallSids>,
     ) -> TeardownDisposition;
 
-    /// Targeted, bookkeeping-only revocation of ONE issued JWT for
-    /// the pair (#1444): moves `jti` into the revocation set without
-    /// touching the participant's registration, their other
-    /// issuances, or the SFU itself (no `RemoveParticipant`). This is
-    /// the compensation for a single stanza whose delivery failed —
-    /// the pair may simultaneously be live in the call through an
-    /// independent, successful negotiation, and that session must
-    /// survive the bounce.
+    /// Targeted revocation of ONE issued JWT for the pair (#1444):
+    /// moves `jti` into the revocation set without touching the
+    /// participant's registration or their other issuances, then
+    /// schedules the same generation/SID-guarded `RemoveParticipant`
+    /// convergence path that a full unregister uses when the
+    /// revocation empties the pair's active issuance window (the
+    /// downgrade-to-nothing case). LiveKit never consults our revoked
+    /// map on join, so active enforcement for a live holder has to
+    /// happen through the admin API rather than by local bookkeeping
+    /// alone.
+    ///
+    /// If the revoked token is first used only AFTER this local
+    /// revocation, convergence still comes from that guarded eject
+    /// once the live participant becomes observable again (for
+    /// example through a later participant-join observation or room
+    /// adoption/reconciliation).
     ///
     /// Implementations MUST ignore a `jti` that is not currently
     /// tracked in the pair's issued window: the identifier arrives

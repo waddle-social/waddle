@@ -20,7 +20,10 @@
 //! `<forbidden/>` and the SFU is never touched.
 //! `session-terminate` is intentionally not membership-gated —
 //! `unregister` on the SFU is idempotent and harmless, and an
-//! over-eager leave from a non-occupant is benign cleanup. It is
+//! over-eager leave from a non-occupant is benign cleanup. Every
+//! other Muji Jingle action is membership-gated, because ongoing
+//! session negotiation and transport changes are valid only while the
+//! sender is still a participant in the referenced MUC. Terminate is
 //! still checked for room LOCALITY (#1445), because the matching
 //! initiate registered the participant on the room-owning node and
 //! the terminate has to reach that same node to undo it.
@@ -56,8 +59,8 @@ use super::errors::{bad_request_iq_error, forbidden_iq_error, internal_server_er
 /// occupant's XEP-0045 role at authorization time, and the caller
 /// threads them into the sans-I/O dispatch so the Jingle handler
 /// mints the SFU token with exactly those grants. `None` means no
-/// membership check applied (non-Jingle, 1:1 Jingle, non-initiate
-/// actions) — the Muji mint path treats that as listen-only.
+/// membership check applied (non-Jingle or 1:1 Jingle) — the Muji
+/// mint path treats that as listen-only.
 /// `RoomNotLocal` means no room actor lives in this process. That is
 /// NOT a room-existence verdict: with multiple replicas the room actor
 /// is claimed by exactly one node, so a perfectly live room looks
@@ -74,17 +77,26 @@ pub(super) enum GateOutcome {
     },
 }
 
-/// The terminal `room_not_found` denial: no room actor here AND no
-/// other node owns the room (or relay was impossible). Records the
-/// SFU-token denial telemetry and produces the exact `<forbidden/>`
-/// wire shape this path has always had. Every terminal decision site
-/// must funnel through here so the #1452 SLI keeps counting complete
-/// call-setup attempts.
-pub(super) fn deny_room_not_found(room_jid: &BareJid, user: &BareJid) -> Box<StanzaError> {
-    record_sfu_token_denial(room_jid, user, SfuDenialReason::RoomNotFound);
+fn room_not_found_error() -> Box<StanzaError> {
     Box::new(forbidden_iq_error(
         "not an occupant of the requested room — join the MUC first",
     ))
+}
+
+/// The terminal `room_not_found` denial: no room actor here AND no
+/// other node owns the room (or relay was impossible). Records the
+/// SFU-token denial telemetry for Muji call setup, then produces the
+/// exact `<forbidden/>` wire shape this path has always had.
+pub(super) fn deny_room_not_found(room_jid: &BareJid, user: &BareJid) -> Box<StanzaError> {
+    record_sfu_token_denial(room_jid, user, SfuDenialReason::RoomNotFound);
+    room_not_found_error()
+}
+
+/// The same terminal wire denial as [`deny_room_not_found`] without
+/// recording SFU-token setup telemetry. Used for Muji actions that
+/// are membership-gated but are not token-mint attempts.
+pub(super) fn deny_room_not_found_without_setup_telemetry() -> Box<StanzaError> {
+    room_not_found_error()
 }
 
 /// `Allow` for stanzas the Muji membership gate does not apply to.
@@ -116,11 +128,10 @@ pub(super) enum GateInvocation {
 /// Returns:
 /// - `Allow` if the IQ is not a Muji-bearing `<jingle/>` (other
 ///   Jingle traffic — 1:1 calls — passes through unchanged), or if
-///   the action is something other than `session-initiate`
-///   (terminate/info are idempotent on the SFU), or if the caller
-///   is a current occupant of the requested room.
-/// - `Deny(forbidden)` if the IQ is a Muji `session-initiate` but
-///   the caller is not a current occupant of the room.
+///   the caller is a current occupant of the requested room.
+/// - `Deny(forbidden)` if the IQ is a Muji Jingle action other than
+///   `session-terminate` but the caller is not a current occupant of
+///   the room.
 /// - `Deny(bad_request)` if the `<muji room='…'/>` attribute is
 ///   missing or not a valid bare JID.
 /// - `RoomNotLocal` if no room actor for the requested room lives in
@@ -170,8 +181,7 @@ pub(super) async fn verify_muji_jingle_request(
         return reject_wire_shape("Muji <muji/> inside <jingle/> requires the 'room' attribute");
     };
 
-    // Parse the surrounding Jingle to extract the action — we only
-    // gate session-initiate; terminate is idempotent.
+    // Parse the surrounding Jingle to extract the action.
     let jingle = match Jingle::try_from(payload.clone()) {
         Ok(j) => j,
         Err(_) => {
@@ -233,11 +243,7 @@ pub(super) async fn verify_muji_jingle_request(
             },
         };
     }
-    if !matches!(jingle.action, Action::SessionInitiate) {
-        return allow_ungated();
-    }
-
-    verify_room_membership(state, full_jid, &room_jid).await
+    verify_room_membership(state, full_jid, &room_jid, is_session_initiate).await
 }
 
 /// When `iq` is a Muji-bearing Jingle `session-terminate`, return the
@@ -265,6 +271,7 @@ async fn verify_room_membership(
     state: &WebSocketState,
     full_jid: &FullJid,
     room_jid: &BareJid,
+    record_setup_denials: bool,
 ) -> GateOutcome {
     // No LOCAL room actor. That is not the same as "the room does not
     // exist": room actors are claimed by exactly one node, so on a
@@ -281,11 +288,13 @@ async fn verify_room_membership(
         }
         Err(error) => {
             tracing::debug!(room = %room_jid, error = %error, "Muji gate room lookup failed");
-            record_sfu_token_denial(
-                room_jid,
-                &full_jid.to_bare(),
-                SfuDenialReason::InternalError,
-            );
+            if record_setup_denials {
+                record_sfu_token_denial(
+                    room_jid,
+                    &full_jid.to_bare(),
+                    SfuDenialReason::InternalError,
+                );
+            }
             // Telemetry records the true cause, but the wire error
             // stays `forbidden` — the exact shape this path produced
             // before the telemetry work; changing client-visible
@@ -311,21 +320,25 @@ async fn verify_room_membership(
             media_capabilities: Some(MediaCapabilities::from_muc_voice(voice)),
         },
         Ok(None) => {
-            record_sfu_token_denial(
-                room_jid,
-                &full_jid.to_bare(),
-                SfuDenialReason::MembershipDenied,
-            );
+            if record_setup_denials {
+                record_sfu_token_denial(
+                    room_jid,
+                    &full_jid.to_bare(),
+                    SfuDenialReason::MembershipDenied,
+                );
+            }
             GateOutcome::Deny(Box::new(forbidden_iq_error(
                 "not an occupant of the requested room — join the MUC first",
             )))
         }
         Err(_) => {
-            record_sfu_token_denial(
-                room_jid,
-                &full_jid.to_bare(),
-                SfuDenialReason::InternalError,
-            );
+            if record_setup_denials {
+                record_sfu_token_denial(
+                    room_jid,
+                    &full_jid.to_bare(),
+                    SfuDenialReason::InternalError,
+                );
+            }
             // Actor ask flaked — this is a transient server-side
             // failure, not an authorization decision. RFC 6120
             // §8.3.3 maps "the server could not process the
@@ -502,12 +515,14 @@ mod tests {
         )
         .await;
         // Authorization produces the grant: a voiced occupant (role ≥
-        // participant) is authorized WITH publish capabilities.
+        // participant) is authorized with publish capabilities, but
+        // not the LiveKit data channel (#1449 defect 10).
         let GateOutcome::Allow { media_capabilities } = outcome else {
             panic!("expected Allow");
         };
         let caps = media_capabilities.expect("membership check ran, so capabilities are derived");
-        assert!(caps.can_publish && caps.can_subscribe && caps.can_publish_data);
+        assert!(caps.can_publish && caps.can_subscribe);
+        assert!(!caps.can_publish_data);
     }
 
     /// XEP-0045 voice semantics on the SFU boundary: a visitor in a
@@ -589,6 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn deny_when_caller_is_not_an_occupant() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let state = create_test_websocket_state().await;
         let room: BareJid = "general@muc.example.com".parse().unwrap();
         let alice = full("alice@example.com/web");
@@ -737,6 +753,7 @@ mod tests {
     /// events and the LiveKit webhook logs also carry (#1452).
     #[tokio::test(flavor = "current_thread")]
     async fn denial_log_carries_the_call_correlation_id_and_not_the_room_hash_preimage() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
@@ -849,6 +866,49 @@ mod tests {
             matches!(outcome, GateOutcome::Allow { .. }),
             "terminate is never membership-gated, even from a non-occupant"
         );
+    }
+
+    #[tokio::test]
+    async fn deny_transport_info_when_caller_is_not_an_occupant() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice = full("alice@example.com/web");
+        let mallory = full("mallory@example.com/laptop");
+        create_room_and_join(&state, &room, "alice", &alice).await;
+
+        let outcome = verify_muji_jingle_request(
+            &state,
+            &mallory,
+            &build_jingle_muji_iq(Action::TransportInfo, "general@muc.example.com"),
+            GateInvocation::ClientOrigin,
+        )
+        .await;
+        let GateOutcome::Deny(err) = outcome else {
+            panic!("expected transport-info from a non-occupant to be denied");
+        };
+        assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn allow_transport_info_when_caller_is_a_current_occupant() {
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice = full("alice@example.com/web");
+        create_room_and_join(&state, &room, "alice", &alice).await;
+
+        let outcome = verify_muji_jingle_request(
+            &state,
+            &alice,
+            &build_jingle_muji_iq(Action::TransportInfo, "general@muc.example.com"),
+            GateInvocation::ClientOrigin,
+        )
+        .await;
+        let GateOutcome::Allow { media_capabilities } = outcome else {
+            panic!("expected occupant transport-info to be allowed");
+        };
+        let caps = media_capabilities.expect("membership-gated actions derive capabilities");
+        assert!(caps.can_publish && caps.can_subscribe);
     }
 
     /// #1445: a terminate for a room with no local actor must report

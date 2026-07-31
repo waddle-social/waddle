@@ -15,8 +15,9 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use waddle_sfu::{Identity, SfuService};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
+use crate::protocol::handlers::session_initiate_rate_limit::TurnCredentialRateLimit;
 use crate::protocol::traits::IqHandler;
-use crate::telemetry::attributes::RequestOutcome;
+use crate::telemetry::attributes::{CallControlRateLimitedSurface, RequestOutcome};
 use crate::xep::xep0215::{
     build_services_result_element, build_stun_service_element, build_turn_service, ServiceType,
     NS_EXT_DISCO,
@@ -28,6 +29,7 @@ pub struct ExtDiscoHandler {
     sfu: Arc<dyn SfuService>,
     turn_tls_port: u16,
     turn_udp_port: u16,
+    turn_credential_rate_limit: Arc<TurnCredentialRateLimit>,
 }
 
 impl std::fmt::Debug for ExtDiscoHandler {
@@ -45,6 +47,22 @@ impl ExtDiscoHandler {
             sfu,
             turn_tls_port,
             turn_udp_port,
+            turn_credential_rate_limit: Arc::new(TurnCredentialRateLimit::with_defaults()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_turn_credential_rate_limit(
+        sfu: Arc<dyn SfuService>,
+        turn_tls_port: u16,
+        turn_udp_port: u16,
+        turn_credential_rate_limit: Arc<TurnCredentialRateLimit>,
+    ) -> Self {
+        Self {
+            sfu,
+            turn_tls_port,
+            turn_udp_port,
+            turn_credential_rate_limit,
         }
     }
 }
@@ -94,6 +112,22 @@ impl IqHandler for ExtDiscoHandler {
         let want_stun = type_filter != Some(ServiceType::Turn);
         let mut services: Vec<minidom::Element> = Vec::with_capacity(2);
         if want_turn {
+            let requester = ctx.full_jid.to_bare();
+            if let Err(exceeded) = self.turn_credential_rate_limit.check_and_record(&requester) {
+                tracing::warn!(
+                    jid = %requester,
+                    %exceeded,
+                    "rate-limit dropped TURN credential request"
+                );
+                crate::telemetry::call::increment_call_control_rate_limited(
+                    CallControlRateLimitedSurface::Turn,
+                );
+                return error_reply(
+                    iq,
+                    DefinedCondition::PolicyViolation,
+                    "TURN credential rate limit exceeded",
+                );
+            }
             // Mint credentials scoped to the authenticated session
             // JID, never the client-supplied `iq.from` (which could
             // spoof any identity into the TURN username).
@@ -302,6 +336,81 @@ mod tests {
             metrics.metric_unit("waddle.call.turn_credentials"),
             Some("1".to_string())
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rate_limited_turn_request_returns_policy_violation_and_counts_rejection() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::with_turn_credential_rate_limit(
+            fixture_sfu(),
+            443,
+            3478,
+            Arc::new(TurnCredentialRateLimit::new(
+                1,
+                std::time::Duration::from_secs(30),
+            )),
+        );
+
+        let first = handler.handle(&services_get_iq(), &ctx(&jid));
+        assert_eq!(first.len(), 1);
+
+        let second = handler.handle(&services_get_iq(), &ctx(&jid));
+        let OutboundEvent::SendStanza(stanza) = second.into_iter().next().unwrap() else {
+            panic!("expected SendStanza")
+        };
+        let Stanza::Iq(reply) = *stanza else {
+            panic!("expected Iq")
+        };
+        let Iq::Error { error, .. } = *reply else {
+            panic!("expected error reply")
+        };
+        assert_eq!(error.defined_condition, DefinedCondition::PolicyViolation);
+        assert_eq!(
+            metrics.counter_sum("waddle.call.control.rate_limited", &[("surface", "turn")]),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn stun_only_services_queries_bypass_the_turn_rate_limiter() {
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::with_turn_credential_rate_limit(
+            fixture_sfu(),
+            443,
+            3478,
+            Arc::new(TurnCredentialRateLimit::new(
+                0,
+                std::time::Duration::from_secs(30),
+            )),
+        );
+        let iq = Iq::Get {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("waddle.test".parse().unwrap()),
+            id: "stun-only".into(),
+            payload: Element::builder("services", NS_EXT_DISCO)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "stun")
+                .build(),
+        };
+
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        let OutboundEvent::SendStanza(stanza) = events.into_iter().next().unwrap() else {
+            panic!("expected SendStanza")
+        };
+        let Stanza::Iq(reply) = *stanza else {
+            panic!("expected Iq")
+        };
+        let Iq::Result {
+            payload: Some(elem),
+            ..
+        } = *reply
+        else {
+            panic!("expected success reply")
+        };
+        let entries: Vec<&Element> = elem.children().filter(|c| c.name() == "service").collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].attr("type"), Some("stun"));
     }
 
     #[test]
