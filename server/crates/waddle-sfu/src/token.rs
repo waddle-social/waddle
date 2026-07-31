@@ -113,6 +113,7 @@ impl std::fmt::Debug for Jwt {
 pub(crate) struct IssuedJti {
     pub jti: Jti,
     pub exp: DateTime<Utc>,
+    pub protected_from_empty_bucket_eject: bool,
 }
 
 /// Fully-issued join credential. Returned by

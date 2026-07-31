@@ -426,7 +426,7 @@ fn first_error_condition(events: &[OutboundEvent]) -> Option<DefinedCondition> {
     })
 }
 
-fn first_result_ack(events: &[OutboundEvent]) -> Option<&Iq> {
+fn first_error_application_condition(events: &[OutboundEvent]) -> Option<&Element> {
     events.iter().find_map(|ev| {
         let OutboundEvent::SendStanza(stanza) = ev else {
             return None;
@@ -434,7 +434,10 @@ fn first_result_ack(events: &[OutboundEvent]) -> Option<&Iq> {
         let Stanza::Iq(reply) = stanza.as_ref() else {
             return None;
         };
-        matches!(reply.as_ref(), Iq::Result { .. }).then_some(reply.as_ref())
+        let Iq::Error { error, .. } = reply.as_ref() else {
+            return None;
+        };
+        error.other.as_ref()
     })
 }
 
@@ -858,7 +861,7 @@ async fn muji_session_terminate_skips_delete_room_when_call_still_has_participan
 }
 
 #[tokio::test]
-async fn muji_unknown_participant_terminate_acks_without_admin_calls() {
+async fn muji_unknown_participant_terminate_returns_unknown_session_without_admin_calls() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
     let room_jid_str = "room@muc.waddle.test";
@@ -880,14 +883,15 @@ async fn muji_unknown_participant_terminate_acks_without_admin_calls() {
 
     assert_eq!(
         first_error_condition(&events),
-        None,
-        "unknown Muji terminator must get an idempotent ack: {events:?}",
+        Some(DefinedCondition::ItemNotFound),
+        "unknown Muji terminator must get item-not-found/unknown-session: {events:?}",
     );
-    let ack = first_result_ack(&events).expect("result ack present");
-    assert_eq!(ack.id(), iq.id(), "ack must answer the terminate IQ");
     assert!(
-        matches!(ack, Iq::Result { payload: None, .. }),
-        "Muji unknown terminate ack must be an empty IQ result"
+        first_error_application_condition(&events).is_some_and(|condition| {
+            condition.name() == "unknown-session"
+                && condition.ns() == waddle_xmpp::xep::xep0166::NS_JINGLE_ERRORS
+        }),
+        "unknown Muji terminate must include the XEP-0166 unknown-session application condition"
     );
     assert!(
         admin.remove_snapshot().is_empty(),

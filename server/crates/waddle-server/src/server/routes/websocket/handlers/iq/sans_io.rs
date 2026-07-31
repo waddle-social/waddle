@@ -37,6 +37,25 @@ pub(super) async fn handle_sans_io_iq(
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> Option<Vec<String>> {
+    handle_sans_io_iq_with_relay_override(
+        ctx,
+        state,
+        authenticated_session,
+        phase,
+        conn_state,
+        None,
+    )
+    .await
+}
+
+async fn handle_sans_io_iq_with_relay_override(
+    ctx: IqHandlerContext<'_>,
+    state: &WebSocketState,
+    authenticated_session: &Option<Session>,
+    phase: &ConnectionPhase,
+    conn_state: &mut IqConnState<'_>,
+    muji_relay_override: Option<MujiRelayOutcome>,
+) -> Option<Vec<String>> {
     let iq = ctx.iq;
     let id = ctx.id;
     let payload_ns = ctx.payload_ns;
@@ -186,25 +205,29 @@ pub(super) async fn handle_sans_io_iq(
                         response_from,
                         response_to,
                     };
-                    match relay_muji_to_room_owner(
-                        state, conn_state, full_jid, iq, &room_jid, reply,
+                    let relay_outcome = match muji_relay_override {
+                        Some(outcome) => outcome,
+                        None => {
+                            relay_muji_to_room_owner(
+                                state, conn_state, full_jid, iq, &room_jid, reply,
+                            )
+                            .await
+                        }
+                    };
+                    if let Some(frames) = resolve_muji_relay_outcome(
+                        state,
+                        &room_jid,
+                        full_jid,
+                        relay_outcome,
+                        IqReplyAddressing {
+                            id,
+                            response_from,
+                            response_to,
+                        },
                     )
                     .await
                     {
-                        MujiRelayOutcome::Frames(frames) => return Some(frames),
-                        // Terminate could not be relayed. Fall through
-                        // to local dispatch, which is what this path
-                        // did before the relay existed: unregistering
-                        // is idempotent, so a local no-op is strictly
-                        // better than failing the client's hangup.
-                        MujiRelayOutcome::ProcessLocally {
-                            enqueue_owner_cleanup,
-                        } => {
-                            if enqueue_owner_cleanup {
-                                enqueue_muji_relay_teardown_fallback(state, &room_jid, full_jid)
-                                    .await;
-                            }
-                        }
+                        return Some(frames);
                     }
                 }
             }
@@ -713,13 +736,14 @@ async fn relay_muji_to_room_owner(
 }
 
 /// Persist the owner-side convergence that a failed cross-node terminate
-/// could not deliver. Enqueue errors are operationally loud but never alter
-/// the client's successful hangup response.
+/// could not deliver. The success ACK is only safe after this synchronous
+/// insert succeeds; the in-memory retry supervisor narrows an outage window
+/// but is not itself a durability boundary.
 async fn enqueue_muji_relay_teardown_fallback(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
-) {
+) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
@@ -728,7 +752,7 @@ async fn enqueue_muji_relay_teardown_fallback(
                 %error,
                 "could not model Muji relay fallback as a typed teardown intent"
             );
-            return;
+            return Err(error.into());
         }
     };
     let intents = [
@@ -752,19 +776,89 @@ async fn enqueue_muji_relay_teardown_fallback(
         },
     ];
     let store = &state.deps.protocol.call_teardown_outbox;
-    if let Err(error) = store.enqueue_batch(&intents).await {
-        tracing::warn!(
-            room = %room_jid,
-            departed = %departed,
-            %error,
-            "failed to persist Muji teardown fallback; retrying asynchronously"
-        );
-        state
-            .deps
-            .protocol
-            .call_teardown_persistence
-            .retry_batch(intents.to_vec());
+    match store.enqueue_batch(&intents).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                departed = %departed,
+                %error,
+                    "failed to persist Muji teardown fallback; rejecting the ACK and retrying asynchronously"
+            );
+            state
+                .deps
+                .protocol
+                .call_teardown_persistence
+                .retry_batch(intents.to_vec());
+            Err(error)
+        }
     }
+}
+
+async fn fallback_muji_terminate_owner_cleanup_ack(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    departed: &jid::FullJid,
+    reply: IqReplyAddressing<'_>,
+) -> Vec<String> {
+    let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed).await;
+    let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
+        state, room_jid, departed, None,
+    )
+    .await;
+    if persisted.is_err() {
+        return vec![build_iq_error_xml_typed(
+            reply.id,
+            reply.response_from,
+            reply.response_to,
+            internal_server_error_iq_error("the leave could not be durably accepted; please retry"),
+        )];
+    }
+    muji_terminate_ack_frames(reply.id, reply.response_from, reply.response_to)
+}
+
+/// Resolve the relay decision before the normal IQ dispatcher runs.
+///
+/// A relay failure with durable owner cleanup is terminal here: the origin
+/// acknowledges the accepted leave directly and MUST NOT ask its local Jingle
+/// handler to validate a session that only the owner ever held. Returning
+/// `unknown-session` would be false because the session exists on the owner.
+/// The queued participant removal and presence clear are harmless no-ops for a
+/// non-participant, and this ingress path is rate-limited. A benign local
+/// fallback returns `None` so the existing local handler path remains intact.
+async fn resolve_muji_relay_outcome(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    departed: &jid::FullJid,
+    outcome: MujiRelayOutcome,
+    reply: IqReplyAddressing<'_>,
+) -> Option<Vec<String>> {
+    match outcome {
+        MujiRelayOutcome::Frames(frames) => Some(frames),
+        MujiRelayOutcome::ProcessLocally {
+            enqueue_owner_cleanup: false,
+        } => None,
+        MujiRelayOutcome::ProcessLocally {
+            enqueue_owner_cleanup: true,
+        } => {
+            Some(fallback_muji_terminate_owner_cleanup_ack(state, room_jid, departed, reply).await)
+        }
+    }
+}
+
+fn muji_terminate_ack_frames(
+    id: &str,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    vec![
+        crate::server::routes::websocket::transport_xml::build_iq_result_xml(
+            id,
+            response_from,
+            response_to,
+            None,
+        ),
+    ]
 }
 
 /// The (id, from, to) triple every IQ error reply is stamped with —
@@ -813,9 +907,12 @@ mod tests {
     use crate::call_teardown_outbox::TeardownTarget;
     use crate::db::actor::DbExecute;
     use crate::db::blocking::DatabaseBlockingStorage;
+    use crate::server::routes::websocket::get_room_actor;
+    use crate::server::routes::websocket::handlers::presence::handle_muc_join;
     use crate::server::routes::websocket::tests::{
-        create_test_websocket_state_with_calls, create_test_websocket_state_with_sfu,
-        register_test_connection, RecordingSfu,
+        create_test_server_owner_session, create_test_websocket_state_with_calls,
+        create_test_websocket_state_with_sfu, register_test_connection, snapshot_room,
+        RecordingSfu,
     };
     use chrono::Utc;
     use jid::{FullJid, Jid};
@@ -825,6 +922,7 @@ mod tests {
         ApiSecret, CallId, Identity, JoinToken, Jti, Jwt, MediaCapabilities, SfuError, SfuService,
         TurnCredential, TurnHost, WebsocketUrl,
     };
+    use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
     use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
     use waddle_xmpp::registry::OutboundStanza;
     use waddle_xmpp::xep::xep0167::MediaKind;
@@ -1053,7 +1151,9 @@ mod tests {
         let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
 
-        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice).await;
+        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice)
+            .await
+            .expect("persist fallback intents");
 
         let jobs = state
             .deps
@@ -1071,6 +1171,200 @@ mod tests {
             .any(|job| matches!(job.intent.target, TeardownTarget::Participant { .. })));
         assert!(jobs.iter().all(|job| job.intent.generation.is_none()));
         assert!(jobs.iter().all(|job| job.intent.room_sid.is_none()));
+    }
+
+    #[tokio::test]
+    async fn sans_io_owner_cleanup_fallback_returns_before_local_jingle_dispatch() {
+        let sfu = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(Arc::clone(&sfu) as Arc<_>).await;
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let iq = muji_terminate_iq("general@muc.example.com");
+        let phase = ready_phase(&alice);
+        let authenticated_session = None;
+        let mut carbons = false;
+        let mut roster = false;
+        let mut blocklist = false;
+        let mut conn_state = super::IqConnState {
+            carbons_enabled: &mut carbons,
+            roster_interested: &mut roster,
+            blocklist_interested: &mut blocklist,
+            registry_owner: None,
+            state_machine: None,
+            ordered_relay_origin: None,
+        };
+
+        let frames = super::handle_sans_io_iq_with_relay_override(
+            super::IqHandlerContext {
+                iq: &iq,
+                id: iq.id(),
+                payload_ns: waddle_xmpp::xep::xep0166::NS_JINGLE,
+                target_to: Some("calls.example.com"),
+                has_destroy: false,
+                domain: "example.com",
+                muc_domain: "muc.example.com",
+                upload_domain: "upload.example.com",
+                spaces_domain: "spaces.example.com",
+                community_domain: "community.example.com",
+                extensions_domain: "extensions.example.com",
+                push_domain: "push.example.com",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+            &state,
+            &authenticated_session,
+            &phase,
+            &mut conn_state,
+            Some(super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            }),
+        )
+        .await
+        .expect("registered Jingle handler owns the IQ");
+
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            parse_iq(&frames[0]),
+            Iq::Result { payload: None, .. }
+        ));
+        assert!(
+            sfu.snapshot().is_empty(),
+            "the full sans-IO path must return before local Jingle unregister dispatch"
+        );
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim fallback intents");
+        assert_eq!(jobs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_acks_before_local_muji_handler_dispatch() {
+        let sfu = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(Arc::clone(&sfu) as Arc<_>).await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(owner_session),
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room)
+            .await
+            .expect("room actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                muji: Muji {
+                    room: None,
+                    preparing: false,
+                    contents: vec![MujiContent::new(
+                        "audio",
+                        Creator::Initiator,
+                        MediaKind::Audio,
+                    )],
+                },
+            })
+            .await
+            .expect("muji update")
+            .expect("occupant update");
+
+        let frames = super::resolve_muji_relay_outcome(
+            &state,
+            &room,
+            &alice,
+            super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            },
+            super::IqReplyAddressing {
+                id: "term-ack",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await
+        .expect("owner-cleanup relay outcome is terminal before dispatch");
+
+        assert_eq!(frames.len(), 1, "fallback branch must answer immediately");
+        let reply = parse_iq(&frames[0]);
+        assert!(
+            matches!(reply, Iq::Result { payload: None, .. }),
+            "owner-cleanup fallback must return an empty IQ result instead of reaching the local Muji handler",
+        );
+        assert!(
+            snapshot_room(state.as_ref(), &room)
+                .await
+                .room
+                .muji_for_session("alice", &alice)
+                .is_none(),
+            "the fallback ack path must still run the local Muji clear-after side effect",
+        );
+        assert!(
+            sfu.snapshot().is_empty(),
+            "the terminal relay outcome must not reach the local Jingle handler unregister path",
+        );
+
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim fallback intents");
+        assert_eq!(jobs.len(), 2, "owner cleanup must stay durable");
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_rejects_ack_when_durable_enqueue_fails() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let connection = state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .guard()
+            .await
+            .expect("database");
+        connection
+            .execute("DROP TABLE call_teardown_outbox", ())
+            .await
+            .expect("drop outbox table");
+
+        let frames = super::resolve_muji_relay_outcome(
+            &state,
+            &room,
+            &alice,
+            super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            },
+            super::IqReplyAddressing {
+                id: "term-enqueue-failed",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await
+        .expect("owner-cleanup relay outcome remains terminal");
+
+        let reply = parse_iq(&frames[0]);
+        let Iq::Error { error, .. } = reply else {
+            panic!("durability failure must not acknowledge the leave")
+        };
+        assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::InternalServerError
+        );
+        assert_eq!(error.type_, xmpp_parsers::stanza_error::ErrorType::Wait);
     }
 
     /// #1445: a relay failure is not a membership decision. Routing it

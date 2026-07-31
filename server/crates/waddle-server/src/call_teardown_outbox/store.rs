@@ -4,8 +4,9 @@ use jid::{BareJid, FullJid};
 use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid};
 
 use super::{
-    schema, CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownOutboxError,
-    CallTeardownQueueStats, CallTeardownRetryOutcome, CallTeardownStatus, TeardownTarget,
+    schema, CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownLastError,
+    CallTeardownOutboxError, CallTeardownQueueStats, CallTeardownRetryOutcome,
+    CallTeardownRetryReason, CallTeardownStatus, ClaimToken, TeardownTarget,
 };
 use crate::db::{Database, Row};
 
@@ -102,12 +103,20 @@ impl CallTeardownOutboxStore {
                 "SELECT intent_id FROM call_teardown_outbox \
                  WHERE status = ? AND call_id = ? AND action = ? \
                    AND identity IS NOT DISTINCT FROM ? \
+                   AND room_jid IS NOT DISTINCT FROM ? \
+                   AND generation IS NOT DISTINCT FROM ? \
+                   AND room_sid IS NOT DISTINCT FROM ? \
+                   AND participant_sid IS NOT DISTINCT FROM ? \
                  LIMIT 1",
                 crate::db_params![
                     STATUS_QUEUED,
                     intent.call_id.as_str(),
                     action,
-                    identity.clone()
+                    identity.clone(),
+                    room_jid.clone(),
+                    generation,
+                    intent.room_sid.as_ref().map(RoomSid::as_str),
+                    participant_sid,
                 ],
             )
             .await?;
@@ -184,7 +193,7 @@ impl CallTeardownOutboxStore {
 
         let mut claimed = Vec::with_capacity(selected.len());
         for mut job in selected {
-            let claim_token = uuid::Uuid::new_v4().to_string();
+            let claim_token = ClaimToken::new();
             let connection = self.db.guard().await?;
             let affected = connection
                 .execute(
@@ -237,7 +246,7 @@ impl CallTeardownOutboxStore {
                     now_ms,
                     job.intent_id.as_str(),
                     STATUS_IN_PROGRESS,
-                    job.claim_token.as_deref(),
+                    job.claim_token.as_ref().map(ClaimToken::as_str),
                 ],
             )
             .await?;
@@ -300,7 +309,7 @@ impl CallTeardownOutboxStore {
                     now_ms,
                     job.intent_id.as_str(),
                     STATUS_IN_PROGRESS,
-                    job.claim_token.as_deref(),
+                    job.claim_token.as_ref().map(ClaimToken::as_str),
                 ],
             )
             .await?;
@@ -310,16 +319,15 @@ impl CallTeardownOutboxStore {
     pub async fn fail_claim(
         &self,
         job: &CallTeardownJob,
-        error: impl Into<String>,
+        error: CallTeardownLastError,
     ) -> Result<bool, CallTeardownOutboxError> {
-        self.fail_claim_at(job, error.into(), crate::time::now_ms())
-            .await
+        self.fail_claim_at(job, error, crate::time::now_ms()).await
     }
 
     pub(super) async fn fail_claim_at(
         &self,
         job: &CallTeardownJob,
-        error: String,
+        error: CallTeardownLastError,
         now_ms: i64,
     ) -> Result<bool, CallTeardownOutboxError> {
         let connection = self.db.guard().await?;
@@ -331,11 +339,11 @@ impl CallTeardownOutboxStore {
                  WHERE intent_id = ? AND status = ? AND claim_token = ?",
                 crate::db_params![
                     STATUS_FAILED,
-                    error,
+                    error.as_db_value(),
                     now_ms,
                     job.intent_id.as_str(),
                     STATUS_IN_PROGRESS,
-                    job.claim_token.as_deref(),
+                    job.claim_token.as_ref().map(ClaimToken::as_str),
                 ],
             )
             .await?;
@@ -345,16 +353,16 @@ impl CallTeardownOutboxStore {
     pub async fn retry_or_fail(
         &self,
         job: &CallTeardownJob,
-        error: impl Into<String>,
+        error: CallTeardownRetryReason,
     ) -> Result<CallTeardownRetryOutcome, CallTeardownOutboxError> {
-        self.retry_or_fail_at(job, error.into(), crate::time::now_ms())
+        self.retry_or_fail_at(job, error, crate::time::now_ms())
             .await
     }
 
     pub(super) async fn retry_or_fail_at(
         &self,
         job: &CallTeardownJob,
-        error: String,
+        error: CallTeardownRetryReason,
         now_ms: i64,
     ) -> Result<CallTeardownRetryOutcome, CallTeardownOutboxError> {
         let attempt_count = job.attempt_count.saturating_add(1);
@@ -373,12 +381,12 @@ impl CallTeardownOutboxStore {
                 crate::db_params![
                     status,
                     attempt_count,
-                    error,
+                    error.as_db_value(),
                     next_attempt_at_ms,
                     now_ms,
                     job.intent_id.as_str(),
                     STATUS_IN_PROGRESS,
-                    job.claim_token.as_deref(),
+                    job.claim_token.as_ref().map(ClaimToken::as_str),
                 ],
             )
             .await?;
@@ -533,7 +541,7 @@ fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutboxError> {
         })
         .transpose()?;
     Ok(CallTeardownJob {
-        intent_id: CallTeardownIntentId(row.get(0)?),
+        intent_id: CallTeardownIntentId::from_stored(row.get(0)?),
         intent: CallTeardownIntent {
             call_id: CallId::new(row.get::<String>(1)?)?,
             target,
@@ -545,9 +553,11 @@ fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutboxError> {
         },
         status: CallTeardownStatus::from_db_value(row.get(8)?)?,
         attempt_count: row.get(9)?,
-        last_error: row.get(10)?,
+        last_error: row
+            .get::<Option<String>>(10)?
+            .map(CallTeardownLastError::from_db_value),
         next_attempt_at_ms: row.get(11)?,
-        claim_token: row.get(12)?,
+        claim_token: row.get::<Option<String>>(12)?.map(ClaimToken::from_stored),
         created_at_ms: row.get(13)?,
     })
 }

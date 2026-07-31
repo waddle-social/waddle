@@ -24,6 +24,23 @@ impl CallTeardownIntentId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClaimToken(String);
+
+impl ClaimToken {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub(crate) fn from_stored(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TeardownTarget {
     Participant {
         identity: FullJid,
@@ -67,15 +84,68 @@ impl CallTeardownStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallTeardownRetryReason {
+    MujiPresenceClear,
+    LiveKitExecutorUnavailable,
+    LiveKitAdmin,
+    LiveKitOccupied,
+    Unknown,
+}
+
+impl CallTeardownRetryReason {
+    pub(crate) const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::MujiPresenceClear => "muji_presence_clear_retryable",
+            Self::LiveKitExecutorUnavailable => "livekit_teardown_executor_unavailable",
+            Self::LiveKitAdmin => "livekit_admin_retryable",
+            Self::LiveKitOccupied => "livekit_room_occupied",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn from_db_value(value: &str) -> Self {
+        match value {
+            "muji_presence_clear_retryable" => Self::MujiPresenceClear,
+            "livekit_teardown_executor_unavailable" => Self::LiveKitExecutorUnavailable,
+            "livekit_admin_retryable" => Self::LiveKitAdmin,
+            "livekit_room_occupied" => Self::LiveKitOccupied,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallTeardownLastError {
+    Retryable(CallTeardownRetryReason),
+    RoomNeverOwned,
+}
+
+impl CallTeardownLastError {
+    pub(crate) fn from_db_value(value: String) -> Self {
+        match value.as_str() {
+            "room_never_owned" => Self::RoomNeverOwned,
+            _ => Self::Retryable(CallTeardownRetryReason::from_db_value(value.as_str())),
+        }
+    }
+
+    pub(crate) const fn as_db_value(&self) -> &'static str {
+        match self {
+            Self::Retryable(reason) => reason.as_db_value(),
+            Self::RoomNeverOwned => "room_never_owned",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallTeardownJob {
     pub intent_id: CallTeardownIntentId,
     pub intent: CallTeardownIntent,
     pub status: CallTeardownStatus,
     pub attempt_count: i64,
-    pub last_error: Option<String>,
+    pub last_error: Option<CallTeardownLastError>,
     pub next_attempt_at_ms: Option<i64>,
-    pub claim_token: Option<String>,
+    pub claim_token: Option<ClaimToken>,
     pub created_at_ms: i64,
 }
 

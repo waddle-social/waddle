@@ -81,7 +81,12 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "MUC room actor is absent during LiveKit departure cleanup; queueing owner-gated Muji clear"
             );
-            enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids).await;
+            if enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids)
+                .await
+                .is_err()
+            {
+                return WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed");
+            }
             record_participant_left(state, room_jid, full_jid, observed_sids);
             return WebhookEffectOutcome::Completed;
         }
@@ -132,7 +137,7 @@ async fn enqueue_muji_presence_clear(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
-) {
+) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
@@ -142,7 +147,7 @@ async fn enqueue_muji_presence_clear(
                 %error,
                 "could not model absent-room Muji cleanup as a teardown intent"
             );
-            return;
+            return Ok(());
         }
     };
     let intent = crate::call_teardown_outbox::CallTeardownIntent {
@@ -161,10 +166,12 @@ async fn enqueue_muji_presence_clear(
             room = %room_jid,
             identity = %full_jid,
             %error,
-            "failed to persist absent-room Muji clear; retrying asynchronously"
+            "failed to persist absent-room Muji clear; keeping webhook retryable and retrying asynchronously"
         );
         persistence.retry_batch(vec![intent]);
+        return Err(error);
     }
+    Ok(())
 }
 
 fn record_participant_left(
@@ -350,5 +357,37 @@ fn format_call_thread_duration(duration: chrono::Duration) -> String {
         format!("PT{minutes}M{seconds}S")
     } else {
         format!("PT{seconds}S")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_muji_presence_for_departure, WebhookEffectOutcome};
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state_with_sfu, RecordingSfu,
+    };
+    use jid::{BareJid, FullJid};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn absent_room_outbox_enqueue_failure_is_retryable() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let db = state.deps.app_state.db_pool.global();
+        let connection = db.guard().await.expect("db");
+        connection
+            .execute("DROP TABLE call_teardown_outbox", ())
+            .await
+            .expect("drop outbox table");
+
+        let room_jid: BareJid = "enqueue-failure@muc.example.com".parse().expect("room jid");
+        let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
+
+        let outcome =
+            clear_muji_presence_for_departure(state.as_ref(), &room_jid, &full_jid, None).await;
+
+        assert_eq!(
+            outcome,
+            WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed")
+        );
     }
 }

@@ -13,7 +13,8 @@ use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::ownership::{ClaimSnapshot, Entity, EntityType};
 
 use super::{
-    CallTeardownIntent, CallTeardownOutboxError, CallTeardownRetryOutcome, TeardownTarget,
+    CallTeardownIntent, CallTeardownLastError, CallTeardownOutboxError, CallTeardownRetryOutcome,
+    CallTeardownRetryReason, TeardownTarget,
 };
 use crate::server::routes::muc_muji_clear::WebhookEffectOutcome;
 use crate::server::routes::websocket::WebSocketState;
@@ -21,6 +22,7 @@ use crate::server::routes::websocket::WebSocketState;
 const ROOM_OWNERSHIP_LOOKUP_TIMEOUT: std::time::Duration =
     waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT;
 const OWNERSHIP_DEAD_LETTER_MS: i64 = 24 * 60 * 60 * 1_000;
+const CLOCK_SKEW_MARGIN_MS: i64 = 2_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CallTeardownDrainSummary {
@@ -83,7 +85,7 @@ pub(super) async fn drain_due_at(
                         "call teardown room-scoped intent never reached an owning node; dead-lettering"
                     );
                     if store
-                        .fail_claim_at(&job, "room_never_owned".to_owned(), now_ms)
+                        .fail_claim_at(&job, CallTeardownLastError::RoomNeverOwned, now_ms)
                         .await?
                     {
                         summary.failed += 1;
@@ -145,13 +147,11 @@ pub(super) async fn drain_due_at(
                     waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped();
                 }
             }
-            IntentExecution::Retryable(reason) => {
-                match store.retry_or_fail(&job, reason.as_db_value()).await? {
-                    CallTeardownRetryOutcome::Requeued { .. } => summary.requeued += 1,
-                    CallTeardownRetryOutcome::Failed { .. } => summary.failed += 1,
-                    CallTeardownRetryOutcome::ClaimLost => {}
-                }
-            }
+            IntentExecution::Retryable(reason) => match store.retry_or_fail(&job, reason).await? {
+                CallTeardownRetryOutcome::Requeued { .. } => summary.requeued += 1,
+                CallTeardownRetryOutcome::Failed { .. } => summary.failed += 1,
+                CallTeardownRetryOutcome::ClaimLost => {}
+            },
         }
     }
     Ok(summary)
@@ -161,9 +161,13 @@ pub(super) async fn drain_due_at(
 /// owner the registration legitimately survives exactly because the
 /// departure this intent represents was never applied there (that is
 /// why the intent exists). Only a registration that POSTDATES the
-/// intent's creation is a rejoin; anything else (equal, earlier, or an
-/// implementation that does not track times) must let the intent
-/// execute (#1449 review N1).
+/// intent's creation PLUS a small cross-node clock-skew margin is a
+/// rejoin; anything else (equal, earlier, within the skew budget, or
+/// an implementation that does not track times) must let the intent
+/// execute. NTP should keep nodes comfortably inside this 2s budget,
+/// and the bias is intentionally toward EXECUTING the intent: the
+/// guarded effects are idempotent/no-op bounded, while silently
+/// swallowing a real teardown strands state (#1449 review N1/NN1).
 fn stale_superseded_by_live_participant(
     sfu: Option<&dyn SfuService>,
     intent: &CallTeardownIntent,
@@ -178,7 +182,10 @@ fn stale_superseded_by_live_participant(
         TeardownTarget::Room => return false,
     };
     sfu.participant_registered_at(&intent.call_id, &Identity::from_jid(participant.clone()))
-        .is_some_and(|registered_at| registered_at.timestamp_millis() > intent_created_at_ms)
+        .is_some_and(|registered_at| {
+            registered_at.timestamp_millis()
+                > intent_created_at_ms.saturating_add(CLOCK_SKEW_MARGIN_MS)
+        })
 }
 
 async fn room_is_globally_unclaimed(
@@ -227,30 +234,6 @@ fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
     claim.is_none_or(|snapshot| !snapshot.owner_lease_fresh)
 }
 
-#[cfg(test)]
-mod ownership_tests {
-    use super::claim_permits_dead_letter;
-    use waddle_xmpp::ownership::{ClaimEpoch, ClaimSnapshot, NodeIdentity};
-
-    #[test]
-    fn global_claim_dead_letter_requires_no_fresh_owner_lease() {
-        let fresh = ClaimSnapshot {
-            owner: NodeIdentity::new("fresh-node", "epoch-1"),
-            claim_epoch: ClaimEpoch(1),
-            owner_lease_fresh: true,
-        };
-        let stale = ClaimSnapshot {
-            owner: NodeIdentity::new("stale-node", "epoch-2"),
-            claim_epoch: ClaimEpoch(2),
-            owner_lease_fresh: false,
-        };
-
-        assert!(claim_permits_dead_letter(None));
-        assert!(!claim_permits_dead_letter(Some(&fresh)));
-        assert!(claim_permits_dead_letter(Some(&stale)));
-    }
-}
-
 async fn local_room_jids(
     room_registry: &ActorRef<RoomRegistryActor>,
 ) -> Result<HashSet<BareJid>, ()> {
@@ -283,25 +266,6 @@ enum IntentExecution {
     Done,
     Stale,
     Retryable(CallTeardownRetryReason),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CallTeardownRetryReason {
-    MujiPresenceClear,
-    LiveKitExecutorUnavailable,
-    LiveKitAdmin,
-    LiveKitOccupied,
-}
-
-impl CallTeardownRetryReason {
-    const fn as_db_value(self) -> &'static str {
-        match self {
-            Self::MujiPresenceClear => "muji_presence_clear_retryable",
-            Self::LiveKitExecutorUnavailable => "livekit_teardown_executor_unavailable",
-            Self::LiveKitAdmin => "livekit_admin_retryable",
-            Self::LiveKitOccupied => "livekit_room_occupied",
-        }
-    }
 }
 
 async fn execute_intent(
@@ -364,5 +328,29 @@ async fn execute_intent(
             );
             IntentExecution::Retryable(CallTeardownRetryReason::LiveKitAdmin)
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::claim_permits_dead_letter;
+    use waddle_xmpp::ownership::{ClaimEpoch, ClaimSnapshot, NodeIdentity};
+
+    #[test]
+    fn global_claim_dead_letter_requires_no_fresh_owner_lease() {
+        let fresh = ClaimSnapshot {
+            owner: NodeIdentity::new("fresh-node", "epoch-1"),
+            claim_epoch: ClaimEpoch(1),
+            owner_lease_fresh: true,
+        };
+        let stale = ClaimSnapshot {
+            owner: NodeIdentity::new("stale-node", "epoch-2"),
+            claim_epoch: ClaimEpoch(2),
+            owner_lease_fresh: false,
+        };
+
+        assert!(claim_permits_dead_letter(None));
+        assert!(!claim_permits_dead_letter(Some(&fresh)));
+        assert!(claim_permits_dead_letter(Some(&stale)));
     }
 }

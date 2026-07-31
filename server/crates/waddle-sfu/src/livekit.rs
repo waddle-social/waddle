@@ -7,7 +7,10 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -83,12 +86,27 @@ pub const RECONCILE_CONCURRENCY: usize = 8;
 #[derive(Debug, Clone)]
 struct ParticipantState {
     participant_sid: Option<ParticipantSid>,
+    first_registered_at: DateTime<Utc>,
+    registered_without_mint: bool,
 }
 
 impl ParticipantState {
-    fn new() -> Self {
+    fn new(first_registered_at: DateTime<Utc>) -> Self {
         Self {
             participant_sid: None,
+            first_registered_at,
+            registered_without_mint: false,
+        }
+    }
+
+    fn restored(
+        first_registered_at: DateTime<Utc>,
+        participant_sid: Option<ParticipantSid>,
+    ) -> Self {
+        Self {
+            participant_sid,
+            first_registered_at,
+            registered_without_mint: true,
         }
     }
 }
@@ -242,6 +260,8 @@ enum TeardownGuard {
 pub struct LiveKitTeardownExecutor {
     admin: Arc<dyn LiveKitAdmin>,
     calls: CallRegistry,
+    reconcile_pass_completed: Arc<AtomicBool>,
+    allow_missing_entry_before_reconcile: bool,
 }
 
 impl LiveKitTeardownExecutor {
@@ -340,6 +360,15 @@ impl LiveKitTeardownExecutor {
         participant: Option<(&Identity, Option<&ParticipantSid>)>,
     ) -> TeardownGuard {
         let Some(entry) = self.calls.get(call_id) else {
+            let carries_fence = generation.is_some()
+                || room_sid.is_some()
+                || participant.is_some_and(|(_, participant_sid)| participant_sid.is_some());
+            if carries_fence
+                && !self.allow_missing_entry_before_reconcile
+                && !self.reconcile_pass_completed.load(Ordering::Acquire)
+            {
+                return TeardownGuard::Unresolved;
+            }
             return TeardownGuard::Proceed;
         };
         if generation.is_some_and(|generation| entry.generation > generation) {
@@ -377,14 +406,17 @@ pub struct LiveKitSfu {
     /// a misbehaving client cannot push the tracker into unbounded
     /// memory growth.
     issued: DashMap<(CallId, Identity), Vec<IssuedJti>>,
-    /// Wall-clock instant each `(call, identity)` was registered.
+    /// Wall-clock instant each `(call, identity)` was last registered.
     /// Read only by the reconciliation backstop to enforce
     /// [`RECONCILE_GRACE_SECONDS`]: a participant absent from LiveKit's
     /// `ListParticipants` is only swept once it has been registered
     /// longer than the grace window, so a still-connecting joiner is
-    /// never mistaken for a ghost. Kept in lockstep with `calls`:
-    /// written in `register_call_participant`, removed in
-    /// `clear_local_state`.
+    /// never mistaken for a ghost. This is deliberately refreshed on
+    /// every sighting/re-registration; durable teardown supersession
+    /// instead reads `ParticipantState::first_registered_at`, which
+    /// advances only on absent->present transitions. Kept in lockstep
+    /// with `calls`: written in `register_call_participant`, removed
+    /// in `clear_local_state`.
     registered_at: DashMap<(CallId, Identity), DateTime<Utc>>,
     /// Consecutive reconciliation passes each `(call, identity)` has
     /// been observed absent from LiveKit's `ListParticipants` (#1127).
@@ -446,6 +478,7 @@ pub struct LiveKitSfu {
     /// — see [`ADMIN_CONCURRENCY`] for the cap.
     admin_permits: Arc<Semaphore>,
     teardown_reporter: TeardownReporter,
+    reconcile_pass_completed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for LiveKitSfu {
@@ -466,6 +499,7 @@ impl LiveKitSfu {
             return;
         };
         let Some(current_room_sid) = entry.room_sid.as_ref() else {
+            entry.room_sid = Some(listed_room_sid.clone());
             return;
         };
         if current_room_sid == listed_room_sid {
@@ -515,7 +549,7 @@ impl LiveKitSfu {
         let participant_states: HashMap<Identity, ParticipantState> = participants
             .iter()
             .cloned()
-            .map(|identity| (identity, ParticipantState::new()))
+            .map(|identity| (identity, ParticipantState::restored(now, None)))
             .collect();
         entry.insert(CallEntry {
             generation,
@@ -572,6 +606,7 @@ impl LiveKitSfu {
                 sink: None,
                 state: Arc::new(Mutex::new(TeardownReporterState::default())),
             },
+            reconcile_pass_completed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -584,6 +619,17 @@ impl LiveKitSfu {
         LiveKitTeardownExecutor {
             admin: Arc::clone(&self.admin),
             calls: Arc::clone(&self.calls),
+            reconcile_pass_completed: Arc::clone(&self.reconcile_pass_completed),
+            allow_missing_entry_before_reconcile: false,
+        }
+    }
+
+    fn inline_teardown_executor(&self) -> LiveKitTeardownExecutor {
+        LiveKitTeardownExecutor {
+            admin: Arc::clone(&self.admin),
+            calls: Arc::clone(&self.calls),
+            reconcile_pass_completed: Arc::clone(&self.reconcile_pass_completed),
+            allow_missing_entry_before_reconcile: true,
         }
     }
 
@@ -882,12 +928,18 @@ impl LiveKitSfu {
     /// would evict them too — and then confirmed against LiveKit's
     /// own participant list, because local emptiness says nothing
     /// about participants registered on another replica (#1445); see
-    /// [`LiveKitTeardownExecutor::delete_room_if_empty`]. Spawn target is the runtime handle
-    /// captured at construction. When none is attached, when the admin
-    /// semaphore is saturated, or when an admitted admin call fails, the
-    /// corresponding typed effect is handed to `teardown_failure_sink` for
-    /// durable retry. The availability gate bounds both in-flight calls and
-    /// spawned tasks during a teardown burst.
+    /// [`LiveKitTeardownExecutor::delete_room_if_empty`]. Spawn target is the
+    /// runtime handle captured at construction. When none is attached, when
+    /// the admin semaphore is saturated, or when an admitted admin call
+    /// fails, the corresponding typed effect is handed to
+    /// `teardown_failure_sink` for durable retry. The availability gate
+    /// bounds both in-flight calls and spawned tasks during a teardown burst.
+    ///
+    /// The participant intent is reported before spawning the inline admin
+    /// future whenever we are about to attempt `RemoveParticipant`. That
+    /// closes the local-clear-before-spawn crash window. The residual gap is
+    /// the sink's own async enqueue; fully persisting before the side effect
+    /// would require an async `SfuService` surface.
     fn schedule_remote_teardown(
         &self,
         call_id: CallId,
@@ -934,29 +986,25 @@ impl LiveKitSfu {
                 return;
             }
         };
-        let executor = self.teardown_executor();
+        self.teardown_reporter.report([participant_intent.clone()]);
+        let executor = self.inline_teardown_executor();
         let reporter = self.teardown_reporter.clone();
         runtime.spawn(async move {
             let _permit = permit;
-            if !matches!(
-                executor
-                    .remove_participant(
-                        &call_id,
-                        &identity,
-                        generation,
-                        participant_intent.room_sid.as_ref(),
-                        match &participant_intent.target {
-                            TeardownTargetLite::Participant {
-                                participant_sid, ..
-                            } => participant_sid.as_ref(),
-                            TeardownTargetLite::Room => None,
-                        },
-                    )
-                    .await,
-                Ok(TeardownExecution::Executed | TeardownExecution::StaleGeneration)
-            ) {
-                reporter.report([participant_intent]);
-            }
+            let _ = executor
+                .remove_participant(
+                    &call_id,
+                    &identity,
+                    generation,
+                    participant_intent.room_sid.as_ref(),
+                    match &participant_intent.target {
+                        TeardownTargetLite::Participant {
+                            participant_sid, ..
+                        } => participant_sid.as_ref(),
+                        TeardownTargetLite::Room => None,
+                    },
+                )
+                .await;
             if we_just_emptied
                 && executor
                     .delete_room_if_empty(
@@ -1349,13 +1397,15 @@ impl LiveKitSfu {
                     .cmp(&right_identity.as_livekit_identity())
             })
         });
-        crate::ReconcilePassSummary {
+        let summary = crate::ReconcilePassSummary {
             swept,
             rooms_examined,
             rooms_adopted,
             rooms_swept: swept_rooms.len() as u64,
             occupancy_failures,
-        }
+        };
+        self.reconcile_pass_completed.store(true, Ordering::Release);
+        summary
     }
 }
 
@@ -1416,12 +1466,20 @@ impl SfuService for LiveKitSfu {
             .entry((call_id.clone(), identity.clone()))
             .or_default();
         self.clear_pending_revocation_eject(call_id, identity);
+        let mut protected_from_empty_bucket_eject = false;
+        if let Some(mut call_entry) = self.calls.get_mut(call_id) {
+            if let Some(participant) = call_entry.participants.get_mut(identity) {
+                protected_from_empty_bucket_eject = participant.registered_without_mint;
+                participant.registered_without_mint = false;
+            }
+        }
         while entry.len() >= MAX_ISSUED_PER_PARTICIPANT {
             entry.remove(0);
         }
         entry.push(IssuedJti {
             jti: token.jti.clone(),
             exp: token.expires_at,
+            protected_from_empty_bucket_eject,
         });
         Ok(token)
     }
@@ -1435,6 +1493,7 @@ impl SfuService for LiveKitSfu {
     }
 
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity) {
+        let now = Utc::now();
         match self.calls.entry(call_id.clone()) {
             dashmap::Entry::Occupied(mut entry) => {
                 let entry = entry.get_mut();
@@ -1448,7 +1507,7 @@ impl SfuService for LiveKitSfu {
                 entry
                     .participants
                     .entry(identity.clone())
-                    .or_insert_with(ParticipantState::new);
+                    .or_insert_with(|| ParticipantState::new(now));
             }
             dashmap::Entry::Vacant(entry) => {
                 let generation = {
@@ -1458,7 +1517,7 @@ impl SfuService for LiveKitSfu {
                     CallGeneration::new(*last_generation)
                 };
                 let mut participants = HashMap::new();
-                participants.insert(identity.clone(), ParticipantState::new());
+                participants.insert(identity.clone(), ParticipantState::new(now));
                 entry.insert(CallEntry {
                     generation,
                     room_sid: None,
@@ -1473,7 +1532,7 @@ impl SfuService for LiveKitSfu {
         // any prior not-seen observations belong to the previous
         // connection attempt.
         self.registered_at
-            .insert((call_id.clone(), identity.clone()), Utc::now());
+            .insert((call_id.clone(), identity.clone()), now);
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
     }
@@ -1484,6 +1543,7 @@ impl SfuService for LiveKitSfu {
         identity: &Identity,
         observed_sids: &ObservedCallSids,
     ) -> SidObservationDisposition {
+        let now = Utc::now();
         match self.calls.entry(call_id.clone()) {
             dashmap::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -1507,8 +1567,8 @@ impl SfuService for LiveKitSfu {
                 entry
                     .participants
                     .entry(identity.clone())
-                    .or_insert_with(|| ParticipantState {
-                        participant_sid: observed_sids.participant_sid.clone(),
+                    .or_insert_with(|| {
+                        ParticipantState::restored(now, observed_sids.participant_sid.clone())
                     });
                 if entry.room_sid.is_none() {
                     entry.room_sid.clone_from(&observed_sids.room_sid);
@@ -1524,9 +1584,7 @@ impl SfuService for LiveKitSfu {
                 let mut participants = HashMap::new();
                 participants.insert(
                     identity.clone(),
-                    ParticipantState {
-                        participant_sid: observed_sids.participant_sid.clone(),
-                    },
+                    ParticipantState::restored(now, observed_sids.participant_sid.clone()),
                 );
                 vacant.insert(CallEntry {
                     generation,
@@ -1536,7 +1594,7 @@ impl SfuService for LiveKitSfu {
             }
         }
         self.registered_at
-            .insert((call_id.clone(), identity.clone()), Utc::now());
+            .insert((call_id.clone(), identity.clone()), now);
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
         self.schedule_pending_revocation_eject_if_needed(call_id, identity);
@@ -1557,17 +1615,20 @@ impl SfuService for LiveKitSfu {
         if !self.has_call_participant(call_id, identity) {
             return None;
         }
-        self.registered_at
-            .get(&(call_id.clone(), identity.clone()))
-            .map(|at| *at)
+        self.calls.get(call_id).and_then(|entry| {
+            entry
+                .participants
+                .get(identity)
+                .map(|participant| participant.first_registered_at)
+        })
     }
 
     fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti) {
         let key = (call_id.clone(), identity.clone());
-        let mut exp = None;
+        let mut revoked_issuance = None;
         if let Some(mut issued) = self.issued.get_mut(&key) {
             if let Some(position) = issued.iter().position(|entry| entry.jti == *jti) {
-                exp = Some(issued.remove(position).exp);
+                revoked_issuance = Some(issued.remove(position));
             }
         }
         // Only a JTI we can prove we minted (still present in the
@@ -1577,7 +1638,9 @@ impl SfuService for LiveKitSfu {
         // IQs grow the revocation map without bound. The bounce's
         // fresh mint is always still in the window at bounce time, so
         // the #1444 compensation is unaffected.
-        let Some(exp) = exp else { return };
+        let Some(revoked_issuance) = revoked_issuance else {
+            return;
+        };
         let bucket_emptied = self
             .issued
             .get(&key)
@@ -1589,9 +1652,17 @@ impl SfuService for LiveKitSfu {
         // repopulated the vec is preserved.
         self.issued
             .remove_if(&key, |_, issuances| issuances.is_empty());
-        self.revoked.insert(jti.clone(), exp);
+        self.revoked.insert(jti.clone(), revoked_issuance.exp);
         if bucket_emptied {
-            self.arm_pending_revocation_eject(call_id, identity, exp);
+            if revoked_issuance.protected_from_empty_bucket_eject {
+                tracing::warn!(
+                    call_id = %call_id,
+                    identity = %identity.as_livekit_identity(),
+                    "Skipping empty-bucket revocation eject for participant restored without a locally minted token"
+                );
+                return;
+            }
+            self.arm_pending_revocation_eject(call_id, identity, revoked_issuance.exp);
             self.schedule_revocation_eject(call_id, identity);
         }
     }

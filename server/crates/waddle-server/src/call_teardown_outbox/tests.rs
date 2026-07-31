@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use jid::{BareJid, FullJid};
 use waddle_sfu::{
-    CallGeneration, CallId, Identity, ListedRoom, LiveKitAdmin, MediaCapabilities, ParticipantSid,
-    RoomOccupancy, RoomSid, SfuError, SfuService,
+    CallGeneration, CallId, Identity, ListedRoom, LiveKitAdmin, MediaCapabilities,
+    ObservedCallSids, ParticipantSid, RoomOccupancy, RoomSid, SfuError, SfuService,
 };
 use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
 use waddle_xmpp::xep::xep0167::MediaKind;
@@ -28,6 +28,14 @@ async fn store(name: &str) -> CallTeardownOutboxStore {
         .unwrap()
 }
 
+async fn store_with_db(name: &str) -> (Database, CallTeardownOutboxStore) {
+    let database = Database::in_memory(name).await.unwrap();
+    let store = CallTeardownOutboxStore::new(database.clone())
+        .await
+        .unwrap();
+    (database, store)
+}
+
 fn participant_intent() -> CallTeardownIntent {
     CallTeardownIntent {
         call_id: CallId::new("alice@example.test:call-1").unwrap(),
@@ -48,11 +56,57 @@ async fn enqueue_claim_and_complete_round_trip() {
     let claimed = store.claim_due(64).await.unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].intent, participant_intent());
+    assert!(claimed[0].claim_token.is_some());
     assert!(store.mark_done(&claimed[0]).await.unwrap());
 
     let stored = store.find(&intent_id).await.unwrap().unwrap();
     assert_eq!(stored.status, CallTeardownStatus::Done);
     assert_eq!(stored.attempt_count, 0);
+}
+
+#[tokio::test]
+async fn identical_queued_duplicate_returns_the_existing_intent_id() {
+    let store = store("call-teardown-dedupe-identical").await;
+    let intent = participant_intent();
+
+    let first_id = store.enqueue(intent.clone()).await.unwrap();
+    let second_id = store.enqueue(intent).await.unwrap();
+
+    assert_eq!(second_id, first_id);
+    let claimed = store.claim_due(8).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].intent_id, first_id);
+}
+
+#[tokio::test]
+async fn differing_fence_evidence_inserts_a_second_queued_row() {
+    let store = store("call-teardown-dedupe-fenced").await;
+    let first = participant_intent();
+    let second = CallTeardownIntent {
+        generation: Some(CallGeneration::try_from(2).unwrap()),
+        room_sid: Some(RoomSid::new("RM_other").unwrap()),
+        target: TeardownTarget::Participant {
+            identity: FullJid::from_str("alice@example.test/device").unwrap(),
+            participant_sid: Some(ParticipantSid::new("PA_other").unwrap()),
+        },
+        ..participant_intent()
+    };
+
+    let first_id = store.enqueue(first).await.unwrap();
+    let second_id = store.enqueue(second).await.unwrap();
+
+    assert_ne!(second_id, first_id);
+    let mut claimed_ids = store
+        .claim_due(8)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|job| job.intent_id)
+        .collect::<Vec<_>>();
+    claimed_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    let mut expected_ids = vec![first_id, second_id];
+    expected_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    assert_eq!(claimed_ids, expected_ids);
 }
 
 #[tokio::test]
@@ -62,7 +116,10 @@ async fn retry_increments_attempt_and_schedules_exponential_backoff() {
     let claimed = store.claim_due(1).await.unwrap().pop().unwrap();
 
     let outcome = store
-        .retry_or_fail(&claimed, "livekit unavailable")
+        .retry_or_fail(
+            &claimed,
+            CallTeardownRetryReason::LiveKitExecutorUnavailable,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -72,7 +129,12 @@ async fn retry_increments_attempt_and_schedules_exponential_backoff() {
     let stored = store.find(&intent_id).await.unwrap().unwrap();
     assert_eq!(stored.status, CallTeardownStatus::Queued);
     assert_eq!(stored.attempt_count, 1);
-    assert_eq!(stored.last_error.as_deref(), Some("livekit unavailable"));
+    assert_eq!(
+        stored.last_error,
+        Some(CallTeardownLastError::Retryable(
+            CallTeardownRetryReason::LiveKitExecutorUnavailable
+        ))
+    );
     assert!(stored.next_attempt_at_ms.unwrap() >= stored.created_at_ms + BASE_RETRY_DELAY_MS);
     assert_eq!(retry_delay_ms(1), 5_000);
     assert_eq!(retry_delay_ms(2), 10_000);
@@ -87,7 +149,7 @@ async fn twentieth_attempt_becomes_failed_and_retains_error() {
     claimed.attempt_count = MAX_ATTEMPTS - 1;
 
     let outcome = store
-        .retry_or_fail(&claimed, "permanent outage")
+        .retry_or_fail(&claimed, CallTeardownRetryReason::LiveKitAdmin)
         .await
         .unwrap();
     assert_eq!(
@@ -99,7 +161,12 @@ async fn twentieth_attempt_becomes_failed_and_retains_error() {
     let stored = store.find(&intent_id).await.unwrap().unwrap();
     assert_eq!(stored.status, CallTeardownStatus::Failed);
     assert_eq!(stored.attempt_count, MAX_ATTEMPTS);
-    assert_eq!(stored.last_error.as_deref(), Some("permanent outage"));
+    assert_eq!(
+        stored.last_error,
+        Some(CallTeardownLastError::Retryable(
+            CallTeardownRetryReason::LiveKitAdmin
+        ))
+    );
     assert_eq!(stored.next_attempt_at_ms, None);
 }
 
@@ -109,12 +176,12 @@ async fn terminal_write_requires_the_current_claim_token() {
     let intent_id = store.enqueue(participant_intent()).await.unwrap();
     let claimed = store.claim_due(1).await.unwrap().pop().unwrap();
     let mut second_drainer = claimed.clone();
-    second_drainer.claim_token = Some(uuid::Uuid::new_v4().to_string());
+    second_drainer.claim_token = Some(ClaimToken::from_stored(uuid::Uuid::new_v4().to_string()));
 
     assert!(!store.mark_done(&second_drainer).await.unwrap());
     assert_eq!(
         store
-            .retry_or_fail(&second_drainer, "not my claim")
+            .retry_or_fail(&second_drainer, CallTeardownRetryReason::LiveKitAdmin)
             .await
             .unwrap(),
         CallTeardownRetryOutcome::ClaimLost
@@ -124,6 +191,36 @@ async fn terminal_write_requires_the_current_claim_token() {
         CallTeardownStatus::InProgress
     );
     assert!(store.mark_done(&claimed).await.unwrap());
+}
+
+#[tokio::test]
+async fn row_decode_maps_unknown_last_error_to_the_typed_unknown_variant() {
+    let (database, store) = store_with_db("call-teardown-unknown-last-error").await;
+    let intent_id = store.enqueue(participant_intent()).await.unwrap();
+    let claimed = store.claim_due(1).await.unwrap().pop().unwrap();
+    let now_ms = crate::time::now_ms();
+    let connection = database.guard().await.unwrap();
+    connection
+        .execute(
+            "UPDATE call_teardown_outbox \
+             SET last_error = ?, updated_at_ms = ? \
+             WHERE intent_id = ?",
+            crate::db_params!["future_retry_reason", now_ms, intent_id.as_str()],
+        )
+        .await
+        .unwrap();
+
+    let stored = store.find(&intent_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.last_error,
+        Some(CallTeardownLastError::Retryable(
+            CallTeardownRetryReason::Unknown
+        ))
+    );
+    assert_eq!(
+        stored.claim_token.as_ref().map(ClaimToken::as_str),
+        claimed.claim_token.as_ref().map(ClaimToken::as_str)
+    );
 }
 
 #[tokio::test]
@@ -304,11 +401,28 @@ async fn drain_executes_admin_call_and_marks_intent_done() {
         Arc::clone(&admin) as Arc<_>,
     ));
     let state = state_with_executor(Arc::clone(&sfu)).await;
+    let intent = participant_intent();
+    let participant_sid = match &intent.target {
+        TeardownTarget::Participant {
+            participant_sid: Some(participant_sid),
+            ..
+        } => Some(participant_sid.clone()),
+        _ => None,
+    };
+    let identity = Identity::from_jid(FullJid::from_str("alice@example.test/device").unwrap());
+    assert_eq!(
+        sfu.register_call_participant_observed(
+            &intent.call_id,
+            &identity,
+            &ObservedCallSids::new(intent.room_sid.clone(), participant_sid),
+        ),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
     let intent_id = state
         .deps
         .protocol
         .call_teardown_outbox
-        .enqueue(participant_intent())
+        .enqueue(intent)
         .await
         .expect("enqueue");
 
@@ -929,7 +1043,7 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
         store
             .retry_or_fail_at(
                 &failed_job,
-                "terminal failure".to_string(),
+                CallTeardownRetryReason::LiveKitAdmin,
                 now_ms - FAILED_RETENTION_MS - 1,
             )
             .await
@@ -1000,7 +1114,10 @@ async fn unowned_room_scoped_intent_older_than_a_day_dead_letters() {
         .expect("find")
         .expect("stored intent");
     assert_eq!(stored.status, CallTeardownStatus::Failed);
-    assert_eq!(stored.last_error.as_deref(), Some("room_never_owned"));
+    assert_eq!(
+        stored.last_error,
+        Some(CallTeardownLastError::RoomNeverOwned)
+    );
 }
 
 #[tokio::test]
@@ -1146,5 +1263,63 @@ async fn live_registration_predating_the_intent_still_executes_removal() {
         admin.remove_calls.lock().expect("recording lock").len(),
         1,
         "a registration predating the intent is the never-applied departure, not a rejoin"
+    );
+}
+
+/// NN1: a second observation of an ALREADY-present participant refreshes
+/// `registered_at` for reconcile grace accounting, but the teardown fence
+/// must still consult the absent->present incarnation timestamp so this
+/// mid-window intent executes instead of being falsely swallowed.
+#[tokio::test]
+async fn existing_participant_reobservation_does_not_reopen_the_swallow_window() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let call_id = CallId::new("alice@example.test:restamped-registration").expect("call id");
+    let identity =
+        Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
+
+    sfu.register_call_participant(&call_id, &identity);
+    let first_registered_at_ms = sfu
+        .participant_registered_at(&call_id, &identity)
+        .expect("first registration time")
+        .timestamp_millis();
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(
+        sfu.register_call_participant_observed(&call_id, &identity, &ObservedCallSids::none()),
+        waddle_sfu::SidObservationDisposition::Applied
+    );
+
+    let intent_created_at_ms = first_registered_at_ms - 1_990;
+    let _intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: call_id.clone(),
+                target: TeardownTarget::Participant {
+                    identity: identity.as_jid().clone(),
+                    participant_sid: None,
+                },
+                generation: None,
+                room_sid: None,
+            },
+            intent_created_at_ms,
+        )
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert_eq!(
+        admin.remove_calls.lock().expect("recording lock").len(),
+        1,
+        "re-observing an existing participant must not make a mid-window intent look newer than the original incarnation"
     );
 }

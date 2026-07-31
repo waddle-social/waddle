@@ -51,7 +51,9 @@ impl ExtDiscoHandler {
         }
     }
 
-    #[cfg(test)]
+    /// Constructor that accepts a caller-supplied TURN credential
+    /// limiter. Used by the dedicated XEP-0215 suite to pin
+    /// rate-limit wire behavior with a short window.
     pub fn with_turn_credential_rate_limit(
         sfu: Arc<dyn SfuService>,
         turn_tls_port: u16,

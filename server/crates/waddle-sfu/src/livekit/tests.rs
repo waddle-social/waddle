@@ -112,6 +112,57 @@ fn stored_participant_sid(
 }
 
 #[test]
+fn participant_registered_at_keeps_the_first_current_registration_timestamp() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-first-registered-at").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_current"), Some("PA_current"));
+    let key = (call.clone(), alice.clone());
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+    let first_registered_at = sfu
+        .participant_registered_at(&call, &alice)
+        .expect("participant registration timestamp");
+    sfu.registered_at.insert(
+        key.clone(),
+        first_registered_at - chrono::Duration::seconds(60),
+    );
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+
+    let refreshed_registered_at = *sfu
+        .registered_at
+        .get(&key)
+        .expect("refreshed grace timestamp")
+        .value();
+    assert!(
+        refreshed_registered_at > first_registered_at - chrono::Duration::seconds(60),
+        "repeat sighting must refresh the grace timestamp"
+    );
+    assert_eq!(
+        sfu.participant_registered_at(&call, &alice),
+        Some(first_registered_at),
+        "supersession fencing must keep the first absent->present timestamp"
+    );
+    assert_eq!(
+        sfu.calls
+            .get(&call)
+            .expect("call entry")
+            .participants
+            .get(&alice)
+            .expect("participant state")
+            .first_registered_at,
+        first_registered_at
+    );
+}
+
+#[test]
 fn registry_tracks_participants_per_call() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
     let call = CallId::new("r1").unwrap();
@@ -273,8 +324,9 @@ fn revoke_issued_token_reports_a_guarded_eject_intent() {
     let call = CallId::new("c-bounce-eject").expect("call id");
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_revoked"), Some("PA_revoked"));
+    sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.register_call_participant_observed(&call, &alice, &observed),
+        sfu.observe_call_participant_sids(&call, &alice, Some(&observed)),
         SidObservationDisposition::Applied
     );
     let minted = sfu
@@ -1065,8 +1117,8 @@ async fn teardown_burst_reserves_before_spawn_and_defers_excess_work() {
     assert_eq!(admin.remove_snapshot().len(), ADMIN_CONCURRENCY);
     assert_eq!(
         reported.lock().expect("sink lock").len(),
-        excess * 2,
-        "each rejected call reports participant and room intents"
+        ADMIN_CONCURRENCY + excess * 2,
+        "admitted calls pre-report their participant intent; rejected saturated calls still report participant and room intents"
     );
     gate.add_permits(ADMIN_CONCURRENCY);
 }
@@ -1171,6 +1223,93 @@ async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids
         TeardownExecution::Occupied
     );
     assert!(admin.remove_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_completes() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-restart-fence").expect("call id");
+    let alice = fixture_identity("alice");
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: Some(fixture_participant_sid("PA_restart")),
+        },
+        generation: Some(CallGeneration::new(1)),
+        room_sid: Some(fixture_room_sid("RM_restart")),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed defer"),
+        TeardownExecution::Occupied
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "pre-reconcile restart drain must requeue fenced teardown rows"
+    );
+
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed execution"),
+        TeardownExecution::Executed
+    );
+    assert_eq!(admin.remove_snapshot(), vec![(call, alice)]);
+}
+
+#[tokio::test]
+async fn inline_teardown_reports_the_participant_intent_before_admin_remove_completes() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let gate = Arc::new(Semaphore::new(0));
+    admin.block_removes_on(Arc::clone(&gate));
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    let call = CallId::new("r-inline-report-first").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+    for _ in 0..100 {
+        if reported.lock().expect("sink lock").len() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    {
+        let intents = reported.lock().expect("sink lock");
+        assert_eq!(
+            intents.len(),
+            1,
+            "the participant intent must be durably reported before the blocked inline remove finishes"
+        );
+        assert!(matches!(
+            intents[0].target,
+            TeardownTargetLite::Participant { .. }
+        ));
+    }
+    assert_eq!(admin.remove_snapshot().len(), 1);
+
+    gate.add_permits(1);
+    drain_admin_tasks().await;
+    assert_eq!(
+        reported.lock().expect("sink lock").len(),
+        1,
+        "a successful inline remove must not enqueue a duplicate participant intent"
+    );
 }
 
 #[tokio::test]
@@ -2155,6 +2294,37 @@ async fn reconcile_room_sid_rotation_reincarnates_call_and_accepts_new_sid_obser
 }
 
 #[tokio::test]
+async fn reconcile_listing_learns_a_missing_room_sid_without_rotating_generation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("sid-learn@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+    let learned_room_sid = fixture_room_sid("RM_learned");
+    let stale = observed_sids(Some("RM_old"), Some("PA_old"));
+
+    sfu.register_call_participant(&call, &alice);
+    let original_generation = stored_generation(&sfu, &call).expect("generation");
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: call.to_string(),
+        sid: Some(learned_room_sid.clone()),
+        num_participants: Some(1),
+    }]);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let summary = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+    assert!(summary.swept.is_empty());
+    assert_eq!(stored_room_sid(&sfu, &call), Some(learned_room_sid.clone()));
+    assert_eq!(stored_generation(&sfu, &call), Some(original_generation));
+    assert_eq!(
+        sfu.observe_call_participant_sids(&call, &alice, Some(&stale)),
+        SidObservationDisposition::StaleSid,
+        "once reconcile learns the room sid, an older webhook must be rejected"
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), Some(learned_room_sid));
+}
+
+#[tokio::test]
 async fn reconcile_failed_pass_resets_absence_streak() {
     // #1127 AC: the absence tracker resets on a failed pass — two
     // absent observations separated by a ListParticipants failure
@@ -2318,6 +2488,51 @@ async fn reconcile_limits_concurrent_room_occupancy_probes() {
     );
     assert!(admin.max_occupancy_in_flight() <= RECONCILE_CONCURRENCY);
     assert_eq!(admin.max_occupancy_in_flight(), RECONCILE_CONCURRENCY);
+}
+
+#[test]
+fn restored_participant_skips_the_first_empty_bucket_eject_after_adoption() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("r-adopted-empty-bucket").expect("call id");
+    let alice = fixture_identity("alice");
+
+    assert!(sfu.adopt_discovered_call(
+        &call,
+        Some(fixture_room_sid("RM_adopted")),
+        std::slice::from_ref(&alice),
+        Utc::now()
+    ));
+    let first_minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("first post-adoption token");
+
+    sfu.revoke_issued_token(&call, &alice, &first_minted.jti);
+
+    assert!(sfu.is_revoked(&first_minted.jti));
+    assert!(
+        reported.lock().expect("sink lock").is_empty(),
+        "the first local mint after adoption must preserve the pre-restart protection"
+    );
+
+    let second_minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+    sfu.revoke_issued_token(&call, &alice, &second_minted.jti);
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 1);
+    assert!(matches!(
+        intents[0].target,
+        TeardownTargetLite::Participant { .. }
+    ));
 }
 
 // -------- #1129 teardown/join race --------

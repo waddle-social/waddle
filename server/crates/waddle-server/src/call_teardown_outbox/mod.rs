@@ -19,8 +19,9 @@ pub use store::{
     FAILED_RETENTION_MS, MAX_ATTEMPTS, MAX_RETRY_DELAY_MS,
 };
 pub use types::{
-    CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownOutboxError,
-    CallTeardownQueueStats, CallTeardownRetryOutcome, CallTeardownStatus, TeardownTarget,
+    CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownLastError,
+    CallTeardownOutboxError, CallTeardownQueueStats, CallTeardownRetryOutcome,
+    CallTeardownRetryReason, CallTeardownStatus, ClaimToken, TeardownTarget,
 };
 
 #[cfg(test)]
