@@ -170,8 +170,8 @@ async fn producer_retry_supervisor_coalesces_duplicate_batches() {
     assert_eq!(supervisor.state_snapshot(), (true, 1));
 
     for _ in 0..100 {
-        if store.queue_stats().await.expect("queue stats").queued_count == 1 {
-            assert_eq!(supervisor.state_snapshot(), (false, 0));
+        let persisted = store.queue_stats().await.expect("queue stats").queued_count == 1;
+        if persisted && supervisor.state_snapshot() == (false, 0) {
             return;
         }
         tokio::task::yield_now().await;
