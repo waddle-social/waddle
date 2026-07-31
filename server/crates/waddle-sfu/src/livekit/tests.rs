@@ -2658,3 +2658,59 @@ fn final_muc_departure_retains_generation_tracker() {
         "MUC call ids are stable room names, so their generation fence must survive teardown"
     );
 }
+
+/// #1449 codex round 3: a degraded pass (listing failed) must NOT open
+/// the startup fence — the fence exists to wait for an authoritative
+/// SID/generation inventory.
+#[tokio::test]
+async fn degraded_reconcile_pass_keeps_the_startup_fence_closed() {
+    let admin = Arc::new(RecordingAdmin::default());
+    admin.fail_list_rooms();
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+
+    let _ = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert!(
+        !sfu.reconcile_pass_completed.load(Ordering::Acquire),
+        "a pass without an authoritative listing must not open the fence"
+    );
+
+    *admin.list_rooms_errors.lock().expect("recording lock") = false;
+    let _ = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert!(
+        sfu.reconcile_pass_completed.load(Ordering::Acquire),
+        "the first authoritative pass opens the fence"
+    );
+}
+
+/// #1449 codex round 3: when one participant was already re-registered
+/// (webhook beat the reconcile pass), the remaining LiveKit-live
+/// identities must be merged into the existing entry instead of
+/// staying invisible until another join signal.
+#[tokio::test]
+async fn partially_restored_call_merges_remaining_live_identities() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("merge-room@muc.waddle.social").expect("call id");
+    let alice = Identity::from_jid("alice@waddle.social/web".parse().expect("jid"));
+    let bob = Identity::from_jid("bob@waddle.social/web".parse().expect("jid"));
+
+    // Alice's webhook re-registration arrived before the pass.
+    sfu.register_call_participant(&call, &alice);
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: call.to_string(),
+        sid: Some(RoomSid::new("RM_merge").expect("room sid")),
+        num_participants: Some(2),
+    }]);
+    admin.set_live(&call, vec![alice.clone(), bob.clone()]);
+
+    let pass = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(
+        pass.rooms_adopted, 0,
+        "existing entries are merged, not adopted"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert!(
+        sfu.has_call_participant(&call, &bob),
+        "live identities missing from a partially restored entry must be merged"
+    );
+}

@@ -566,6 +566,46 @@ impl LiveKitSfu {
         true
     }
 
+    /// Merge LiveKit-reported live identities into an EXISTING call
+    /// entry that is missing them — the partial-restart case where one
+    /// participant was re-registered by a webhook before the reconcile
+    /// pass ran, so the vacant-entry adoption path never fires and the
+    /// remaining connected identities would otherwise stay invisible
+    /// (unknown-session terminates, missed survivor sweeps). Merged
+    /// identities are restored (no mint) and stamped `now`, exactly
+    /// like adoption. Returns how many were merged (#1449 codex
+    /// round 3).
+    fn merge_live_identities(
+        &self,
+        call_id: &CallId,
+        live: &[Identity],
+        now: DateTime<Utc>,
+    ) -> usize {
+        let mut merged = 0;
+        {
+            let Some(mut entry) = self.calls.get_mut(call_id) else {
+                return 0;
+            };
+            for identity in live {
+                if !entry.participants.contains_key(identity) {
+                    entry
+                        .participants
+                        .insert(identity.clone(), ParticipantState::restored(now, None));
+                    merged += 1;
+                }
+            }
+        }
+        if merged > 0 {
+            for identity in live {
+                let key = (call_id.clone(), identity.clone());
+                self.registered_at.entry(key.clone()).or_insert(now);
+                self.absent_streak.remove(&key);
+                self.schedule_pending_revocation_eject_if_needed(call_id, identity);
+            }
+        }
+        merged
+    }
+
     /// Build a [`LiveKitSfu`] backed by the production reqwest admin
     /// client. Captures the current Tokio runtime handle if one is
     /// active so the teardown hot path can fire `RemoveParticipant` +
@@ -1239,6 +1279,7 @@ impl LiveKitSfu {
             })
             .collect();
 
+        let mut listing_authoritative = true;
         match self.admin.list_rooms().await {
             Ok(listed) => {
                 for room in listed {
@@ -1260,6 +1301,7 @@ impl LiveKitSfu {
                 }
             }
             Err(error) => {
+                listing_authoritative = false;
                 tracing::warn!(
                     error = %error,
                     "SFU reconcile: ListRooms failed; continuing with registry rooms only"
@@ -1316,6 +1358,15 @@ impl LiveKitSfu {
             // on the listing before per-room probes), so by this
             // point `entry.room_sid` already matches the listed sid.
             let registered = if was_registered {
+                let merged = self.merge_live_identities(&call_id, &live, now);
+                if merged > 0 {
+                    tracing::info!(
+                        call_id = %call_id,
+                        merged,
+                        "SFU reconcile: merged live LiveKit identities missing from the \
+                         partially restored call entry"
+                    );
+                }
                 registered
             } else {
                 if self.adopt_discovered_call(&call_id, listed_room_sid, &live, now) {
@@ -1404,7 +1455,14 @@ impl LiveKitSfu {
             rooms_swept: swept_rooms.len() as u64,
             occupancy_failures,
         };
-        self.reconcile_pass_completed.store(true, Ordering::Release);
+        // The startup fence (missing-entry arm of the teardown guard)
+        // may only open after an AUTHORITATIVE pass: the listing
+        // succeeded and every occupancy probe answered. A degraded
+        // pass has not obtained the SID/generation inventory the
+        // fence exists to wait for (#1449 codex round 3).
+        if listing_authoritative && occupancy_failures == 0 {
+            self.reconcile_pass_completed.store(true, Ordering::Release);
+        }
         summary
     }
 }
@@ -1641,17 +1699,17 @@ impl SfuService for LiveKitSfu {
         let Some(revoked_issuance) = revoked_issuance else {
             return;
         };
+        // The ejection decision must be the ATOMIC removal result:
+        // a fresh mint can repopulate the bucket between a plain read
+        // and the removal, and a stale pre-read would then eject the
+        // newly authorized participant (#1449 codex round 3).
+        // `remove_if` re-checks under the shard lock, so a concurrent
+        // mint that repopulated the vec both survives and suppresses
+        // the ejection.
         let bucket_emptied = self
             .issued
-            .get(&key)
-            .map(|issuances| issuances.is_empty())
-            .unwrap_or(true);
-        // Don't leave an empty bucket behind for the common
-        // mint-then-immediately-revoke bounce case; `remove_if`
-        // re-checks under the shard lock so a concurrent mint that
-        // repopulated the vec is preserved.
-        self.issued
-            .remove_if(&key, |_, issuances| issuances.is_empty());
+            .remove_if(&key, |_, issuances| issuances.is_empty())
+            .is_some();
         self.revoked.insert(jti.clone(), revoked_issuance.exp);
         if bucket_emptied {
             if revoked_issuance.protected_from_empty_bucket_eject {
