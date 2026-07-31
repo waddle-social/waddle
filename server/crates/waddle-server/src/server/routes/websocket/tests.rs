@@ -331,7 +331,11 @@ impl waddle_sfu::SfuService for RecordingSfu {
     }
 
     fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
-        unimplemented!("not exercised by these tests")
+        static SECRET: std::sync::OnceLock<waddle_sfu::ApiSecret> = std::sync::OnceLock::new();
+        SECRET.get_or_init(|| {
+            waddle_sfu::ApiSecret::from_text("recording-webhook-secret-32-bytes")
+                .expect("recording webhook secret meets minimum length")
+        })
     }
 
     fn participants_for_call(&self, _: &waddle_sfu::CallId) -> Vec<waddle_sfu::Identity> {

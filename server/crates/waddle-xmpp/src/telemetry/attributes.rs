@@ -632,6 +632,10 @@ pub enum WebhookOutcome {
     SignatureFailed,
     /// The signature was valid, but the body did not decode as an event.
     DecodeFailed,
+    /// A valid delivery's effects could not be completed and LiveKit was asked to retry.
+    RetryableFailure,
+    /// A valid delivery contained an unrecoverable value and was acknowledged after warning.
+    PermanentFailure,
 }
 
 impl sealed::Sealed for WebhookOutcome {}
@@ -645,6 +649,8 @@ impl MetricAttribute for WebhookOutcome {
             Self::Duplicate => "duplicate",
             Self::SignatureFailed => "signature_failed",
             Self::DecodeFailed => "decode_failed",
+            Self::RetryableFailure => "retryable_failure",
+            Self::PermanentFailure => "permanent_failure",
         }
     }
 }

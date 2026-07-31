@@ -19,8 +19,7 @@
 //! [`waddle_sfu::verify_webhook_signature`]; this module composes
 //! that with the MUC dispatch + SFU registry teardown.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use axum::body::Bytes;
@@ -37,77 +36,27 @@ use waddle_sfu::{
 };
 use waddle_xmpp::telemetry::attributes::{MetricAttribute, WebhookEventType, WebhookOutcome};
 
-use super::muc_muji_clear::clear_muji_presence_for_departure;
+use super::muc_muji_clear::{clear_muji_presence_for_departure, WebhookEffectOutcome};
+use super::webhook_delivery::{
+    DatabaseWebhookDeliveryStore, WebhookDeliveryObservation, WebhookDeliveryStore,
+};
 use super::websocket::{note_participant_left_by_call_id, WebSocketState};
 
-/// Upper bound on remembered event ids for delivery deduplication.
-/// LiveKit retries up to 5 times per delivery; a small LRU is enough
-/// to absorb the retry storm without paying unbounded memory.
-const SEEN_EVENT_ID_CAPACITY: usize = 1024;
-
-/// Shared, bounded LRU of LiveKit event ids the handler has already
-/// processed. Used so the retries LiveKit sends for the same delivery
-/// (per the LK best-practices field guide: up to 5 retries, include a
-/// dedupe key) collapse into a single MUC broadcast.
-#[derive(Debug, Default)]
-pub struct SeenEventIds {
-    inner: Mutex<SeenEventIdsInner>,
-}
-
-#[derive(Debug, Default)]
-struct SeenEventIdsInner {
-    order: VecDeque<String>,
-    set: std::collections::HashSet<String>,
-}
-
-impl SeenEventIds {
-    /// Returns `true` if `id` was not previously seen and is now
-    /// recorded; `false` if it is a duplicate that should be dropped.
-    /// `None`-id events are always treated as fresh (the caller may
-    /// still log them, but cannot dedupe).
-    pub fn observe(&self, id: Option<&str>) -> bool {
-        let Some(id) = id else {
-            return true;
-        };
-        let mut guard = self.inner.lock().expect("SeenEventIds mutex poisoned");
-        if !guard.set.insert(id.to_string()) {
-            return false;
-        }
-        guard.order.push_back(id.to_string());
-        while guard.order.len() > SEEN_EVENT_ID_CAPACITY {
-            if let Some(stale) = guard.order.pop_front() {
-                guard.set.remove(&stale);
-            }
-        }
-        true
-    }
-
-    /// Un-record `id`, so a LiveKit retry of the same delivery is
-    /// processed instead of dropped as a duplicate.
-    ///
-    /// Needed when handling could not complete for a transient reason:
-    /// the dedupe LRU is recorded up-front, so without this a delivery
-    /// we failed to act on would be permanently unrepairable — LiveKit's
-    /// retries would all be discarded as duplicates.
-    pub fn forget(&self, id: Option<&str>) {
-        let Some(id) = id else {
-            return;
-        };
-        let mut guard = self.inner.lock().expect("SeenEventIds mutex poisoned");
-        if guard.set.remove(id) {
-            guard.order.retain(|seen| seen != id);
-        }
-    }
+#[derive(Clone)]
+struct WebhookRouterState {
+    deliveries: Arc<dyn WebhookDeliveryStore>,
 }
 
 /// Axum router for the LiveKit webhook endpoint. Mounted under
 /// `/api/v1/livekit/webhook` by [`crate::server::http`].
 pub fn router(websocket_state: Arc<WebSocketState>) -> Router {
-    let seen = Arc::new(SeenEventIds::default());
+    let deliveries = Arc::new(DatabaseWebhookDeliveryStore::new(
+        websocket_state.deps.app_state.db_pool.global().clone(),
+    ));
     Router::new()
         .route("/api/v1/livekit/webhook", post(livekit_webhook_handler))
         .layer(Extension(websocket_state))
-        .with_state(seen)
+        .with_state(WebhookRouterState { deliveries })
 }
 
 /// Which LiveKit payload kind a delivery carried, as the closed
@@ -140,7 +89,7 @@ fn webhook_room_name(event: &LiveKitWebhookEvent) -> Option<&str> {
 
 async fn livekit_webhook_handler(
     Extension(state): Extension<Arc<WebSocketState>>,
-    State(seen): State<Arc<SeenEventIds>>,
+    State(router_state): State<WebhookRouterState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -183,15 +132,30 @@ async fn livekit_webhook_handler(
         .map(CallCorrelationId::as_str)
         .unwrap_or("unknown");
 
-    if !seen.observe(event.event_id()) {
-        record_webhook_outcome(event_type, WebhookOutcome::Duplicate);
-        debug!(
-            event_id = ?event.event_id(),
-            event = %event_type.value(),
-            call.id = %call_id_field,
-            "LiveKit webhook duplicate; dropping",
-        );
-        return StatusCode::OK;
+    if let Some(event_id) = event.event_id() {
+        match router_state.deliveries.observe(event_id).await {
+            Ok(WebhookDeliveryObservation::Done) => {
+                record_webhook_outcome(event_type, WebhookOutcome::Duplicate);
+                debug!(
+                    event_id,
+                    event = %event_type.value(),
+                    call.id = %call_id_field,
+                    "LiveKit webhook duplicate; dropping",
+                );
+                return StatusCode::OK;
+            }
+            Ok(WebhookDeliveryObservation::Processing) => {}
+            Err(error) => {
+                warn!(
+                    event_id,
+                    event = %event_type.value(),
+                    error = %error,
+                    "failed to record LiveKit webhook delivery; asking LiveKit to retry"
+                );
+                record_webhook_outcome(event_type, WebhookOutcome::RetryableFailure);
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
+        }
     }
     record_webhook_outcome(event_type, WebhookOutcome::Received);
     // One disposition line per accepted delivery (#1452): what LiveKit
@@ -206,10 +170,10 @@ async fn livekit_webhook_handler(
         "LiveKit webhook accepted",
     );
 
-    match &event {
+    let effect_outcome = match &event {
         LiveKitWebhookEvent::ParticipantLeft(env)
         | LiveKitWebhookEvent::ParticipantConnectionAborted(env) => {
-            process_participant_left(&state, env).await;
+            process_participant_left(&state, env).await
         }
         LiveKitWebhookEvent::RoomFinished(env) => {
             // LiveKit typically emits `participant_left` for every
@@ -222,21 +186,35 @@ async fn livekit_webhook_handler(
             // straggling participant_left loss can't leave permanent
             // ghost Muji presence in the room.
             info!(room = %env.room.name, "LiveKit reported room finished; sweeping surviving participants");
-            if let Ok(call_id) = CallId::new(env.room.name.clone()) {
-                let survivors = sfu.participants_for_call(&call_id);
-                for identity in survivors {
-                    process_participant_left_for_identity(
-                        &state,
-                        &env.room.name,
-                        identity.as_jid().to_string().as_str(),
-                    )
-                    .await;
+            match CallId::new(env.room.name.clone()) {
+                Ok(call_id) => {
+                    let survivors = sfu.participants_for_call(&call_id);
+                    let mut outcome = WebhookEffectOutcome::Completed;
+                    for identity in survivors {
+                        let survivor_outcome = process_participant_left_for_identity(
+                            &state,
+                            &env.room.name,
+                            identity.as_jid().to_string().as_str(),
+                        )
+                        .await;
+                        if matches!(survivor_outcome, WebhookEffectOutcome::Retryable(_)) {
+                            outcome = survivor_outcome;
+                            break;
+                        }
+                        if matches!(survivor_outcome, WebhookEffectOutcome::Permanent(_)) {
+                            outcome = survivor_outcome;
+                        }
+                    }
+                    outcome
                 }
-            } else {
-                warn!(
-                    room = %env.room.name,
-                    "LiveKit room_finished room name is not a valid MUC bare JID; cannot sweep survivors",
-                );
+                Err(error) => {
+                    warn!(
+                        room = %env.room.name,
+                        %error,
+                        "LiveKit room_finished room name is not a valid call id; cannot sweep survivors",
+                    );
+                    WebhookEffectOutcome::Permanent("invalid_call_id")
+                }
             }
         }
         LiveKitWebhookEvent::ParticipantJoined(env) => {
@@ -261,26 +239,57 @@ async fn livekit_webhook_handler(
                 .await
                 == ReassertOutcome::RetryableFailure
             {
-                // A transient failure must not be acknowledged: the
-                // dedupe LRU is recorded up-front, so a 200 here would
-                // make LiveKit's retries land as duplicates and leave a
-                // possibly stale token unenforced forever. Drop the
-                // dedupe entry and answer 5xx so the retry is processed.
-                // The structural case (room owned by another replica) is
-                // deliberately NOT retried — see `ReassertOutcome`.
-                seen.forget(event.event_id());
                 warn!(
                     room = %env.room.name,
                     call.id = %call_id_field,
                     "asking LiveKit to retry participant_joined after a transient failure",
                 );
-                return StatusCode::SERVICE_UNAVAILABLE;
+                WebhookEffectOutcome::Retryable("voice_grant_reassert_failed")
+            } else {
+                WebhookEffectOutcome::Completed
             }
         }
-        LiveKitWebhookEvent::Other => {}
-    }
+        LiveKitWebhookEvent::Other => WebhookEffectOutcome::Completed,
+    };
 
-    StatusCode::OK
+    match effect_outcome {
+        WebhookEffectOutcome::Retryable(reason) => {
+            warn!(
+                event_id = ?event.event_id(),
+                event = %event_type.value(),
+                call.id = %call_id_field,
+                reason,
+                "LiveKit webhook effects were not completed; asking LiveKit to retry"
+            );
+            record_webhook_outcome(event_type, WebhookOutcome::RetryableFailure);
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        WebhookEffectOutcome::Completed | WebhookEffectOutcome::Permanent(_) => {
+            if let WebhookEffectOutcome::Permanent(reason) = effect_outcome {
+                warn!(
+                    event_id = ?event.event_id(),
+                    event = %event_type.value(),
+                    call.id = %call_id_field,
+                    reason,
+                    "LiveKit webhook had a permanent effect failure; acknowledging delivery"
+                );
+                record_webhook_outcome(event_type, WebhookOutcome::PermanentFailure);
+            }
+            if let Some(event_id) = event.event_id() {
+                if let Err(error) = router_state.deliveries.complete(event_id).await {
+                    warn!(
+                        event_id,
+                        event = %event_type.value(),
+                        error = %error,
+                        "failed to complete LiveKit webhook delivery; asking LiveKit to retry"
+                    );
+                    record_webhook_outcome(event_type, WebhookOutcome::RetryableFailure);
+                    return StatusCode::SERVICE_UNAVAILABLE;
+                }
+            }
+            StatusCode::OK
+        }
+    }
 }
 
 fn record_webhook_outcome(event: WebhookEventType, outcome: WebhookOutcome) {
@@ -319,7 +328,12 @@ pub(crate) fn register_webhook_counters() {
         WebhookEventType::RoomFinished,
         WebhookEventType::Other,
     ] {
-        for outcome in [WebhookOutcome::Received, WebhookOutcome::Duplicate] {
+        for outcome in [
+            WebhookOutcome::Received,
+            WebhookOutcome::Duplicate,
+            WebhookOutcome::RetryableFailure,
+            WebhookOutcome::PermanentFailure,
+        ] {
             add_webhook_event(0, event, outcome);
         }
     }
@@ -402,8 +416,11 @@ async fn reconcile_once(
         .await;
 }
 
-async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvelope) {
-    process_participant_left_for_identity(state, &env.room.name, &env.participant.identity).await;
+async fn process_participant_left(
+    state: &WebSocketState,
+    env: &ParticipantEnvelope,
+) -> WebhookEffectOutcome {
+    process_participant_left_for_identity(state, &env.room.name, &env.participant.identity).await
 }
 
 /// Shared cleanup implementation used by both the
@@ -515,27 +532,34 @@ async fn process_participant_left_for_identity(
     state: &WebSocketState,
     room_name: &str,
     identity: &str,
-) {
-    let Ok(full_jid) = identity.parse::<FullJid>() else {
-        warn!(
-            identity = %identity,
-            room = %room_name,
-            "LiveKit participant identity is not a valid full JID; skipping cleanup",
-        );
-        return;
+) -> WebhookEffectOutcome {
+    let full_jid = match identity.parse::<FullJid>() {
+        Ok(full_jid) => full_jid,
+        Err(error) => {
+            warn!(
+                identity = %identity,
+                room = %room_name,
+                %error,
+                "LiveKit participant identity is not a valid full JID; skipping cleanup",
+            );
+            return WebhookEffectOutcome::Permanent("invalid_participant_jid");
+        }
     };
     if let Ok(room_jid) = room_name.parse::<BareJid>() {
-        clear_muji_presence_for_departure(state, &room_jid, &full_jid).await;
-        return;
+        return clear_muji_presence_for_departure(state, &room_jid, &full_jid).await;
     }
 
-    let Ok(call_id) = CallId::new(room_name.to_owned()) else {
-        warn!(
-            room = %room_name,
-            identity = %identity,
-            "LiveKit room name is neither a MUC bare JID nor a valid raw call id; skipping cleanup",
-        );
-        return;
+    let call_id = match CallId::new(room_name.to_owned()) {
+        Ok(call_id) => call_id,
+        Err(error) => {
+            warn!(
+                room = %room_name,
+                identity = %identity,
+                %error,
+                "LiveKit room name is neither a MUC bare JID nor a valid raw call id; skipping cleanup",
+            );
+            return WebhookEffectOutcome::Permanent("invalid_call_id");
+        }
     };
 
     debug!(
@@ -544,6 +568,7 @@ async fn process_participant_left_for_identity(
         "LiveKit room name is not a MUC bare JID; clearing SFU registry by raw call id",
     );
     note_participant_left_by_call_id(state, &call_id, &full_jid);
+    WebhookEffectOutcome::Completed
 }
 
 #[cfg(test)]
@@ -559,6 +584,7 @@ mod tests {
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::io;
+    use std::sync::Mutex;
     use waddle_sfu::{Identity, MediaCapabilities};
     use waddle_xmpp::protocol::ConnectionPhase;
 
@@ -611,13 +637,16 @@ mod tests {
         headers
     }
 
-    #[test]
-    fn seen_event_ids_deduplicates_repeat_observations() {
-        let seen = SeenEventIds::default();
-        assert!(seen.observe(Some("EV_1")));
-        assert!(!seen.observe(Some("EV_1")));
-        assert!(seen.observe(Some("EV_2")));
-        assert!(!seen.observe(Some("EV_2")));
+    fn test_router_state() -> WebhookRouterState {
+        WebhookRouterState {
+            deliveries: Arc::new(
+                super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default(),
+            ),
+        }
+    }
+
+    fn test_router_state_with(deliveries: Arc<dyn WebhookDeliveryStore>) -> WebhookRouterState {
+        WebhookRouterState { deliveries }
     }
 
     /// #1436 acceptance for the webhook family: a pod that has received
@@ -637,6 +666,8 @@ mod tests {
             ("room_finished", "received"),
             ("other", "received"),
             ("room_finished", "duplicate"),
+            ("participant_left", "retryable_failure"),
+            ("participant_left", "permanent_failure"),
         ] {
             assert_eq!(
                 metrics.counter_sum(
@@ -660,7 +691,8 @@ mod tests {
                 .with_writer(CaptureWriter(buffer.clone()))
                 .finish(),
         );
-        let state = create_test_websocket_state_with_calls().await;
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let secret = state
             .deps
             .protocol
@@ -671,30 +703,39 @@ mod tests {
             .as_bytes()
             .to_vec();
         let body = serde_json::to_vec(&json!({
-            "event": "participant_joined",
+            "event": "participant_left",
             "id": "EV_duplicate_metric",
-            "room": { "name": "general@muc.example.com" },
+            "room": { "name": "alice@example.com::duplicate-call" },
             "participant": { "identity": "alice@example.com/web" }
         }))
         .expect("serialize webhook body");
         let headers = signed_webhook_headers(&secret, &body);
-        let seen = Arc::new(SeenEventIds::default());
+        let router_state = test_router_state();
 
         let first = livekit_webhook_handler(
             Extension(state.clone()),
-            State(seen.clone()),
+            State(router_state.clone()),
             headers.clone(),
             Bytes::from(body.clone()),
         )
         .await
         .into_response();
-        let duplicate =
-            livekit_webhook_handler(Extension(state), State(seen), headers, Bytes::from(body))
-                .await
-                .into_response();
+        let duplicate = livekit_webhook_handler(
+            Extension(state),
+            State(router_state),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
 
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(duplicate.status(), StatusCode::OK);
+        assert_eq!(
+            recorder.note_snapshot().len(),
+            1,
+            "a completed duplicate must not run participant-left effects twice"
+        );
         assert_eq!(
             metrics.counter_sum("waddle.call.webhook.events", &[("outcome", "received")]),
             Some(1)
@@ -718,6 +759,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn processing_delivery_redelivery_runs_effects_and_completes() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let store =
+            Arc::new(super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default());
+        assert_eq!(
+            store
+                .observe("EV_processing_redelivery")
+                .await
+                .expect("seed processing delivery"),
+            WebhookDeliveryObservation::Processing
+        );
+        let router_state = test_router_state_with(store.clone());
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "id": "EV_processing_redelivery",
+            "room": { "name": "alice@example.com::processing-call" },
+            "participant": { "identity": "alice@example.com/web" }
+        }))
+        .expect("serialize webhook body");
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("recording SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let response = livekit_webhook_handler(
+            Extension(state),
+            State(router_state),
+            signed_webhook_headers(&secret, &body),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(recorder.note_snapshot().len(), 1);
+        assert_eq!(
+            store
+                .status("EV_processing_redelivery")
+                .expect("delivery status"),
+            Some(WebhookDeliveryObservation::Done)
+        );
+        assert_eq!(
+            store
+                .attempt_count("EV_processing_redelivery")
+                .expect("attempt count"),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn retryable_participant_left_stays_processing_then_completes_on_retry() {
+        let first_recorder = Arc::new(RecordingSfu::default());
+        let first_state = create_test_websocket_state_with_sfu(first_recorder).await;
+        first_state.deps.protocol.room_registry.kill();
+        first_state
+            .deps
+            .protocol
+            .room_registry
+            .wait_for_shutdown()
+            .await;
+
+        let store =
+            Arc::new(super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default());
+        let router_state = test_router_state_with(store.clone());
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "id": "EV_retryable_participant_left",
+            "room": { "name": "retryable@muc.example.com" },
+            "participant": { "identity": "alice@example.com/web" }
+        }))
+        .expect("serialize webhook body");
+        let first_secret = first_state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("recording SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let first_response = livekit_webhook_handler(
+            Extension(first_state),
+            State(router_state.clone()),
+            signed_webhook_headers(&first_secret, &body),
+            Bytes::from(body.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(first_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            store
+                .status("EV_retryable_participant_left")
+                .expect("processing status"),
+            Some(WebhookDeliveryObservation::Processing)
+        );
+        assert_eq!(
+            store
+                .attempt_count("EV_retryable_participant_left")
+                .expect("first attempt count"),
+            Some(1)
+        );
+
+        let retry_recorder = Arc::new(RecordingSfu::default());
+        let retry_state = create_test_websocket_state_with_sfu(retry_recorder.clone()).await;
+        let session = crate::server::routes::websocket::tests::create_test_server_owner_session(
+            retry_state.as_ref(),
+            "alice",
+        )
+        .await;
+        let room_jid: BareJid = "retryable@muc.example.com".parse().expect("room JID");
+        let alice: FullJid = "alice@example.com/web".parse().expect("full JID");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            retry_state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+        let retry_secret = retry_state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("recording SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let retry_response = livekit_webhook_handler(
+            Extension(retry_state),
+            State(router_state),
+            signed_webhook_headers(&retry_secret, &body),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(retry_response.status(), StatusCode::OK);
+        assert_eq!(retry_recorder.note_snapshot().len(), 1);
+        assert_eq!(
+            store
+                .status("EV_retryable_participant_left")
+                .expect("done status"),
+            Some(WebhookDeliveryObservation::Done)
+        );
+        assert_eq!(
+            store
+                .attempt_count("EV_retryable_participant_left")
+                .expect("retry attempt count"),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_bad_participant_jid_is_acknowledged_and_completed() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let store =
+            Arc::new(super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default());
+        let router_state = test_router_state_with(store.clone());
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "id": "EV_permanent_bad_jid",
+            "room": { "name": "alice@example.com::bad-jid-call" },
+            "participant": { "identity": "not a jid" }
+        }))
+        .expect("serialize webhook body");
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("recording SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let response = livekit_webhook_handler(
+            Extension(state),
+            State(router_state),
+            signed_webhook_headers(&secret, &body),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(recorder.note_snapshot().is_empty());
+        assert_eq!(
+            store
+                .status("EV_permanent_bad_jid")
+                .expect("delivery status"),
+            Some(WebhookDeliveryObservation::Done)
+        );
+        assert_eq!(
+            store
+                .attempt_count("EV_permanent_bad_jid")
+                .expect("attempt count"),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
     async fn signed_undecodable_webhook_records_decode_failure() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let state = create_test_websocket_state_with_calls().await;
@@ -735,7 +986,7 @@ mod tests {
 
         let response = livekit_webhook_handler(
             Extension(state),
-            State(Arc::new(SeenEventIds::default())),
+            State(test_router_state()),
             headers,
             Bytes::from_static(body),
         )
@@ -794,7 +1045,7 @@ mod tests {
 
         let response = livekit_webhook_handler(
             Extension(state),
-            State(Arc::new(SeenEventIds::default())),
+            State(test_router_state()),
             headers,
             Bytes::from(body),
         )
@@ -852,7 +1103,7 @@ mod tests {
 
         let response = livekit_webhook_handler(
             Extension(state),
-            State(Arc::new(SeenEventIds::default())),
+            State(test_router_state()),
             headers,
             Bytes::from_static(body),
         )
@@ -907,13 +1158,6 @@ mod tests {
     }
 
     #[test]
-    fn seen_event_ids_treats_missing_id_as_fresh() {
-        let seen = SeenEventIds::default();
-        assert!(seen.observe(None));
-        assert!(seen.observe(None));
-    }
-
-    #[test]
     fn is_muc_call_distinguishes_room_jids_from_scoped_1to1_ids() {
         // MUC (Muji) call ids are bare room JIDs → have presence.
         assert!(is_muc_call("general@muc.waddle.social"));
@@ -922,17 +1166,6 @@ mod tests {
         // JIDs (the `::` lands in the domain part) → no MUC presence.
         assert!(!is_muc_call("alice@waddle.social::c-abc123"));
         assert!(!is_muc_call("c-abc123"));
-    }
-
-    #[test]
-    fn seen_event_ids_evicts_oldest_past_capacity() {
-        let seen = SeenEventIds::default();
-        for i in 0..(SEEN_EVENT_ID_CAPACITY + 10) {
-            assert!(seen.observe(Some(&format!("EV_{i}"))));
-        }
-        // The oldest entry should now be evicted, so re-observing it
-        // returns "fresh".
-        assert!(seen.observe(Some("EV_0")));
     }
 
     /// Cross-node seam (#1594): the shared enforcement helper must
