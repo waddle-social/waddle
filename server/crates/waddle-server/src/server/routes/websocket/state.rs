@@ -1284,6 +1284,16 @@ pub struct ProtocolServices {
     /// committed XMPP state into durable XEP-0357 PubSub publish jobs while
     /// leaving canonical registration state in `push_store`.
     pub notification_outbox: Arc<crate::notification_outbox::NotificationOutboxStore>,
+    /// Durable convergence queue for failed LiveKit admin teardown and
+    /// cross-node Muji-presence cleanup effects.
+    pub call_teardown_outbox: Arc<crate::call_teardown_outbox::CallTeardownOutboxStore>,
+    /// Single supervised producer retry path used when a direct atomic Muji
+    /// teardown insertion encounters a transient database failure.
+    pub(crate) call_teardown_persistence:
+        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor,
+    /// Async LiveKit admin view of the concrete SFU, retained separately
+    /// from the synchronous protocol service for the teardown janitor.
+    pub call_teardown_executor: Option<waddle_sfu::LiveKitTeardownExecutor>,
     /// Durable derived projection of XEP-0492 notification settings from
     /// canonical XMPP state.
     pub notification_settings_projection:

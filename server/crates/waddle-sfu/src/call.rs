@@ -154,6 +154,44 @@ impl CallGeneration {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    /// Decode a persisted generation. Zero is reserved for no value;
+    /// producers that do not know a generation must use `Option::None`.
+    pub fn try_from_u64(value: u64) -> Result<Self, SfuError> {
+        if value == 0 {
+            return Err(SfuError::InvalidCallGeneration);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<u64> for CallGeneration {
+    type Error = SfuError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::try_from_u64(value)
+    }
+}
+
+/// Durable-teardown payload emitted by the synchronous SFU hot path.
+///
+/// This deliberately contains only typed call-domain values. Persistence and
+/// retry policy belong to the consuming server crate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallTeardownIntentLite {
+    pub call_id: CallId,
+    pub target: TeardownTargetLite,
+    pub generation: Option<CallGeneration>,
+    pub room_sid: Option<RoomSid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TeardownTargetLite {
+    Participant {
+        identity: Identity,
+        participant_sid: Option<ParticipantSid>,
+    },
+    Room,
 }
 
 impl std::fmt::Display for CallGeneration {
@@ -321,5 +359,19 @@ mod tests {
             ParticipantSid::new("π"),
             Err(SfuError::InvalidParticipantSid)
         ));
+    }
+
+    #[test]
+    fn persisted_generation_rejects_zero_sentinel() {
+        assert!(matches!(
+            CallGeneration::try_from_u64(0),
+            Err(SfuError::InvalidCallGeneration)
+        ));
+        assert_eq!(
+            CallGeneration::try_from_u64(7)
+                .expect("positive generation")
+                .as_u64(),
+            7
+        );
     }
 }

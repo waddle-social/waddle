@@ -68,6 +68,8 @@ pub enum Janitor {
     PushPublishJob,
     /// Notification outbox drain/retry/dead-letter.
     NotificationOutbox,
+    /// Durable LiveKit/Muji teardown convergence outbox.
+    CallTeardownOutbox,
     /// Expired OAuth/device auth state.
     AuthState,
     /// Dormant MUC room eviction.
@@ -90,6 +92,7 @@ impl MetricAttribute for Janitor {
             Self::PendingDeliveryClaim => "pending_delivery_claim",
             Self::PushPublishJob => "push_publish_job",
             Self::NotificationOutbox => "notification_outbox",
+            Self::CallTeardownOutbox => "call_teardown_outbox",
             Self::AuthState => "auth_state",
             Self::RoomDormancy => "room_dormancy",
             Self::UserActorReaper => "user_actor_reaper",

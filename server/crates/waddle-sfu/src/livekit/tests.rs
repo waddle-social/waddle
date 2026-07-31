@@ -458,6 +458,9 @@ struct RecordingAdmin {
     list_rooms_errors: Mutex<bool>,
     remove_calls: Mutex<Vec<(CallId, Identity)>>,
     delete_calls: Mutex<Vec<CallId>>,
+    remove_errors: Mutex<bool>,
+    delete_errors: Mutex<bool>,
+    remove_gate: Mutex<Option<Arc<Semaphore>>>,
     update_calls: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
     /// Per-call artificial latency for `update_participant`,
     /// consumed in call order. Ordering tests queue a SLOW first
@@ -488,6 +491,18 @@ struct RecordingAdmin {
 }
 
 impl RecordingAdmin {
+    fn fail_remove(&self) {
+        *self.remove_errors.lock().expect("recording lock") = true;
+    }
+
+    fn fail_delete(&self) {
+        *self.delete_errors.lock().expect("recording lock") = true;
+    }
+
+    fn block_removes_on(&self, gate: Arc<Semaphore>) {
+        *self.remove_gate.lock().expect("recording lock") = Some(gate);
+    }
+
     fn set_rooms(&self, rooms: Vec<crate::admin::ListedRoom>) {
         *self.rooms.lock().expect("recording lock") = rooms;
     }
@@ -636,6 +651,13 @@ impl LiveKitAdmin for RecordingAdmin {
                 .lock()
                 .expect("recording lock")
                 .push((room, identity));
+            let gate = self.remove_gate.lock().expect("recording lock").clone();
+            if let Some(gate) = gate {
+                let _permit = gate.acquire().await.expect("test gate remains open");
+            }
+            if *self.remove_errors.lock().expect("recording lock") {
+                return Err(SfuError::InvalidCallId("simulated remove failure".into()));
+            }
             Ok(())
         })
     }
@@ -647,6 +669,9 @@ impl LiveKitAdmin for RecordingAdmin {
         let room = room.clone();
         Box::pin(async move {
             self.delete_calls.lock().expect("recording lock").push(room);
+            if *self.delete_errors.lock().expect("recording lock") {
+                return Err(SfuError::InvalidCallId("simulated delete failure".into()));
+            }
             Ok(())
         })
     }
@@ -754,6 +779,232 @@ async fn drain_admin_tasks() {
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
+}
+
+#[test]
+fn teardown_without_runtime_reports_typed_intents() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("r-no-runtime").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 2);
+    assert!(matches!(
+        intents[0].target,
+        TeardownTargetLite::Participant { .. }
+    ));
+    assert!(matches!(intents[1].target, TeardownTargetLite::Room));
+    assert!(intents.iter().all(|intent| intent.generation.is_some()));
+}
+
+#[tokio::test]
+async fn failed_admin_effects_are_independently_reported() {
+    let admin = Arc::new(RecordingAdmin::default());
+    admin.fail_remove();
+    admin.fail_delete();
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    let call = CallId::new("r-admin-fail").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+    for _ in 0..100 {
+        if reported.lock().expect("sink lock").len() == 2 {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 2);
+    assert!(intents
+        .iter()
+        .any(|intent| matches!(intent.target, TeardownTargetLite::Participant { .. })));
+    assert!(intents
+        .iter()
+        .any(|intent| matches!(intent.target, TeardownTargetLite::Room)));
+}
+
+#[tokio::test]
+async fn saturated_teardown_gate_reports_without_spawning_admin_work() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let mut sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    sfu.admin_permits = Arc::new(Semaphore::new(0));
+    let call = CallId::new("r-saturated").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+
+    for _ in 0..100 {
+        if reported.lock().expect("sink lock").len() == 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(reported.lock().expect("sink lock").len(), 2);
+    assert!(admin.remove_snapshot().is_empty());
+    assert!(admin.delete_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn teardown_burst_reserves_before_spawn_and_defers_excess_work() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let gate = Arc::new(Semaphore::new(0));
+    admin.block_removes_on(Arc::clone(&gate));
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    let excess = 32;
+    for index in 0..(ADMIN_CONCURRENCY + excess) {
+        let call = CallId::new(format!("r-burst-{index}")).expect("call id");
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        let _ = sfu.unregister_call_participant(&call, &alice, None);
+    }
+    for _ in 0..100 {
+        if admin.remove_snapshot().len() == ADMIN_CONCURRENCY {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+
+    assert_eq!(admin.remove_snapshot().len(), ADMIN_CONCURRENCY);
+    assert_eq!(
+        reported.lock().expect("sink lock").len(),
+        excess * 2,
+        "each rejected call reports participant and room intents"
+    );
+    gate.add_permits(ADMIN_CONCURRENCY);
+}
+
+#[tokio::test]
+async fn saturated_teardown_reports_use_one_supervised_persistence_task() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let gate = Arc::new(Semaphore::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let sink_gate = Arc::clone(&gate);
+    let sink_started = Arc::clone(&started);
+    let mut sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(
+        Arc::new(move |_| {
+            let gate = Arc::clone(&sink_gate);
+            let started = Arc::clone(&sink_started);
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                let _permit = gate.acquire().await.expect("report gate remains open");
+            })
+        }),
+    );
+    sfu.admin_permits = Arc::new(Semaphore::new(0));
+
+    let calls = 32;
+    for index in 0..calls {
+        let call = CallId::new(format!("r-persist-burst-{index}")).expect("call id");
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        let _ = sfu.unregister_call_participant(&call, &alice, None);
+    }
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+
+    gate.add_permits(calls * 2);
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) == calls * 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), calls * 2);
+}
+
+#[tokio::test]
+async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-sid-guard").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = observed_sids(Some("RM_current"), Some("PA_current"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &current),
+        SidObservationDisposition::Applied
+    );
+    let stale = CallTeardownIntentLite {
+        call_id: call,
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: Some(fixture_room_sid("RM_old")),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&stale)
+            .await
+            .expect("typed no-op"),
+        TeardownExecution::StaleGeneration
+    );
+    assert!(admin.remove_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-sid-unresolved").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+    let persisted = CallTeardownIntentLite {
+        call_id: call,
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: Some(fixture_room_sid("RM_old")),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&persisted)
+            .await
+            .expect("typed defer"),
+        TeardownExecution::Occupied
+    );
+    assert!(admin.remove_snapshot().is_empty());
 }
 
 #[tokio::test]

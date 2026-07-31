@@ -5,7 +5,9 @@
 //! focus path to decide when a call has ended.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -16,8 +18,9 @@ use tokio::sync::Semaphore;
 
 use crate::admin::{admin_base_url_from_ws, LiveKitAdmin, ReqwestLiveKitAdmin};
 use crate::call::{
-    CallGeneration, CallId, CallState, Identity, MediaCapabilities, ObservedCallSids,
-    ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
+    CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
+    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
+    TeardownTargetLite,
 };
 use crate::config::{SfuConfig, WebsocketUrl};
 use crate::error::SfuError;
@@ -123,24 +126,8 @@ fn reap_grant_lock(locks: &GrantLocks, key: &ParticipantKey) {
     locks.remove_if(key, |_, held| Arc::strong_count(held) == 2);
 }
 
-fn current_teardown_generation(
-    calls: &CallRegistry,
-    call_id: &CallId,
-    scheduled_generation: Option<CallGeneration>,
-) -> RemoteTeardownDisposition {
-    let Some(scheduled_generation) = scheduled_generation else {
-        return RemoteTeardownDisposition::Proceed;
-    };
-    match calls.get(call_id) {
-        Some(entry) if entry.generation > scheduled_generation => {
-            RemoteTeardownDisposition::StaleGeneration
-        }
-        _ => RemoteTeardownDisposition::Proceed,
-    }
-}
-
 /// Result of [`LiveKitSfu::clear_local_state`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ClearOutcome {
     /// `identity` was actually registered against the call.
     was_present: bool,
@@ -150,6 +137,8 @@ struct ClearOutcome {
     /// flag may gate a `DeleteRoom` (#1129).
     emptied: bool,
     generation: CallGeneration,
+    room_sid: Option<RoomSid>,
+    participant_sid: Option<ParticipantSid>,
     /// Participants still registered after the clear.
     remaining: usize,
 }
@@ -160,17 +149,220 @@ enum SidGuardDisposition {
     StaleSid,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum ClearDisposition {
     Cleared(ClearOutcome),
     NoCall,
     StaleSid,
 }
 
+pub type TeardownFailureSink =
+    Arc<dyn Fn(CallTeardownIntentLite) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+#[derive(Clone)]
+struct TeardownReporter {
+    runtime: Option<Handle>,
+    sink: Option<TeardownFailureSink>,
+    state: Arc<Mutex<TeardownReporterState>>,
+}
+
+#[derive(Default)]
+struct TeardownReporterState {
+    running: bool,
+    pending: HashSet<CallTeardownIntentLite>,
+}
+
+impl TeardownReporter {
+    fn report(&self, intents: impl IntoIterator<Item = CallTeardownIntentLite>) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        let intents = intents.into_iter().collect::<Vec<_>>();
+        let Some(runtime) = self.runtime.as_ref() else {
+            for intent in intents {
+                drop(sink(intent));
+            }
+            return;
+        };
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.pending.extend(intents);
+            if state.running {
+                return;
+            }
+            state.running = true;
+        }
+        let state = Arc::clone(&self.state);
+        let sink = Arc::clone(sink);
+        runtime.spawn(async move {
+            loop {
+                let batch = {
+                    let mut state = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.pending.drain().collect::<Vec<_>>()
+                };
+                for intent in batch {
+                    sink(intent).await;
+                }
+                let mut state = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.pending.is_empty() {
+                    state.running = false;
+                    break;
+                }
+            }
+        });
+    }
+}
+
+/// Result of an idempotent LiveKit teardown attempt. `StaleGeneration` and
+/// `Occupied` are successful no-ops and must not be retried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemoteTeardownDisposition {
-    Proceed,
+pub enum TeardownExecution {
+    Executed,
     StaleGeneration,
+    Occupied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownGuard {
+    Proceed,
+    Stale,
+    Unresolved,
+}
+
+/// Cloneable admin executor shared by the inline path and durable outbox
+/// drainers. It owns no persistence policy.
+#[derive(Clone)]
+pub struct LiveKitTeardownExecutor {
+    admin: Arc<dyn LiveKitAdmin>,
+    calls: CallRegistry,
+}
+
+impl LiveKitTeardownExecutor {
+    pub fn current_generation(&self, call_id: &CallId) -> Option<CallGeneration> {
+        self.calls.get(call_id).map(|entry| entry.generation)
+    }
+
+    pub async fn remove_participant(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        generation: Option<CallGeneration>,
+        room_sid: Option<&RoomSid>,
+        participant_sid: Option<&ParticipantSid>,
+    ) -> Result<TeardownExecution, SfuError> {
+        match self.guard(
+            call_id,
+            generation,
+            room_sid,
+            Some((identity, participant_sid)),
+        ) {
+            TeardownGuard::Proceed => {}
+            TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
+            TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
+        }
+        self.admin.remove_participant(call_id, identity).await?;
+        Ok(TeardownExecution::Executed)
+    }
+
+    pub async fn delete_room_if_empty(
+        &self,
+        call_id: &CallId,
+        departing: Option<&Identity>,
+        generation: Option<CallGeneration>,
+        room_sid: Option<&RoomSid>,
+    ) -> Result<TeardownExecution, SfuError> {
+        match self.guard(call_id, generation, room_sid, None) {
+            TeardownGuard::Proceed => {}
+            TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
+            TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
+        }
+        if self.calls.get(call_id).is_some() {
+            return Ok(TeardownExecution::Occupied);
+        }
+        let occupancy = self.admin.room_occupancy(call_id).await?;
+        let empty = match departing {
+            Some(departing) => occupancy.is_empty_except(departing),
+            None => occupancy.foreign == 0 && occupancy.waddle.is_empty(),
+        };
+        if !empty || self.calls.get(call_id).is_some() {
+            return Ok(TeardownExecution::Occupied);
+        }
+        self.admin.delete_room(call_id).await?;
+        Ok(TeardownExecution::Executed)
+    }
+
+    /// Execute a durable intent. Room intents use strict emptiness because
+    /// they intentionally carry no participant identity; the inline path
+    /// calls [`Self::delete_room_if_empty`] with its departing identity so a
+    /// just-removed participant echoed by LiveKit does not block cleanup.
+    pub async fn execute(
+        &self,
+        intent: &CallTeardownIntentLite,
+    ) -> Result<TeardownExecution, SfuError> {
+        match &intent.target {
+            TeardownTargetLite::Participant {
+                identity,
+                participant_sid,
+            } => {
+                self.remove_participant(
+                    &intent.call_id,
+                    identity,
+                    intent.generation,
+                    intent.room_sid.as_ref(),
+                    participant_sid.as_ref(),
+                )
+                .await
+            }
+            TeardownTargetLite::Room => {
+                self.delete_room_if_empty(
+                    &intent.call_id,
+                    None,
+                    intent.generation,
+                    intent.room_sid.as_ref(),
+                )
+                .await
+            }
+        }
+    }
+
+    fn guard(
+        &self,
+        call_id: &CallId,
+        generation: Option<CallGeneration>,
+        room_sid: Option<&RoomSid>,
+        participant: Option<(&Identity, Option<&ParticipantSid>)>,
+    ) -> TeardownGuard {
+        let Some(entry) = self.calls.get(call_id) else {
+            return TeardownGuard::Proceed;
+        };
+        if generation.is_some_and(|generation| entry.generation > generation) {
+            return TeardownGuard::Stale;
+        }
+        if let Some(observed) = room_sid {
+            match entry.room_sid.as_ref() {
+                Some(live) if live != observed => return TeardownGuard::Stale,
+                Some(_) => {}
+                None => return TeardownGuard::Unresolved,
+            }
+        }
+        if let Some((identity, Some(observed))) = participant {
+            if let Some(state) = entry.participants.get(identity) {
+                match state.participant_sid.as_ref() {
+                    Some(live) if live != observed => return TeardownGuard::Stale,
+                    Some(_) => {}
+                    None => return TeardownGuard::Unresolved,
+                }
+            }
+        }
+        TeardownGuard::Proceed
+    }
 }
 
 pub struct LiveKitSfu {
@@ -246,6 +438,7 @@ pub struct LiveKitSfu {
     /// a teardown burst can't fan out into thousands of reqwest tasks
     /// — see [`ADMIN_CONCURRENCY`] for the cap.
     admin_permits: Arc<Semaphore>,
+    teardown_reporter: TeardownReporter,
 }
 
 impl std::fmt::Debug for LiveKitSfu {
@@ -318,6 +511,7 @@ impl LiveKitSfu {
     /// production code goes through [`Self::new`] which constructs a
     /// real [`crate::admin::ReqwestLiveKitAdmin`] backed by reqwest.
     pub fn with_admin(config: SfuConfig, admin: Arc<dyn LiveKitAdmin>) -> Self {
+        let runtime = Handle::try_current().ok();
         Self {
             config,
             calls: Arc::new(DashMap::new()),
@@ -329,8 +523,25 @@ impl LiveKitSfu {
             desired_grants: Arc::new(DashMap::new()),
             grant_locks: Arc::new(DashMap::new()),
             admin,
-            runtime: Handle::try_current().ok(),
+            runtime: runtime.clone(),
             admin_permits: Arc::new(Semaphore::new(ADMIN_CONCURRENCY)),
+            teardown_reporter: TeardownReporter {
+                runtime,
+                sink: None,
+                state: Arc::new(Mutex::new(TeardownReporterState::default())),
+            },
+        }
+    }
+
+    pub fn with_teardown_failure_sink(mut self, sink: TeardownFailureSink) -> Self {
+        self.teardown_reporter.sink = Some(sink);
+        self
+    }
+
+    pub fn teardown_executor(&self) -> LiveKitTeardownExecutor {
+        LiveKitTeardownExecutor {
+            admin: Arc::clone(&self.admin),
+            calls: Arc::clone(&self.calls),
         }
     }
 
@@ -477,6 +688,11 @@ impl LiveKitSfu {
             return ClearDisposition::StaleSid;
         }
 
+        let participant_sid = entry
+            .participants
+            .get(identity)
+            .and_then(|participant| participant.participant_sid.clone());
+        let room_sid = entry.room_sid.clone();
         let was_present = entry.participants.remove(identity).is_some();
         let generation = entry.generation;
         drop(entry);
@@ -535,6 +751,8 @@ impl LiveKitSfu {
             was_present,
             emptied,
             generation,
+            room_sid,
+            participant_sid,
             remaining,
         })
     }
@@ -551,78 +769,96 @@ impl LiveKitSfu {
     /// would evict them too — and then confirmed against LiveKit's
     /// own participant list, because local emptiness says nothing
     /// about participants registered on another replica (#1445); see
-    /// [`delete_room_if_livekit_empty`]. Spawn target is the runtime handle
-    /// captured at construction; when none is attached (e.g. plain
-    /// `#[test]` fixtures) the remote leg silently drops, matching
-    /// pre-admin behaviour for those tests. The admin concurrency
-    /// semaphore bounds in-flight HTTP tasks so a teardown burst
-    /// can't fan out unboundedly.
+    /// [`LiveKitTeardownExecutor::delete_room_if_empty`]. Spawn target is the runtime handle
+    /// captured at construction. When none is attached, when the admin
+    /// semaphore is saturated, or when an admitted admin call fails, the
+    /// corresponding typed effect is handed to `teardown_failure_sink` for
+    /// durable retry. The availability gate bounds both in-flight calls and
+    /// spawned tasks during a teardown burst.
     fn schedule_remote_teardown(
         &self,
         call_id: CallId,
         identity: Identity,
         we_just_emptied: bool,
         generation: Option<CallGeneration>,
+        room_sid: Option<RoomSid>,
+        participant_sid: Option<ParticipantSid>,
     ) {
+        let participant_intent = CallTeardownIntentLite {
+            call_id: call_id.clone(),
+            target: TeardownTargetLite::Participant {
+                identity: identity.clone(),
+                participant_sid,
+            },
+            generation,
+            room_sid: room_sid.clone(),
+        };
+        let room_intent = we_just_emptied.then(|| CallTeardownIntentLite {
+            call_id: call_id.clone(),
+            target: TeardownTargetLite::Room,
+            generation,
+            room_sid,
+        });
+        let report_all = || {
+            self.teardown_reporter
+                .report(std::iter::once(participant_intent.clone()).chain(room_intent.clone()));
+        };
         let Some(runtime) = self.runtime.as_ref() else {
+            // Invoking the sink still reports the typed effects to non-async
+            // embedders. Production construction always captures a runtime;
+            // without one there is no executor on which an async persistence
+            // implementation could make progress.
+            report_all();
             return;
         };
-        let admin = Arc::clone(&self.admin);
-        let permits = Arc::clone(&self.admin_permits);
-        let calls = Arc::clone(&self.calls);
+        // Do not create a future that can wait indefinitely behind the
+        // semaphore. Saturation hands the effects directly to the durable
+        // retry sink, bounding the number of spawned teardown tasks.
+        let permit = match Arc::clone(&self.admin_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                report_all();
+                return;
+            }
+        };
+        let executor = self.teardown_executor();
+        let reporter = self.teardown_reporter.clone();
         runtime.spawn(async move {
-            // `acquire_owned` returns `Err` only when the semaphore is
-            // explicitly `close()`d. Production code never closes
-            // `admin_permits`, so the `Err` arm is unreachable today;
-            // the early-return is defensive scaffolding for a future
-            // shutdown hook that may want to drain pending teardowns
-            // without admitting new ones.
-            let Ok(_permit) = permits.acquire_owned().await else {
-                return;
-            };
-
-            if matches!(
-                current_teardown_generation(&calls, &call_id, generation),
-                RemoteTeardownDisposition::StaleGeneration
+            let _permit = permit;
+            if !matches!(
+                executor
+                    .remove_participant(
+                        &call_id,
+                        &identity,
+                        generation,
+                        participant_intent.room_sid.as_ref(),
+                        match &participant_intent.target {
+                            TeardownTargetLite::Participant {
+                                participant_sid, ..
+                            } => participant_sid.as_ref(),
+                            TeardownTargetLite::Room => None,
+                        },
+                    )
+                    .await,
+                Ok(TeardownExecution::Executed | TeardownExecution::StaleGeneration)
             ) {
-                tracing::warn!(
-                    call_id = %call_id,
-                    identity = %identity.as_livekit_identity(),
-                    generation = ?generation,
-                    "LiveKit teardown admin call skipped for stale generation"
-                );
-                return;
+                reporter.report([participant_intent]);
             }
-
-            if let Err(err) = admin.remove_participant(&call_id, &identity).await {
-                tracing::warn!(
-                    call_id = %call_id,
-                    identity = %identity.as_livekit_identity(),
-                    error = %err,
-                    "LiveKit RemoveParticipant failed; SFU may rely on DTLS timeout"
-                );
-            }
-            if we_just_emptied {
-                // Rejoin race: between local-clear and this point a
-                // fresh participant may have re-registered (same
-                // `call_id` is shared across all Muji occupants of a
-                // MUC). `DeleteRoom` would evict that just-joined
-                // session, so only proceed when the call is *still*
-                // empty in our local view.
-                if calls.get(&call_id).is_none() {
-                    if matches!(
-                        current_teardown_generation(&calls, &call_id, generation),
-                        RemoteTeardownDisposition::StaleGeneration
-                    ) {
-                        tracing::warn!(
-                            call_id = %call_id,
-                            identity = %identity.as_livekit_identity(),
-                            generation = ?generation,
-                            "LiveKit DeleteRoom skipped for stale generation"
-                        );
-                        return;
-                    }
-                    delete_room_if_livekit_empty(admin.as_ref(), &calls, &call_id, &identity).await;
+            if we_just_emptied
+                && executor
+                    .delete_room_if_empty(
+                        &call_id,
+                        Some(&identity),
+                        generation,
+                        room_intent
+                            .as_ref()
+                            .and_then(|intent| intent.room_sid.as_ref()),
+                    )
+                    .await
+                    .is_err()
+            {
+                if let Some(intent) = room_intent {
+                    reporter.report([intent]);
                 }
             }
         });
@@ -1223,20 +1459,36 @@ impl SfuService for LiveKitSfu {
         observed_sids: Option<&ObservedCallSids>,
     ) -> TeardownDisposition {
         let clear = self.clear_local_state(call_id, identity, observed_sids);
-        let (was_present, emptied, generation, remaining) = match clear {
+        let (was_present, emptied, generation, room_sid, participant_sid, remaining) = match clear {
             ClearDisposition::Cleared(ClearOutcome {
                 was_present,
                 emptied,
                 generation,
+                room_sid,
+                participant_sid,
                 remaining,
-            }) => (was_present, emptied, Some(generation), remaining),
+            }) => (
+                was_present,
+                emptied,
+                Some(generation),
+                room_sid,
+                participant_sid,
+                remaining,
+            ),
             ClearDisposition::StaleSid => return TeardownDisposition::StaleSid,
             ClearDisposition::NoCall => {
                 let generation = self
                     .call_generations
                     .get(call_id)
                     .map(|generation| CallGeneration::new(*generation));
-                self.schedule_remote_teardown(call_id.clone(), identity.clone(), false, generation);
+                self.schedule_remote_teardown(
+                    call_id.clone(),
+                    identity.clone(),
+                    false,
+                    generation,
+                    observed_sids.and_then(|sids| sids.room_sid.clone()),
+                    observed_sids.and_then(|sids| sids.participant_sid.clone()),
+                );
                 return TeardownDisposition::Applied(CallState::Active { remaining: 0 });
             }
         };
@@ -1269,6 +1521,8 @@ impl SfuService for LiveKitSfu {
             identity.clone(),
             we_just_emptied,
             generation,
+            room_sid,
+            participant_sid,
         );
 
         TeardownDisposition::Applied(state)
@@ -1381,75 +1635,6 @@ impl SfuService for LiveKitSfu {
             .get(call_id)
             .map(|entry| entry.participants.keys().cloned().collect())
             .unwrap_or_default()
-    }
-}
-
-/// `DeleteRoom` precondition against shared ground truth (#1445): the
-/// participant registry is process-local, so with multiple
-/// waddle-server replicas "our map just emptied" says nothing about
-/// participants registered by another replica in the same LiveKit
-/// room. LiveKit itself is the one component every replica shares, so
-/// ask it who is connected before tearing the room down.
-///
-/// The list may still echo `departing` (the identity whose
-/// `RemoveParticipant` was issued moments ago); anyone *else* means
-/// another replica's participant is live and the delete is skipped.
-/// Fail-safe: if the probe errors, occupancy cannot be ruled out, so
-/// the delete is skipped and an abandoned room lapses via LiveKit's
-/// own `empty_timeout`.
-///
-/// Known residual race, accepted: a joiner whose token was minted on
-/// another replica but who has not yet connected is invisible to both
-/// this probe and the local registry. LiveKit auto-creates rooms on
-/// join, so an over-eager delete is disruptive but self-healing;
-/// closing it needs the durable generation-keyed registry tracked in
-/// #1449.
-async fn delete_room_if_livekit_empty(
-    admin: &dyn LiveKitAdmin,
-    calls: &CallRegistry,
-    call_id: &CallId,
-    departing: &Identity,
-) {
-    let occupancy = match admin.room_occupancy(call_id).await {
-        Ok(occupancy) => occupancy,
-        Err(err) => {
-            tracing::warn!(
-                call_id = %call_id,
-                error = %err,
-                "DeleteRoom skipped; LiveKit occupancy could not be confirmed"
-            );
-            return;
-        }
-    };
-    if !occupancy.is_empty_except(departing) {
-        tracing::info!(
-            call_id = %call_id,
-            waddle_participants = occupancy.waddle.len(),
-            foreign_participants = occupancy.foreign,
-            "DeleteRoom skipped; LiveKit reports live participants \
-             (another replica's registrations, or an egress/SIP participant)"
-        );
-        return;
-    }
-    // Re-check the local registry AFTER the probe, not just before it
-    // (#1129 rejoin race): the round-trip above is a second window in
-    // which a fresh participant can register locally, and the
-    // already-taken LiveKit snapshot cannot see them because they have
-    // not connected yet. Deleting here would evict that session.
-    if calls.get(call_id).is_some() {
-        tracing::info!(
-            call_id = %call_id,
-            "DeleteRoom skipped; a participant registered locally while \
-             LiveKit occupancy was being confirmed"
-        );
-        return;
-    }
-    if let Err(err) = admin.delete_room(call_id).await {
-        tracing::warn!(
-            call_id = %call_id,
-            error = %err,
-            "LiveKit DeleteRoom failed; empty room will linger until empty_timeout"
-        );
     }
 }
 

@@ -178,7 +178,14 @@ pub(super) async fn handle_sans_io_iq(
                         // did before the relay existed: unregistering
                         // is idempotent, so a local no-op is strictly
                         // better than failing the client's hangup.
-                        MujiRelayOutcome::ProcessLocally => {}
+                        MujiRelayOutcome::ProcessLocally {
+                            enqueue_owner_cleanup,
+                        } => {
+                            if enqueue_owner_cleanup {
+                                enqueue_muji_relay_teardown_fallback(state, &room_jid, full_jid)
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
@@ -239,7 +246,7 @@ enum MujiRelayOutcome {
     /// Non-terminal: handle the IQ on this node after all. Only ever
     /// returned for `session-terminate`, whose local execution is an
     /// idempotent no-op and therefore a better answer than an error.
-    ProcessLocally,
+    ProcessLocally { enqueue_owner_cleanup: bool },
 }
 
 /// Resolve a Muji IQ whose room has no local actor (#1445): relay it
@@ -298,9 +305,11 @@ async fn relay_muji_to_room_owner(
     // — evaluating them eagerly would fabricate `room_not_found`
     // denials on every cross-node teardown.
     let is_terminate = super::jingle_muji_gate::muji_session_terminate_room(iq).is_some();
-    let unrelayable = |frames: &dyn Fn() -> Vec<String>| {
+    let unrelayable = |enqueue_owner_cleanup: bool, frames: &dyn Fn() -> Vec<String>| {
         if is_terminate {
-            MujiRelayOutcome::ProcessLocally
+            MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup,
+            }
         } else {
             MujiRelayOutcome::Frames(frames())
         }
@@ -403,7 +412,7 @@ async fn relay_muji_to_room_owner(
         state.deps.auth_state.xmpp_domain.as_str(),
     );
     if !addressed_to_mixer || !room_is_local {
-        return unrelayable(&deny);
+        return unrelayable(false, &deny);
     }
 
     let bridge = state
@@ -415,7 +424,7 @@ async fn relay_muji_to_room_owner(
     let (Some(bridge), Some(origin)) = (bridge, conn_state.ordered_relay_origin.as_ref()) else {
         // No relay substrate (clustering disabled at runtime): local
         // absence is definitive, exactly the pre-#1445 semantics.
-        return unrelayable(&deny);
+        return unrelayable(false, &deny);
     };
     // Stamp the authenticated full JID as `from` before relaying:
     // clients legitimately omit `from` (the server derives the sender
@@ -459,20 +468,20 @@ async fn relay_muji_to_room_owner(
         // took it — outcome unknown to us, and its own.
         MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
             unrelayable_after_relay_failure("delivered_without_replies");
-            unrelayable(&|| relay_uncertain("delivered_without_replies"))
+            unrelayable(true, &|| relay_uncertain("delivered_without_replies"))
         }
         // No node owns the room (or this one does, with no actor): the
         // local fallback for a terminate genuinely IS a no-op, because
         // there is no owner holding a registration to strand.
         MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
-            unrelayable(&deny)
+            unrelayable(false, &deny)
         }
         // Definitely not delivered: the attempt ended here.
         MucProxyRouteDecision::Attempted(
             OrderedRelayMucProxyOutcome::Unavailable | OrderedRelayMucProxyOutcome::Dropped,
         ) => {
             unrelayable_after_relay_failure("relay_delivery_failed");
-            unrelayable(&relay_failed)
+            unrelayable(true, &relay_failed)
         }
         // Ambiguous by construction — the owner may have committed it.
         MucProxyRouteDecision::Attempted(
@@ -480,15 +489,15 @@ async fn relay_muji_to_room_owner(
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
         ) => {
             unrelayable_after_relay_failure("relay_maybe_committed");
-            unrelayable(&|| relay_uncertain("relay_maybe_committed"))
+            unrelayable(true, &|| relay_uncertain("relay_maybe_committed"))
         }
         MucProxyRouteDecision::RoomClaimUnavailable => {
             unrelayable_after_relay_failure("room_claim_unavailable");
-            unrelayable(&relay_failed)
+            unrelayable(true, &relay_failed)
         }
         MucProxyRouteDecision::OriginUnavailable => {
             unrelayable_after_relay_failure("origin_unavailable");
-            unrelayable(&relay_failed)
+            unrelayable(true, &relay_failed)
         }
     }
 }
@@ -499,7 +508,7 @@ async fn relay_muji_to_room_owner(
 #[cfg(not(feature = "clustering"))]
 enum MujiRelayOutcome {
     Frames(Vec<String>),
-    ProcessLocally,
+    ProcessLocally { enqueue_owner_cleanup: bool },
 }
 
 #[cfg(not(feature = "clustering"))]
@@ -512,7 +521,9 @@ async fn relay_muji_to_room_owner(
     reply: IqReplyAddressing<'_>,
 ) -> MujiRelayOutcome {
     if super::jingle_muji_gate::muji_session_terminate_room(iq).is_some() {
-        return MujiRelayOutcome::ProcessLocally;
+        return MujiRelayOutcome::ProcessLocally {
+            enqueue_owner_cleanup: false,
+        };
     }
     MujiRelayOutcome::Frames(vec![build_iq_error_xml_typed(
         reply.id,
@@ -520,6 +531,61 @@ async fn relay_muji_to_room_owner(
         reply.response_to,
         *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
     )])
+}
+
+/// Persist the owner-side convergence that a failed cross-node terminate
+/// could not deliver. Enqueue errors are operationally loud but never alter
+/// the client's successful hangup response.
+async fn enqueue_muji_relay_teardown_fallback(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    departed: &jid::FullJid,
+) {
+    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+        Ok(call_id) => call_id,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                %error,
+                "could not model Muji relay fallback as a typed teardown intent"
+            );
+            return;
+        }
+    };
+    let intents = [
+        crate::call_teardown_outbox::CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
+                room_jid: room_jid.clone(),
+                departed: departed.clone(),
+            },
+            generation: None,
+            room_sid: None,
+        },
+        crate::call_teardown_outbox::CallTeardownIntent {
+            call_id,
+            target: crate::call_teardown_outbox::TeardownTarget::Participant {
+                identity: departed.clone(),
+                participant_sid: None,
+            },
+            generation: None,
+            room_sid: None,
+        },
+    ];
+    let store = &state.deps.protocol.call_teardown_outbox;
+    if let Err(error) = store.enqueue_batch(&intents).await {
+        tracing::warn!(
+            room = %room_jid,
+            departed = %departed,
+            %error,
+            "failed to persist Muji teardown fallback; retrying asynchronously"
+        );
+        state
+            .deps
+            .protocol
+            .call_teardown_persistence
+            .retry_batch(intents.to_vec());
+    }
 }
 
 /// The (id, from, to) triple every IQ error reply is stamped with —
@@ -565,6 +631,7 @@ async fn mirror_remote_carbons_update(
 
 #[cfg(test)]
 mod tests {
+    use crate::call_teardown_outbox::TeardownTarget;
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_calls;
     use waddle_xmpp::xep::xep0167::MediaKind;
     use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
@@ -615,6 +682,32 @@ mod tests {
             id: "term-1".into(),
             payload: elem,
         }
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_persists_presence_and_participant_intents() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+
+        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice).await;
+
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim fallback intents");
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs
+            .iter()
+            .any(|job| matches!(job.intent.target, TeardownTarget::MujiPresenceClear { .. })));
+        assert!(jobs
+            .iter()
+            .any(|job| matches!(job.intent.target, TeardownTarget::Participant { .. })));
+        assert!(jobs.iter().all(|job| job.intent.generation.is_none()));
+        assert!(jobs.iter().all(|job| job.intent.room_sid.is_none()));
     }
 
     /// #1445: a relay failure is not a membership decision. Routing it
@@ -712,7 +805,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(outcome, super::MujiRelayOutcome::ProcessLocally),
+            matches!(outcome, super::MujiRelayOutcome::ProcessLocally { .. }),
             "an unrelayable terminate must fall back to local execution"
         );
         assert_eq!(

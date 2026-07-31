@@ -35,13 +35,17 @@ mod webhook;
 
 pub use admin::{ListedRoom, LiveKitAdmin, RoomOccupancy};
 pub use call::{
-    CallGeneration, CallId, CallState, Identity, MediaCapabilities, ObservedCallSids,
-    ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
+    CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
+    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
+    TeardownTargetLite,
 };
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
 pub use error::SfuError;
-pub use livekit::{LiveKitSfu, RECONCILE_CONCURRENCY, RECONCILE_GRACE_SECONDS};
+pub use livekit::{
+    LiveKitSfu, LiveKitTeardownExecutor, TeardownExecution, TeardownFailureSink,
+    RECONCILE_CONCURRENCY, RECONCILE_GRACE_SECONDS,
+};
 pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
 pub use webhook::{

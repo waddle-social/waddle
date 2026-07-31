@@ -629,6 +629,18 @@ async fn create_test_websocket_state_with_extension_manager(
         .await
         .expect("notification outbox"),
     );
+    let call_teardown_outbox = Arc::new(
+        crate::call_teardown_outbox::CallTeardownOutboxStore::new(
+            app_state.db_pool.global().clone(),
+        )
+        .await
+        .expect("call teardown outbox"),
+    );
+    let call_teardown_persistence =
+        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor::new(
+            Arc::clone(&call_teardown_outbox),
+            tokio::runtime::Handle::current(),
+        );
 
     let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
@@ -700,6 +712,9 @@ async fn create_test_websocket_state_with_extension_manager(
                     ),
                     push_service,
                     notification_outbox,
+                    call_teardown_outbox,
+                    call_teardown_persistence,
+                    call_teardown_executor: None,
                     notification_settings_projection,
                     dnd_projection,
                     dnd_reader,

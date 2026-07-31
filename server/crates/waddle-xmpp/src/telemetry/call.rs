@@ -121,6 +121,63 @@ pub fn increment_call_teardown_stale_dropped() {
     );
 }
 
+/// Record the durable teardown queue depth observed by one janitor sweep.
+pub fn record_call_teardown_outbox_depth(depth: u64) {
+    crate::histogram_record!(
+        "waddle.call.teardown.outbox.depth",
+        "1",
+        "Queued durable call teardown intents observed at sweep time.",
+        depth as f64,
+    );
+}
+
+/// Record the age of the oldest queued teardown intent observed by a sweep.
+pub fn record_call_teardown_outbox_oldest_age(seconds: f64) {
+    crate::histogram_record!(
+        "waddle.call.teardown.outbox.oldest_age",
+        "s",
+        "Age of the oldest queued durable call teardown intent.",
+        buckets: crate::telemetry::SECOND_SCALE_BUCKETS,
+        seconds,
+    );
+}
+
+/// Count durable teardown intents completed by the outbox drain.
+pub fn add_call_teardown_outbox_drained(count: u64) {
+    if count > 0 {
+        crate::counter_add!(
+            "waddle.call.teardown.outbox.drained",
+            "1",
+            "Durable call teardown intents completed by the outbox drain.",
+            count,
+        );
+    }
+}
+
+/// Count durable teardown intents scheduled for another attempt.
+pub fn add_call_teardown_outbox_requeued(count: u64) {
+    if count > 0 {
+        crate::counter_add!(
+            "waddle.call.teardown.outbox.requeued",
+            "1",
+            "Durable call teardown intents requeued after retryable failures.",
+            count,
+        );
+    }
+}
+
+/// Count durable teardown intents that exhausted their retry budget.
+pub fn add_call_teardown_outbox_failed(count: u64) {
+    if count > 0 {
+        crate::counter_add!(
+            "waddle.call.teardown.outbox.failed",
+            "1",
+            "Durable call teardown intents moved to terminal failure.",
+            count,
+        );
+    }
+}
+
 /// Record the wall-clock duration of one LiveKit reconciliation pass.
 pub fn record_reconcile_pass_duration(seconds: f64) {
     crate::histogram_record!(

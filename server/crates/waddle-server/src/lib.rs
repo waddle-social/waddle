@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod call_teardown_outbox;
 pub mod channel_space_links;
 pub mod clustering;
 pub mod config;
