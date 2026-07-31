@@ -430,12 +430,22 @@ impl FullJidDeliveryOutcome {
 /// over on resume) and `MaybeCommitted` (ambiguous cluster relay —
 /// may well have reached the peer, so the alert must not over-read)
 /// count `ok`. `Unavailable` (confirmed offline — the caller gets the
-/// undeliverable bounce) and `Dropped` (the invite verifiably never
-/// landed anywhere: recipient backpressure after bounded retries, or
-/// a storage error recording to detached — no bounce is sent) count
-/// `failed{reason=peer_unavailable}`. A `Dropped` spike therefore
-/// means delivery loss, not necessarily an offline peer; the runbook
-/// on `CallSetupFailureRate` covers both readings.
+/// undeliverable bounce) and `Dropped` count
+/// `failed{reason=peer_unavailable}`; no bounce is sent for `Dropped`.
+///
+/// `Dropped` is mostly definite loss (recipient channel still full
+/// after bounded retries, storage error recording to detached) but
+/// also absorbs `ActorSendFailure::MaybeEnqueued` — an actor ask that
+/// timed out after possibly enqueueing, where the invite may still be
+/// delivered. Counting that ambiguous sliver as `failed` is
+/// deliberate, and deliberately the opposite of the `MaybeCommitted`
+/// → `ok` choice: `MaybeCommitted` is a healthy-path cluster
+/// ambiguity, while a `MaybeEnqueued` timeout means the local user
+/// actor is congested or wedged — a state in which call setup IS
+/// degraded, so erring toward the alert firing is the useful reading.
+/// A `Dropped`-driven spike therefore means delivery loss or actor
+/// congestion, not necessarily an offline peer; the runbook on
+/// `CallSetupFailureRate` covers the readings.
 pub(crate) fn close_call_setup_from_outcome(
     call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
     outcome: FullJidDeliveryOutcome,
