@@ -119,7 +119,27 @@ pub(super) fn register_call_setup_counters() {
 /// discouraged by the [`Self::open`] constructor being the only way
 /// to build one.
 #[derive(Debug, Clone)]
-pub struct PendingCallSetupRoute(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub struct PendingCallSetupRoute(std::sync::Arc<TicketCell>);
+
+/// Shared closed bit with a Drop backstop: when the LAST clone of an
+/// unclosed ticket is dropped — the routing pipeline discarded the
+/// invite without resolving delivery — the attempt is closed as
+/// `failed{reason=route_abandoned}` so `attempted` always receives a
+/// terminal increment and the success-rate denominator cannot leak
+/// (#1611 review).
+#[derive(Debug)]
+struct TicketCell(std::sync::atomic::AtomicBool);
+
+impl Drop for TicketCell {
+    fn drop(&mut self) {
+        if !self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::warn!(
+                "call-setup ticket dropped without a disposition; counting route_abandoned"
+            );
+            increment_call_setup_failed(CallSetupFailureReason::RouteAbandoned);
+        }
+    }
+}
 
 impl PendingCallSetupRoute {
     /// Open a ticket for a routed 1:1 `session-initiate`. Only the
@@ -127,8 +147,8 @@ impl PendingCallSetupRoute {
     /// this; everything downstream receives the ticket through
     /// `OutboundEvent::RouteToConnection`.
     pub fn open() -> Self {
-        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            false,
+        Self(std::sync::Arc::new(TicketCell(
+            std::sync::atomic::AtomicBool::new(false),
         )))
     }
 
@@ -136,6 +156,7 @@ impl PendingCallSetupRoute {
     /// close and may count.
     fn close(&self) -> bool {
         self.0
+             .0
             .compare_exchange(
                 false,
                 true,
@@ -184,6 +205,40 @@ pub fn record_call_setup_rejected(reason: CallSetupFailureReason) {
 #[cfg(test)]
 mod pending_call_setup_route_tests {
     use super::PendingCallSetupRoute;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unclosed_dropped_ticket_counts_route_abandoned_once() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let ticket = PendingCallSetupRoute::open();
+        let clone = ticket.clone();
+        drop(ticket);
+        // The backstop fires only when the LAST clone goes away.
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.failed", &[("reason", "route_abandoned")])
+                .unwrap_or(0),
+            0
+        );
+        drop(clone);
+        assert_eq!(
+            metrics.counter_sum("waddle.call.setup.failed", &[("reason", "route_abandoned")]),
+            Some(1)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_closed_ticket_drops_without_extra_counts() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let ticket = PendingCallSetupRoute::open();
+        ticket.delivered();
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.failed", &[])
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_cloned_ticket_closes_exactly_once() {

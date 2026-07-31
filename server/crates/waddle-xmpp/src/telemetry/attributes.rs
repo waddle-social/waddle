@@ -552,12 +552,20 @@ pub enum CallSetupFailureReason {
     /// not the Jingle handler: the disposition is only known after
     /// the sans-I/O boundary.
     PeerUnavailable,
+    /// The routed invite's ticket was dropped without any disposition
+    /// — the routing pipeline discarded the invite (or panicked)
+    /// before delivery was resolved. Counted from the ticket's Drop
+    /// guard so `attempted` always gets a terminal `ok`/`failed` and
+    /// the success-rate denominator cannot silently leak (#1611
+    /// review). A nonzero rate here is a routing-pipeline bug, not a
+    /// peer or client condition.
+    RouteAbandoned,
 }
 
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -569,6 +577,7 @@ impl CallSetupFailureReason {
         Self::MembershipCheckFailed,
         Self::OwnerUnreachable,
         Self::PeerUnavailable,
+        Self::RouteAbandoned,
     ];
 }
 
@@ -590,6 +599,7 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::MembershipCheckFailed => "membership_check_failed",
             Self::OwnerUnreachable => "owner_unreachable",
             Self::PeerUnavailable => "peer_unavailable",
+            Self::RouteAbandoned => "route_abandoned",
         }
     }
 }
