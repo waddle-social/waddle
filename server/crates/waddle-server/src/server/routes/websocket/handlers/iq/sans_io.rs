@@ -211,7 +211,7 @@ pub(super) async fn handle_sans_io_iq(
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
             crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-                state, &room_jid, full_jid,
+                state, &room_jid, full_jid, None,
             )
             .await;
         }

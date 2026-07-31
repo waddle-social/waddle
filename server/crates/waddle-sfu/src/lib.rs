@@ -34,7 +34,10 @@ mod turn;
 mod webhook;
 
 pub use admin::{LiveKitAdmin, RoomOccupancy};
-pub use call::{CallId, CallState, Identity, MediaCapabilities};
+pub use call::{
+    CallGeneration, CallId, CallState, Identity, MediaCapabilities, ObservedCallSids,
+    ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
+};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
 pub use error::SfuError;
@@ -72,8 +75,8 @@ pub trait SfuService: Send + Sync + 'static {
     /// configuration follows.
     fn issue_turn_credentials(&self, identity: &Identity) -> Result<TurnCredential, SfuError>;
 
-    /// Record that `identity` has joined `call_id`. Idempotent: a
-    /// repeat join is a no-op (the registry is a set).
+    /// Record that `identity` has joined `call_id`. Idempotent within
+    /// one call generation: a repeat join is a no-op.
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity);
 
     /// Return whether `identity` is currently registered in
@@ -97,7 +100,12 @@ pub trait SfuService: Send + Sync + 'static {
     /// `Active { remaining }` instead): a stale or replayed teardown
     /// must not trigger room-end broadcast or SFU-side room deletion
     /// for a call the caller does not actually own membership in.
-    fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState;
+    fn unregister_call_participant(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> TeardownDisposition;
 
     /// Targeted, bookkeeping-only revocation of ONE issued JWT for
     /// the pair (#1444): moves `jti` into the revocation set without
@@ -124,7 +132,28 @@ pub trait SfuService: Send + Sync + 'static {
     /// that the SFU already evicted the participant, and a
     /// back-channel `RemoveParticipant` would amplify into a wasted
     /// round-trip plus a race window against quick rejoins.
-    fn note_participant_left(&self, call_id: &CallId, identity: &Identity);
+    fn note_participant_left(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> TeardownDisposition;
+
+    /// Learn observed room/participant sids for an existing
+    /// `(call_id, identity)` without changing membership or issuing
+    /// admin calls. Used by SID-bearing informational events such as
+    /// `participant_joined` so later teardown can reject an older call
+    /// incarnation reusing the same human room name.
+    ///
+    /// Implementations MUST NOT create new call or participant entries
+    /// from this method. If either is unknown, the observation is
+    /// ignored and reported as applied.
+    fn observe_call_participant_sids(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> SidObservationDisposition;
 
     /// Push replacement media grants to a live participant after an
     /// XEP-0045 voice change, without disconnecting them: losing voice

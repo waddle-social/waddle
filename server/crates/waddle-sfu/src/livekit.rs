@@ -4,7 +4,7 @@
 //! containing the set of joined [`Identity`] values, used by the MUC
 //! focus path to decide when a call has ended.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -14,7 +14,10 @@ use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
 use crate::admin::{admin_base_url_from_ws, LiveKitAdmin, ReqwestLiveKitAdmin};
-use crate::call::{CallId, CallState, Identity, MediaCapabilities};
+use crate::call::{
+    CallGeneration, CallId, CallState, Identity, MediaCapabilities, ObservedCallSids,
+    ParticipantSid, RoomSid, SidObservationDisposition, TeardownDisposition,
+};
 use crate::config::{SfuConfig, WebsocketUrl};
 use crate::error::SfuError;
 use crate::token::{mint_join_token, IssuedJti, JoinToken, Jti, MintInputs};
@@ -66,11 +69,31 @@ pub const RECONCILE_GRACE_SECONDS: i64 = 120;
 /// participants within ~2 passes.
 pub(crate) const RECONCILE_ABSENT_PASSES: u32 = 2;
 
+#[derive(Debug, Clone)]
+struct ParticipantState {
+    participant_sid: Option<ParticipantSid>,
+}
+
+impl ParticipantState {
+    fn new() -> Self {
+        Self {
+            participant_sid: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CallEntry {
+    generation: CallGeneration,
+    room_sid: Option<RoomSid>,
+    participants: HashMap<Identity, ParticipantState>,
+}
+
 /// Shared registry of in-call participants. Held in an `Arc` so the
 /// spawned admin teardown future can re-check membership before
 /// firing `DeleteRoom`, closing the race where a fresh joiner
 /// re-creates the call between local-clear and the remote evict.
-type CallRegistry = Arc<DashMap<CallId, HashSet<Identity>>>;
+type CallRegistry = Arc<DashMap<CallId, CallEntry>>;
 
 /// Key identifying one participant within one call across the
 /// per-participant side tables.
@@ -92,6 +115,22 @@ fn reap_grant_lock(locks: &GrantLocks, key: &ParticipantKey) {
     locks.remove_if(key, |_, held| Arc::strong_count(held) == 2);
 }
 
+fn current_teardown_generation(
+    calls: &CallRegistry,
+    call_id: &CallId,
+    scheduled_generation: Option<CallGeneration>,
+) -> RemoteTeardownDisposition {
+    let Some(scheduled_generation) = scheduled_generation else {
+        return RemoteTeardownDisposition::Proceed;
+    };
+    match calls.get(call_id) {
+        Some(entry) if entry.generation > scheduled_generation => {
+            RemoteTeardownDisposition::StaleGeneration
+        }
+        _ => RemoteTeardownDisposition::Proceed,
+    }
+}
+
 /// Result of [`LiveKitSfu::clear_local_state`].
 #[derive(Debug, Clone, Copy)]
 struct ClearOutcome {
@@ -102,13 +141,34 @@ struct ClearOutcome {
     /// concurrent) hold no participant for it any more. Only this
     /// flag may gate a `DeleteRoom` (#1129).
     emptied: bool,
+    generation: CallGeneration,
     /// Participants still registered after the clear.
     remaining: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidGuardDisposition {
+    Applied,
+    StaleSid,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClearDisposition {
+    Cleared(ClearOutcome),
+    NoCall,
+    StaleSid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteTeardownDisposition {
+    Proceed,
+    StaleGeneration,
 }
 
 pub struct LiveKitSfu {
     config: SfuConfig,
     calls: CallRegistry,
+    call_generations: Arc<DashMap<CallId, u64>>,
     /// Live JWT identifiers per `(call, identity)`, each carrying
     /// its `exp` so revocation entries can be swept once the token
     /// would have lapsed anyway. Capped at
@@ -216,6 +276,7 @@ impl LiveKitSfu {
         Self {
             config,
             calls: Arc::new(DashMap::new()),
+            call_generations: Arc::new(DashMap::new()),
             issued: DashMap::new(),
             registered_at: DashMap::new(),
             absent_streak: DashMap::new(),
@@ -237,7 +298,10 @@ impl LiveKitSfu {
     /// [`Self::unregister_call_participant`] which already returns a
     /// [`CallState`] derived from this.
     pub fn participant_count(&self, call_id: &CallId) -> usize {
-        self.calls.get(call_id).map(|e| e.len()).unwrap_or(0)
+        self.calls
+            .get(call_id)
+            .map(|entry| entry.participants.len())
+            .unwrap_or(0)
     }
 
     /// Number of currently-tracked revoked JTIs. Exposed for tests
@@ -270,6 +334,66 @@ impl LiveKitSfu {
         self.revoked.retain(|_, exp| *exp > now);
     }
 
+    fn guard_and_learn_observed_sids(
+        call_id: &CallId,
+        identity: &Identity,
+        entry: &mut CallEntry,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> SidGuardDisposition {
+        let Some(observed_sids) = observed_sids else {
+            return SidGuardDisposition::Applied;
+        };
+        let identity_is_tracked = entry.participants.contains_key(identity);
+
+        // Validate every learned value before mutating the entry. A
+        // participant-SID mismatch must be a true no-op, including when
+        // the same event also carries the first room SID we have seen.
+        if let Some(room_sid) = observed_sids.room_sid.as_ref() {
+            if let Some(stored_room_sid) = entry.room_sid.as_ref() {
+                if stored_room_sid != room_sid {
+                    tracing::warn!(
+                        call_id = %call_id,
+                        identity = %identity.as_livekit_identity(),
+                        room_sid = %room_sid,
+                        stored_room_sid = %stored_room_sid,
+                        "LiveKit event ignored as stale: room sid mismatch"
+                    );
+                    return SidGuardDisposition::StaleSid;
+                }
+            }
+        }
+
+        if let Some(participant_sid) = observed_sids.participant_sid.as_ref() {
+            if let Some(state) = entry.participants.get(identity) {
+                if let Some(stored_participant_sid) = state.participant_sid.as_ref() {
+                    if stored_participant_sid != participant_sid {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            identity = %identity.as_livekit_identity(),
+                            participant_sid = %participant_sid,
+                            stored_participant_sid = %stored_participant_sid,
+                            "LiveKit event ignored as stale: participant sid mismatch"
+                        );
+                        return SidGuardDisposition::StaleSid;
+                    }
+                }
+            }
+        }
+
+        if identity_is_tracked && entry.room_sid.is_none() {
+            entry.room_sid.clone_from(&observed_sids.room_sid);
+        }
+        if let Some(state) = entry.participants.get_mut(identity) {
+            if state.participant_sid.is_none() {
+                state
+                    .participant_sid
+                    .clone_from(&observed_sids.participant_sid);
+            }
+        }
+
+        SidGuardDisposition::Applied
+    }
+
     /// Drop `identity` from the in-memory registry and revoke every
     /// JWT it ever held. Returns the [`ClearOutcome`] the caller uses
     /// to distinguish "this participant just left the last seat"
@@ -286,11 +410,31 @@ impl LiveKitSfu {
     /// registry nor exposed to the spawned `DeleteRoom` (the caller
     /// derives its emptiness decision from `emptied`, which is `false`
     /// in that case).
-    fn clear_local_state(&self, call_id: &CallId, identity: &Identity) -> ClearOutcome {
-        let was_present = match self.calls.get_mut(call_id) {
-            Some(mut entry) => entry.remove(identity),
-            None => false,
+    fn clear_local_state(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> ClearDisposition {
+        let mut entry = match self.calls.get_mut(call_id) {
+            Some(entry) => entry,
+            None => return ClearDisposition::NoCall,
         };
+        if matches!(
+            Self::guard_and_learn_observed_sids(
+                call_id,
+                identity,
+                entry.value_mut(),
+                observed_sids
+            ),
+            SidGuardDisposition::StaleSid
+        ) {
+            return ClearDisposition::StaleSid;
+        }
+
+        let was_present = entry.participants.remove(identity).is_some();
+        let generation = entry.generation;
+        drop(entry);
 
         if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
             for issued in issued {
@@ -331,19 +475,23 @@ impl LiveKitSfu {
         // is *still* empty at removal time (see doc comment above).
         let emptied = self
             .calls
-            .remove_if(call_id, |_, participants| participants.is_empty())
+            .remove_if(call_id, |_, entry| entry.participants.is_empty())
             .is_some();
         let remaining = if emptied {
             0
         } else {
-            self.calls.get(call_id).map(|e| e.len()).unwrap_or(0)
+            self.calls
+                .get(call_id)
+                .map(|entry| entry.participants.len())
+                .unwrap_or(0)
         };
 
-        ClearOutcome {
+        ClearDisposition::Cleared(ClearOutcome {
             was_present,
             emptied,
+            generation,
             remaining,
-        }
+        })
     }
 
     /// Fire-and-forget the LiveKit admin REST calls that mirror a
@@ -364,7 +512,13 @@ impl LiveKitSfu {
     /// pre-admin behaviour for those tests. The admin concurrency
     /// semaphore bounds in-flight HTTP tasks so a teardown burst
     /// can't fan out unboundedly.
-    fn schedule_remote_teardown(&self, call_id: CallId, identity: Identity, we_just_emptied: bool) {
+    fn schedule_remote_teardown(
+        &self,
+        call_id: CallId,
+        identity: Identity,
+        we_just_emptied: bool,
+        generation: Option<CallGeneration>,
+    ) {
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
@@ -382,6 +536,19 @@ impl LiveKitSfu {
                 return;
             };
 
+            if matches!(
+                current_teardown_generation(&calls, &call_id, generation),
+                RemoteTeardownDisposition::StaleGeneration
+            ) {
+                tracing::warn!(
+                    call_id = %call_id,
+                    identity = %identity.as_livekit_identity(),
+                    generation = ?generation,
+                    "LiveKit teardown admin call skipped for stale generation"
+                );
+                return;
+            }
+
             if let Err(err) = admin.remove_participant(&call_id, &identity).await {
                 tracing::warn!(
                     call_id = %call_id,
@@ -398,6 +565,18 @@ impl LiveKitSfu {
                 // session, so only proceed when the call is *still*
                 // empty in our local view.
                 if calls.get(&call_id).is_none() {
+                    if matches!(
+                        current_teardown_generation(&calls, &call_id, generation),
+                        RemoteTeardownDisposition::StaleGeneration
+                    ) {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            identity = %identity.as_livekit_identity(),
+                            generation = ?generation,
+                            "LiveKit DeleteRoom skipped for stale generation"
+                        );
+                        return;
+                    }
                     delete_room_if_livekit_empty(admin.as_ref(), &calls, &call_id, &identity).await;
                 }
             }
@@ -601,7 +780,12 @@ impl LiveKitSfu {
         let snapshot: Vec<(CallId, Vec<Identity>)> = self
             .calls
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().iter().cloned().collect()))
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    entry.value().participants.keys().cloned().collect(),
+                )
+            })
             .collect();
 
         let mut swept = Vec::new();
@@ -674,8 +858,11 @@ impl LiveKitSfu {
                     );
                     continue;
                 }
-                let outcome = self.clear_local_state(&call_id, &identity);
-                if outcome.was_present {
+                let outcome = self.clear_local_state(&call_id, &identity, None);
+                if let ClearDisposition::Cleared(ClearOutcome {
+                    was_present: true, ..
+                }) = outcome
+                {
                     tracing::info!(
                         call_id = %call_id,
                         identity = %identity.as_livekit_identity(),
@@ -764,10 +951,37 @@ impl SfuService for LiveKitSfu {
     }
 
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity) {
-        self.calls
-            .entry(call_id.clone())
-            .or_default()
-            .insert(identity.clone());
+        match self.calls.entry(call_id.clone()) {
+            dashmap::Entry::Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                if entry.participants.is_empty() {
+                    let mut last_generation =
+                        self.call_generations.entry(call_id.clone()).or_insert(0);
+                    *last_generation += 1;
+                    entry.generation = CallGeneration::new(*last_generation);
+                    entry.room_sid = None;
+                }
+                entry
+                    .participants
+                    .entry(identity.clone())
+                    .or_insert_with(ParticipantState::new);
+            }
+            dashmap::Entry::Vacant(entry) => {
+                let generation = {
+                    let mut last_generation =
+                        self.call_generations.entry(call_id.clone()).or_insert(0);
+                    *last_generation += 1;
+                    CallGeneration::new(*last_generation)
+                };
+                let mut participants = HashMap::new();
+                participants.insert(identity.clone(), ParticipantState::new());
+                entry.insert(CallEntry {
+                    generation,
+                    room_sid: None,
+                    participants,
+                });
+            }
+        }
         // Stamp (or refresh) the registration time so the
         // reconciliation backstop's grace window is measured from the
         // most recent (re)join, not a stale earlier attempt. A
@@ -783,7 +997,7 @@ impl SfuService for LiveKitSfu {
     fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool {
         self.calls
             .get(call_id)
-            .is_some_and(|entry| entry.contains(identity))
+            .is_some_and(|entry| entry.participants.contains_key(identity))
     }
 
     fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti) {
@@ -811,12 +1025,30 @@ impl SfuService for LiveKitSfu {
         self.revoked.insert(jti.clone(), exp);
     }
 
-    fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState {
-        let ClearOutcome {
-            was_present,
-            emptied,
-            remaining,
-        } = self.clear_local_state(call_id, identity);
+    fn unregister_call_participant(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> TeardownDisposition {
+        let clear = self.clear_local_state(call_id, identity, observed_sids);
+        let (was_present, emptied, generation, remaining) = match clear {
+            ClearDisposition::Cleared(ClearOutcome {
+                was_present,
+                emptied,
+                generation,
+                remaining,
+            }) => (was_present, emptied, Some(generation), remaining),
+            ClearDisposition::StaleSid => return TeardownDisposition::StaleSid,
+            ClearDisposition::NoCall => {
+                let generation = self
+                    .call_generations
+                    .get(call_id)
+                    .map(|generation| CallGeneration::new(*generation));
+                self.schedule_remote_teardown(call_id.clone(), identity.clone(), false, generation);
+                return TeardownDisposition::Applied(CallState::Active { remaining: 0 });
+            }
+        };
 
         let state = if was_present && emptied {
             CallState::Ended
@@ -841,12 +1073,22 @@ impl SfuService for LiveKitSfu {
         // the spawn re-checks the registry inside the future to close
         // the rejoin race.
         let we_just_emptied = was_present && emptied;
-        self.schedule_remote_teardown(call_id.clone(), identity.clone(), we_just_emptied);
+        self.schedule_remote_teardown(
+            call_id.clone(),
+            identity.clone(),
+            we_just_emptied,
+            generation,
+        );
 
-        state
+        TeardownDisposition::Applied(state)
     }
 
-    fn note_participant_left(&self, call_id: &CallId, identity: &Identity) {
+    fn note_participant_left(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> TeardownDisposition {
         // LiveKit's `participant_left` webhook is the SFU
         // acknowledging it already removed the participant — usually
         // because we asked it to. Doing only the local cleanup avoids
@@ -855,7 +1097,45 @@ impl SfuService for LiveKitSfu {
         // (LiveKit would return `not_found`, which is mapped to
         // success, but the round-trip is wasted and amplifies the
         // race with quick rejoins).
-        let _ = self.clear_local_state(call_id, identity);
+        let clear = match self.clear_local_state(call_id, identity, observed_sids) {
+            ClearDisposition::Cleared(clear) => clear,
+            ClearDisposition::StaleSid => return TeardownDisposition::StaleSid,
+            ClearDisposition::NoCall => {
+                return TeardownDisposition::Applied(CallState::Active { remaining: 0 });
+            }
+        };
+
+        let state = if clear.was_present && clear.emptied {
+            CallState::Ended
+        } else {
+            CallState::Active {
+                remaining: clear.remaining,
+            }
+        };
+        TeardownDisposition::Applied(state)
+    }
+
+    fn observe_call_participant_sids(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> SidObservationDisposition {
+        let Some(mut entry) = self.calls.get_mut(call_id) else {
+            return SidObservationDisposition::Applied;
+        };
+        if !entry.participants.contains_key(identity) {
+            return SidObservationDisposition::Applied;
+        }
+        match Self::guard_and_learn_observed_sids(
+            call_id,
+            identity,
+            entry.value_mut(),
+            observed_sids,
+        ) {
+            SidGuardDisposition::Applied => SidObservationDisposition::Applied,
+            SidGuardDisposition::StaleSid => SidObservationDisposition::StaleSid,
+        }
     }
 
     fn update_participant_capabilities(
@@ -908,7 +1188,7 @@ impl SfuService for LiveKitSfu {
     fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity> {
         self.calls
             .get(call_id)
-            .map(|entry| entry.iter().cloned().collect())
+            .map(|entry| entry.participants.keys().cloned().collect())
             .unwrap_or_default()
     }
 }

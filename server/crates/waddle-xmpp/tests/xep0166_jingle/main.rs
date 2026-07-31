@@ -1216,7 +1216,7 @@ fn xep_0166_survivor_terminate_after_peer_swept_acks_and_cleans_up() {
     assert_eq!(sfu.issued_count(&call, &alice_identity), 1);
 
     // Peer crash: the webhook's registry cleanup removed Bob.
-    sfu.note_participant_left(&call, &bob_identity);
+    sfu.note_participant_left(&call, &bob_identity, None);
     assert!(!sfu.has_call_participant(&call, &bob_identity));
     assert!(sfu.has_call_participant(&call, &alice_identity));
 

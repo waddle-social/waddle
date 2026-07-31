@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
-use crate::config::ApiSecret;
+use crate::{config::ApiSecret, ParticipantSid, RoomSid};
 
 /// Errors that arise while verifying a LiveKit webhook delivery.
 ///
@@ -234,10 +234,11 @@ pub struct RoomInfo {
     /// scoped `<bare-jid>::<sid>` (1:1) or the MUC room JID (group),
     /// matching [`crate::CallId`].
     pub name: String,
-    /// LiveKit-internal opaque room sid. Recorded for logs but not
-    /// load-bearing.
+    /// LiveKit-internal opaque room sid. Used to distinguish a stale
+    /// webhook for an older room incarnation from a newer call reusing
+    /// the same human room name.
     #[serde(default)]
-    pub sid: Option<String>,
+    pub sid: Option<RoomSid>,
 }
 
 /// LiveKit `ParticipantInfo` projection. Only the identity field is
@@ -247,7 +248,7 @@ pub struct RoomInfo {
 pub struct ParticipantInfo {
     pub identity: String,
     #[serde(default)]
-    pub sid: Option<String>,
+    pub sid: Option<ParticipantSid>,
     #[serde(default)]
     pub state: Option<String>,
 }
@@ -310,10 +311,33 @@ mod tests {
             LiveKitWebhookEvent::ParticipantLeft(env) => {
                 assert_eq!(env.id.as_deref(), Some("EV_test_1"));
                 assert_eq!(env.room.name, "general@muc.test");
+                assert_eq!(
+                    env.room.sid,
+                    Some(RoomSid::new("RM_xxx").expect("valid typed room sid"))
+                );
                 assert_eq!(env.participant.identity, "alice@waddle.test/desktop");
+                assert_eq!(
+                    env.participant.sid,
+                    Some(ParticipantSid::new("PA_xxx").expect("valid typed participant sid"))
+                );
             }
             other => panic!("expected ParticipantLeft, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_invalid_sid_shapes_during_payload_parse() {
+        let secret = fixture_secret();
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "room": { "name": "general@muc.test", "sid": "" },
+            "participant": { "identity": "alice@waddle.test/desktop", "sid": "PA_xxx" },
+        }))
+        .unwrap();
+        let auth = format!("Bearer {}", sign_for_body(&secret, &body));
+
+        let err = verify_webhook_signature(&secret, Some(&auth), &body).unwrap_err();
+        assert!(matches!(err, WebhookVerifyError::BodyJson(_)));
     }
 
     #[test]

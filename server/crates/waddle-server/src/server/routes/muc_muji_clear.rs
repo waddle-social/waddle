@@ -11,8 +11,10 @@ use std::sync::{Arc, LazyLock};
 use jid::{BareJid, FullJid};
 use minidom::Element;
 use tracing::{debug, warn};
+use waddle_sfu::{ObservedCallSids, TeardownDisposition};
 use waddle_xmpp::muc::build_occupant_presence;
 use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
+use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp::xep::{
@@ -24,7 +26,7 @@ use xmpp_parsers::message::{Message, MessageType};
 
 use super::websocket::{
     get_room_actor_result, interpret_loop::build_interpret_deps,
-    note_participant_left_from_webhook, WebSocketState,
+    note_participant_left_from_webhook, observe_participant_sids_from_webhook, WebSocketState,
 };
 
 static CALL_THREAD_END_LOCKS: LazyLock<dashmap::DashMap<BareJid, Arc<tokio::sync::Mutex<()>>>> =
@@ -55,12 +57,21 @@ pub(crate) async fn clear_muji_presence_for_departure(
     state: &WebSocketState,
     room_jid: &BareJid,
     full_jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
 ) -> WebhookEffectOutcome {
     debug!(
         room = %room_jid,
         identity = %full_jid,
         "Clearing Muji presence for departed participant"
     );
+
+    if matches!(
+        observe_participant_sids_from_webhook(state, room_jid, full_jid, observed_sids),
+        Some(waddle_sfu::SidObservationDisposition::StaleSid)
+    ) {
+        increment_call_teardown_stale_dropped();
+        return WebhookEffectOutcome::Completed;
+    }
 
     let actor = match get_room_actor_result(state, room_jid).await {
         Ok(Some(actor)) => actor,
@@ -70,7 +81,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "MUC room actor is absent during LiveKit departure cleanup; treating as permanently gone"
             );
-            note_participant_left_from_webhook(state, room_jid, full_jid);
+            record_participant_left(state, room_jid, full_jid, observed_sids);
             return WebhookEffectOutcome::Permanent("room_actor_absent");
         }
         Err(error) => {
@@ -96,7 +107,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "Participant not in MUC actor; SFU registry cleanup only"
             );
-            note_participant_left_from_webhook(state, room_jid, full_jid);
+            record_participant_left(state, room_jid, full_jid, observed_sids);
             return maybe_broadcast_call_thread_ended(state, room_jid).await;
         }
         Err(error) => {
@@ -111,8 +122,22 @@ pub(crate) async fn clear_muji_presence_for_departure(
     };
 
     broadcast_muji_clear(state, room_jid, full_jid, &outcome);
-    note_participant_left_from_webhook(state, room_jid, full_jid);
+    record_participant_left(state, room_jid, full_jid, observed_sids);
     maybe_broadcast_call_thread_ended(state, room_jid).await
+}
+
+fn record_participant_left(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
+) {
+    if matches!(
+        note_participant_left_from_webhook(state, room_jid, full_jid, observed_sids),
+        Some(TeardownDisposition::StaleSid)
+    ) {
+        increment_call_teardown_stale_dropped();
+    }
 }
 
 /// Broadcast a server-originated Muji-presence clear to every remaining

@@ -31,10 +31,12 @@ use axum::Router;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_sfu::{
-    verify_webhook_signature, CallCorrelationId, CallId, LiveKitWebhookEvent, ParticipantEnvelope,
-    SfuReconciler, WebhookVerifyError, RECONCILE_GRACE_SECONDS,
+    verify_webhook_signature, CallCorrelationId, CallId, LiveKitWebhookEvent, ObservedCallSids,
+    ParticipantEnvelope, ParticipantInfo, RoomInfo, SfuReconciler, SidObservationDisposition,
+    TeardownDisposition, WebhookVerifyError, RECONCILE_GRACE_SECONDS,
 };
 use waddle_xmpp::telemetry::attributes::{MetricAttribute, WebhookEventType, WebhookOutcome};
+use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 
 use super::muc_muji_clear::{clear_muji_presence_for_departure, WebhookEffectOutcome};
 use super::webhook_delivery::{
@@ -188,6 +190,7 @@ async fn livekit_webhook_handler(
             info!(room = %env.room.name, "LiveKit reported room finished; sweeping surviving participants");
             match CallId::new(env.room.name.clone()) {
                 Ok(call_id) => {
+                    let observed_sids = observed_sids_for_room(&env.room);
                     let survivors = sfu.participants_for_call(&call_id);
                     let mut outcome = WebhookEffectOutcome::Completed;
                     for identity in survivors {
@@ -195,6 +198,7 @@ async fn livekit_webhook_handler(
                             &state,
                             &env.room.name,
                             identity.as_jid().to_string().as_str(),
+                            Some(&observed_sids),
                         )
                         .await;
                         if matches!(survivor_outcome, WebhookEffectOutcome::Retryable(_)) {
@@ -235,8 +239,17 @@ async fn livekit_webhook_handler(
             // otherwise publish for the remainder of the token's TTL.
             // Re-deriving their current voice here and pushing it
             // converges them within one webhook round-trip.
-            if reassert_voice_grants_on_join(&state, &env.room.name, &env.participant.identity)
-                .await
+            let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+            if observe_participant_sids(&state, env, &observed_sids)
+                == SidObservationDisposition::StaleSid
+            {
+                WebhookEffectOutcome::Completed
+            } else if reassert_voice_grants_on_join(
+                &state,
+                &env.room.name,
+                &env.participant.identity,
+            )
+            .await
                 == ReassertOutcome::RetryableFailure
             {
                 warn!(
@@ -339,6 +352,38 @@ pub(crate) fn register_webhook_counters() {
     }
 }
 
+fn observed_sids_for_participant(
+    room: &RoomInfo,
+    participant: &ParticipantInfo,
+) -> ObservedCallSids {
+    ObservedCallSids::new(room.sid.clone(), participant.sid.clone())
+}
+
+fn observed_sids_for_room(room: &RoomInfo) -> ObservedCallSids {
+    ObservedCallSids::new(room.sid.clone(), None)
+}
+
+fn observe_participant_sids(
+    state: &WebSocketState,
+    env: &ParticipantEnvelope,
+    observed_sids: &ObservedCallSids,
+) -> SidObservationDisposition {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return SidObservationDisposition::Applied;
+    };
+    let Ok(call_id) = CallId::new(env.room.name.clone()) else {
+        return SidObservationDisposition::Applied;
+    };
+    let Ok(full_jid) = env.participant.identity.parse::<FullJid>() else {
+        return SidObservationDisposition::Applied;
+    };
+    sfu.observe_call_participant_sids(
+        &call_id,
+        &waddle_sfu::Identity::from_jid(full_jid),
+        Some(observed_sids),
+    )
+}
+
 /// How often the reconciliation backstop polls LiveKit for the true
 /// participant set of every active call. Frequent enough that a ghost
 /// left by a lost `participant_left`/`room_finished` webhook clears
@@ -407,6 +452,7 @@ async fn reconcile_once(
                     state,
                     call_id.as_str(),
                     identity.as_jid().to_string().as_str(),
+                    None,
                 )
                 .await;
             }
@@ -420,7 +466,14 @@ async fn process_participant_left(
     state: &WebSocketState,
     env: &ParticipantEnvelope,
 ) -> WebhookEffectOutcome {
-    process_participant_left_for_identity(state, &env.room.name, &env.participant.identity).await
+    let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+    process_participant_left_for_identity(
+        state,
+        &env.room.name,
+        &env.participant.identity,
+        Some(&observed_sids),
+    )
+    .await
 }
 
 /// Shared cleanup implementation used by both the
@@ -532,6 +585,7 @@ async fn process_participant_left_for_identity(
     state: &WebSocketState,
     room_name: &str,
     identity: &str,
+    observed_sids: Option<&ObservedCallSids>,
 ) -> WebhookEffectOutcome {
     let full_jid = match identity.parse::<FullJid>() {
         Ok(full_jid) => full_jid,
@@ -546,7 +600,7 @@ async fn process_participant_left_for_identity(
         }
     };
     if let Ok(room_jid) = room_name.parse::<BareJid>() {
-        return clear_muji_presence_for_departure(state, &room_jid, &full_jid).await;
+        return clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids).await;
     }
 
     let call_id = match CallId::new(room_name.to_owned()) {
@@ -567,7 +621,12 @@ async fn process_participant_left_for_identity(
         identity = %identity,
         "LiveKit room name is not a MUC bare JID; clearing SFU registry by raw call id",
     );
-    note_participant_left_by_call_id(state, &call_id, &full_jid);
+    if matches!(
+        note_participant_left_by_call_id(state, &call_id, &full_jid, observed_sids),
+        Some(TeardownDisposition::StaleSid)
+    ) {
+        increment_call_teardown_stale_dropped();
+    }
     WebhookEffectOutcome::Completed
 }
 
@@ -576,7 +635,8 @@ mod tests {
     use super::*;
     use crate::server::routes::websocket::handlers::iq::handle_iq;
     use crate::server::routes::websocket::tests::{
-        create_test_websocket_state_with_calls, create_test_websocket_state_with_sfu, RecordingSfu,
+        create_test_server_owner_session, create_test_websocket_state_with_calls,
+        create_test_websocket_state_with_sfu, snapshot_room, RecordingSfu,
     };
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
@@ -585,7 +645,9 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::io;
     use std::sync::Mutex;
-    use waddle_sfu::{Identity, MediaCapabilities};
+    use waddle_sfu::{
+        Identity, MediaCapabilities, ObservedCallSids, ParticipantSid, RoomSid, TeardownDisposition,
+    };
     use waddle_xmpp::protocol::ConnectionPhase;
 
     #[derive(Clone, Default)]
@@ -756,6 +818,52 @@ mod tests {
         );
         assert!(logs.contains("\"level\":\"DEBUG\""), "{logs}");
         assert!(logs.contains("EV_duplicate_metric"), "{logs}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn room_finished_survivor_sweep_forwards_only_room_sid() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let survivor_jid: FullJid = "bob@example.com/phone".parse().expect("survivor jid");
+        recorder.set_participants(vec![Identity::from_jid(survivor_jid.clone())]);
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("call fixture has SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let body = serde_json::to_vec(&json!({
+            "event": "room_finished",
+            "id": "EV_room_finished_sid",
+            "room": {
+                "name": "alice@example.com::room-finished",
+                "sid": "RM_finished"
+            }
+        }))
+        .expect("serialize webhook body");
+        let headers = signed_webhook_headers(&secret, &body);
+
+        let response = livekit_webhook_handler(
+            Extension(state),
+            State(test_router_state()),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let notes = recorder.note_with_sids_snapshot();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].1.as_jid(), &survivor_jid);
+        assert_eq!(
+            notes[0].2.room_sid,
+            Some(RoomSid::new("RM_finished").expect("room sid"))
+        );
+        assert_eq!(notes[0].2.participant_sid, None);
     }
 
     #[tokio::test]
@@ -1397,7 +1505,7 @@ mod tests {
         let call_id = "alice@example.com::dm-1128";
         let departed = "bob@example.com/phone";
 
-        process_participant_left_for_identity(state.as_ref(), call_id, departed).await;
+        process_participant_left_for_identity(state.as_ref(), call_id, departed, None).await;
 
         let notes = recorder.note_snapshot();
         assert_eq!(
@@ -1410,6 +1518,130 @@ mod tests {
         assert!(
             recorder.snapshot().is_empty(),
             "participant-left webhook must not call the admin-evict unregister path"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_left_scoped_1to1_threads_observed_sids_to_sfu() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let call_id = "alice@example.com::dm-observed";
+        let departed = "bob@example.com/phone";
+        let observed_sids = ObservedCallSids {
+            room_sid: Some(RoomSid::new("RM_observed").expect("room sid")),
+            participant_sid: Some(ParticipantSid::new("PA_observed").expect("participant sid")),
+        };
+
+        process_participant_left_for_identity(
+            state.as_ref(),
+            call_id,
+            departed,
+            Some(&observed_sids),
+        )
+        .await;
+
+        let notes = recorder.note_with_sids_snapshot();
+        assert_eq!(notes.len(), 1, "participant-left must note exactly once");
+        assert_eq!(notes[0].0.as_str(), call_id);
+        assert_eq!(notes[0].1.as_livekit_identity(), departed);
+        assert_eq!(notes[0].2, observed_sids);
+        assert!(
+            recorder.snapshot().is_empty(),
+            "participant-left webhook must not call the admin-evict unregister path"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_joined_threads_observed_sids_to_sfu() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let env = ParticipantEnvelope {
+            id: Some("EV_joined_observed".to_owned()),
+            room: RoomInfo {
+                name: "alice@example.com::dm-observed".to_owned(),
+                sid: Some(RoomSid::new("RM_joined").expect("room sid")),
+            },
+            participant: ParticipantInfo {
+                identity: "bob@example.com/phone".to_owned(),
+                sid: Some(ParticipantSid::new("PA_joined").expect("participant sid")),
+                state: None,
+            },
+        };
+        let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+
+        assert_eq!(
+            observe_participant_sids(state.as_ref(), &env, &observed_sids),
+            SidObservationDisposition::Applied
+        );
+
+        let observations = recorder.observed_with_sids_snapshot();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0.as_str(), env.room.name);
+        assert_eq!(
+            observations[0].1.as_livekit_identity(),
+            env.participant.identity
+        );
+        assert_eq!(observations[0].2, observed_sids);
+    }
+
+    #[tokio::test]
+    async fn stale_sid_drop_skips_muc_clear_and_counts_metric() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let recorder = Arc::new(RecordingSfu::default());
+        recorder.set_note_disposition(TeardownDisposition::StaleSid);
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "stale-sid@muc.example.com".parse().expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(session),
+        )
+        .await;
+        let observed_sids = ObservedCallSids {
+            room_sid: Some(RoomSid::new("RM_stale").expect("room sid")),
+            participant_sid: Some(ParticipantSid::new("PA_stale").expect("participant sid")),
+        };
+        let room_name = room_jid.to_string();
+
+        let outcome = process_participant_left_for_identity(
+            state.as_ref(),
+            &room_name,
+            alice.as_str(),
+            Some(&observed_sids),
+        )
+        .await;
+
+        assert_eq!(outcome, WebhookEffectOutcome::Completed);
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert_eq!(
+            room.find_nick_by_real_jid(&alice),
+            Some("alice"),
+            "stale SID must not clear the current occupant from the room actor"
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.teardown.stale_dropped", &[] as &[(&str, &str)]),
+            Some(1)
+        );
+        let observed = recorder.observed_with_sids_snapshot();
+        assert_eq!(
+            observed.len(),
+            1,
+            "stale guard still inspects the webhook once"
+        );
+        assert_eq!(observed[0].2, observed_sids);
+        assert!(
+            recorder.note_with_sids_snapshot().is_empty(),
+            "stale preflight must not destructively note the participant"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "webhook stale drop must not trigger the admin-evict path"
         );
     }
 
@@ -1438,7 +1670,8 @@ mod tests {
         sfu.register_call_participant(&call_id, &alice_identity);
         sfu.register_call_participant(&call_id, &bob_identity);
 
-        process_participant_left_for_identity(state.as_ref(), call_id.as_str(), bob.as_str()).await;
+        process_participant_left_for_identity(state.as_ref(), call_id.as_str(), bob.as_str(), None)
+            .await;
 
         assert!(
             !sfu.has_call_participant(&call_id, &bob_identity),

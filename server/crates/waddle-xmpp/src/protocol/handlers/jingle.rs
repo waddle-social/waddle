@@ -783,9 +783,11 @@ impl JingleHandler {
         // Same CallId derivation as session-initiate so the
         // unregister matches the original registration.
         if let Ok(call_id) = CallId::new(room_jid.to_string()) {
-            let _ = self
-                .sfu
-                .unregister_call_participant(&call_id, &Identity::from_jid(ctx.full_jid.clone()));
+            let _ = self.sfu.unregister_call_participant(
+                &call_id,
+                &Identity::from_jid(ctx.full_jid.clone()),
+                None,
+            );
         }
         // Empty IQ result per XEP-0166 §6.7.
         let mixer: Jid = calls_mixer_jid(ctx.domain).into();
@@ -858,10 +860,10 @@ impl JingleHandler {
         }) {
             let _ = self
                 .sfu
-                .unregister_call_participant(call_id, &sender_identity);
+                .unregister_call_participant(call_id, &sender_identity, None);
             let _ = self
                 .sfu
-                .unregister_call_participant(call_id, &peer_identity);
+                .unregister_call_participant(call_id, &peer_identity, None);
             self.lock_pending_dm_invites().remove(call_id);
             return self.route_unchanged(iq, peer, ctx);
         }
@@ -877,7 +879,7 @@ impl JingleHandler {
         }) {
             let _ = self
                 .sfu
-                .unregister_call_participant(call_id, &sender_identity);
+                .unregister_call_participant(call_id, &sender_identity, None);
             self.lock_pending_dm_invites().remove(call_id);
             return terminate_ack(iq);
         }
@@ -1226,7 +1228,7 @@ fn revoke_other_dm_participants(
 ) {
     for participant in sfu.participants_for_call(call_id) {
         if &participant != initiator && &participant != responder {
-            let _ = sfu.unregister_call_participant(call_id, &participant);
+            let _ = sfu.unregister_call_participant(call_id, &participant, None);
         }
     }
 }

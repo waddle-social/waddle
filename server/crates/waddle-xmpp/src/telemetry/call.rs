@@ -109,3 +109,14 @@ pub fn record_call_setup_rejected(reason: CallSetupFailureReason) {
     increment_call_setup_attempted();
     increment_call_setup_failed(reason);
 }
+
+/// Count a webhook-driven teardown dropped because its observed SID
+/// belongs to an older call incarnation.
+pub fn increment_call_teardown_stale_dropped() {
+    crate::counter_add!(
+        "waddle.call.teardown.stale_dropped",
+        "1",
+        "Webhook-driven call teardowns dropped due to stale room or participant SIDs.",
+        1,
+    );
+}

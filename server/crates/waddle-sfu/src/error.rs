@@ -7,6 +7,12 @@ pub enum SfuError {
     #[error("invalid call id: {0}")]
     InvalidCallId(String),
 
+    #[error("invalid LiveKit room sid")]
+    InvalidRoomSid,
+
+    #[error("invalid LiveKit participant sid")]
+    InvalidParticipantSid,
+
     #[error("failed to sign LiveKit join JWT")]
     JwtSigning(#[source] jsonwebtoken::errors::Error),
 
