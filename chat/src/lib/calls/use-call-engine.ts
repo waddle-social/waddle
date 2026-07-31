@@ -1,5 +1,6 @@
 import { ref, type Ref } from "vue";
-import { $callState } from "./call-store";
+import { $callState, clearCallState, reportCallError } from "./call-store";
+import { DisconnectReason } from "livekit-client";
 import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engine";
 import {
   advanceActiveSpeakers,
@@ -63,6 +64,31 @@ import {
   finishCallAttemptForTransportDisconnect,
   type CallKind,
 } from "./call-lifecycle-telemetry";
+
+function transportDisconnectMessage(reason?: DisconnectReason): string {
+  switch (reason) {
+    case DisconnectReason.DUPLICATE_IDENTITY:
+      return "This call ended because the same account joined from another device.";
+    case DisconnectReason.PARTICIPANT_REMOVED:
+      return "You were removed from the call.";
+    case DisconnectReason.ROOM_DELETED:
+    case DisconnectReason.ROOM_CLOSED:
+      return "The call room was closed.";
+    case DisconnectReason.SERVER_SHUTDOWN:
+      return "The call service shut down unexpectedly.";
+    case DisconnectReason.USER_UNAVAILABLE:
+    case DisconnectReason.USER_REJECTED:
+      return "The other participant is no longer available for this call.";
+    case DisconnectReason.CONNECTION_TIMEOUT:
+      return "The call connection timed out.";
+    case DisconnectReason.MEDIA_FAILURE:
+      return "The call ended because the media connection failed.";
+    case DisconnectReason.JOIN_FAILURE:
+      return "The call ended because the room connection failed.";
+    default:
+      return "The call connection was lost.";
+  }
+}
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -567,10 +593,13 @@ export function useCallEngine(): {
       if (!roomJid) return;
       removeLiveCallParticipant(roomJid, identity);
     });
-    singletonEngine.on("disconnected", (reason) => {
+    singletonEngine.on("disconnected", ({ origin, reason }) => {
       const disconnectedCall = $callState.get();
-      if (reason !== "local" && disconnectedCall.phase === "active") {
-        finishCallAttemptForTransportDisconnect(disconnectedCall.sid);
+      const disconnectedMucSlot = activeMucCallSlot();
+      if (origin !== "local" && disconnectedCall.phase === "active") {
+        const terminal = finishCallAttemptForTransportDisconnect(disconnectedCall.sid);
+        clearCallState({ endReason: terminal?.endReason ?? "error" });
+        reportCallError(new Error(transportDisconnectMessage(reason)));
       }
       remoteTracks.value = [];
       localTracks.value = [];
@@ -613,7 +642,7 @@ export function useCallEngine(): {
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook
       // bridge keeps honest within seconds.
-      const slot = activeMucCallSlot();
+      const slot = disconnectedMucSlot;
       if (!slot) return;
       // Suppress our own stale Muji nick for one render cycle: the
       // server-authoritative `<muji/>` absence broadcast arrives ~1

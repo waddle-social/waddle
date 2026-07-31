@@ -68,6 +68,10 @@ function getSender(): CallWireSender | null {
  */
 let micOpChain: Promise<void> = Promise.resolve();
 let micRequestGen = 0;
+let camOpChain: Promise<void> = Promise.resolve();
+let camRequestGen = 0;
+let screenShareOpChain: Promise<void> = Promise.resolve();
+let screenShareRequestGen = 0;
 
 /**
  * Drive the local microphone to `next` with optimistic UI + rollback, the
@@ -129,29 +133,45 @@ export function setPushToTalkActive(active: boolean): void {
  *  camera once a device is attached or access is granted. */
 export async function toggleCam(): Promise<void> {
   const next = !$callCamEnabled.get();
+  const gen = ++camRequestGen;
   $callCamEnabled.set(next);
-  try {
-    const { engine } = useCallEngine();
-    await engine.setCameraEnabled(next);
-    clearMediaIssue("cam");
-  } catch (err) {
-    $callCamEnabled.set(!next);
-    recordMediaIssue("cam", err);
-  }
+  const op = camOpChain.then(async () => {
+    if (gen !== camRequestGen) return;
+    try {
+      const { engine } = useCallEngine();
+      await engine.setCameraEnabled(next);
+      if (gen !== camRequestGen) return;
+      clearMediaIssue("cam");
+    } catch (err) {
+      if (gen !== camRequestGen) return;
+      $callCamEnabled.set(!next);
+      recordMediaIssue("cam", err);
+    }
+  });
+  camOpChain = op;
+  await op;
 }
 
 export async function toggleScreenShare(): Promise<void> {
   const next = !$callScreenShareEnabled.get();
+  const gen = ++screenShareRequestGen;
   $callScreenShareEnabled.set(next);
-  try {
-    const { engine } = useCallEngine();
-    await engine.setScreenShareEnabled(next, { audio: next });
-    clearMediaIssue("screen");
-  } catch (err) {
-    $callScreenShareEnabled.set(!next);
-    if (next && isScreenSharePickerCancel(err)) return;
-    recordMediaIssue("screen", err);
-  }
+  const op = screenShareOpChain.then(async () => {
+    if (gen !== screenShareRequestGen) return;
+    try {
+      const { engine } = useCallEngine();
+      await engine.setScreenShareEnabled(next, { audio: next });
+      if (gen !== screenShareRequestGen) return;
+      clearMediaIssue("screen");
+    } catch (err) {
+      if (gen !== screenShareRequestGen) return;
+      $callScreenShareEnabled.set(!next);
+      if (next && isScreenSharePickerCancel(err)) return;
+      recordMediaIssue("screen", err);
+    }
+  });
+  screenShareOpChain = op;
+  await op;
 }
 
 /**
@@ -211,6 +231,9 @@ export function suspendCallForPageHide(): void {
  * state once the engine has connected.
  */
 export function resetCallControls(micEnabled: boolean, camEnabled: boolean): void {
+  micRequestGen++;
+  camRequestGen++;
+  screenShareRequestGen++;
   $callMicEnabled.set(micEnabled);
   $callCamEnabled.set(camEnabled);
   $callScreenShareEnabled.set(false);

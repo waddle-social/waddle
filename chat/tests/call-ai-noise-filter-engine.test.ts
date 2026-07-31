@@ -37,7 +37,14 @@ function engineWithMic(opts: {
   const make =
     opts.make ?? ((model: NoiseModelId) => Promise.resolve(fakeProcessor(model)));
   const engine = new CallEngine({ makeAiNoiseProcessor: make });
-  (engine as unknown as { room: unknown }).room = { localParticipant };
+  const room = {
+    localParticipant,
+    off() {
+      return room;
+    },
+    async disconnect() {},
+  };
+  (engine as unknown as { room: unknown }).room = room;
 
   const states: AiNoiseFilterState[] = [];
   engine.on("aiNoiseFilterChanged", (s) => states.push(s));
@@ -179,5 +186,41 @@ describe("CallEngine — AI noise filter reconcile", () => {
     // the snapshot is internally consistent (no impossible {NS-on, model-on}).
     expect(last?.aiNoiseFilter).toEqual({ kind: "active", model: "rnnoise" });
     expect(last?.processing.kind).toBe("active");
+  });
+
+  test("a delayed processor from call N is destroyed instead of attaching after reconnect", async () => {
+    let release: () => void = () => {};
+    let started: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const makeStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const destroy = mock(async () => undefined);
+    const processor = {
+      ...fakeProcessor("rnnoise"),
+      destroy,
+    } as AudioNoiseProcessor;
+    const { engine, setProcessor } = engineWithMic({
+      make: async () => {
+        started();
+        await gate;
+        return processor;
+      },
+    });
+
+    const staleReconcile = engine.setAiNoiseModel("rnnoise");
+    await makeStarted;
+    await engine.disconnect();
+    const nextRoom = { localParticipant: { getTrackPublication: () => undefined } };
+    const internals = engine as unknown as { room: unknown; connectGeneration: number };
+    internals.room = nextRoom;
+    internals.connectGeneration += 1;
+    release();
+    await staleReconcile;
+
+    expect(setProcessor).not.toHaveBeenCalled();
+    expect(destroy).toHaveBeenCalledTimes(1);
   });
 });

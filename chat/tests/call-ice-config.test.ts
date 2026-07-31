@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { Room, RoomConnectOptions, RoomOptions } from "livekit-client";
+import {
+  DisconnectReason,
+  RoomEvent,
+  type Room,
+  type RoomConnectOptions,
+  type RoomOptions,
+} from "livekit-client";
 import { CallEngine } from "../src/lib/calls/engine";
 import { videoCodecSupport } from "../src/lib/calls/video-codec/support";
 import type { LiveKitJoin } from "../src/lib/calls/types";
@@ -34,9 +40,23 @@ function join(): LiveKitJoin {
  */
 function stubRoom() {
   const connectCalls: Array<{ url: string; token: string; opts?: RoomConnectOptions }> = [];
+  const handlers = new Map<RoomEvent, unknown>();
+  const offCalls: RoomEvent[] = [];
+  let disconnectCalls = 0;
   const room = {
     connectCalls,
-    on() {
+    handlers,
+    offCalls,
+    get disconnectCalls() {
+      return disconnectCalls;
+    },
+    on(event: RoomEvent, handler: unknown) {
+      handlers.set(event, handler);
+      return room;
+    },
+    off(event: RoomEvent, handler: unknown) {
+      if (handlers.get(event) === handler) handlers.delete(event);
+      offCalls.push(event);
       return room;
     },
     removeAllListeners() {},
@@ -47,8 +67,15 @@ function stubRoom() {
       identity: "alice@waddle.test/desktop",
       async setMicrophoneEnabled() {},
       async setCameraEnabled() {},
+      async setScreenShareEnabled() {},
+      getTrackPublication() {
+        return undefined;
+      },
     },
     remoteParticipants: new Map(),
+    async disconnect() {
+      disconnectCalls += 1;
+    },
   };
   return room;
 }
@@ -173,5 +200,64 @@ describe("CallEngine.connect — XEP-0215 ICE injection", () => {
     // The engine is not wedged: a fresh connect proceeds (gate already resolved).
     await engine.connect(join(), { audio: false, video: false });
     expect(built).toBe(2);
+  });
+
+  test("terminal disconnect releases the room, unbinds listeners, and permits reconnect", async () => {
+    const room = stubRoom();
+    const engine = engineWith(room);
+    const disconnected: Array<{
+      origin: "local" | "transport";
+      reason?: DisconnectReason;
+    }> = [];
+    engine.on("disconnected", (info) => disconnected.push(info));
+
+    await engine.connect(join(), { audio: false, video: false });
+    const onDisconnected = room.handlers.get(RoomEvent.Disconnected) as
+      | ((reason?: DisconnectReason) => Promise<void>)
+      | undefined;
+    expect(onDisconnected).toBeDefined();
+    await onDisconnected?.(DisconnectReason.DUPLICATE_IDENTITY);
+
+    expect((engine as unknown as { room: Room | null }).room).toBeNull();
+    expect(room.offCalls).toHaveLength(14);
+    expect(room.handlers.size).toBe(0);
+    expect(disconnected).toEqual([{
+      origin: "transport",
+      reason: DisconnectReason.DUPLICATE_IDENTITY,
+    }]);
+
+    await engine.connect(join(), { audio: false, video: false });
+    expect(room.connectCalls).toHaveLength(2);
+  });
+
+  test("an operation from call N cannot fall back after call N+1 connects", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = stubRoom();
+    const second = stubRoom();
+    let screenCalls = 0;
+    first.localParticipant.setScreenShareEnabled = async () => {
+      screenCalls += 1;
+      await gate;
+      const error = new Error("screen audio unsupported");
+      error.name = "NotSupportedError";
+      throw error;
+    };
+    let built = 0;
+    const engine = new CallEngine({
+      makeRoom: () => (built++ === 0 ? first : second) as unknown as Room,
+      videoCodecSupport: videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] }),
+    });
+
+    await engine.connect(join(), { audio: false, video: false });
+    const staleOperation = engine.setScreenShareEnabled(true, { audio: true });
+    await engine.disconnect();
+    await engine.connect(join(), { audio: false, video: false });
+    release();
+    await staleOperation;
+
+    expect(screenCalls).toBe(1);
   });
 });
