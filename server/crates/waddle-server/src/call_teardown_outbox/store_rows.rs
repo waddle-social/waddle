@@ -16,7 +16,17 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
     let room_jid = row.get::<Option<String>>(3)?;
     let participant_sid = row.get::<Option<String>>(7)?;
     let thread_id = row.get::<Option<String>>(15)?;
-    let target = decode_target(&action, identity, room_jid, participant_sid, thread_id)?;
+    let anchor_origin_id = row.get::<Option<String>>(16)?;
+    let thread_started_at_ms = row.get::<Option<i64>>(17)?;
+    let target = decode_target(
+        &action,
+        identity,
+        room_jid,
+        participant_sid,
+        thread_id,
+        anchor_origin_id,
+        thread_started_at_ms,
+    )?;
     let generation = row
         .get::<Option<i64>>(5)?
         .map(|value| {
@@ -60,6 +70,8 @@ fn decode_target(
     room_jid: Option<String>,
     participant_sid: Option<String>,
     thread_id: Option<String>,
+    anchor_origin_id: Option<String>,
+    thread_started_at_ms: Option<i64>,
 ) -> Result<TeardownTarget, CallTeardownOutboxError> {
     match action {
         "remove_participant" => match (identity, room_jid) {
@@ -98,16 +110,32 @@ fn decode_target(
                 action.to_owned(),
             )),
         },
-        "call_thread_end_retry" => match (identity, room_jid, participant_sid, thread_id) {
-            (None, Some(room_jid), None, Some(thread_id)) => {
-                Ok(TeardownTarget::CallThreadEndRetry {
-                    room_jid: BareJid::from_str(&room_jid)
-                        .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
-                    thread_id: waddle_xmpp_core::mam::ThreadId::new(thread_id).ok_or_else(
-                        || CallTeardownOutboxError::InvalidTargetShape(action.to_owned()),
-                    )?,
-                })
-            }
+        "call_thread_end_retry" => match (
+            identity,
+            room_jid,
+            participant_sid,
+            thread_id,
+            anchor_origin_id,
+            thread_started_at_ms,
+        ) {
+            (
+                None,
+                Some(room_jid),
+                None,
+                Some(thread_id),
+                Some(anchor_origin_id),
+                Some(thread_started_at_ms),
+            ) if !anchor_origin_id.is_empty() => Ok(TeardownTarget::CallThreadEndRetry {
+                room_jid: BareJid::from_str(&room_jid)
+                    .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
+                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread_id).ok_or_else(|| {
+                    CallTeardownOutboxError::InvalidTargetShape(action.to_owned())
+                })?,
+                anchor_origin_id: waddle_xmpp_core::xep0359::OriginId::new(anchor_origin_id),
+                started: chrono::DateTime::from_timestamp_millis(thread_started_at_ms).ok_or_else(
+                    || CallTeardownOutboxError::InvalidTargetShape(action.to_owned()),
+                )?,
+            }),
             _ => Err(CallTeardownOutboxError::InvalidTargetShape(
                 action.to_owned(),
             )),

@@ -87,8 +87,7 @@ impl CallTeardownOutboxStore {
         let mut intent_ids = Vec::with_capacity(intents.len());
         for intent in intents {
             let intent_id = CallTeardownIntentId::new();
-            let (action, identity, room_jid, participant_sid, thread_id) =
-                encode_target(&intent.target);
+            let encoded = encode_target(&intent.target);
             let generation = encode_generation(intent.generation)?;
             let producing_node =
                 Self::encode_producing_node(intent, producing_node_guard.as_ref())?;
@@ -96,19 +95,21 @@ impl CallTeardownOutboxStore {
                 .execute(
                     "INSERT INTO call_teardown_outbox (\
                         intent_id, call_id, identity, room_jid, action, generation, \
-                        room_sid, participant_sid, thread_id, producing_node, status, attempt_count, last_error, \
+                        room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, producing_node, status, attempt_count, last_error, \
                         next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
                     crate::db_params![
                         intent_id.as_str(),
                         intent.call_id.as_str(),
-                        identity,
-                        room_jid,
-                        action,
+                        encoded.identity,
+                        encoded.room_jid,
+                        encoded.action,
                         generation,
                         intent.room_sid.as_ref().map(RoomSid::as_str),
-                        participant_sid,
-                        thread_id,
+                        encoded.participant_sid,
+                        encoded.thread_id,
+                        encoded.anchor_origin_id,
+                        encoded.thread_started_at_ms,
                         producing_node,
                         STATUS_QUEUED,
                         now_ms,
@@ -133,8 +134,7 @@ impl CallTeardownOutboxStore {
             .producing_node_guard(intent.room_scope().is_none())
             .await?;
         let intent_id = CallTeardownIntentId::new();
-        let (action, identity, room_jid, participant_sid, thread_id) =
-            encode_target(&intent.target);
+        let encoded = encode_target(&intent.target);
         let generation = encode_generation(intent.generation)?;
         let producing_node = Self::encode_producing_node(&intent, producing_node_guard.as_ref())?;
         let connection = self.db.guard().await?;
@@ -143,28 +143,37 @@ impl CallTeardownOutboxStore {
         // for the same departure, and the drained effects are
         // idempotent, so an identical still-queued intent makes a new
         // row pure noise. A racing duplicate insert is harmless.
+        // Null-safe equality is spelled per driver: the host SQLite may
+        // predate `IS NOT DISTINCT FROM` (3.39), so SQLite uses `IS`.
+        let ns = crate::db::null_safe_eq(self.db.driver());
         let mut existing = connection
             .query(
-                "SELECT intent_id FROM call_teardown_outbox \
-                 WHERE status = ? AND call_id = ? AND action = ? \
-                   AND identity IS NOT DISTINCT FROM ? \
-                   AND room_jid IS NOT DISTINCT FROM ? \
-                   AND generation IS NOT DISTINCT FROM ? \
-                   AND room_sid IS NOT DISTINCT FROM ? \
-                   AND participant_sid IS NOT DISTINCT FROM ? \
-                   AND thread_id IS NOT DISTINCT FROM ? \
-                   AND producing_node IS NOT DISTINCT FROM ? \
-                 LIMIT 1",
+                &format!(
+                    "SELECT intent_id FROM call_teardown_outbox \
+                     WHERE status = ? AND call_id = ? AND action = ? \
+                       AND identity {ns} ? \
+                       AND room_jid {ns} ? \
+                       AND generation {ns} ? \
+                       AND room_sid {ns} ? \
+                       AND participant_sid {ns} ? \
+                       AND thread_id {ns} ? \
+                       AND anchor_origin_id {ns} ? \
+                       AND thread_started_at_ms {ns} ? \
+                       AND producing_node {ns} ? \
+                     LIMIT 1"
+                ),
                 crate::db_params![
                     STATUS_QUEUED,
                     intent.call_id.as_str(),
-                    action,
-                    identity.clone(),
-                    room_jid.clone(),
+                    encoded.action,
+                    encoded.identity.clone(),
+                    encoded.room_jid.clone(),
                     generation,
                     intent.room_sid.as_ref().map(RoomSid::as_str),
-                    participant_sid,
-                    thread_id,
+                    encoded.participant_sid,
+                    encoded.thread_id,
+                    encoded.anchor_origin_id,
+                    encoded.thread_started_at_ms,
                     producing_node.clone(),
                 ],
             )
@@ -177,19 +186,21 @@ impl CallTeardownOutboxStore {
             .execute(
                 "INSERT INTO call_teardown_outbox (\
                     intent_id, call_id, identity, room_jid, action, generation, \
-                    room_sid, participant_sid, thread_id, producing_node, status, attempt_count, last_error, \
+                    room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, producing_node, status, attempt_count, last_error, \
                     next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
                 crate::db_params![
                     intent_id.as_str(),
                     intent.call_id.as_str(),
-                    identity,
-                    room_jid,
-                    action,
+                    encoded.identity,
+                    encoded.room_jid,
+                    encoded.action,
                     generation,
                     intent.room_sid.as_ref().map(RoomSid::as_str),
-                    participant_sid,
-                    thread_id,
+                    encoded.participant_sid,
+                    encoded.thread_id,
+                    encoded.anchor_origin_id,
+                    encoded.thread_started_at_ms,
                     producing_node,
                     STATUS_QUEUED,
                     now_ms,
@@ -340,60 +351,79 @@ pub fn retry_delay_ms(attempt_count: i64) -> i64 {
 pub(super) fn select_columns() -> &'static str {
     "SELECT intent_id, call_id, identity, room_jid, action, generation, \
             room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
-            next_attempt_at_ms, claim_token, created_at_ms, thread_id \
+            next_attempt_at_ms, claim_token, created_at_ms, thread_id, anchor_origin_id, \
+            thread_started_at_ms \
      FROM call_teardown_outbox"
 }
 
-/// `(action, identity, room_jid, participant_sid, thread_id)` column
-/// values for a typed target.
-fn encode_target(
-    target: &TeardownTarget,
-) -> (
-    &'static str,
-    Option<String>,
-    Option<String>,
-    Option<&str>,
-    Option<&str>,
-) {
+/// Column values for a typed target.
+struct EncodedTarget<'a> {
+    action: &'static str,
+    identity: Option<String>,
+    room_jid: Option<String>,
+    participant_sid: Option<&'a str>,
+    thread_id: Option<&'a str>,
+    anchor_origin_id: Option<&'a str>,
+    thread_started_at_ms: Option<i64>,
+}
+
+impl<'a> EncodedTarget<'a> {
+    fn without_thread(
+        action: &'static str,
+        identity: Option<String>,
+        room_jid: Option<String>,
+        participant_sid: Option<&'a str>,
+    ) -> Self {
+        Self {
+            action,
+            identity,
+            room_jid,
+            participant_sid,
+            thread_id: None,
+            anchor_origin_id: None,
+            thread_started_at_ms: None,
+        }
+    }
+}
+
+fn encode_target(target: &TeardownTarget) -> EncodedTarget<'_> {
     match target {
         TeardownTarget::Participant {
             identity,
             participant_sid,
-        } => (
+        } => EncodedTarget::without_thread(
             "remove_participant",
             Some(identity.to_string()),
             None,
             participant_sid.as_ref().map(ParticipantSid::as_str),
-            None,
         ),
-        TeardownTarget::Room => ("delete_room", None, None, None, None),
+        TeardownTarget::Room => EncodedTarget::without_thread("delete_room", None, None, None),
         TeardownTarget::MujiPresenceClear {
             room_jid,
             departed,
             participant_sid,
-        } => (
+        } => EncodedTarget::without_thread(
             "muji_presence_clear",
             Some(departed.to_string()),
             Some(room_jid.to_string()),
             participant_sid.as_ref().map(ParticipantSid::as_str),
-            None,
         ),
-        TeardownTarget::MujiRoomSweep { room_jid } => (
-            "muji_room_sweep",
-            None,
-            Some(room_jid.to_string()),
-            None,
-            None,
-        ),
+        TeardownTarget::MujiRoomSweep { room_jid } => {
+            EncodedTarget::without_thread("muji_room_sweep", None, Some(room_jid.to_string()), None)
+        }
         TeardownTarget::CallThreadEndRetry {
             room_jid,
             thread_id,
-        } => (
-            "call_thread_end_retry",
-            None,
-            Some(room_jid.to_string()),
-            None,
-            Some(thread_id.as_str()),
-        ),
+            anchor_origin_id,
+            started,
+        } => EncodedTarget {
+            action: "call_thread_end_retry",
+            identity: None,
+            room_jid: Some(room_jid.to_string()),
+            participant_sid: None,
+            thread_id: Some(thread_id.as_str()),
+            anchor_origin_id: Some(anchor_origin_id.as_str()),
+            thread_started_at_ms: Some(started.timestamp_millis()),
+        },
     }
 }

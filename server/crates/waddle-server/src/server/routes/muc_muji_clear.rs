@@ -140,6 +140,8 @@ pub(crate) async fn enqueue_call_thread_end_retry(
     state: &WebSocketState,
     room_jid: &BareJid,
     thread_id: waddle_xmpp_core::mam::ThreadId,
+    anchor_origin_id: waddle_xmpp_core::xep0359::OriginId,
+    started: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
@@ -157,6 +159,8 @@ pub(crate) async fn enqueue_call_thread_end_retry(
         target: crate::call_teardown_outbox::TeardownTarget::CallThreadEndRetry {
             room_jid: room_jid.clone(),
             thread_id,
+            anchor_origin_id,
+            started,
         },
         generation: None,
         room_sid: None,
@@ -293,17 +297,26 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(
     maybe_broadcast_call_thread_ended_for(state, room_jid, None).await
 }
 
+/// The durable completion retry's persisted view of the FAILED thread
+/// (#1612 review rounds 10-11): identity plus everything needed to
+/// reconstruct the ended summary when the in-memory `ActiveCallThread`
+/// is gone (process restart) or was replaced by a newer call.
+pub(crate) struct CallThreadCompletionFence<'a> {
+    pub thread_id: &'a waddle_xmpp_core::mam::ThreadId,
+    pub anchor_origin_id: &'a waddle_xmpp_core::xep0359::OriginId,
+    pub started: chrono::DateTime<chrono::Utc>,
+}
+
 /// Like [`maybe_broadcast_call_thread_ended`], but fenced to a specific
 /// thread: a durable completion retry must only ever finish THE thread
-/// whose completion failed. If a new call has since replaced the room's
-/// `ActiveCallThread`, applying the ended effect would either steal the
-/// replacement's completion or stamp the wrong summary — the retry
-/// resolves `Stale` instead and leaves the live thread alone (#1612
-/// review round 10).
+/// whose completion failed. When the live entry still matches, the
+/// normal completion flow runs; when it is gone or replaced, the ended
+/// summary is reconstructed from the fence's persisted payload without
+/// touching the live thread (#1612 review rounds 10-11).
 pub(crate) async fn maybe_broadcast_call_thread_ended_for(
     state: &WebSocketState,
     room_jid: &BareJid,
-    expected_thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+    expected_thread: Option<CallThreadCompletionFence<'_>>,
 ) -> WebhookEffectOutcome {
     // A processing delivery is deliberately re-executed. Serialize this
     // final call-thread effect so overlapping attempts cannot both clone the
@@ -322,30 +335,31 @@ pub(crate) async fn maybe_broadcast_call_thread_ended_for(
                 return WebhookEffectOutcome::Permanent("invalid_call_id");
             }
         };
-        if !sfu.participants_for_call(&call_id).is_empty() {
-            return WebhookEffectOutcome::Completed;
-        }
-        let Some(active) = state
+        let live_active = state
             .deps
             .protocol
             .call_threads
             .get(room_jid)
-            .map(|active| active.clone())
-        else {
-            return WebhookEffectOutcome::Completed;
-        };
-        if let Some(expected) = expected_thread {
-            if active.thread_id != expected.as_str() {
-                warn!(
-                    room = %room_jid,
-                    expected = %expected.as_str(),
-                    active = %active.thread_id,
-                    "call-thread completion retry outlived its thread; a newer call \
-                     owns the room now — dropping the stale retry"
-                );
-                return WebhookEffectOutcome::Stale;
+            .map(|active| active.clone());
+        if let Some(fence) = &expected_thread {
+            let live_matches = live_active
+                .as_ref()
+                .is_some_and(|active| active.thread_id == fence.thread_id.as_str());
+            if !live_matches {
+                // Restart lost the in-memory entry, or a newer call
+                // replaced it: the persisted payload is the only
+                // remaining record of the failed thread. Complete from
+                // it — never acknowledge an absent entry, never touch
+                // the replacement (#1612 review round 11).
+                return complete_call_thread_from_fence(state, room_jid, fence).await;
             }
         }
+        if !sfu.participants_for_call(&call_id).is_empty() {
+            return WebhookEffectOutcome::Completed;
+        }
+        let Some(active) = live_active else {
+            return WebhookEffectOutcome::Completed;
+        };
 
         let ended = chrono::Utc::now();
         let duration = ended.signed_duration_since(active.started);
@@ -421,6 +435,53 @@ fn remove_completed_call_thread(
             current.thread_id == completed.thread_id
                 && current.anchor_origin_id == completed.anchor_origin_id
         });
+}
+
+/// Complete a failed call-thread end from its persisted payload. This
+/// is at-least-once by design: if a concurrent path already finished
+/// the thread, `mark_call_thread_ended` is an idempotent upsert and the
+/// extra ended broadcast is benign — losing the summary forever (the
+/// alternative) is not (#1612 review round 11).
+async fn complete_call_thread_from_fence(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    fence: &CallThreadCompletionFence<'_>,
+) -> WebhookEffectOutcome {
+    let ended = chrono::Utc::now();
+    let duration = ended.signed_duration_since(fence.started);
+    let duration = CallThreadDuration::parse(&format_call_thread_duration(duration))
+        .expect("formatted call-thread duration is valid");
+    let message = build_call_thread_ended_message(
+        room_jid,
+        fence.anchor_origin_id.as_str(),
+        &CallThreadEnded {
+            ended,
+            duration: duration.clone(),
+        },
+    );
+    if let Err(error) = state
+        .deps
+        .protocol
+        .inbox_storage
+        .mark_call_thread_ended(room_jid, fence.thread_id.as_str(), ended, &duration)
+        .await
+    {
+        warn!(
+            room = %room_jid,
+            thread = %fence.thread_id.as_str(),
+            %error,
+            "failed to persist reconstructed call-thread ended summary"
+        );
+        return WebhookEffectOutcome::Retryable("inbox_call_thread_end_persist_failed");
+    }
+    let deps = build_interpret_deps(state, None);
+    if super::interpret::broadcast_room_system_message(&deps, room_jid.clone(), Box::new(message))
+        .await
+        .is_none()
+    {
+        return WebhookEffectOutcome::Retryable("call_thread_end_broadcast_failed");
+    }
+    WebhookEffectOutcome::Completed
 }
 
 fn build_call_thread_ended_message(

@@ -790,10 +790,25 @@ impl LiveKitSfu {
             };
             for (identity, participant_sid) in live {
                 if let Some(participant) = entry.participants.get_mut(identity) {
-                    if participant_sid.is_some() && participant.participant_sid.is_none() {
+                    if participant_sid.is_some()
+                        && participant.participant_sid.is_none()
+                        // First-SID learning is freshness-gated too
+                        // (#1612 review round 11): a sid-less state
+                        // REGISTERED AFTER the probe went out is a fresh
+                        // incarnation, and the probe's sid belongs to
+                        // the previous one — learning it would let a
+                        // delayed old `participant_left` match the fence
+                        // and clear the replacement.
+                        && participant.first_registered_at <= probe_freshness_boundary
+                    {
                         participant.participant_sid.clone_from(participant_sid);
                         participant.participant_sid_observed_at = Some(now);
                     } else if participant_sid.is_some()
+                        // Only a stored sid may be ADVANCED here; a sid-less
+                        // state is exclusively the first-fill branch above,
+                        // whose registration-time gate must not be bypassed
+                        // via `None != Some`.
+                        && participant.participant_sid.is_some()
                         && participant.participant_sid.as_ref() != participant_sid.as_ref()
                         && participant
                             .participant_sid_observed_at
@@ -1898,6 +1913,14 @@ impl SfuService for LiveKitSfu {
                     entry.generation =
                         self.next_call_generation(call_id, entry.generation.as_u64());
                     entry.room_sid = None;
+                    // A reused temporarily-empty entry IS a new
+                    // incarnation: refresh the freshness stamps too, or
+                    // an in-flight `ListRooms` snapshot of the previous
+                    // room would pass the `created_at` gate and stamp
+                    // the old sid onto this fresh registration (#1612
+                    // review round 11).
+                    entry.created_at = now;
+                    entry.room_sid_observed_at = None;
                 }
                 entry
                     .participants

@@ -425,13 +425,21 @@ pub(crate) async fn try_handle_muc_presence_update(
                 .protocol
                 .call_threads
                 .get(room_jid)
-                .and_then(|active| ThreadId::new(active.thread_id.clone()));
-            if let Some(failed_thread) = failed_thread {
+                .and_then(|active| {
+                    Some((
+                        ThreadId::new(active.thread_id.clone())?,
+                        waddle_xmpp_core::xep0359::OriginId::new(active.anchor_origin_id.clone()),
+                        active.started,
+                    ))
+                });
+            if let Some((failed_thread, anchor_origin_id, started)) = failed_thread {
                 if let Err(error) =
                     crate::server::routes::muc_muji_clear::enqueue_call_thread_end_retry(
                         state,
                         room_jid,
                         failed_thread,
+                        anchor_origin_id,
+                        started,
                     )
                     .await
                 {

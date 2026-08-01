@@ -98,11 +98,18 @@ pub enum TeardownTarget {
     CallThreadEndRetry {
         room_jid: BareJid,
         /// The exact thread whose completion failed. The drain verifies
-        /// it against the room's live `ActiveCallThread` and resolves
-        /// `Stale` on mismatch, so a retry can never complete (or
-        /// clobber) a NEWER call that replaced the entry before the row
-        /// drained (#1612 review round 10).
+        /// it against the room's live `ActiveCallThread` and, when the
+        /// live entry is gone (restart) or replaced (newer call),
+        /// completes the FAILED thread from this persisted payload
+        /// instead of acknowledging an absent entry or touching the
+        /// replacement (#1612 review rounds 10-11).
         thread_id: waddle_xmpp_core::mam::ThreadId,
+        /// The anchor message's XEP-0359 origin-id, needed to fasten
+        /// the reconstructed `<call-thread-ended/>` record.
+        anchor_origin_id: waddle_xmpp_core::xep0359::OriginId,
+        /// When the failed thread's call started; the ended summary's
+        /// duration is derived from it at completion time.
+        started: chrono::DateTime<chrono::Utc>,
     },
 }
 

@@ -382,18 +382,26 @@ async fn execute_intent(
     if let TeardownTarget::CallThreadEndRetry {
         room_jid,
         thread_id,
+        anchor_origin_id,
+        started,
     } = &intent.target
     {
-        // Completion-only: never replays the destructive presence clear;
-        // the ended broadcast is idempotent and fenced to the exact
-        // thread whose completion failed — a newer call that replaced
-        // the room's active thread resolves this row `Stale` untouched.
+        // Completion-only: never replays the destructive presence clear.
+        // The fence carries the failed thread's persisted payload, so a
+        // lost (restart) or replaced (newer call) in-memory entry is
+        // completed from the row itself rather than acknowledged away.
         return match tokio::time::timeout(
             ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
             crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended_for(
                 state,
                 room_jid,
-                Some(thread_id),
+                Some(
+                    crate::server::routes::muc_muji_clear::CallThreadCompletionFence {
+                        thread_id,
+                        anchor_origin_id,
+                        started: *started,
+                    },
+                ),
             ),
         )
         .await
