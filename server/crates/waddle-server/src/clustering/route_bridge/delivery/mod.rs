@@ -7,8 +7,9 @@ pub(super) mod receiver;
 pub(super) mod remote;
 
 pub(super) use local::*;
-pub(super) use muc::muc_proxy_result_to_ordered_outcome;
-use muc::*;
+pub(super) use muc::reserved::{
+    deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome, muc_proxy_result_to_outcome,
+};
 pub(crate) use muc::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 use receiver::*;
 pub(super) use remote::*;

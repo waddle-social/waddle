@@ -21,7 +21,12 @@ mod groupchat_retry;
 mod offline_delivery;
 mod room_dispatch;
 mod room_subject;
-mod routing;
+mod routing_detached_delivery;
+mod routing_fanout_pass;
+mod routing_full_jid_fallback;
+mod routing_local_account;
+mod routing_negative_priority;
+mod routing_route_to_connection;
 mod undeliverable_bounce;
 
 #[derive(Clone)]
