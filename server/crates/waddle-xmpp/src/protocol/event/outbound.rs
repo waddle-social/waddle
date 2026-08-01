@@ -73,7 +73,17 @@ pub enum OutboundEvent {
     /// logged and dropped (s2s is out of scope); wire delivery to an
     /// offline local recipient is archive-based, via the headless
     /// pass's persistence effects, not routing-based.
-    RouteToConnection { jid: jid::Jid, stanza: Box<Stanza> },
+    ///
+    /// `call_setup` (#1488): `Some` iff `stanza` is the forwarded
+    /// invite of a 1:1 Jingle `session-initiate`. The interpreter MUST
+    /// close the ticket exactly once from the route disposition — see
+    /// [`crate::telemetry::call::PendingCallSetupRoute`]. `None` for
+    /// every other routed stanza.
+    RouteToConnection {
+        jid: jid::Jid,
+        stanza: Box<Stanza>,
+        call_setup: Option<crate::telemetry::call::PendingCallSetupRoute>,
+    },
     /// Hand a `<message type='groupchat'>` to the room handler chain
     /// (Option C — issue #229 Q7) for occupancy validation,
     /// XEP-0359/XEP-0421 stamping, XEP-0313 §5.1.3 archiving, and

@@ -106,6 +106,7 @@ impl MessageHandler for BlockingFilterHandler {
                         return HandlerOutcome::Halt(vec![OutboundEvent::RouteToConnection {
                             jid: from.clone(),
                             stanza: Box::new(crate::Stanza::Message(reply)),
+                            call_setup: None,
                         }]);
                     }
                 }
@@ -214,7 +215,7 @@ mod tests {
         };
         assert_eq!(events.len(), 1);
         let (jid, stanza) = match &events[0] {
-            OutboundEvent::RouteToConnection { jid, stanza } => (jid, stanza),
+            OutboundEvent::RouteToConnection { jid, stanza, .. } => (jid, stanza),
             other => panic!("expected RouteToConnection bounce, got {other:?}"),
         };
         assert_eq!(jid.to_string(), expected_sender);

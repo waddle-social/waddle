@@ -38,6 +38,7 @@ impl RoomHandler for ReflectorHandler {
             events.push(OutboundEvent::RouteToConnection {
                 jid: Jid::from(occupant.full_jid.clone()),
                 stanza: Box::new(Stanza::Message(copy)),
+                call_setup: None,
             });
         }
         RoomHandlerOutcome::Continue(events)
@@ -165,7 +166,7 @@ mod tests {
         let mut msg = make_groupchat();
         let events = run_with_occupants(&room, &alice, occupants, &mut msg);
         for event in &events {
-            if let OutboundEvent::RouteToConnection { jid, stanza } = event {
+            if let OutboundEvent::RouteToConnection { jid, stanza, .. } = event {
                 if let Stanza::Message(m) = stanza.as_ref() {
                     assert_eq!(
                         m.to.as_ref().map(|j| j.to_string()),

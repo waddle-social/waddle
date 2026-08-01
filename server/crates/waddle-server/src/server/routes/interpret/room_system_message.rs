@@ -160,6 +160,7 @@ pub(super) async fn broadcast_room_system_message_event(
             Jid::from(occupant.full_jid.clone()),
             Box::new(Stanza::Message(copy)),
             recursion_depth,
+            None,
         )
         .await;
     }

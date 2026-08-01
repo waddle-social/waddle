@@ -272,7 +272,7 @@ pub(super) async fn run_fanout_recipient_pass(
                 }
                 processed = Some(boxed);
             }
-            OutboundEvent::RouteToConnection { jid, stanza } => {
+            OutboundEvent::RouteToConnection { jid, stanza, .. } => {
                 side_routes.push((jid, stanza));
             }
             other => remaining.push(other),
@@ -417,6 +417,50 @@ impl FullJidDeliveryOutcome {
             Self::Unavailable | Self::Dropped => false,
             #[cfg(feature = "clustering")]
             Self::MaybeCommitted => true,
+        }
+    }
+}
+
+/// #1488: close a routed 1:1 call-setup ticket from a full-JID
+/// delivery disposition — the single mapping shared by the local
+/// delivery path and the ordered-relay path (including the deferred
+/// handoff, which resolves its real outcome in a spawned task).
+///
+/// `Delivered`, `QueuedDetached` (XEP-0198 replay hands the invite
+/// over on resume) and `MaybeCommitted` (ambiguous cluster relay —
+/// may well have reached the peer, so the alert must not over-read)
+/// count `ok`. `Unavailable` (confirmed offline — the caller gets the
+/// undeliverable bounce) and `Dropped` count
+/// `failed{reason=peer_unavailable}`; no bounce is sent for `Dropped`.
+///
+/// `Dropped` is mostly definite loss (recipient channel still full
+/// after bounded retries, storage error recording to detached) but
+/// also absorbs `ActorSendFailure::MaybeEnqueued` — an actor ask that
+/// timed out after possibly enqueueing, where the invite may still be
+/// delivered. Counting that ambiguous sliver as `failed` is
+/// deliberate, and deliberately the opposite of the `MaybeCommitted`
+/// → `ok` choice: `MaybeCommitted` is a healthy-path cluster
+/// ambiguity, while a `MaybeEnqueued` timeout means the local user
+/// actor is congested or wedged — a state in which call setup IS
+/// degraded, so erring toward the alert firing is the useful reading.
+/// A `Dropped`-driven spike therefore means delivery loss or actor
+/// congestion, not necessarily an offline peer; the runbook on
+/// `CallSetupFailureRate` covers the readings.
+pub(crate) fn close_call_setup_from_outcome(
+    call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+    outcome: FullJidDeliveryOutcome,
+) {
+    let Some(ticket) = call_setup else {
+        return;
+    };
+    match outcome {
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+            ticket.delivered();
+        }
+        #[cfg(feature = "clustering")]
+        FullJidDeliveryOutcome::MaybeCommitted => ticket.delivered(),
+        FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {
+            ticket.undeliverable();
         }
     }
 }

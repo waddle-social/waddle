@@ -91,6 +91,15 @@ impl CallSetupAttempt {
         }
     }
 
+    /// Hand a live attempt off to the routing layer instead of closing
+    /// it here (#1488): the route disposition — delivered vs. no usable
+    /// resource — is only known after the sans-I/O boundary, so the
+    /// interpreter closes the attempt via the returned ticket.
+    fn handed_to_router(self) -> Option<crate::telemetry::call::PendingCallSetupRoute> {
+        self.live
+            .then(crate::telemetry::call::PendingCallSetupRoute::open)
+    }
+
     fn failed(self, reason: CallSetupFailureReason) {
         if self.live {
             crate::telemetry::call::increment_call_setup_failed(reason);
@@ -502,13 +511,13 @@ impl JingleHandler {
             payload: forwarded_elem,
         };
 
-        attempt.ok();
         vec![OutboundEvent::RouteToConnection {
             jid: forwarded_iq
                 .to()
                 .cloned()
                 .unwrap_or_else(|| ctx.full_jid.clone().into()),
             stanza: Box::new(Stanza::Iq(Box::new(forwarded_iq))),
+            call_setup: attempt.handed_to_router(),
         }]
     }
 
@@ -917,6 +926,7 @@ impl JingleHandler {
         vec![OutboundEvent::RouteToConnection {
             jid: peer,
             stanza: Box::new(Stanza::Iq(Box::new(forwarded))),
+            call_setup: None,
         }]
     }
 
@@ -1487,8 +1497,9 @@ mod tests {
         // Server does NOT pre-ACK; the responder's real client emits
         // the IQ-result. We just forward the rewritten stanza.
         assert_eq!(events.len(), 1, "expected forward only, got {events:?}");
-        let OutboundEvent::RouteToConnection { jid: peer, stanza } =
-            events.into_iter().next().unwrap()
+        let OutboundEvent::RouteToConnection {
+            jid: peer, stanza, ..
+        } = events.into_iter().next().unwrap()
         else {
             panic!("expected RouteToConnection");
         };
@@ -2087,8 +2098,9 @@ mod tests {
         let handler = JingleHandler::new(fixture_sfu());
         let events = handler.handle(&iq, &ctx(&jid));
         assert_eq!(events.len(), 1, "no server-forged ACK on transport-info");
-        let OutboundEvent::RouteToConnection { jid: peer, stanza } =
-            events.into_iter().next().unwrap()
+        let OutboundEvent::RouteToConnection {
+            jid: peer, stanza, ..
+        } = events.into_iter().next().unwrap()
         else {
             panic!("expected RouteToConnection");
         };
@@ -2246,7 +2258,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn session_initiate_records_an_attempted_and_ok_setup() {
+    async fn session_initiate_records_attempted_and_defers_ok_to_the_router() {
         let metrics = crate::telemetry::test_support::acquire().await;
         let iq = session_initiate_iq(
             "alice@waddle.test/desktop",
@@ -2258,22 +2270,113 @@ mod tests {
 
         let events = handler.handle(&iq, &ctx(&jid));
 
+        // #1488: the handler no longer counts `ok` at emit time — the
+        // route disposition is unknown here. It counts `attempted` and
+        // hands the open attempt to the routing interpreter as a
+        // ticket on the routing effect.
         assert!(
-            matches!(events[0], OutboundEvent::RouteToConnection { .. }),
+            matches!(
+                events[0],
+                OutboundEvent::RouteToConnection {
+                    call_setup: Some(_),
+                    ..
+                }
+            ),
             "{events:?}"
         );
         assert_eq!(
             metrics.counter_sum("waddle.call.setup.attempted", &[]),
             Some(1)
         );
-        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.ok", &[])
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.failed", &[])
+                .unwrap_or(0),
+            0
+        );
         assert_eq!(
             metrics.metric_unit("waddle.call.setup.attempted"),
             Some("1".to_string())
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn routed_initiate_ticket_closes_the_attempt_as_ok_when_delivered() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let iq = session_initiate_iq(
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/desktop",
+            "setup-ticket-ok",
+        );
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+
+        let event = handler
+            .handle(&iq, &ctx(&jid))
+            .into_iter()
+            .next()
+            .expect("one event");
+        let OutboundEvent::RouteToConnection {
+            call_setup: Some(ticket),
+            ..
+        } = event
+        else {
+            panic!("expected a routed invite carrying a call-setup ticket: {event:?}");
+        };
+
+        ticket.delivered();
+
+        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
         assert_eq!(
             metrics.metric_unit("waddle.call.setup.ok"),
             Some("1".to_string())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn routed_initiate_ticket_closes_the_attempt_as_peer_unavailable() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let iq = session_initiate_iq(
+            "alice@waddle.test/desktop",
+            "bob@waddle.test/desktop",
+            "setup-ticket-unroutable",
+        );
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+
+        let event = handler
+            .handle(&iq, &ctx(&jid))
+            .into_iter()
+            .next()
+            .expect("one event");
+        let OutboundEvent::RouteToConnection {
+            call_setup: Some(ticket),
+            ..
+        } = event
+        else {
+            panic!("expected a routed invite carrying a call-setup ticket: {event:?}");
+        };
+
+        ticket.undeliverable();
+
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.ok", &[])
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.setup.failed",
+                &[("reason", "peer_unavailable")]
+            ),
+            Some(1)
         );
     }
 
@@ -2298,12 +2401,19 @@ mod tests {
         );
         handler.handle(&accept, &ctx(&bob));
 
-        // Only the initiate counted; the accept added nothing.
+        // Only the initiate counted; the accept added nothing. `ok`
+        // stays 0 at the handler seam — the routed initiate defers it
+        // to the interpreter (#1488).
         assert_eq!(
             metrics.counter_sum("waddle.call.setup.attempted", &[]),
             Some(1)
         );
-        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.ok", &[])
+                .unwrap_or(0),
+            0
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2393,14 +2503,20 @@ mod tests {
             handler.handle(&iq, &ctx(&jid));
         }
 
-        // Two attempts: the first succeeded, the second was rejected by
-        // the limiter — which counts the attempted/failed pair itself
-        // because the per-attempt tracker never opens.
+        // Two attempts: the first was routed (its `ok`/`failed` close
+        // is deferred to the interpreter, #1488), the second was
+        // rejected by the limiter — which counts the attempted/failed
+        // pair itself because the per-attempt tracker never opens.
         assert_eq!(
             metrics.counter_sum("waddle.call.setup.attempted", &[]),
             Some(2)
         );
-        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.ok", &[])
+                .unwrap_or(0),
+            0
+        );
         assert_eq!(
             metrics.counter_sum("waddle.call.setup.failed", &[("reason", "rate_limited")]),
             Some(1)

@@ -48,13 +48,13 @@ fn add_call_setup_attempted(count: u64) {
 /// (a join token was issued and the negotiation stanza was forwarded
 /// or accepted).
 ///
-/// Precisely: `ok` means the server authorized the attempt and handed
-/// the invite to the router. A 1:1 invite whose peer then turns out to
-/// be unroutable (offline/stale full JID) still counts `ok` — the
-/// undeliverable IQ error is interpreted after the sans-I/O boundary,
-/// where this tracker is out of scope. Client-side `chat.call.lifecycle`
-/// telemetry captures that failure mode; folding the route disposition
-/// into this counter is tracked as a follow-up (#1452 review).
+/// Precisely: `ok` means the server authorized the attempt and the
+/// invite reached the peer's routing layer with a usable destination.
+/// For the Muji path that is token mint + registration; for the 1:1
+/// path the handler defers to the routing interpreter via
+/// [`PendingCallSetupRoute`], so an invite whose full JID turns out to
+/// be unroutable counts `failed{reason=peer_unavailable}` instead of
+/// `ok` (#1488).
 pub fn increment_call_setup_ok() {
     add_call_setup_ok(1);
 }
@@ -96,6 +96,116 @@ pub(super) fn register_call_setup_counters() {
     }
 }
 
+/// An open 1:1 call-setup attempt handed off to the routing layer
+/// (#1488).
+///
+/// The Jingle handler counts `attempted` when it opens the attempt,
+/// but for a routed 1:1 `session-initiate` the outcome is only known
+/// after the sans-I/O boundary, when the interpreter has resolved the
+/// addressed full JID against live and detached resources. The handler
+/// therefore attaches this ticket to the routing effect instead of
+/// counting `ok` at emit time, and the interpreter MUST close it
+/// exactly once from the route disposition: [`Self::delivered`] when
+/// the invite reached a live resource, a detached XEP-0198 session, or
+/// an ambiguous-but-possibly-committed cluster relay;
+/// [`Self::undeliverable`] when no usable destination existed and the
+/// caller got the undeliverable bounce.
+///
+/// Exactly-once is enforced at the type level (Qodo review on PR
+/// #1611): the ticket is a shared one-shot guard, so clones — e.g.
+/// through `OutboundEvent`'s derived `Clone` — share the same closed
+/// bit and the first `delivered`/`undeliverable` wins. A second close
+/// is a counted-nowhere no-op that logs at warn, and fabrication is
+/// prevented by the [`Self::open`] constructor being `pub(crate)`:
+/// outside this crate a ticket can only be obtained from the routing
+/// effect the Jingle handler built — after it counted `attempted` —
+/// or minted deliberately in tests via [`Self::open_for_test`].
+#[derive(Debug, Clone)]
+pub struct PendingCallSetupRoute(std::sync::Arc<TicketCell>);
+
+/// Shared closed bit with a Drop backstop: when the LAST clone of an
+/// unclosed ticket is dropped — the routing pipeline discarded the
+/// invite without resolving delivery — the attempt is closed as
+/// `failed{reason=route_abandoned}` so `attempted` always receives a
+/// terminal increment and the success-rate denominator cannot leak
+/// (#1611 review).
+#[derive(Debug)]
+struct TicketCell(std::sync::atomic::AtomicBool);
+
+impl Drop for TicketCell {
+    fn drop(&mut self) {
+        if !self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::warn!(
+                "call-setup ticket dropped without a disposition; counting route_abandoned"
+            );
+            increment_call_setup_failed(CallSetupFailureReason::RouteAbandoned);
+        }
+    }
+}
+
+impl PendingCallSetupRoute {
+    /// Open a ticket for a routed 1:1 `session-initiate`.
+    ///
+    /// Crate-private on purpose (#1611 review): every ticket's terminal
+    /// `ok`/`failed` increment presumes the Jingle handler already
+    /// counted `waddle.call.setup.attempted` for the same attempt, so
+    /// only that handler may mint tickets — a ticket opened without the
+    /// `attempted` increment corrupts the `CallSetupFailureRate`
+    /// denominator. Everything downstream receives the ticket through
+    /// `OutboundEvent::RouteToConnection`; cross-crate tests use
+    /// [`Self::open_for_test`].
+    pub(crate) fn open() -> Self {
+        Self(std::sync::Arc::new(TicketCell(
+            std::sync::atomic::AtomicBool::new(false),
+        )))
+    }
+
+    /// Test-only ticket constructor that models production accounting:
+    /// it counts `waddle.call.setup.attempted` before opening, exactly
+    /// as the Jingle handler does, so suites exercising ticket closure
+    /// keep the SLI numerator and denominator consistent.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn open_for_test() -> Self {
+        increment_call_setup_attempted();
+        Self::open()
+    }
+
+    /// Flip the shared closed bit; `true` iff this call performed the
+    /// close and may count.
+    fn close(&self) -> bool {
+        self.0
+             .0
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// The routed invite reached a usable destination: close the
+    /// attempt as `ok`.
+    pub fn delivered(self) {
+        if self.close() {
+            increment_call_setup_ok();
+        } else {
+            tracing::warn!("call-setup ticket closed twice (delivered); second close ignored");
+        }
+    }
+
+    /// No live or detached resource could take the invite (or the
+    /// delivery was dropped): close the attempt as
+    /// `failed{reason=peer_unavailable}`.
+    pub fn undeliverable(self) {
+        if self.close() {
+            increment_call_setup_failed(CallSetupFailureReason::PeerUnavailable);
+        } else {
+            tracing::warn!("call-setup ticket closed twice (undeliverable); second close ignored");
+        }
+    }
+}
+
 /// Count a call setup rejected at a gate that runs *before* the
 /// per-attempt tracker in the Jingle handler opens — the server-side
 /// Muji membership gate (which short-circuits IQ dispatch entirely),
@@ -108,4 +218,66 @@ pub(super) fn register_call_setup_counters() {
 pub fn record_call_setup_rejected(reason: CallSetupFailureReason) {
     increment_call_setup_attempted();
     increment_call_setup_failed(reason);
+}
+
+#[cfg(test)]
+mod pending_call_setup_route_tests {
+    use super::PendingCallSetupRoute;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unclosed_dropped_ticket_counts_route_abandoned_once() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let ticket = PendingCallSetupRoute::open();
+        let clone = ticket.clone();
+        drop(ticket);
+        // The backstop fires only when the LAST clone goes away.
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.failed", &[("reason", "route_abandoned")])
+                .unwrap_or(0),
+            0
+        );
+        drop(clone);
+        assert_eq!(
+            metrics.counter_sum("waddle.call.setup.failed", &[("reason", "route_abandoned")]),
+            Some(1)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_closed_ticket_drops_without_extra_counts() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let ticket = PendingCallSetupRoute::open();
+        ticket.delivered();
+        assert_eq!(
+            metrics
+                .counter_sum("waddle.call.setup.failed", &[])
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cloned_ticket_closes_exactly_once() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let ticket = PendingCallSetupRoute::open();
+        let clone = ticket.clone();
+
+        ticket.delivered();
+        // The second close (via the clone, with the opposite verdict)
+        // must be a counted-nowhere no-op.
+        clone.undeliverable();
+
+        assert_eq!(metrics.counter_sum("waddle.call.setup.ok", &[]), Some(1));
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "waddle.call.setup.failed",
+                    &[("reason", "peer_unavailable")]
+                )
+                .unwrap_or(0),
+            0
+        );
+    }
 }
