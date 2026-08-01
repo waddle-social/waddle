@@ -260,16 +260,7 @@ impl OrderedRelayDeliveryBridge {
             Ok(RelayRemoteResourceFrameReply {
                 status: RelayRemoteResourceFrameStatus::Delivered,
             }) => {
-                // The direct remote-resource path bypasses the counted
-                // owner-node delivery channels AND the deliberately
-                // uncounted socket endpoint, so the flagship delivered-
-                // message counter must be bumped here — once, on the
-                // owner node, upon the socket node's acknowledgment.
-                if let Some(message_kind) =
-                    waddle_xmpp::telemetry::messages::delivered_message_kind(stanza)
-                {
-                    waddle_xmpp::telemetry::messages::record_delivered_message(message_kind);
-                }
+                super::telemetry::record_remote_resource_delivered(stanza);
                 tracing::debug!(
                     jid = %target,
                     message_id = stanza_message_id(stanza),

@@ -1,5 +1,18 @@
 use super::*;
 
+/// Failure modes of local envelope preparation.
+pub(in super::super) enum RemotePrepareError {
+    /// The sender channel is diverted: the outcome is final and the
+    /// caller must NOT run local fallback.
+    Terminal(FullJidDeliveryOutcome),
+    /// A local precondition failed (origin signer not wired, signing or
+    /// serialization error): decline the ordered-relay attempt so the
+    /// caller's local fallback decides. This is not a remote
+    /// reachability signal — the channel is left undiverted and the
+    /// envelope sequence is rolled back (#1611 review round 6).
+    Declined,
+}
+
 impl OrderedRelayDeliveryBridge {
     pub(in super::super) async fn deliver_seeded_remote(
         self: Arc<Self>,
@@ -22,7 +35,10 @@ impl OrderedRelayDeliveryBridge {
                         .deliver_prepared_remote(prepared, allow_target_refresh_retry)
                         .await
                 }
-                Err(outcome) => Some(no_client_reply_outcome(outcome)),
+                Err(RemotePrepareError::Terminal(outcome)) => {
+                    Some(no_client_reply_outcome(outcome))
+                }
+                Err(RemotePrepareError::Declined) => None,
             }
         };
         self.remove_channel_lock_if_unused(&channel, &lock).await;
@@ -32,7 +48,7 @@ impl OrderedRelayDeliveryBridge {
     pub(in super::super) async fn prepare_remote_delivery(
         &self,
         seed: RemoteDeliverySeed,
-    ) -> Result<PreparedRemoteDelivery, FullJidDeliveryOutcome> {
+    ) -> Result<PreparedRemoteDelivery, RemotePrepareError> {
         let mut envelope = {
             let mut sender = self.sender_state.lock().await;
             match sender.next_envelope(
@@ -54,15 +70,28 @@ impl OrderedRelayDeliveryBridge {
                         "ordered relay: sender channel diverted; dropping to avoid \
                          reordering"
                     );
-                    return Err(definite_no_effect_outcome(seed.is_iq));
+                    return Err(RemotePrepareError::Terminal(definite_no_effect_outcome(
+                        seed.is_iq,
+                    )));
                 }
             }
         };
         let channel = envelope.channel.clone();
         if self.sign_envelope(&mut envelope).is_err() {
-            self.divert_channel(channel, OrderedRelayDiversionReason::Unreachable)
-                .await;
-            return Err(definite_no_effect_outcome(seed.is_iq));
+            // Local precondition failure: undo the sequence advance so
+            // the channel has no gap, and decline instead of diverting —
+            // the target node is not proven unreachable and the caller's
+            // local fallback still owes the sender a disposition.
+            self.sender_state
+                .lock()
+                .await
+                .rollback_unseen_envelope(&envelope);
+            tracing::warn!(
+                target = %seed.target,
+                "ordered relay: envelope signing unavailable; declining relay for \
+                 local fallback"
+            );
+            return Err(RemotePrepareError::Declined);
         }
         Ok(PreparedRemoteDelivery {
             services: seed.services,
@@ -280,7 +309,12 @@ impl OrderedRelayDeliveryBridge {
                         .finish_prepared_delivery_result(retry, result)
                         .await
                 }
-                Err(outcome) => Some(no_client_reply_outcome(outcome)),
+                Err(RemotePrepareError::Terminal(outcome)) => {
+                    Some(no_client_reply_outcome(outcome))
+                }
+                // Declined retry: fall back to classifying the original
+                // send failure rather than synthesizing an outcome here.
+                Err(RemotePrepareError::Declined) => None,
             }
         };
         self.remove_channel_lock_if_unused(&new_channel, &lock)

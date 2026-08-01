@@ -9,6 +9,7 @@ pub(super) mod receiver;
 pub(super) mod remote;
 pub(super) mod remote_route_helpers;
 pub(super) mod remote_socket;
+pub(super) mod telemetry;
 
 pub(super) use local::*;
 pub(super) use muc::reserved::{
