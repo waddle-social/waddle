@@ -84,9 +84,14 @@ fn result_iq(id: &str) -> Iq {
     }
 }
 
-fn chat_msg(from: &str, to: &str, body: &str) -> xmpp_parsers::message::Message {
-    let mut m = xmpp_parsers::message::Message::new(Some(to.parse().expect("jid")));
-    m.from = Some(from.parse().expect("jid"));
+/// Parse boundary for test fixtures: literal → typed JID, once.
+fn jid(value: &str) -> jid::Jid {
+    value.parse().expect("valid test jid")
+}
+
+fn chat_msg(from: jid::Jid, to: jid::Jid, body: &str) -> xmpp_parsers::message::Message {
+    let mut m = xmpp_parsers::message::Message::new(Some(to));
+    m.from = Some(from);
     m.type_ = xmpp_parsers::message::MessageType::Chat;
     m.bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
@@ -152,7 +157,11 @@ async fn preserves_frame_order_across_multiple_events() {
 
 #[tokio::test]
 async fn send_stanza_preserves_xep_0201_thread_on_wire() {
-    let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "threaded hi");
+    let mut msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "threaded hi",
+    );
     msg.thread = Some(xmpp_parsers::message::Thread {
         id: "root-thread".to_string(),
         parent: None,

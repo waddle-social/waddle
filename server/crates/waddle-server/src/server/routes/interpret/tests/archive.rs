@@ -15,7 +15,11 @@ async fn xep_0313_archive_direct_persists_to_mam_storage() {
     let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
     let from: jid::BareJid = "alice@example.com".parse().expect("bare");
     let to: jid::BareJid = "bob@example.com".parse().expect("bare");
-    let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "hello");
+    let mut msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "hello",
+    );
     msg.id = Some(xmpp_parsers::message::Id("orig-1".to_string()));
 
     let events = vec![OutboundEvent::ArchiveDirect {
@@ -152,7 +156,11 @@ async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_via_archive_or_stanza_
 
     let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
     let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
-    let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "pivot test");
+    let mut msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "pivot test",
+    );
     msg.id = Some(xmpp_parsers::message::Id("wire-id".to_string()));
     // Simulate CanonicalizeHandler stamping the canonical id
     // under alice's archive — the same id InboxHandler will
@@ -236,8 +244,8 @@ async fn origin_id_dedup_rewrites_downstream_archive_refs_to_existing_mam_id() {
         .expect("seed original archive row");
 
     let mut retry = chat_msg(
-        "alice@example.com/web-new",
-        "bob@example.com",
+        jid("alice@example.com/web-new"),
+        jid("bob@example.com"),
         "original copy",
     );
     retry
@@ -325,8 +333,8 @@ async fn origin_id_collision_with_distinct_content_keeps_fresh_archive_refs() {
         .expect("seed original archive row");
 
     let mut distinct = chat_msg(
-        "alice@example.com/web-new",
-        "bob@example.com",
+        jid("alice@example.com/web-new"),
+        jid("bob@example.com"),
         "new content",
     );
     distinct
@@ -382,7 +390,7 @@ async fn xep_0313_archive_direct_writes_one_entry_per_event() {
 
     let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
     let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "yo");
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "yo");
 
     let events = vec![
         OutboundEvent::ArchiveDirect {
@@ -528,7 +536,7 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
 
     let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
     let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "yo");
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "yo");
     let events = vec![OutboundEvent::ArchiveDirect {
         archive_jid: alice.clone(),
         from: alice.into(),
@@ -559,7 +567,11 @@ async fn inbox_project_writes_owner_peer_keyed_row_with_typed_archive_ref() {
 
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
     let peer: jid::BareJid = "bob@example.com".parse().expect("bare");
-    let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "hi there");
+    let mut msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "hi there",
+    );
     msg.id = Some(xmpp_parsers::message::Id("origin-X".to_string()));
 
     let events = vec![OutboundEvent::ProjectInbox {
@@ -596,7 +608,11 @@ async fn inbox_project_increment_unread_bumps_recipient_count() {
 
     let owner: jid::BareJid = "bob@example.com".parse().expect("bare");
     let peer: jid::BareJid = "alice@example.com".parse().expect("bare");
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi bob");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "hi bob",
+    );
 
     let events = vec![OutboundEvent::ProjectInbox {
         owner: owner.clone(),

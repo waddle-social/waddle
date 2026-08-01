@@ -17,7 +17,7 @@ async fn xep_0280_send_carbons_fans_out_to_other_carbon_enabled_resources() {
     registry.register_with_carbons(alice_phone.clone(), phone_tx, true);
 
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
-    let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::SendCarbons {
         owner,
         message: Box::new(original),
@@ -55,7 +55,7 @@ async fn xep_0280_send_carbons_skips_originating_resource() {
     registry.register_with_carbons(alice_web.clone(), web_tx, true);
 
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
-    let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::SendCarbons {
         owner,
         message: Box::new(original),
@@ -81,7 +81,7 @@ async fn xep_0280_send_carbons_skips_resources_without_carbons_enabled() {
     registry.register_with_carbons(alice_phone.clone(), phone_tx, false);
 
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
-    let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::SendCarbons {
         owner,
         message: Box::new(original),
@@ -105,7 +105,7 @@ async fn xep_0280_send_carbons_received_kind_emits_received_envelope() {
     registry.register_with_carbons(bob_phone.clone(), phone_tx, true);
 
     let owner: jid::BareJid = "bob@example.com".parse().expect("bare");
-    let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::SendCarbons {
         owner,
         message: Box::new(original),
@@ -172,7 +172,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
     sm.store_session(detached).await.expect("store session");
 
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
-    let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let deps = Deps {
         connection_registry: &registry,
         user_registry: None,

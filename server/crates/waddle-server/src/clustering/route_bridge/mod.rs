@@ -80,10 +80,10 @@ use registration::*;
 pub(crate) use types::RemoteResourceRegisterOutcome;
 use types::*;
 pub use types::{
-    RemoteCarbonKind, RemotePresenceStateSnapshot, RemoteResourceOriginSnapshot,
-    RemoteResourceOutboundFrame, RemoteResourceRegistrationId, RemoteResourceRouteOutcome,
-    RemoteResourceRouteTarget, RemoteResourceSocketGeneration, RemoteResourceStateSnapshot,
-    RemoteResourceStateUpdate, RemoteUserSideEffect,
+    RemoteCarbonKind, RemotePresenceShow, RemotePresenceStateSnapshot,
+    RemoteResourceOriginSnapshot, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
+    RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
+    RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
 };
 use validation::*;
 

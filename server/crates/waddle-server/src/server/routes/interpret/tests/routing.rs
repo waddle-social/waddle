@@ -20,7 +20,7 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
     // user_registry.
     register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::RouteToConnection {
         jid: jid::Jid::from(bob.clone()),
         stanza: Box::new(Stanza::Message(msg)),
@@ -69,7 +69,11 @@ async fn route_to_connection_bare_jid_selects_highest_priority_available_resourc
     registry.update_presence(&bob_phone, true, 5);
     registry.update_presence(&bob_tablet, true, 1);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi bare");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "hi bare",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -125,7 +129,7 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
     // routing still delivers to this resource (tier-2 `GetResources`
     // fallback, read from the same authoritative actor).
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -162,7 +166,7 @@ async fn route_to_connection_bare_jid_ignores_resource_absent_from_actor() {
     registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
     registry.update_presence(&bob_desk, true, 5);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -227,7 +231,11 @@ async fn route_to_connection_bare_jid_sole_stale_extra_self_heals_via_dropped_cl
         &dispatcher,
     );
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "no-loss");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "no-loss",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -320,8 +328,8 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(chat_msg(
-            "alice@example.com/web",
-            "bob@example.com",
+            jid("alice@example.com/web"),
+            jid("bob@example.com"),
             "first",
         ))),
         call_setup: None,
@@ -365,8 +373,8 @@ async fn route_to_connection_bare_jid_stale_top_priority_extra_self_heals_to_liv
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(chat_msg(
-            "alice@example.com/web",
-            "bob@example.com",
+            jid("alice@example.com/web"),
+            jid("bob@example.com"),
             "second",
         ))),
         call_setup: None,
@@ -402,7 +410,7 @@ async fn route_to_connection_bare_jid_degrades_to_offline_on_dead_user_registry(
     user_registry.kill();
     tokio::task::yield_now().await;
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -490,7 +498,11 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         sfu: None,
     };
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "must arrive");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "must arrive",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -554,7 +566,11 @@ async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
     );
 
     let dm = || {
-        let mut m = chat_msg("alice@example.com/web", "bob@example.com", "retry me");
+        let mut m = chat_msg(
+            jid("alice@example.com/web"),
+            jid("bob@example.com"),
+            "retry me",
+        );
         m.payloads.push(build_origin_id_element("origin-retry-1"));
         m
     };
@@ -656,7 +672,11 @@ async fn route_full_jid_dm_offline_resource_falls_back_to_other_live_resource() 
         &dispatcher,
     );
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com/gone", "hi bob");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com/gone"),
+        "hi bob",
+    );
     let outcome = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com/gone".parse::<jid::Jid>().expect("full"),
@@ -715,7 +735,11 @@ async fn route_full_jid_dm_no_resources_stores_offline() {
     let dispatcher = pipelined_dispatcher();
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com/gone", "offline?");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com/gone"),
+        "offline?",
+    );
     let _ = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com/gone".parse::<jid::Jid>().expect("full"),
@@ -766,8 +790,8 @@ async fn route_full_jid_dm_to_detached_resource_runs_recipient_pipeline() {
     };
 
     let msg = chat_msg(
-        "alice@example.com/web",
-        "bob@example.com/phone",
+        jid("alice@example.com/web"),
+        jid("bob@example.com/phone"),
         "resume me",
     );
     let _ = interpret(
@@ -851,7 +875,11 @@ async fn route_bare_jid_message_to_nonexistent_local_user_bounces() {
         ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
 
-    let msg = chat_msg("alice@example.com/web", "typo@example.com", "anyone?");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("typo@example.com"),
+        "anyone?",
+    );
     let outcome = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "typo@example.com".parse::<jid::Jid>().expect("bare"),
@@ -938,7 +966,11 @@ async fn route_bare_jid_message_to_existing_oidc_user_persists_offline() {
         ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hello bob");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "hello bob",
+    );
     let outcome = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
@@ -990,7 +1022,11 @@ async fn route_to_connection_bare_jid_skips_negative_priority_resources() {
     // territory).
     registry.update_presence(&bob_desk, true, -1);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi bare");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "hi bare",
+    );
     let _ = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
@@ -1044,7 +1080,11 @@ async fn route_to_connection_bare_jid_all_negative_priority_goes_offline() {
         &dispatcher,
     );
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "store me");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "store me",
+    );
     let _ = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
@@ -1121,8 +1161,8 @@ async fn route_full_jid_dm_to_detached_drops_when_blocklist_load_fails() {
     };
 
     let msg = chat_msg(
-        "alice@example.com/web",
-        "bob@example.com/phone",
+        jid("alice@example.com/web"),
+        jid("bob@example.com/phone"),
         "maybe blocked",
     );
     let _ = interpret(
@@ -1174,7 +1214,11 @@ async fn route_bare_jid_dm_to_detached_only_recipient_runs_recipient_pipeline() 
         ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "bare detached");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "bare detached",
+    );
     let _ = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
@@ -1251,8 +1295,8 @@ async fn route_bare_jid_dm_from_blocked_sender_to_detached_only_recipient_is_fil
     };
 
     let msg = chat_msg(
-        "alice@example.com/web",
-        "bob@example.com",
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
         "should not pass",
     );
     let _ = interpret(

@@ -17,7 +17,11 @@ async fn offline_recipient_pass_persists_archive_for_bare_jid_target() {
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
     // alice -> bob bare; no resources for bob registered.
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hello bob");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "hello bob",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -56,7 +60,11 @@ async fn offline_recipient_pass_persists_inbox_for_bare_jid_target() {
     let dispatcher = pipelined_dispatcher();
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "inbox row?");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "inbox row?",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -105,7 +113,11 @@ async fn route_to_connection_at_max_recursion_depth_drops_without_persistence() 
     let dispatcher = pipelined_dispatcher();
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "guard");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "guard",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -155,7 +167,11 @@ async fn offline_recipient_pass_drops_send_stanza_no_wire() {
     let dispatcher = pipelined_dispatcher();
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "drop wire");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "drop wire",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -194,7 +210,11 @@ async fn offline_recipient_pass_blocklist_loaded_from_storage_blocks_filtered_me
     let dispatcher = pipelined_dispatcher();
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "blocked");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "blocked",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: jid::Jid::from(bob.clone()),
         stanza: Box::new(Stanza::Message(msg)),
@@ -255,7 +275,11 @@ async fn offline_recipient_pass_blocklist_storage_error_skips_recipient_persiste
     let dispatcher = pipelined_dispatcher();
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-    let msg = chat_msg("alice@example.com/web", "bob@example.com", "fail-closed");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "fail-closed",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
         stanza: Box::new(Stanza::Message(msg)),
@@ -437,7 +461,11 @@ async fn offline_recipient_pass_skipped_for_remote_domain() {
     let dispatcher = pipelined_dispatcher();
     let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-    let msg = chat_msg("alice@example.com/web", "bob@other.example.com", "remote");
+    let msg = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@other.example.com"),
+        "remote",
+    );
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@other.example.com"
             .parse::<jid::Jid>()

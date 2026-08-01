@@ -37,9 +37,57 @@ impl RemoteResourceSocketGeneration {
     }
 }
 
+/// Typed RFC 6121 §4.7.2.1 presence `<show/>` for cross-node state
+/// transfer; the default "available" state is the absent `Option` on
+/// [`RemotePresenceStateSnapshot::show`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemotePresenceShow {
+    Away,
+    Chat,
+    Dnd,
+    Xa,
+}
+
+impl RemotePresenceShow {
+    /// The wire value used by the registry's `PresenceState` boundary.
+    fn as_wire(self) -> &'static str {
+        match self {
+            Self::Away => "away",
+            Self::Chat => "chat",
+            Self::Dnd => "dnd",
+            Self::Xa => "xa",
+        }
+    }
+
+    /// Parse the registry's stored show string. `PresenceState.show` is
+    /// only ever populated from parsed RFC 6121 presence, so anything
+    /// out of contract degrades to `None` (plain "available") instead
+    /// of relaying junk cross-node.
+    fn from_wire(show: &str) -> Option<Self> {
+        match show {
+            "away" => Some(Self::Away),
+            "chat" => Some(Self::Chat),
+            "dnd" => Some(Self::Dnd),
+            "xa" => Some(Self::Xa),
+            _ => None,
+        }
+    }
+}
+
+impl From<xmpp_parsers::presence::Show> for RemotePresenceShow {
+    fn from(show: xmpp_parsers::presence::Show) -> Self {
+        match show {
+            xmpp_parsers::presence::Show::Away => Self::Away,
+            xmpp_parsers::presence::Show::Chat => Self::Chat,
+            xmpp_parsers::presence::Show::Dnd => Self::Dnd,
+            xmpp_parsers::presence::Show::Xa => Self::Xa,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemotePresenceStateSnapshot {
-    pub show: Option<String>,
+    pub show: Option<RemotePresenceShow>,
     pub status: Option<String>,
     pub priority: i8,
     pub payloads: Vec<RemoteElement>,
@@ -48,7 +96,10 @@ pub struct RemotePresenceStateSnapshot {
 impl From<PresenceState> for RemotePresenceStateSnapshot {
     fn from(state: PresenceState) -> Self {
         Self {
-            show: state.show,
+            show: state
+                .show
+                .as_deref()
+                .and_then(RemotePresenceShow::from_wire),
             status: state.status,
             priority: state.priority,
             payloads: state.payloads.into_iter().map(RemoteElement).collect(),
@@ -59,7 +110,7 @@ impl From<PresenceState> for RemotePresenceStateSnapshot {
 impl From<RemotePresenceStateSnapshot> for PresenceState {
     fn from(state: RemotePresenceStateSnapshot) -> Self {
         Self {
-            show: state.show,
+            show: state.show.map(|show| show.as_wire().to_string()),
             status: state.status,
             priority: state.priority,
             payloads: state

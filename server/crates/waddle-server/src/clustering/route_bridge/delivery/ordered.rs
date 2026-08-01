@@ -103,49 +103,49 @@ impl OrderedRelayDeliveryBridge {
                     };
                     tokio::spawn(async move {
                         let sfu_for_bounce = bridge.sfu_for_bounce();
-                        let delivery_outcome = bridge
-                            .deliver_seeded_remote(seed, true)
-                            .await
-                            .map(caller_delivery_outcome);
-                        if let Some(outcome) = delivery_outcome {
-                            tracing::debug!(
-                                jid = %outcome_target,
-                                message_id = outcome_message_id
-                                    .as_ref()
-                                    .map_or("", |id| id.0.as_str()),
-                                ?outcome,
-                                "ordered-relay deferred full-JID delivery outcome"
-                            );
-                        }
+                        let fallback_services = seed.services.clone();
+                        let fallback_target = seed.target.clone();
+                        let fallback_payload = seed.payload.clone();
+                        // `None` from `deliver_seeded_remote` means "relay
+                        // declined; local fallback decides the disposition"
+                        // (e.g. `RelayAskError::NotFound`) — the non-deferred
+                        // path propagates it via `?` so the caller keeps the
+                        // local path. The deferred branch already returned a
+                        // synthetic `Delivered`, so it must run that fallback
+                        // itself instead of treating `None` as a lost invite
+                        // (#1611 review round 4).
+                        let outcome = match bridge.deliver_seeded_remote(seed, true).await {
+                            Some(remote) => caller_delivery_outcome(remote),
+                            None => caller_delivery_outcome(
+                                deliver_local_after_target_refresh_outcome(
+                                    &fallback_services,
+                                    &fallback_target,
+                                    &origin_stanza,
+                                    &fallback_payload,
+                                )
+                                .await,
+                            ),
+                        };
+                        tracing::debug!(
+                            jid = %outcome_target,
+                            message_id = outcome_message_id
+                                .as_ref()
+                                .map_or("", |id| id.0.as_str()),
+                            ?outcome,
+                            "ordered-relay deferred full-JID delivery outcome"
+                        );
                         // #1488: this is the point where the deferred
                         // delivery's REAL disposition is known — the
                         // `Delivered` returned below is synthetic. Close
-                        // the call-setup ticket here; a `None` outcome
-                        // means the relay never handed the stanza to
-                        // anyone (and there is no local fallback on the
-                        // deferred branch), so the invite is lost.
-                        match delivery_outcome {
-                            Some(outcome) => {
-                                crate::server::routes::interpret::close_call_setup_from_outcome(
-                                    call_setup, outcome,
-                                );
-                            }
-                            None => {
-                                if let Some(ticket) = call_setup {
-                                    ticket.undeliverable();
-                                }
-                            }
-                        }
-                        let replies = delivery_outcome
-                            .map(|outcome| {
-                                replies_for_origin_handoff(
-                                    &origin_stanza,
-                                    outcome,
-                                    sfu_for_bounce.as_deref(),
-                                )
-                            })
-                            .unwrap_or_default();
-                        handoff.complete(replies);
+                        // the call-setup ticket here.
+                        crate::server::routes::interpret::close_call_setup_from_outcome(
+                            call_setup, outcome,
+                        );
+                        handoff.complete(replies_for_origin_handoff(
+                            &origin_stanza,
+                            outcome,
+                            sfu_for_bounce.as_deref(),
+                        ));
                     });
                     return Some(FullJidDeliveryOutcome::Delivered);
                 }
@@ -251,18 +251,30 @@ impl OrderedRelayDeliveryBridge {
                     let origin_stanza = stanza.clone();
                     tokio::spawn(async move {
                         let sfu_for_bounce = bridge.sfu_for_bounce();
-                        let replies = bridge
-                            .deliver_seeded_remote(seed, true)
-                            .await
-                            .map(|outcome| {
-                                replies_for_origin_handoff(
+                        let fallback_services = seed.services.clone();
+                        let fallback_target = seed.target.clone();
+                        let fallback_payload = seed.payload.clone();
+                        // Same `None` semantics as the full-JID deferred
+                        // branch above: relay declined, so run the local
+                        // fallback rather than dropping the stanza with no
+                        // replies (#1611 review round 4).
+                        let outcome = match bridge.deliver_seeded_remote(seed, true).await {
+                            Some(remote) => caller_delivery_outcome(remote),
+                            None => caller_delivery_outcome(
+                                deliver_local_after_target_refresh_outcome(
+                                    &fallback_services,
+                                    &fallback_target,
                                     &origin_stanza,
-                                    caller_delivery_outcome(outcome),
-                                    sfu_for_bounce.as_deref(),
+                                    &fallback_payload,
                                 )
-                            })
-                            .unwrap_or_default();
-                        handoff.complete(replies);
+                                .await,
+                            ),
+                        };
+                        handoff.complete(replies_for_origin_handoff(
+                            &origin_stanza,
+                            outcome,
+                            sfu_for_bounce.as_deref(),
+                        ));
                     });
                     return Some(FullJidDeliveryOutcome::Delivered);
                 }

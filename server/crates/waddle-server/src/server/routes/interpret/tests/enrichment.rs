@@ -11,7 +11,11 @@ async fn enrichment_request_without_extension_manager_fails_open_with_original_m
     let registry = ConnectionRegistry::new();
     let deps = Deps::registry_only(&registry);
 
-    let mut original = chat_msg("alice@example.com/web", "bob@example.com", "look https://x");
+    let mut original = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "look https://x",
+    );
     original.id = Some(xmpp_parsers::message::Id("orig-id".to_string()));
 
     let events = vec![OutboundEvent::RequestEnrichment {
@@ -69,8 +73,8 @@ async fn enrichment_failure_fail_open_feeds_original_message_back() {
     let deps = Deps::test_with_extension_manager(&registry, &em);
 
     let mut original = chat_msg(
-        "alice@example.com/web",
-        "bob@example.com",
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
         "check https://example.com",
     );
     original.id = Some(xmpp_parsers::message::Id("fail-open-id".to_string()));
@@ -129,7 +133,7 @@ async fn enrichment_request_calls_extension_manager_and_feeds_complete_back() {
     );
     let deps = Deps::test_with_extension_manager(&registry, &em);
 
-    let mut original = chat_msg("alice@example.com/web", "bob@example.com", "ping");
+    let mut original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "ping");
     original.id = Some(xmpp_parsers::message::Id("e-id".to_string()));
 
     let events = vec![OutboundEvent::RequestEnrichment {
