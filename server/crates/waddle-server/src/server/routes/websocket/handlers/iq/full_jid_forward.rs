@@ -54,7 +54,7 @@ pub(super) async fn route_full_jid_iq(
             .as_ref(),
     ) {
         if let Some(outcome) = bridge
-            .try_deliver_full_jid_remote(&target, &stanza, origin)
+            .try_deliver_full_jid_remote(&target, &stanza, origin, None)
             .await
         {
             return match outcome {

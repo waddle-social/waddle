@@ -1,5 +1,6 @@
 use super::*;
 use std::{future::Future, pin::Pin};
+use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
 use xmpp_parsers::iq::Iq;
 
 type OrderedRelayDeliveryFuture<'a> =
@@ -87,6 +88,7 @@ pub(crate) async fn route_to_connection(
     jid: Jid,
     stanza: Box<Stanza>,
     recursion_depth: u8,
+    call_setup: Option<PendingCallSetupRoute>,
 ) -> Vec<Stanza> {
     // #229 PR12 cutover: the destination's main loop is
     // now wired (PR11) to dispatch on `DeliveryKind` and
@@ -130,6 +132,12 @@ pub(crate) async fn route_to_connection(
              dropping nested route (full or bare) to prevent duplicate \
              delivery / persistence"
         );
+        // #1488: a dropped route never reached the peer. Unreachable
+        // for real invites (the Jingle handler emits at depth 0), but
+        // closing here keeps the exactly-once accounting invariant.
+        if let Some(ticket) = call_setup {
+            ticket.undeliverable();
+        }
         Vec::new()
     } else {
         // Notification activity ingest (slice 2b): when the routed
@@ -181,8 +189,18 @@ pub(crate) async fn route_to_connection(
         }
 
         match jid.clone().try_into_full() {
-            Ok(full) => route_to_full_jid(deps, full, stanza, recursion_depth).await,
-            Err(bare) => route_to_bare_jid(deps, bare, stanza, recursion_depth).await,
+            Ok(full) => route_to_full_jid(deps, full, stanza, recursion_depth, call_setup).await,
+            Err(bare) => {
+                // #1488: 1:1 invites are full-JID by construction (the
+                // Jingle handler rejects bare peers with bad-request),
+                // so a bare-JID route cannot carry a ticket. Close
+                // defensively as undeliverable — the invite verifiably
+                // did not take the full-JID delivery path.
+                if let Some(ticket) = call_setup {
+                    ticket.undeliverable();
+                }
+                route_to_bare_jid(deps, bare, stanza, recursion_depth).await
+            }
         }
     }
 }
@@ -216,6 +234,7 @@ async fn route_to_full_jid(
     full: jid::FullJid,
     stanza: Box<Stanza>,
     recursion_depth: u8,
+    call_setup: Option<PendingCallSetupRoute>,
 ) -> Vec<Stanza> {
     let is_dm_message = matches!(
         stanza.as_ref(),
@@ -227,12 +246,38 @@ async fn route_to_full_jid(
             )
     );
     if is_dm_message {
+        // #1488: an invite is an IQ, never a DM message, so a ticket
+        // cannot reach this branch; close defensively as delivered to
+        // keep the exactly-once accounting invariant (the DM path has
+        // its own fan-out/fallback dispositions).
+        if let Some(ticket) = call_setup {
+            ticket.delivered();
+        }
         return route_dm_to_full_jid(deps, full, stanza, recursion_depth).await;
     }
-    let delivery = match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await {
-        Some(outcome) => outcome,
-        None => deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await,
-    };
+    // #1488 ticket ownership: the ordered-relay path owns and closes
+    // the call-setup ticket whenever it handles the delivery
+    // (`Some`) — its deferred-handoff branch returns a synthetic
+    // `Delivered` immediately and only learns the real disposition in
+    // a spawned completion task, so the close must happen there, not
+    // here. When the relay declines (`None`), the local delivery path
+    // closes the ticket from its own outcome via the shared
+    // [`close_call_setup_from_outcome`] mapping.
+    // The clone is sound: the ticket is a shared one-shot guard, so
+    // the relay path's copy and the local fallback's copy share the
+    // same closed bit and at most one of them counts.
+    let delivery =
+        match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), call_setup.clone())
+            .await
+        {
+            Some(outcome) => outcome,
+            None => {
+                let outcome =
+                    deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
+                close_call_setup_from_outcome(call_setup, outcome);
+                outcome
+            }
+        };
     if delivery == FullJidDeliveryOutcome::Unavailable {
         // RFC 6121 §8.5.1: a message to a nonexistent LOCAL account is
         // bounced regardless of type (`groupchat` excluded — reflection
@@ -294,7 +339,8 @@ async fn route_dm_to_full_jid(
     // possibly handled, which must suppress local fallback to avoid
     // duplicates), and `Dropped` is the deliberate full-channel /
     // ambiguous-failure drop the legacy path also performed.
-    let relay_outcome = deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref()).await;
+    let relay_outcome =
+        deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), None).await;
     match relay_outcome {
         Some(FullJidDeliveryOutcome::Unavailable) => {
             // Confirmed offline on the owning node → §8.5.3.2.1
@@ -451,7 +497,11 @@ async fn route_side_stanzas(
     }
     let side_events: Vec<OutboundEvent> = side_routes
         .into_iter()
-        .map(|(jid, stanza)| OutboundEvent::RouteToConnection { jid, stanza })
+        .map(|(jid, stanza)| OutboundEvent::RouteToConnection {
+            jid,
+            stanza,
+            call_setup: None,
+        })
         .collect();
     let _ = Box::pin(interpret_with_depth(side_events, deps, recursion_depth)).await;
 }
@@ -886,10 +936,16 @@ fn bounce_for_nonexistent_account(
     }
 }
 
+/// `call_setup` (#1488): when the relay handles the delivery
+/// (returns `Some`), it also owns closing the call-setup ticket —
+/// see [`RouteBridge::try_deliver_full_jid_remote`]'s deferred
+/// handoff. On `None` the ticket is untouched and the caller closes
+/// it from the local delivery outcome.
 fn deliver_full_jid_via_ordered_relay<'a>(
     deps: &'a Deps<'_>,
     target: &'a jid::FullJid,
     stanza: &'a Stanza,
+    call_setup: Option<PendingCallSetupRoute>,
 ) -> OrderedRelayDeliveryFuture<'a> {
     Box::pin(async move {
         #[cfg(feature = "clustering")]
@@ -903,12 +959,12 @@ fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(target, stanza, origin)
+                .try_deliver_full_jid_remote(target, stanza, origin, call_setup)
                 .await
         }
         #[cfg(not(feature = "clustering"))]
         {
-            let _ = (deps, target, stanza);
+            let _ = (deps, target, stanza, call_setup);
             None
         }
     })

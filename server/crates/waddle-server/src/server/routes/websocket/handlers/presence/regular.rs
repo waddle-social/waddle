@@ -220,8 +220,8 @@ fn remote_presence_state_from_presence(
     crate::clustering::route_bridge::RemotePresenceStateSnapshot {
         show: presence
             .show
-            .as_ref()
-            .map(|show| show_name(show).to_string()),
+            .clone()
+            .map(crate::clustering::route_bridge::RemotePresenceShow::from),
         status: presence.statuses.values().next().cloned(),
         priority,
         payloads: presence

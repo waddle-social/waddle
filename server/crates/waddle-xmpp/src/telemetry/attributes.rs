@@ -546,12 +546,29 @@ pub enum CallSetupFailureReason {
     /// outages out of the membership bucket is what stops a clustering
     /// incident from reading as a permissions problem.
     OwnerUnreachable,
+    /// The 1:1 invite was authorized and forwarded, but the routing
+    /// layer could not hand it to any live or detached resource of
+    /// the addressed full JID — confirmed-offline peer, or the
+    /// delivery was dropped (closed channel / replay-buffer failure)
+    /// — and the caller received the undeliverable bounce instead of
+    /// a peer answer (#1488). Recorded by the routing interpreter,
+    /// not the Jingle handler: the disposition is only known after
+    /// the sans-I/O boundary.
+    PeerUnavailable,
+    /// The routed invite's ticket was dropped without any disposition
+    /// — the routing pipeline discarded the invite (or panicked)
+    /// before delivery was resolved. Counted from the ticket's Drop
+    /// guard so `attempted` always gets a terminal `ok`/`failed` and
+    /// the success-rate denominator cannot silently leak (#1611
+    /// review). A nonzero rate here is a routing-pipeline bug, not a
+    /// peer or client condition.
+    RouteAbandoned,
 }
 
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -562,6 +579,8 @@ impl CallSetupFailureReason {
         Self::TokenMintFailed,
         Self::MembershipCheckFailed,
         Self::OwnerUnreachable,
+        Self::PeerUnavailable,
+        Self::RouteAbandoned,
     ];
 }
 
@@ -582,6 +601,8 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::TokenMintFailed => "token_mint_failed",
             Self::MembershipCheckFailed => "membership_check_failed",
             Self::OwnerUnreachable => "owner_unreachable",
+            Self::PeerUnavailable => "peer_unavailable",
+            Self::RouteAbandoned => "route_abandoned",
         }
     }
 }

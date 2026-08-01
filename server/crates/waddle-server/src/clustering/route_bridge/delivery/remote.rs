@@ -1,0 +1,380 @@
+use super::*;
+
+impl OrderedRelayDeliveryBridge {
+    /// Return `Some` only when this room is currently owned by a fresh
+    /// foreign `RoomActor` claim and an ordered-relay MUC proxy send was
+    /// attempted. `None` means the caller must keep the existing local room
+    /// path.
+    /// the deferred-handoff spawn (the immediate `Delivered` is
+    /// synthetic), or from the ask outcome inline — whenever this
+    /// function returns `Some`. `None` leaves the ticket with the
+    /// caller's fallback path.
+    pub(in super::super) async fn route_remote_resource_origin(
+        self: Arc<Self>,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+        origin_stanza: &Stanza,
+        origin: &OrderedRelayRouteOrigin,
+        call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+    ) -> Option<FullJidDeliveryOutcome> {
+        let outcome_log = route_outcome_log(&target);
+        if let Some(handoff) = origin.handoff.clone() {
+            if handoff.mark_deferred() {
+                let bridge = Arc::clone(&self);
+                let origin_stanza = origin_stanza.clone();
+                tokio::spawn(async move {
+                    let outcome = bridge
+                        .route_remote_resource_origin_once(remote_origin, target)
+                        .await
+                        .unwrap_or(FullJidDeliveryOutcome::Dropped);
+                    log_remote_resource_route_outcome(&outcome_log, outcome);
+                    crate::server::routes::interpret::close_call_setup_from_outcome(
+                        call_setup, outcome,
+                    );
+                    handoff.complete(replies_for_origin_handoff(
+                        &origin_stanza,
+                        outcome,
+                        bridge.sfu_for_bounce().as_deref(),
+                    ));
+                });
+                return Some(FullJidDeliveryOutcome::Delivered);
+            }
+        }
+        let outcome = self
+            .route_remote_resource_origin_once(remote_origin, target)
+            .await;
+        if let Some(outcome) = outcome {
+            log_remote_resource_route_outcome(&outcome_log, outcome);
+            crate::server::routes::interpret::close_call_setup_from_outcome(call_setup, outcome);
+        }
+        outcome
+    }
+
+    pub(in super::super) async fn route_remote_resource_origin_once(
+        self: &Arc<Self>,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<FullJidDeliveryOutcome> {
+        let target_is_iq = route_target_stanza_is_iq(&target);
+        let reply = self
+            .ask_remote_resource_origin(&remote_origin, target.clone())
+            .await;
+        match reply {
+            Ok(reply) if reply.outcome == RemoteResourceRouteOutcome::StaleRegistration => {
+                match self.refresh_remote_resource_origin(&remote_origin).await {
+                    RemoteResourceOriginRefresh::Remote(refreshed) => {
+                        match self.ask_remote_resource_origin(&refreshed, target).await {
+                            Ok(reply) => Some(reply.outcome.into()),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "clustered remote-resource origin route retry failed"
+                                );
+                                outcome_for_ask_error(&error, target_is_iq)
+                                    .or(Some(FullJidDeliveryOutcome::Dropped))
+                            }
+                        }
+                    }
+                    RemoteResourceOriginRefresh::LocalOwner => {
+                        self.route_remote_resource_target_from_local_origin(&remote_origin, target)
+                            .await
+                    }
+                    RemoteResourceOriginRefresh::Failed => {
+                        Some(FullJidDeliveryOutcome::Unavailable)
+                    }
+                }
+            }
+            Ok(reply) => Some(reply.outcome.into()),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "clustered remote-resource origin route ask failed"
+                );
+                if ask_error_allows_target_refresh(&error) {
+                    match self.refresh_remote_resource_origin(&remote_origin).await {
+                        RemoteResourceOriginRefresh::Remote(refreshed) => {
+                            return match self.ask_remote_resource_origin(&refreshed, target).await {
+                                Ok(reply) => Some(reply.outcome.into()),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "clustered remote-resource origin route retry failed"
+                                    );
+                                    outcome_for_ask_error(&error, target_is_iq)
+                                        .or(Some(FullJidDeliveryOutcome::Dropped))
+                                }
+                            };
+                        }
+                        RemoteResourceOriginRefresh::LocalOwner => {
+                            return self
+                                .route_remote_resource_target_from_local_origin(
+                                    &remote_origin,
+                                    target,
+                                )
+                                .await;
+                        }
+                        RemoteResourceOriginRefresh::Failed => {}
+                    }
+                }
+                outcome_for_ask_error(&error, target_is_iq)
+                    .or(Some(FullJidDeliveryOutcome::Dropped))
+            }
+        }
+    }
+
+    pub(in super::super) async fn route_remote_resource_origin_muc(
+        self: Arc<Self>,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+        _origin_stanza: &Stanza,
+        _origin: &OrderedRelayRouteOrigin,
+    ) -> Option<OrderedRelayMucProxyOutcome> {
+        // MUC joins mutate local membership state after this call returns, so
+        // the socket node must observe the owner node's real result instead of
+        // deferring through the SM handoff and reporting provisional success.
+        self.route_remote_resource_origin_muc_once(remote_origin, target)
+            .await
+    }
+
+    pub(in super::super) async fn route_remote_resource_origin_muc_once(
+        self: &Arc<Self>,
+        remote_origin: RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<OrderedRelayMucProxyOutcome> {
+        let reply = self
+            .ask_remote_resource_origin(&remote_origin, target.clone())
+            .await;
+        match reply {
+            Ok(reply) if reply.outcome == RemoteResourceRouteOutcome::StaleRegistration => {
+                match self.refresh_remote_resource_origin(&remote_origin).await {
+                    RemoteResourceOriginRefresh::Remote(refreshed) => {
+                        match self
+                            .ask_remote_resource_origin(&refreshed, target.clone())
+                            .await
+                        {
+                            Ok(reply) => Some(remote_resource_muc_outcome(reply)),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "clustered remote-resource MUC origin route retry failed"
+                                );
+                                Some(remote_resource_muc_ask_error_outcome(&target, &error))
+                            }
+                        }
+                    }
+                    RemoteResourceOriginRefresh::LocalOwner => {
+                        self.route_remote_resource_muc_target_from_local_origin(
+                            &remote_origin,
+                            target,
+                        )
+                        .await
+                    }
+                    RemoteResourceOriginRefresh::Failed => {
+                        Some(OrderedRelayMucProxyOutcome::Unavailable)
+                    }
+                }
+            }
+            Ok(reply) => Some(remote_resource_muc_outcome(reply)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "clustered remote-resource MUC origin route ask failed"
+                );
+                if ask_error_allows_target_refresh(&error) {
+                    match self.refresh_remote_resource_origin(&remote_origin).await {
+                        RemoteResourceOriginRefresh::Remote(refreshed) => {
+                            return match self
+                                .ask_remote_resource_origin(&refreshed, target.clone())
+                                .await
+                            {
+                                Ok(reply) => Some(remote_resource_muc_outcome(reply)),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "clustered remote-resource MUC origin route retry failed"
+                                    );
+                                    Some(remote_resource_muc_ask_error_outcome(&target, &error))
+                                }
+                            };
+                        }
+                        RemoteResourceOriginRefresh::LocalOwner => {
+                            return self
+                                .route_remote_resource_muc_target_from_local_origin(
+                                    &remote_origin,
+                                    target,
+                                )
+                                .await;
+                        }
+                        RemoteResourceOriginRefresh::Failed => {}
+                    }
+                }
+                Some(remote_resource_muc_ask_error_outcome(&target, &error))
+            }
+        }
+    }
+
+    pub(in super::super) async fn ask_remote_resource_origin(
+        &self,
+        remote_origin: &RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Result<RelayRouteRemoteResourceStanzaReply, RelayAskError> {
+        let mut handle =
+            RelayHandle::new(remote_origin.user_owner.clone(), self.stop_token.clone())
+                .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        handle
+            .route_remote_resource_stanza(RelayRouteRemoteResourceStanza {
+                source_jid: remote_origin.jid.clone(),
+                registration_id: remote_origin.registration_id,
+                socket_generation: remote_origin.socket_generation,
+                target,
+                trace: RelayTraceContext::default(),
+            })
+            .await
+    }
+
+    pub(in super::super) async fn route_remote_resource_target_from_local_origin(
+        self: &Arc<Self>,
+        remote_origin: &RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<FullJidDeliveryOutcome> {
+        let services = self.services.get().cloned()?;
+        let origin = local_origin_for_remote_resource(remote_origin);
+        match target {
+            RemoteResourceRouteTarget::FullJid { target, stanza } => {
+                if let Some(remote) = self
+                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin, None)
+                    .await
+                {
+                    Some(remote)
+                } else {
+                    Some(
+                        deliver_local_full_jid_after_target_refresh(&services, &target, &stanza.0)
+                            .await,
+                    )
+                }
+            }
+            RemoteResourceRouteTarget::BareJid { target, stanza } => {
+                match route_local_bare_jid_with_timeout(&services, &target, &stanza.0, Some(origin))
+                    .await
+                {
+                    Ok(replies) if replies.is_empty() => Some(FullJidDeliveryOutcome::Delivered),
+                    Ok(_) => Some(FullJidDeliveryOutcome::Unavailable),
+                    Err(OrderedRelayNackReason::TargetUnavailable) => {
+                        Some(FullJidDeliveryOutcome::Unavailable)
+                    }
+                    Err(_) => Some(FullJidDeliveryOutcome::Dropped),
+                }
+            }
+            RemoteResourceRouteTarget::MucProxy { .. } => Some(FullJidDeliveryOutcome::Dropped),
+        }
+    }
+
+    pub(in super::super) async fn route_remote_resource_muc_target_from_local_origin(
+        self: &Arc<Self>,
+        remote_origin: &RemoteResourceOriginSnapshot,
+        target: RemoteResourceRouteTarget,
+    ) -> Option<OrderedRelayMucProxyOutcome> {
+        let services = self.services.get().cloned()?;
+        let RemoteResourceRouteTarget::MucProxy {
+            room_jid,
+            kind,
+            stanza,
+        } = target
+        else {
+            return Some(OrderedRelayMucProxyOutcome::Dropped);
+        };
+        let origin = local_origin_for_remote_resource(remote_origin);
+        if let Some(remote) = self
+            .try_proxy_muc_remote_from_local_origin(&room_jid, &stanza.0, kind, &origin)
+            .await
+        {
+            Some(remote)
+        } else {
+            Some(muc_proxy_result_to_ordered_outcome(
+                kind,
+                Box::pin(deliver_reserved_muc_proxy(
+                    &services, &room_jid, kind, &stanza.0,
+                ))
+                .await,
+            ))
+        }
+    }
+
+    pub(in super::super) async fn refresh_remote_resource_origin(
+        self: &Arc<Self>,
+        remote_origin: &RemoteResourceOriginSnapshot,
+    ) -> RemoteResourceOriginRefresh {
+        let Some(services) = self.services.get().cloned() else {
+            return RemoteResourceOriginRefresh::Failed;
+        };
+        let owner = {
+            let registrations = self.remote_socket_resources.lock().await;
+            let Some(owner) = registrations
+                .get(&remote_origin.jid)
+                .filter(|registration| {
+                    registration.registration_id == remote_origin.registration_id
+                        && registration.socket_generation == remote_origin.socket_generation
+                })
+                .map(|registration| registration.owner.clone())
+            else {
+                return RemoteResourceOriginRefresh::Failed;
+            };
+            owner
+        };
+        let Some(entry) = services
+            .connection_registry
+            .entry_if_owner(&remote_origin.jid, &owner)
+        else {
+            return RemoteResourceOriginRefresh::Failed;
+        };
+        let target_entity = user_entity(&remote_origin.jid.to_bare());
+        let Some(snapshot) = current_claim(&services, &target_entity).await else {
+            return RemoteResourceOriginRefresh::Failed;
+        };
+        let me = services.node_identity.current();
+        if snapshot.owner_lease_fresh && snapshot.owner == me {
+            match crate::server::dual_registration::mirror_register_outcome(
+                &services.user_registry,
+                remote_origin.jid.clone(),
+                entry,
+            )
+            .await
+            {
+                crate::server::dual_registration::MirrorRegisterOutcome::Registered => {}
+                crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner
+                | crate::server::dual_registration::MirrorRegisterOutcome::Failed => {
+                    return RemoteResourceOriginRefresh::Failed;
+                }
+            }
+            self.remove_remote_socket_registration_if_snapshot(remote_origin, &owner)
+                .await;
+            return RemoteResourceOriginRefresh::LocalOwner;
+        }
+        if !snapshot.owner_lease_fresh {
+            return RemoteResourceOriginRefresh::Failed;
+        }
+        match self
+            .try_register_remote_user_resource(&remote_origin.jid, entry, owner.clone())
+            .await
+        {
+            RemoteResourceRegisterOutcome::Registered => self
+                .remote_resource_origin_if_owner(&remote_origin.jid, &owner)
+                .await
+                .map(RemoteResourceOriginRefresh::Remote)
+                .unwrap_or(RemoteResourceOriginRefresh::Failed),
+            RemoteResourceRegisterOutcome::NotRemote => RemoteResourceOriginRefresh::Failed,
+            RemoteResourceRegisterOutcome::Failed => RemoteResourceOriginRefresh::Failed,
+        }
+    }
+}
+pub(in super::super) fn local_origin_for_remote_resource(
+    remote_origin: &RemoteResourceOriginSnapshot,
+) -> OrderedRelayRouteOrigin {
+    let sender_entity = user_entity(&remote_origin.jid.to_bare());
+    OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+        sender_entity,
+        inbound_sequence: 0,
+        handoff: None,
+    }
+}
