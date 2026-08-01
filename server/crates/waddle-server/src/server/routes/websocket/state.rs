@@ -1381,6 +1381,11 @@ pub struct ProtocolServices {
     /// can later fasten a historical `<call-thread-ended/>` record to that
     /// exact anchor with XEP-0422 `<apply-to/>`.
     pub call_threads: Arc<dashmap::DashMap<BareJid, ActiveCallThread>>,
+    /// Per-room serialization of the call-thread "ended" completion so a
+    /// webhook delivery and a MUC presence clear racing on the same room
+    /// produce exactly one ended broadcast. Explicit state (not a module
+    /// static) so the dependency is visible and per-instance in tests.
+    pub call_thread_end_locks: Arc<dashmap::DashMap<BareJid, Arc<tokio::sync::Mutex<()>>>>,
     /// Remote-owned MUC rooms this node admitted a local connection into.
     /// Used by unclean disconnect cleanup to send the XEP-0045 unavailable
     /// presence to the authoritative remote RoomActor even though no local

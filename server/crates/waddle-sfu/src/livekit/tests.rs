@@ -1515,6 +1515,13 @@ async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_
 
     sfu.reconcile_pass_completed.store(true, Ordering::Release);
 
+    // Post-reconcile a missing entry cannot decide the sid fence locally,
+    // so the executor verifies it against LiveKit's live occupancy: the
+    // participant is connected under the fenced sid, so removal proceeds.
+    admin.set_live_with_sids(
+        &call,
+        vec![(alice.clone(), Some(fixture_participant_sid("PA_restart")))],
+    );
     assert_eq!(
         sfu.teardown_executor()
             .execute(&intent)
@@ -1523,6 +1530,61 @@ async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_
         TeardownExecution::Executed
     );
     assert_eq!(admin.remove_snapshot(), vec![(call, alice)]);
+}
+
+#[tokio::test]
+async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fence() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-live-fence").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+    // LiveKit hosts a NEWER incarnation: same identity, different sid.
+    admin.set_live_with_sids(
+        &call,
+        vec![(alice.clone(), Some(fixture_participant_sid("PA_new")))],
+    );
+
+    let stale = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: None,
+    };
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&stale)
+            .await
+            .expect("typed stale no-op"),
+        TeardownExecution::StaleGeneration
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "a stale fenced intent must not eject the newer incarnation's participant"
+    );
+
+    // Identity no longer connected at all: the removal already happened;
+    // success without touching the room.
+    let absent = CallTeardownIntentLite {
+        call_id: CallId::new("r-live-fence-gone").expect("call id"),
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: None,
+    };
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&absent)
+            .await
+            .expect("typed already-gone no-op"),
+        TeardownExecution::Executed
+    );
+    assert!(admin.remove_snapshot().is_empty());
 }
 
 #[tokio::test]

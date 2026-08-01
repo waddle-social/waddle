@@ -317,6 +317,7 @@ impl LiveKitTeardownExecutor {
         room_sid: Option<&RoomSid>,
         participant_sid: Option<&ParticipantSid>,
     ) -> Result<TeardownExecution, SfuError> {
+        let entry_missing = self.calls.get(call_id).is_none();
         match self.guard(
             call_id,
             generation,
@@ -327,8 +328,48 @@ impl LiveKitTeardownExecutor {
             TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
             TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
         }
+        // A missing registry entry cannot decide a sid fence locally
+        // (restart, or an outbox row claimed by a replica that never
+        // hosted the call, while LiveKit may already host a NEWER
+        // same-name room). Resolve the fence against LiveKit's live
+        // state instead of discarding it (#1612 review).
+        if entry_missing {
+            if let Some(fence) = participant_sid {
+                let occupancy = self.admin.room_occupancy(call_id).await?;
+                match occupancy
+                    .waddle
+                    .iter()
+                    .find(|(occupant, _)| occupant == identity)
+                {
+                    // Already gone: the removal this intent wanted has
+                    // happened; success without touching the room.
+                    None => return Ok(TeardownExecution::Executed),
+                    Some((_, Some(live))) if live != fence => {
+                        return Ok(TeardownExecution::StaleGeneration)
+                    }
+                    Some(_) => {}
+                }
+            } else if let Some(fence) = room_sid {
+                if let Some(live) = self.live_room_sid(call_id).await? {
+                    if &live != fence {
+                        return Ok(TeardownExecution::StaleGeneration);
+                    }
+                }
+            }
+        }
         self.admin.remove_participant(call_id, identity).await?;
         Ok(TeardownExecution::Executed)
+    }
+
+    /// LiveKit's current sid for this room name, if the room exists.
+    async fn live_room_sid(&self, call_id: &CallId) -> Result<Option<RoomSid>, SfuError> {
+        Ok(self
+            .admin
+            .list_rooms()
+            .await?
+            .into_iter()
+            .find(|room| room.name == call_id.as_str())
+            .and_then(|room| room.sid))
     }
 
     pub async fn delete_room_if_empty(
@@ -338,10 +379,25 @@ impl LiveKitTeardownExecutor {
         generation: Option<CallGeneration>,
         room_sid: Option<&RoomSid>,
     ) -> Result<TeardownExecution, SfuError> {
+        let entry_missing = self.calls.get(call_id).is_none();
         match self.guard(call_id, generation, room_sid, None) {
             TeardownGuard::Proceed => {}
             TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
             TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
+        }
+        // Same missing-entry rule as `remove_participant`: a sid fence
+        // that cannot be decided locally is resolved against LiveKit
+        // before the destructive delete — an empty NEWER room (its
+        // joiners still connecting) must not be deleted by a stale
+        // intent from the previous incarnation (#1612 review).
+        if entry_missing {
+            if let Some(fence) = room_sid {
+                if let Some(live) = self.live_room_sid(call_id).await? {
+                    if &live != fence {
+                        return Ok(TeardownExecution::StaleGeneration);
+                    }
+                }
+            }
         }
         if self.calls.get(call_id).is_some() {
             return Ok(TeardownExecution::Occupied);
@@ -931,14 +987,25 @@ impl LiveKitSfu {
             }
         }
 
-        if identity_is_tracked && entry.room_sid.is_none() {
-            entry.room_sid.clone_from(&observed_sids.room_sid);
-        }
-        if let Some(state) = entry.participants.get_mut(identity) {
-            if state.participant_sid.is_none() {
-                state
-                    .participant_sid
-                    .clone_from(&observed_sids.participant_sid);
+        // First-SID learning is restricted to Join-direction
+        // observations (a `participant_joined` webhook or the
+        // authoritative occupancy listing). A Leave-direction event can
+        // be a delayed echo of the PREVIOUS same-name room arriving
+        // before the new room's join: learning its sids here would
+        // poison the fresh entry as if the old incarnation were
+        // current, let the destructive teardown proceed against the new
+        // call, and make the real join un-repairable because it then
+        // conflicts with the poisoned fence (#1612 review).
+        if matches!(direction, SidObservationDirection::Join) {
+            if identity_is_tracked && entry.room_sid.is_none() {
+                entry.room_sid.clone_from(&observed_sids.room_sid);
+            }
+            if let Some(state) = entry.participants.get_mut(identity) {
+                if state.participant_sid.is_none() {
+                    state
+                        .participant_sid
+                        .clone_from(&observed_sids.participant_sid);
+                }
             }
         }
 

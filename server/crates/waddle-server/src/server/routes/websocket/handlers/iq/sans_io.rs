@@ -931,6 +931,7 @@ mod tests {
     use waddle_xmpp::Stanza;
     use xmpp_parsers::iq::Iq;
     use xmpp_parsers::jingle::{Action, Jingle, SessionId};
+    use xmpp_parsers::minidom::Element;
 
     #[derive(Default)]
     struct RecordingCallSfu {
@@ -1076,29 +1077,73 @@ mod tests {
     }
 
     fn direct_jingle_frame(id: &str, target: &str, action: &str) -> String {
-        format!(
-            "<iq xmlns='jabber:client' id='{id}' type='set' to='{target}'>\
-               <jingle xmlns='urn:xmpp:jingle:1' action='{action}' sid='dmcall1' initiator='alice@example.com/web'>\
-                 <content creator='initiator' name='audio'>\
-                   <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'>\
-                     <payload-type id='111' name='opus' clockrate='48000' channels='2'/>\
-                     <rtcp-mux/>\
-                   </description>\
-                   <transport xmlns='urn:waddle:transports:livekit:0'/>\
-                 </content>\
-               </jingle>\
-             </iq>"
+        let description = Element::builder("description", waddle_xmpp::xep::xep0167::NS_JINGLE_RTP)
+            .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+            .append(
+                Element::builder("payload-type", waddle_xmpp::xep::xep0167::NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+                    .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+                    .build(),
+            )
+            .append(Element::builder("rtcp-mux", waddle_xmpp::xep::xep0167::NS_JINGLE_RTP).build())
+            .build();
+        let content = Element::builder("content", waddle_xmpp::xep::xep0166::NS_JINGLE)
+            .attr(
+                minidom::rxml::xml_ncname!("creator").to_owned(),
+                "initiator",
+            )
+            .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+            .append(description)
+            .append(
+                Element::builder(
+                    waddle_xmpp::xep::xep_waddle_livekit_transport::TRANSPORT_NAME,
+                    waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT,
+                )
+                .build(),
+            )
+            .build();
+        let mut jingle: Element = Jingle::new(
+            action.parse().expect("valid Jingle action"),
+            SessionId("dmcall1".into()),
         )
+        .with_initiator(
+            "alice@example.com/web"
+                .parse()
+                .expect("valid initiator JID"),
+        )
+        .into();
+        jingle.append_child(content);
+
+        super::iq_to_xml(Iq::Set {
+            from: None,
+            to: Some(target.parse().expect("valid target JID")),
+            id: id.into(),
+            payload: jingle,
+        })
     }
 
     fn muji_jingle_frame(id: &str, target: &str, action: &str, room: &str) -> String {
-        format!(
-            "<iq xmlns='jabber:client' id='{id}' type='set' to='{target}'>\
-               <jingle xmlns='urn:xmpp:jingle:1' action='{action}' sid='muji1' initiator='alice@example.com/web'>\
-                 <muji xmlns='urn:xmpp:jingle:muji:0' room='{room}'/>\
-               </jingle>\
-             </iq>"
+        let mut jingle: Element = Jingle::new(
+            action.parse().expect("valid Jingle action"),
+            SessionId("muji1".into()),
         )
+        .with_initiator(
+            "alice@example.com/web"
+                .parse()
+                .expect("valid initiator JID"),
+        )
+        .into();
+        jingle
+            .append_child(Muji::for_room(room.parse().expect("valid Muji room JID")).to_element());
+
+        super::iq_to_xml(Iq::Set {
+            from: None,
+            to: Some(target.parse().expect("valid target JID")),
+            id: id.into(),
+            payload: jingle,
+        })
     }
 
     fn muji_initiate_iq(room: &str) -> Iq {

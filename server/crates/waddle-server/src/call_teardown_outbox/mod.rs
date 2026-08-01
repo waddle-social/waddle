@@ -10,6 +10,8 @@ mod drain;
 mod producer;
 mod schema;
 mod store;
+mod store_jobs;
+mod store_rows;
 mod types;
 
 pub(crate) use drain::drain_due;

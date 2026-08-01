@@ -399,8 +399,35 @@ pub(crate) async fn try_handle_muc_presence_update(
     }
 
     if clears_muji_presence {
-        crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(state, room_jid)
-            .await;
+        let outcome = crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(
+            state, room_jid,
+        )
+        .await;
+        // Unlike the webhook ingress, this ordinary MUC presence path has
+        // no LiveKit redelivery behind it: a retryable completion failure
+        // (transient inbox-storage or broadcast error) would otherwise be
+        // dropped here, silently suppressing the ended broadcast and
+        // leaving the active call-thread entry in memory (#1612 review).
+        // Hand the retry to the durable teardown outbox: the drained
+        // MujiPresenceClear re-runs the (idempotent, already-applied)
+        // presence clear and re-attempts the call-thread completion.
+        if matches!(
+            outcome,
+            crate::server::routes::muc_muji_clear::WebhookEffectOutcome::Retryable(_)
+        ) {
+            if let Err(error) = crate::server::routes::muc_muji_clear::enqueue_muji_presence_clear(
+                state, room_jid, sender_jid, None,
+            )
+            .await
+            {
+                tracing::warn!(
+                    room = %room_jid,
+                    %error,
+                    "call-thread completion retry could not be enqueued; the ended \
+                     broadcast is deferred to the room-sweep reconcile backstop"
+                );
+            }
+        }
     }
 
     if let Some(CallThreadAnchorMessage {

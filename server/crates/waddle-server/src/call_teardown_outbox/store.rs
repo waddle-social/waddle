@@ -1,16 +1,13 @@
-use std::str::FromStr;
-
-use jid::{BareJid, FullJid};
+use jid::FullJid;
 use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid};
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, NodeIdentity, SharedNodeIdentity};
 
+use super::store_rows::decode_job;
 use super::{
-    schema, CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownLastError,
-    CallTeardownOutboxError, CallTeardownProducingNode, CallTeardownQueueStats,
-    CallTeardownRetryOutcome, CallTeardownRetryReason, CallTeardownStatus, ClaimToken,
-    TeardownTarget,
+    schema, CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownOutboxError,
+    CallTeardownProducingNode, CallTeardownQueueStats, TeardownTarget,
 };
-use crate::db::{Database, Row};
+use crate::db::Database;
 
 pub const MAX_ATTEMPTS: i64 = 20;
 pub const BASE_RETRY_DELAY_MS: i64 = 5_000;
@@ -18,17 +15,17 @@ pub const MAX_RETRY_DELAY_MS: i64 = 10 * 60 * 1_000;
 pub const CLAIM_TIMEOUT_MS: i64 = 5 * 60 * 1_000;
 pub const FAILED_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const PRUNE_BATCH_SIZE: i64 = 128;
-const OWNERSHIP_RETRY_DELAY_MS: i64 = 15_000;
+pub(super) const OWNERSHIP_RETRY_DELAY_MS: i64 = 15_000;
 
-const STATUS_QUEUED: &str = "queued";
-const STATUS_IN_PROGRESS: &str = "in-progress";
-const STATUS_DONE: &str = "done";
-const STATUS_FAILED: &str = "failed";
+pub(super) const STATUS_QUEUED: &str = "queued";
+pub(super) const STATUS_IN_PROGRESS: &str = "in-progress";
+pub(super) const STATUS_DONE: &str = "done";
+pub(super) const STATUS_FAILED: &str = "failed";
 
 #[derive(Clone)]
 pub struct CallTeardownOutboxStore {
-    db: Database,
-    node_identity: SharedNodeIdentity,
+    pub(super) db: Database,
+    pub(super) node_identity: SharedNodeIdentity,
 }
 
 impl CallTeardownOutboxStore {
@@ -214,109 +211,6 @@ impl CallTeardownOutboxStore {
             .transpose()
     }
 
-    pub async fn claim_due(
-        &self,
-        batch_size: usize,
-    ) -> Result<Vec<CallTeardownJob>, CallTeardownOutboxError> {
-        self.claim_due_at(batch_size, crate::time::now_ms()).await
-    }
-
-    pub(super) async fn claim_due_at(
-        &self,
-        batch_size: usize,
-        now_ms: i64,
-    ) -> Result<Vec<CallTeardownJob>, CallTeardownOutboxError> {
-        let batch_size = batch_size.clamp(1, 1_000);
-        let stale_before_ms = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
-        let connection = self.db.guard().await?;
-        let mut rows = connection
-            .query(
-                &format!(
-                    "{} WHERE (\
-                        status = ? AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)\
-                     ) OR (\
-                        status = ? AND claimed_at_ms IS NOT NULL AND claimed_at_ms <= ?\
-                     ) ORDER BY created_at_ms ASC, intent_id ASC LIMIT ?",
-                    select_columns()
-                ),
-                crate::db_params![
-                    STATUS_QUEUED,
-                    now_ms,
-                    STATUS_IN_PROGRESS,
-                    stale_before_ms,
-                    batch_size,
-                ],
-            )
-            .await?;
-        let mut selected = Vec::new();
-        while let Some(row) = rows.next().await? {
-            selected.push(decode_job(&row)?);
-        }
-        drop(rows);
-        drop(connection);
-
-        let mut claimed = Vec::with_capacity(selected.len());
-        for mut job in selected {
-            let claim_token = ClaimToken::new();
-            let connection = self.db.guard().await?;
-            let affected = connection
-                .execute(
-                    "UPDATE call_teardown_outbox \
-                     SET status = ?, claimed_at_ms = ?, claim_token = ?, updated_at_ms = ? \
-                     WHERE intent_id = ? AND (\
-                        (status = ? AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)) \
-                        OR (status = ? AND claimed_at_ms IS NOT NULL AND claimed_at_ms <= ?)\
-                     )",
-                    crate::db_params![
-                        STATUS_IN_PROGRESS,
-                        now_ms,
-                        claim_token.as_str(),
-                        now_ms,
-                        job.intent_id.as_str(),
-                        STATUS_QUEUED,
-                        now_ms,
-                        STATUS_IN_PROGRESS,
-                        stale_before_ms,
-                    ],
-                )
-                .await?;
-            if affected == 1 {
-                job.status = CallTeardownStatus::InProgress;
-                job.claim_token = Some(claim_token);
-                claimed.push(job);
-            }
-        }
-        Ok(claimed)
-    }
-
-    pub async fn mark_done(&self, job: &CallTeardownJob) -> Result<bool, CallTeardownOutboxError> {
-        self.mark_done_at(job, crate::time::now_ms()).await
-    }
-
-    pub(super) async fn mark_done_at(
-        &self,
-        job: &CallTeardownJob,
-        now_ms: i64,
-    ) -> Result<bool, CallTeardownOutboxError> {
-        let connection = self.db.guard().await?;
-        let affected = connection
-            .execute(
-                "UPDATE call_teardown_outbox \
-                 SET status = ?, last_error = NULL, next_attempt_at_ms = NULL, \
-                     claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? \
-                 WHERE intent_id = ? AND status = ? AND claim_token = ?",
-                crate::db_params![
-                    STATUS_DONE,
-                    now_ms,
-                    job.intent_id.as_str(),
-                    STATUS_IN_PROGRESS,
-                    job.claim_token.as_ref().map(ClaimToken::as_str),
-                ],
-            )
-            .await?;
-        Ok(affected == 1)
-    }
-
     /// Whether a room-scoped participant removal still depends on its
     /// XEP-0272 presence clear. Both queued and claimed rows count: a
     /// participant selected earlier in the same batch must wait until the
@@ -342,126 +236,6 @@ impl CallTeardownOutboxStore {
             )
             .await?;
         Ok(rows.next().await?.is_some())
-    }
-
-    /// Releases a claim without counting an execution attempt. The drain uses
-    /// this when another node owns the intent's clustered room/user scope or
-    /// when claim lookup itself is unavailable.
-    pub async fn release_claim(
-        &self,
-        job: &CallTeardownJob,
-    ) -> Result<bool, CallTeardownOutboxError> {
-        self.release_claim_at(job, crate::time::now_ms()).await
-    }
-
-    pub(super) async fn release_claim_at(
-        &self,
-        job: &CallTeardownJob,
-        now_ms: i64,
-    ) -> Result<bool, CallTeardownOutboxError> {
-        let next_attempt_at_ms = now_ms.saturating_add(OWNERSHIP_RETRY_DELAY_MS);
-        let connection = self.db.guard().await?;
-        let affected = connection
-            .execute(
-                "UPDATE call_teardown_outbox \
-                 SET status = ?, next_attempt_at_ms = ?, claimed_at_ms = NULL, \
-                     claim_token = NULL, updated_at_ms = ? \
-                 WHERE intent_id = ? AND status = ? AND claim_token = ?",
-                crate::db_params![
-                    STATUS_QUEUED,
-                    next_attempt_at_ms,
-                    now_ms,
-                    job.intent_id.as_str(),
-                    STATUS_IN_PROGRESS,
-                    job.claim_token.as_ref().map(ClaimToken::as_str),
-                ],
-            )
-            .await?;
-        Ok(affected == 1)
-    }
-
-    pub async fn fail_claim(
-        &self,
-        job: &CallTeardownJob,
-        error: CallTeardownLastError,
-    ) -> Result<bool, CallTeardownOutboxError> {
-        self.fail_claim_at(job, error, crate::time::now_ms()).await
-    }
-
-    pub(super) async fn fail_claim_at(
-        &self,
-        job: &CallTeardownJob,
-        error: CallTeardownLastError,
-        now_ms: i64,
-    ) -> Result<bool, CallTeardownOutboxError> {
-        let connection = self.db.guard().await?;
-        let affected = connection
-            .execute(
-                "UPDATE call_teardown_outbox \
-                 SET status = ?, last_error = ?, next_attempt_at_ms = NULL, \
-                     claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? \
-                 WHERE intent_id = ? AND status = ? AND claim_token = ?",
-                crate::db_params![
-                    STATUS_FAILED,
-                    error.as_db_value(),
-                    now_ms,
-                    job.intent_id.as_str(),
-                    STATUS_IN_PROGRESS,
-                    job.claim_token.as_ref().map(ClaimToken::as_str),
-                ],
-            )
-            .await?;
-        Ok(affected == 1)
-    }
-
-    pub async fn retry_or_fail(
-        &self,
-        job: &CallTeardownJob,
-        error: CallTeardownRetryReason,
-    ) -> Result<CallTeardownRetryOutcome, CallTeardownOutboxError> {
-        self.retry_or_fail_at(job, error, crate::time::now_ms())
-            .await
-    }
-
-    pub(super) async fn retry_or_fail_at(
-        &self,
-        job: &CallTeardownJob,
-        error: CallTeardownRetryReason,
-        now_ms: i64,
-    ) -> Result<CallTeardownRetryOutcome, CallTeardownOutboxError> {
-        let attempt_count = job.attempt_count.saturating_add(1);
-        let failed = attempt_count >= MAX_ATTEMPTS;
-        let status = if failed { STATUS_FAILED } else { STATUS_QUEUED };
-        let next_attempt_at_ms =
-            (!failed).then(|| now_ms.saturating_add(retry_delay_ms(attempt_count)));
-        let connection = self.db.guard().await?;
-        let affected = connection
-            .execute(
-                "UPDATE call_teardown_outbox \
-                 SET status = ?, attempt_count = ?, last_error = ?, \
-                     next_attempt_at_ms = ?, claimed_at_ms = NULL, claim_token = NULL, \
-                     updated_at_ms = ? \
-                 WHERE intent_id = ? AND status = ? AND claim_token = ?",
-                crate::db_params![
-                    status,
-                    attempt_count,
-                    error.as_db_value(),
-                    next_attempt_at_ms,
-                    now_ms,
-                    job.intent_id.as_str(),
-                    STATUS_IN_PROGRESS,
-                    job.claim_token.as_ref().map(ClaimToken::as_str),
-                ],
-            )
-            .await?;
-        if affected == 0 {
-            return Ok(CallTeardownRetryOutcome::ClaimLost);
-        }
-        if failed {
-            Ok(CallTeardownRetryOutcome::Failed { attempt_count })
-        } else {
-            Ok(CallTeardownRetryOutcome::Requeued { attempt_count })
-        }
     }
 
     pub async fn queue_stats(&self) -> Result<CallTeardownQueueStats, CallTeardownOutboxError> {
@@ -557,7 +331,7 @@ pub fn retry_delay_ms(attempt_count: i64) -> i64 {
         .min(MAX_RETRY_DELAY_MS)
 }
 
-fn select_columns() -> &'static str {
+pub(super) fn select_columns() -> &'static str {
     "SELECT intent_id, call_id, identity, room_jid, action, generation, \
             room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
             next_attempt_at_ms, claim_token, created_at_ms \
@@ -591,98 +365,5 @@ fn encode_target(
         TeardownTarget::MujiRoomSweep { room_jid } => {
             ("muji_room_sweep", None, Some(room_jid.to_string()), None)
         }
-    }
-}
-
-fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutboxError> {
-    let action = row.get::<String>(4)?;
-    let identity = row.get::<Option<String>>(2)?;
-    let room_jid = row.get::<Option<String>>(3)?;
-    let participant_sid = row.get::<Option<String>>(7)?;
-    let target = decode_target(&action, identity, room_jid, participant_sid)?;
-    let generation = row
-        .get::<Option<i64>>(5)?
-        .map(|value| {
-            if value <= 0 {
-                return Err(CallTeardownOutboxError::InvalidGeneration(value));
-            }
-            let value = u64::try_from(value)
-                .map_err(|_| CallTeardownOutboxError::InvalidGeneration(value))?;
-            Ok(CallGeneration::try_from(value)?)
-        })
-        .transpose()?;
-    Ok(CallTeardownJob {
-        intent_id: CallTeardownIntentId::from_stored(row.get(0)?),
-        intent: CallTeardownIntent {
-            call_id: CallId::new(row.get::<String>(1)?)?,
-            target,
-            generation,
-            room_sid: row
-                .get::<Option<String>>(6)?
-                .map(RoomSid::new)
-                .transpose()?,
-        },
-        producing_node: row
-            .get::<Option<String>>(8)?
-            .map(CallTeardownProducingNode::from_db_value)
-            .transpose()?,
-        status: CallTeardownStatus::from_db_value(row.get(9)?)?,
-        attempt_count: row.get(10)?,
-        last_error: row
-            .get::<Option<String>>(11)?
-            .map(CallTeardownLastError::from_db_value),
-        next_attempt_at_ms: row.get(12)?,
-        claim_token: row.get::<Option<String>>(13)?.map(ClaimToken::from_stored),
-        created_at_ms: row.get(14)?,
-    })
-}
-
-fn decode_target(
-    action: &str,
-    identity: Option<String>,
-    room_jid: Option<String>,
-    participant_sid: Option<String>,
-) -> Result<TeardownTarget, CallTeardownOutboxError> {
-    match action {
-        "remove_participant" => match (identity, room_jid) {
-            (Some(identity), None) if !identity.is_empty() => Ok(TeardownTarget::Participant {
-                identity: FullJid::from_str(&identity)
-                    .map_err(|_| CallTeardownOutboxError::InvalidFullJid(identity))?,
-                participant_sid: participant_sid.map(ParticipantSid::new).transpose()?,
-            }),
-            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
-                action.to_owned(),
-            )),
-        },
-        "delete_room" if identity.is_none() && room_jid.is_none() && participant_sid.is_none() => {
-            Ok(TeardownTarget::Room)
-        }
-        "muji_presence_clear" => match (identity, room_jid) {
-            (Some(departed), Some(room_jid)) if !departed.is_empty() => {
-                Ok(TeardownTarget::MujiPresenceClear {
-                    departed: FullJid::from_str(&departed)
-                        .map_err(|_| CallTeardownOutboxError::InvalidFullJid(departed))?,
-                    room_jid: BareJid::from_str(&room_jid)
-                        .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
-                    participant_sid: participant_sid.map(ParticipantSid::new).transpose()?,
-                })
-            }
-            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
-                action.to_owned(),
-            )),
-        },
-        "muji_room_sweep" => match (identity, room_jid, participant_sid) {
-            (None, Some(room_jid), None) => Ok(TeardownTarget::MujiRoomSweep {
-                room_jid: BareJid::from_str(&room_jid)
-                    .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
-            }),
-            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
-                action.to_owned(),
-            )),
-        },
-        "delete_room" => Err(CallTeardownOutboxError::InvalidTargetShape(
-            action.to_owned(),
-        )),
-        _ => Err(CallTeardownOutboxError::InvalidAction(action.to_owned())),
     }
 }

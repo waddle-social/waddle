@@ -6,7 +6,7 @@
 //! Muji state and broadcast the XEP-0272 leave marker to remaining
 //! occupants. Centralising the logic keeps the wire shape identical.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use jid::{BareJid, FullJid};
 use minidom::Element;
@@ -29,11 +29,11 @@ use super::websocket::{
     note_participant_left_from_webhook, observe_participant_sids_from_webhook, WebSocketState,
 };
 
-static CALL_THREAD_END_LOCKS: LazyLock<dashmap::DashMap<BareJid, Arc<tokio::sync::Mutex<()>>>> =
-    LazyLock::new(dashmap::DashMap::new);
-
-fn call_thread_end_lock(room_jid: &BareJid) -> Arc<tokio::sync::Mutex<()>> {
-    CALL_THREAD_END_LOCKS
+fn call_thread_end_lock(state: &WebSocketState, room_jid: &BareJid) -> Arc<tokio::sync::Mutex<()>> {
+    state
+        .deps
+        .protocol
+        .call_thread_end_locks
         .entry(room_jid.clone())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
@@ -132,7 +132,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
     maybe_broadcast_call_thread_ended(state, room_jid).await
 }
 
-async fn enqueue_muji_presence_clear(
+pub(crate) async fn enqueue_muji_presence_clear(
     state: &WebSocketState,
     room_jid: &BareJid,
     full_jid: &FullJid,
@@ -251,7 +251,7 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(
     // final call-thread effect so overlapping attempts cannot both clone the
     // active entry and emit duplicate ended messages. On a retryable persist
     // failure the entry remains in the map for the next waiter to retry.
-    let room_lock = call_thread_end_lock(room_jid);
+    let room_lock = call_thread_end_lock(state, room_jid);
     let end_guard = room_lock.lock().await;
     let outcome = async {
         let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
@@ -328,9 +328,13 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(
     }
     .await;
     drop(end_guard);
-    CALL_THREAD_END_LOCKS.remove_if(room_jid, |_, current| {
-        Arc::ptr_eq(current, &room_lock) && Arc::strong_count(current) == 2
-    });
+    state
+        .deps
+        .protocol
+        .call_thread_end_locks
+        .remove_if(room_jid, |_, current| {
+            Arc::ptr_eq(current, &room_lock) && Arc::strong_count(current) == 2
+        });
     outcome
 }
 
