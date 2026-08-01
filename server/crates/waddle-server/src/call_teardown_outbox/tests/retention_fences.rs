@@ -95,7 +95,13 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
 }
 
 #[tokio::test]
-async fn foreign_node_one_to_one_intent_is_released_without_execution() {
+async fn sid_fenced_foreign_node_intent_still_executes_after_producer_loss() {
+    // #1612 review round 9: a sid fence travels with the intent, so a
+    // fenced row must NOT be stranded behind its dead producer — the
+    // executor's fences make cross-process execution safe. Without an
+    // executor wired in this fixture the attempt lands as a retryable
+    // LiveKit-executor-unavailable, which is exactly the proof that the
+    // producer gate let it through instead of releasing/dead-lettering.
     let producing_node = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
     let state = create_test_websocket_state_with_clustering(
         crate::clustering::ClusteringHandles {
@@ -111,6 +117,50 @@ async fn foreign_node_one_to_one_intent_is_released_without_execution() {
         .protocol
         .call_teardown_outbox
         .enqueue_at(participant_intent(), now_ms - 1)
+        .await
+        .expect("enqueue");
+    producing_node
+        .rotate(NodeIdentity::new("node-b", "epoch-b"))
+        .await;
+
+    let summary = super::drain::drain_due_at(&state, 8, now_ms)
+        .await
+        .expect("drain");
+
+    assert_eq!(
+        summary.requeued, 1,
+        "fenced row must be attempted, not released"
+    );
+    assert_eq!(summary.failed, 0);
+    let stored = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+    assert_eq!(stored.status, CallTeardownStatus::Queued);
+    assert_eq!(stored.attempt_count, 1);
+}
+
+#[tokio::test]
+async fn foreign_node_one_to_one_intent_is_released_without_execution() {
+    let producing_node = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            node_identity: Some(producing_node.clone()),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let now_ms = 2_000_000_i64;
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(unfenced_participant_intent(), now_ms - 1)
         .await
         .expect("enqueue");
     producing_node
@@ -154,7 +204,10 @@ async fn foreign_node_one_to_one_intent_older_than_a_day_dead_letters() {
         .deps
         .protocol
         .call_teardown_outbox
-        .enqueue_at(participant_intent(), now_ms - (24 * 60 * 60 * 1_000) - 1)
+        .enqueue_at(
+            unfenced_participant_intent(),
+            now_ms - (24 * 60 * 60 * 1_000) - 1,
+        )
         .await
         .expect("enqueue");
     producing_node

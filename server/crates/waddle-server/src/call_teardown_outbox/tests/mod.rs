@@ -30,6 +30,22 @@ async fn store(name: &str) -> CallTeardownOutboxStore {
         .unwrap()
 }
 
+/// A raw 1:1 intent with NO sid fences: only its producing node's
+/// process-local registry can execute it safely, so it stays behind
+/// the producer gate (unlike fenced rows, which survive producer
+/// loss — #1612 review round 9).
+fn unfenced_participant_intent() -> CallTeardownIntent {
+    CallTeardownIntent {
+        call_id: CallId::new("alice@example.test:call-1").unwrap(),
+        target: TeardownTarget::Participant {
+            identity: FullJid::from_str("alice@example.test/device").unwrap(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+    }
+}
+
 fn participant_intent() -> CallTeardownIntent {
     CallTeardownIntent {
         call_id: CallId::new("alice@example.test:call-1").unwrap(),
