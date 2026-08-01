@@ -199,7 +199,7 @@ impl CallTeardownOutboxStore {
         now_ms: i64,
     ) -> Result<CallTeardownRetryOutcome, CallTeardownOutboxError> {
         let attempt_count = job.attempt_count.saturating_add(1);
-        let failed = attempt_count >= MAX_ATTEMPTS;
+        let failed = attempt_count >= MAX_ATTEMPTS && !error.is_infrastructure_transient();
         let status = if failed { STATUS_FAILED } else { STATUS_QUEUED };
         let next_attempt_at_ms =
             (!failed).then(|| now_ms.saturating_add(super::retry_delay_ms(attempt_count)));

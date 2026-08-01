@@ -365,12 +365,13 @@ impl IqHandler for JingleHandler {
                 self.handle_session_negotiation(iq, jingle, peer, ctx)
             }
             Action::SessionAccept => self.handle_session_negotiation(iq, jingle, peer, ctx),
-            Action::SessionTerminate => {
-                if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
-                    return reply;
-                }
-                self.handle_session_terminate(iq, jingle, peer, ctx)
-            }
+            // The terminate limiter is charged INSIDE the handler, only
+            // on the authorized mutating branches: charging before
+            // validation would let one resource exhaust the shared
+            // bare-JID bucket with syntactically valid unknown-session
+            // terminates and starve a legitimate hangup from another
+            // resource of the same account (#1612 review round 8).
+            Action::SessionTerminate => self.handle_session_terminate(iq, jingle, peer, ctx),
             Action::SessionInfo
             | Action::TransportInfo
             | Action::ContentAdd
@@ -930,6 +931,11 @@ impl JingleHandler {
             self.sfu.has_call_participant(call_id, &sender_identity)
                 && self.sfu.has_call_participant(call_id, &peer_identity)
         }) {
+            // Charge the limiter only now that this is a validated,
+            // mutating teardown of the sender's own session.
+            if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
+                return reply;
+            }
             let _ = self
                 .sfu
                 .unregister_call_participant(call_id, &sender_identity, None);
@@ -949,6 +955,11 @@ impl JingleHandler {
             let participants = self.sfu.participants_for_call(call_id);
             !participants.is_empty() && participants.iter().all(|p| p == &sender_identity)
         }) {
+            // Same charge point as case 1: an authorized survivor
+            // teardown that will mutate registry state.
+            if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
+                return reply;
+            }
             let _ = self
                 .sfu
                 .unregister_call_participant(call_id, &sender_identity, None);

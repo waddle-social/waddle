@@ -89,6 +89,15 @@ pub enum TeardownTarget {
     MujiRoomSweep {
         room_jid: BareJid,
     },
+    /// Completion-only retry of the call-thread "ended" broadcast
+    /// (#1612 review round 8): the Muji presence clear already
+    /// succeeded on the ordinary MUC path, so replaying a destructive
+    /// `MujiPresenceClear` could clobber a quick rejoin. This target
+    /// only re-runs `maybe_broadcast_call_thread_ended`, which is
+    /// idempotent and a no-op once the thread has ended.
+    CallThreadEndRetry {
+        room_jid: BareJid,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -106,7 +115,8 @@ impl CallTeardownIntent {
     pub(crate) fn room_scope(&self) -> Option<BareJid> {
         match &self.target {
             TeardownTarget::MujiPresenceClear { room_jid, .. }
-            | TeardownTarget::MujiRoomSweep { room_jid } => Some(room_jid.clone()),
+            | TeardownTarget::MujiRoomSweep { room_jid }
+            | TeardownTarget::CallThreadEndRetry { room_jid } => Some(room_jid.clone()),
             TeardownTarget::Participant { .. } | TeardownTarget::Room => {
                 // Muji uses the bare room JID verbatim as CallId. Raw 1:1
                 // call IDs are opaque values which do not parse as JIDs.
@@ -139,6 +149,7 @@ impl CallTeardownStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallTeardownRetryReason {
     MujiPresenceClear,
+    CallThreadEnd,
     LiveKitExecutorUnavailable,
     LiveKitAdmin,
     LiveKitOccupied,
@@ -146,9 +157,21 @@ pub enum CallTeardownRetryReason {
 }
 
 impl CallTeardownRetryReason {
+    /// Reasons caused purely by LiveKit control-plane unavailability.
+    /// These never dead-letter on the attempt cap (#1612 review round
+    /// 8): the guarded effects are idempotent/no-op bounded, failed
+    /// rows are never replayed, and no MUC reconciliation backstop
+    /// covers raw 1:1 removals — so an outage longer than the retry
+    /// budget would otherwise abandon the teardown forever. They keep
+    /// retrying at the capped backoff until LiveKit answers.
+    pub(crate) const fn is_infrastructure_transient(self) -> bool {
+        matches!(self, Self::LiveKitExecutorUnavailable | Self::LiveKitAdmin)
+    }
+
     pub(crate) const fn as_db_value(self) -> &'static str {
         match self {
             Self::MujiPresenceClear => "muji_presence_clear_retryable",
+            Self::CallThreadEnd => "call_thread_end_retryable",
             Self::LiveKitExecutorUnavailable => "livekit_teardown_executor_unavailable",
             Self::LiveKitAdmin => "livekit_admin_retryable",
             Self::LiveKitOccupied => "livekit_room_occupied",
@@ -159,6 +182,7 @@ impl CallTeardownRetryReason {
     fn from_db_value(value: &str) -> Self {
         match value {
             "muji_presence_clear_retryable" => Self::MujiPresenceClear,
+            "call_thread_end_retryable" => Self::CallThreadEnd,
             "livekit_teardown_executor_unavailable" => Self::LiveKitExecutorUnavailable,
             "livekit_admin_retryable" => Self::LiveKitAdmin,
             "livekit_room_occupied" => Self::LiveKitOccupied,
@@ -172,6 +196,12 @@ pub enum CallTeardownLastError {
     Retryable(CallTeardownRetryReason),
     RoomNeverOwned,
     ProducerNeverDrained,
+    /// A `MujiRoomSweep` row without its webhook room SID: the schema
+    /// CHECK forbids inserting one, but `CREATE TABLE IF NOT EXISTS`
+    /// does not retrofit the constraint onto pre-existing tables, so a
+    /// legacy/corrupted row must dead-letter for investigation instead
+    /// of silently completing without sweeping.
+    MissingRoomSid,
 }
 
 impl CallTeardownLastError {
@@ -179,6 +209,7 @@ impl CallTeardownLastError {
         match value.as_str() {
             "room_never_owned" => Self::RoomNeverOwned,
             "producer_never_drained" => Self::ProducerNeverDrained,
+            "missing_room_sid" => Self::MissingRoomSid,
             _ => Self::Retryable(CallTeardownRetryReason::from_db_value(value.as_str())),
         }
     }
@@ -188,6 +219,7 @@ impl CallTeardownLastError {
             Self::Retryable(reason) => reason.as_db_value(),
             Self::RoomNeverOwned => "room_never_owned",
             Self::ProducerNeverDrained => "producer_never_drained",
+            Self::MissingRoomSid => "missing_room_sid",
         }
     }
 }

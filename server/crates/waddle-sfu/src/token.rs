@@ -114,6 +114,11 @@ pub(crate) struct IssuedJti {
     pub jti: Jti,
     pub exp: DateTime<Utc>,
     pub protected_from_empty_bucket_eject: bool,
+    /// When this token was minted. Departure-driven revocation uses it
+    /// to fence the sweep to the departed incarnation: a token minted
+    /// AFTER the departure was observed belongs to a concurrent
+    /// replacement initiate and must survive (#1612 review round 8).
+    pub minted_at: DateTime<Utc>,
 }
 
 /// Fully-issued join credential. Returned by

@@ -96,6 +96,15 @@ fn decode_target(
                 action.to_owned(),
             )),
         },
+        "call_thread_end_retry" => match (identity, room_jid, participant_sid) {
+            (None, Some(room_jid), None) => Ok(TeardownTarget::CallThreadEndRetry {
+                room_jid: BareJid::from_str(&room_jid)
+                    .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
+            }),
+            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
+                action.to_owned(),
+            )),
+        },
         "delete_room" => Err(CallTeardownOutboxError::InvalidTargetShape(
             action.to_owned(),
         )),

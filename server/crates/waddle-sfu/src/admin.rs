@@ -65,14 +65,39 @@ pub struct RoomOccupancy {
     pub foreign: usize,
 }
 
+/// A LiveKit room name classified once at the admin boundary (#1612
+/// review round 8): LiveKit may co-host rooms Waddle does not own, so
+/// the raw listing string is parsed here and never crosses the public
+/// [`LiveKitAdmin`] trait untyped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListedRoomName {
+    /// A name Waddle minted — it parses as a [`CallId`].
+    Waddle(CallId),
+    /// Any other co-hosted room (egress, SIP, third-party); retained
+    /// only for diagnostics and never routed into Waddle state.
+    Foreign(String),
+}
+
+impl ListedRoomName {
+    pub fn classify(name: String) -> Self {
+        match CallId::new(name.clone()) {
+            Ok(call_id) => Self::Waddle(call_id),
+            Err(_) => Self::Foreign(name),
+        }
+    }
+
+    pub fn as_waddle(&self) -> Option<&CallId> {
+        match self {
+            Self::Waddle(call_id) => Some(call_id),
+            Self::Foreign(_) => None,
+        }
+    }
+}
+
 /// An active LiveKit room returned by `RoomService.ListRooms`.
-///
-/// The room name stays a string at the admin boundary because LiveKit
-/// may contain rooms not owned by Waddle. Reconciliation converts only
-/// names accepted by [`CallId::new`] and ignores the rest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedRoom {
-    pub name: String,
+    pub name: ListedRoomName,
     pub sid: Option<RoomSid>,
     pub num_participants: Option<u64>,
 }
@@ -491,7 +516,7 @@ struct ListedRoomWire {
 impl From<ListedRoomWire> for ListedRoom {
     fn from(room: ListedRoomWire) -> Self {
         Self {
-            name: room.name,
+            name: ListedRoomName::classify(room.name),
             sid: room.sid,
             num_participants: room.num_participants,
         }
@@ -743,12 +768,12 @@ mod tests {
             parsed.rooms,
             vec![
                 ListedRoom {
-                    name: "general@muc.waddle.social".to_owned(),
+                    name: ListedRoomName::classify("general@muc.waddle.social".to_owned()),
                     sid: Some(RoomSid::new("RM_1").expect("room sid")),
                     num_participants: Some(2),
                 },
                 ListedRoom {
-                    name: "empty@muc.waddle.social".to_owned(),
+                    name: ListedRoomName::classify("empty@muc.waddle.social".to_owned()),
                     sid: None,
                     num_participants: Some(0),
                 },

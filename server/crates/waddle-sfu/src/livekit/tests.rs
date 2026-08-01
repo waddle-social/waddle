@@ -2634,7 +2634,7 @@ async fn reconcile_room_sid_rotation_reincarnates_call_and_accepts_new_sid_obser
         "a pending room rotation must not mutate participant state"
     );
     admin.set_rooms(vec![crate::admin::ListedRoom {
-        name: call.to_string(),
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
         sid: new_observed.room_sid.clone(),
         num_participants: Some(1),
     }]);
@@ -2679,7 +2679,7 @@ async fn reconcile_listing_learns_a_missing_room_sid_without_rotating_generation
     sfu.register_call_participant(&call, &alice);
     let original_generation = stored_generation(&sfu, &call).expect("generation");
     admin.set_rooms(vec![crate::admin::ListedRoom {
-        name: call.to_string(),
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
         sid: Some(learned_room_sid.clone()),
         num_participants: Some(1),
     }]);
@@ -2780,7 +2780,7 @@ async fn reconcile_discovers_listed_livekit_rooms_and_sweeps_disconnected_after_
     let alice = fixture_identity("alice");
 
     admin.set_rooms(vec![crate::admin::ListedRoom {
-        name: call.as_str().to_owned(),
+        name: crate::admin::ListedRoomName::classify(call.as_str().to_owned()),
         sid: Some(RoomSid::new("RM_recovered").expect("room sid")),
         num_participants: None,
     }]);
@@ -2814,7 +2814,7 @@ async fn reconcile_list_rooms_error_does_not_skip_registry_pass() {
     let admin = Arc::new(RecordingAdmin::default());
     admin.fail_list_rooms();
     admin.set_rooms(vec![crate::admin::ListedRoom {
-        name: "listed@muc.waddle.social".to_owned(),
+        name: crate::admin::ListedRoomName::classify("listed@muc.waddle.social".to_owned()),
         sid: None,
         num_participants: None,
     }]);
@@ -3111,7 +3111,7 @@ async fn partially_restored_call_merges_remaining_live_identities() {
     // Alice's webhook re-registration arrived before the pass.
     sfu.register_call_participant(&call, &alice);
     admin.set_rooms(vec![crate::admin::ListedRoom {
-        name: call.to_string(),
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
         sid: Some(RoomSid::new("RM_merge").expect("room sid")),
         num_participants: Some(2),
     }]);
@@ -3182,7 +3182,7 @@ async fn adopted_participant_sid_makes_fenced_removal_decidable() {
     let participant_sid = fixture_participant_sid("PA_adopt_sid");
 
     admin.set_rooms(vec![crate::admin::ListedRoom {
-        name: call.to_string(),
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
         sid: Some(room_sid.clone()),
         num_participants: Some(1),
     }]);

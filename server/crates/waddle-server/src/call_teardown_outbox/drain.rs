@@ -192,6 +192,11 @@ pub(super) async fn drain_due_at(
                 CallTeardownRetryOutcome::Failed { .. } => summary.failed += 1,
                 CallTeardownRetryOutcome::ClaimLost => {}
             },
+            IntentExecution::Permanent(error) => {
+                if store.fail_claim_at(&job, error, now_ms).await? {
+                    summary.failed += 1;
+                }
+            }
         }
     }
     Ok(summary)
@@ -220,7 +225,11 @@ fn stale_superseded_by_live_participant(
     let participant = match &intent.target {
         TeardownTarget::Participant { identity, .. } => identity,
         TeardownTarget::MujiPresenceClear { departed, .. } => departed,
-        TeardownTarget::Room | TeardownTarget::MujiRoomSweep { .. } => return false,
+        // Completion-only and room-wide targets carry no participant to
+        // supersede (CallThreadEndRetry is additionally non-destructive).
+        TeardownTarget::Room
+        | TeardownTarget::MujiRoomSweep { .. }
+        | TeardownTarget::CallThreadEndRetry { .. } => return false,
     };
     let identity = Identity::from_jid(participant.clone());
     [
@@ -301,6 +310,10 @@ enum IntentExecution {
     Done,
     Stale,
     Retryable(CallTeardownRetryReason),
+    /// An unrecoverable invariant violation: dead-letter the row as
+    /// `failed` so it stays observable (and prunable) instead of
+    /// masquerading as a completed effect.
+    Permanent(CallTeardownLastError),
 }
 
 async fn execute_intent(
@@ -342,6 +355,31 @@ async fn execute_intent(
         };
     }
 
+    if let TeardownTarget::CallThreadEndRetry { room_jid } = &intent.target {
+        // Completion-only: never replays the destructive presence clear;
+        // `maybe_broadcast_call_thread_ended` is idempotent and a no-op
+        // once the thread has ended or another path completed it.
+        return match tokio::time::timeout(
+            ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
+            crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(
+                state, room_jid,
+            ),
+        )
+        .await
+        {
+            Err(_) => IntentExecution::Retryable(CallTeardownRetryReason::CallThreadEnd),
+            Ok(outcome) => match outcome {
+                WebhookEffectOutcome::Completed | WebhookEffectOutcome::Permanent(_) => {
+                    IntentExecution::Done
+                }
+                WebhookEffectOutcome::Stale => IntentExecution::Stale,
+                WebhookEffectOutcome::Retryable(_) => {
+                    IntentExecution::Retryable(CallTeardownRetryReason::CallThreadEnd)
+                }
+            },
+        };
+    }
+
     if let TeardownTarget::MujiRoomSweep { room_jid } = &intent.target {
         let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
             return IntentExecution::Retryable(CallTeardownRetryReason::LiveKitExecutorUnavailable);
@@ -350,9 +388,9 @@ async fn execute_intent(
             tracing::warn!(
                 call_id = %intent.call_id,
                 room = %room_jid,
-                "muji room sweep intent is missing the webhook room SID; skipping"
+                "muji room sweep intent is missing the webhook room SID; dead-lettering"
             );
-            return IntentExecution::Done;
+            return IntentExecution::Permanent(CallTeardownLastError::MissingRoomSid);
         };
         let observed_sids = ObservedCallSids::new(Some(room_sid), None);
         let mut departed: HashSet<_> = sfu
@@ -432,7 +470,9 @@ async fn execute_intent(
             participant_sid: participant_sid.clone(),
         },
         TeardownTarget::Room => TeardownTargetLite::Room,
-        TeardownTarget::MujiPresenceClear { .. } | TeardownTarget::MujiRoomSweep { .. } => {
+        TeardownTarget::MujiPresenceClear { .. }
+        | TeardownTarget::MujiRoomSweep { .. }
+        | TeardownTarget::CallThreadEndRetry { .. } => {
             return IntentExecution::Done;
         }
     };

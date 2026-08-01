@@ -19,7 +19,7 @@ use futures::{stream, StreamExt};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
-use crate::admin::{admin_base_url_from_ws, LiveKitAdmin, ReqwestLiveKitAdmin};
+use crate::admin::{admin_base_url_from_ws, ListedRoomName, LiveKitAdmin, ReqwestLiveKitAdmin};
 use crate::call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
     ObservedCallSids, ParticipantSid, RoomSid, SidObservationDirection, SidObservationDisposition,
@@ -119,6 +119,12 @@ impl ParticipantState {
 struct CallEntry {
     generation: CallGeneration,
     room_sid: Option<RoomSid>,
+    /// When `room_sid` was last written from a live observation (join
+    /// webhook, adoption, or listing rotation). Guards reconcile-time
+    /// rotation: a `ListRooms` snapshot taken BEFORE a webhook already
+    /// advanced the sid must not roll the fence back to the stale
+    /// incarnation (#1612 review round 8).
+    room_sid_observed_at: Option<DateTime<Utc>>,
     participants: HashMap<Identity, ParticipantState>,
 }
 
@@ -368,7 +374,7 @@ impl LiveKitTeardownExecutor {
             .list_rooms()
             .await?
             .into_iter()
-            .find(|room| room.name == call_id.as_str())
+            .find(|room| room.name.as_waddle() == Some(call_id))
             .and_then(|room| room.sid))
     }
 
@@ -622,15 +628,38 @@ impl LiveKitSfu {
         });
     }
 
-    fn rotate_room_incarnation_from_listing(&self, call_id: &CallId, listed_room_sid: &RoomSid) {
+    fn rotate_room_incarnation_from_listing(
+        &self,
+        call_id: &CallId,
+        listed_room_sid: &RoomSid,
+        listing_started_at: DateTime<Utc>,
+    ) {
         let Some(mut entry) = self.calls.get_mut(call_id) else {
             return;
         };
         let Some(current_room_sid) = entry.room_sid.as_ref() else {
             entry.room_sid = Some(listed_room_sid.clone());
+            entry.room_sid_observed_at = Some(listing_started_at);
             return;
         };
         if current_room_sid == listed_room_sid {
+            return;
+        }
+        // The stored sid was observed AFTER this listing was requested:
+        // the listing is the stale snapshot (an old incarnation listed
+        // just before a webhook restored the newer room). Rotating here
+        // would roll the fence back and let a delayed `room_finished`
+        // for the old room clear the current call.
+        if entry
+            .room_sid_observed_at
+            .is_some_and(|observed_at| observed_at > listing_started_at)
+        {
+            tracing::info!(
+                call_id = %call_id,
+                listed_room_sid = %listed_room_sid,
+                stored_room_sid = %current_room_sid,
+                "SFU reconcile: ignoring stale room listing older than the stored sid observation"
+            );
             return;
         }
         let next_generation = self.next_call_generation(call_id, entry.generation.as_u64());
@@ -644,6 +673,7 @@ impl LiveKitSfu {
         );
         entry.generation = next_generation;
         entry.room_sid = Some(listed_room_sid.clone());
+        entry.room_sid_observed_at = Some(listing_started_at);
         for participant in entry.participants.values_mut() {
             participant.participant_sid = None;
         }
@@ -672,6 +702,7 @@ impl LiveKitSfu {
             .collect();
         entry.insert(CallEntry {
             generation,
+            room_sid_observed_at: room_sid.as_ref().map(|_| now),
             room_sid,
             participants: participant_states,
         });
@@ -999,6 +1030,9 @@ impl LiveKitSfu {
         if matches!(direction, SidObservationDirection::Join) {
             if identity_is_tracked && entry.room_sid.is_none() {
                 entry.room_sid.clone_from(&observed_sids.room_sid);
+                if observed_sids.room_sid.is_some() {
+                    entry.room_sid_observed_at = Some(observed_at);
+                }
             }
             if let Some(state) = entry.participants.get_mut(identity) {
                 if state.participant_sid.is_none() {
@@ -1064,22 +1098,48 @@ impl LiveKitSfu {
         let generation = entry.generation;
         drop(entry);
 
+        // Revoke only tokens minted BEFORE this departure was observed
+        // (#1612 review round 8): between dropping the entry guard and
+        // this sweep, a concurrent Jingle initiate can mint a replacement
+        // token for the same (call, identity). That fresh JTI belongs to
+        // the NEW incarnation — capturing it here would revoke it and arm
+        // a pending eject that later disconnects the newly authorized
+        // caller once their `participant_joined` arrives.
+        let mut replacement_minted = false;
         if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
+            let (departed_tokens, fresh_tokens): (Vec<IssuedJti>, Vec<IssuedJti>) =
+                issued.into_iter().partition(|token| token.minted_at <= now);
             let mut latest_exp = None;
-            for issued in issued {
+            for issued in departed_tokens {
                 latest_exp = Some(
                     latest_exp.map_or(issued.exp, |current: DateTime<Utc>| current.max(issued.exp)),
                 );
                 self.revoked.insert(issued.jti, issued.exp);
             }
-            if let Some(latest_exp) = latest_exp {
+            if !fresh_tokens.is_empty() {
+                replacement_minted = true;
+                // Merge-preserve: an even newer mint may already have
+                // repopulated the bucket after the `remove` above.
+                self.issued
+                    .entry((call_id.clone(), identity.clone()))
+                    .or_default()
+                    .extend(fresh_tokens);
+            }
+            // A surviving replacement token proves a concurrent
+            // re-authorization: arming the eject would disconnect it.
+            if let (Some(latest_exp), false) = (latest_exp, replacement_minted) {
                 self.arm_pending_revocation_eject(call_id, identity, latest_exp);
             }
         }
         self.registered_at
             .remove(&(call_id.clone(), identity.clone()));
-        self.last_minted_at
-            .remove(&(call_id.clone(), identity.clone()));
+        // The replacement mint refreshed `last_minted_at`; clearing it
+        // would blind the durable-teardown supersession fence to the
+        // rejoin it exists to detect.
+        if !replacement_minted {
+            self.last_minted_at
+                .remove(&(call_id.clone(), identity.clone()));
+        }
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
         // Dropping a queued grant intent here is correct, and load-bearing
@@ -1456,15 +1516,20 @@ impl LiveKitSfu {
             .collect();
 
         let mut listing_authoritative = true;
+        let listing_started_at = Utc::now();
         match self.admin.list_rooms().await {
             Ok(listed) => {
                 for room in listed {
-                    let Ok(call_id) = CallId::new(room.name) else {
+                    let ListedRoomName::Waddle(call_id) = room.name else {
                         tracing::debug!("SFU reconcile: ignoring non-Waddle LiveKit room name");
                         continue;
                     };
                     if let Some(listed_room_sid) = room.sid.as_ref() {
-                        self.rotate_room_incarnation_from_listing(&call_id, listed_room_sid);
+                        self.rotate_room_incarnation_from_listing(
+                            &call_id,
+                            listed_room_sid,
+                            listing_started_at,
+                        );
                     }
                     rooms
                         .entry(call_id)
@@ -1710,8 +1775,9 @@ impl SfuService for LiveKitSfu {
             .entry((call_id.clone(), identity.clone()))
             .or_default();
         self.clear_pending_revocation_eject(call_id, identity);
+        let minted_at = Utc::now();
         self.last_minted_at
-            .insert((call_id.clone(), identity.clone()), Utc::now());
+            .insert((call_id.clone(), identity.clone()), minted_at);
         let mut protected_from_empty_bucket_eject = false;
         if let Some(mut call_entry) = self.calls.get_mut(call_id) {
             if let Some(participant) = call_entry.participants.get_mut(identity) {
@@ -1726,6 +1792,7 @@ impl SfuService for LiveKitSfu {
             jti: token.jti.clone(),
             exp: token.expires_at,
             protected_from_empty_bucket_eject,
+            minted_at,
         });
         Ok(token)
     }
@@ -1760,6 +1827,7 @@ impl SfuService for LiveKitSfu {
                 entry.insert(CallEntry {
                     generation,
                     room_sid: None,
+                    room_sid_observed_at: None,
                     participants,
                 });
             }
@@ -1825,6 +1893,7 @@ impl SfuService for LiveKitSfu {
                 );
                 vacant.insert(CallEntry {
                     generation,
+                    room_sid_observed_at: observed_sids.room_sid.as_ref().map(|_| now),
                     room_sid: observed_sids.room_sid.clone(),
                     participants,
                 });

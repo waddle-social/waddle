@@ -408,17 +408,18 @@ pub(crate) async fn try_handle_muc_presence_update(
         // (transient inbox-storage or broadcast error) would otherwise be
         // dropped here, silently suppressing the ended broadcast and
         // leaving the active call-thread entry in memory (#1612 review).
-        // Hand the retry to the durable teardown outbox: the drained
-        // MujiPresenceClear re-runs the (idempotent, already-applied)
-        // presence clear and re-attempts the call-thread completion.
+        // Hand the retry to the durable outbox via the COMPLETION-ONLY
+        // target — the presence clear itself already succeeded, and
+        // replaying it could clobber a quick rejoin's advertisement.
         if matches!(
             outcome,
             crate::server::routes::muc_muji_clear::WebhookEffectOutcome::Retryable(_)
         ) {
-            if let Err(error) = crate::server::routes::muc_muji_clear::enqueue_muji_presence_clear(
-                state, room_jid, sender_jid, None,
-            )
-            .await
+            if let Err(error) =
+                crate::server::routes::muc_muji_clear::enqueue_call_thread_end_retry(
+                    state, room_jid,
+                )
+                .await
             {
                 tracing::warn!(
                     room = %room_jid,

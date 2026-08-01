@@ -14,6 +14,9 @@ use crate::db::{Database, DatabaseError};
 const DONE_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const PROCESSING_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 const PRUNE_BATCH_SIZE: i64 = 128;
+/// Retention pruning is amortized: at most one observe per interval pays
+/// the DELETE cost, keeping the hot webhook-ingest transaction small.
+const PRUNE_INTERVAL_MS: i64 = 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebhookDeliveryObservation {
@@ -47,6 +50,7 @@ pub(crate) trait WebhookDeliveryStore: Send + Sync {
 pub(crate) struct DatabaseWebhookDeliveryStore {
     db: Database,
     initialized: OnceCell<()>,
+    last_pruned_at_ms: std::sync::atomic::AtomicI64,
 }
 
 impl DatabaseWebhookDeliveryStore {
@@ -54,7 +58,28 @@ impl DatabaseWebhookDeliveryStore {
         Self {
             db,
             initialized: OnceCell::new(),
+            last_pruned_at_ms: std::sync::atomic::AtomicI64::new(0),
         }
+    }
+
+    /// At most one observe per [`PRUNE_INTERVAL_MS`] wins the CAS and
+    /// carries the retention DELETEs; everyone else skips them. The
+    /// first observe of a store's lifetime (sentinel `0`) always
+    /// prunes, independent of the caller's clock domain.
+    fn claim_prune_slot(&self, now_ms: i64) -> bool {
+        let last = self
+            .last_pruned_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        (last == 0 || now_ms.saturating_sub(last) >= PRUNE_INTERVAL_MS)
+            && self
+                .last_pruned_at_ms
+                .compare_exchange(
+                    last,
+                    now_ms.max(1),
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
     }
 
     async fn initialize(&self) -> Result<(), WebhookDeliveryError> {
@@ -96,33 +121,35 @@ impl DatabaseWebhookDeliveryStore {
     ) -> Result<WebhookDeliveryObservation, WebhookDeliveryError> {
         self.initialize().await?;
         let mut transaction = self.db.begin_immediate().await?;
-        let prune_before_ms = now_ms.saturating_sub(DONE_RETENTION_MS);
-        let processing_prune_before_ms = now_ms.saturating_sub(PROCESSING_RETENTION_MS);
-        transaction
-            .execute(
-                "DELETE FROM webhook_deliveries \
-                 WHERE event_id IN (\
-                     SELECT event_id FROM webhook_deliveries \
-                     WHERE status = 'done' AND completed_at_ms < ? \
-                     ORDER BY completed_at_ms ASC LIMIT ?\
-                 )",
-                crate::db_params![prune_before_ms, PRUNE_BATCH_SIZE],
-            )
-            .await?;
-        // LiveKit abandons webhook retries within minutes. Reaping a
-        // day-old `processing` row therefore only re-opens idempotent
-        // reprocessing for a delivery we will not hear about again.
-        transaction
-            .execute(
-                "DELETE FROM webhook_deliveries \
-                 WHERE event_id IN (\
-                     SELECT event_id FROM webhook_deliveries \
-                     WHERE status = 'processing' AND first_seen_ms < ? \
-                     ORDER BY first_seen_ms ASC LIMIT ?\
-                 )",
-                crate::db_params![processing_prune_before_ms, PRUNE_BATCH_SIZE],
-            )
-            .await?;
+        if self.claim_prune_slot(now_ms) {
+            let prune_before_ms = now_ms.saturating_sub(DONE_RETENTION_MS);
+            let processing_prune_before_ms = now_ms.saturating_sub(PROCESSING_RETENTION_MS);
+            transaction
+                .execute(
+                    "DELETE FROM webhook_deliveries \
+                     WHERE event_id IN (\
+                         SELECT event_id FROM webhook_deliveries \
+                         WHERE status = 'done' AND completed_at_ms < ? \
+                         ORDER BY completed_at_ms ASC LIMIT ?\
+                     )",
+                    crate::db_params![prune_before_ms, PRUNE_BATCH_SIZE],
+                )
+                .await?;
+            // LiveKit abandons webhook retries within minutes. Reaping a
+            // day-old `processing` row therefore only re-opens idempotent
+            // reprocessing for a delivery we will not hear about again.
+            transaction
+                .execute(
+                    "DELETE FROM webhook_deliveries \
+                     WHERE event_id IN (\
+                         SELECT event_id FROM webhook_deliveries \
+                         WHERE status = 'processing' AND first_seen_ms < ? \
+                         ORDER BY first_seen_ms ASC LIMIT ?\
+                     )",
+                    crate::db_params![processing_prune_before_ms, PRUNE_BATCH_SIZE],
+                )
+                .await?;
+        }
 
         let inserted = transaction
             .execute(
@@ -385,14 +412,16 @@ mod tests {
             .await
             .expect("observe processing");
 
+        // Pruning is amortized to one observe per PRUNE_INTERVAL_MS, so
+        // the triggering observe must land in a fresh interval slot.
         store
-            .observe_at("EV_trigger", DONE_RETENTION_MS + 2)
+            .observe_at("EV_trigger", DONE_RETENTION_MS + PRUNE_INTERVAL_MS + 2)
             .await
             .expect("trigger prune");
 
         assert_eq!(
             store
-                .observe_at("EV_old", DONE_RETENTION_MS + 3)
+                .observe_at("EV_old", DONE_RETENTION_MS + PRUNE_INTERVAL_MS + 3)
                 .await
                 .expect("re-observe expired delivery"),
             WebhookDeliveryObservation::Processing,

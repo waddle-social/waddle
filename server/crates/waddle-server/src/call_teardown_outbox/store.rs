@@ -365,5 +365,11 @@ fn encode_target(
         TeardownTarget::MujiRoomSweep { room_jid } => {
             ("muji_room_sweep", None, Some(room_jid.to_string()), None)
         }
+        TeardownTarget::CallThreadEndRetry { room_jid } => (
+            "call_thread_end_retry",
+            None,
+            Some(room_jid.to_string()),
+            None,
+        ),
     }
 }

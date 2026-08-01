@@ -132,7 +132,48 @@ pub(crate) async fn clear_muji_presence_for_departure(
     maybe_broadcast_call_thread_ended(state, room_jid).await
 }
 
-pub(crate) async fn enqueue_muji_presence_clear(
+/// Persist a completion-only retry of the call-thread "ended" broadcast.
+/// Deliberately NOT a `MujiPresenceClear`: the presence clear already
+/// succeeded on the caller's path, and replaying it from the outbox could
+/// clobber a quick rejoin's fresh advertisement (#1612 review round 8).
+pub(crate) async fn enqueue_call_thread_end_retry(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+        Ok(call_id) => call_id,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                %error,
+                "could not model call-thread completion retry as a teardown intent"
+            );
+            return Ok(());
+        }
+    };
+    let intent = crate::call_teardown_outbox::CallTeardownIntent {
+        call_id,
+        target: crate::call_teardown_outbox::TeardownTarget::CallThreadEndRetry {
+            room_jid: room_jid.clone(),
+        },
+        generation: None,
+        room_sid: None,
+    };
+    let store = &state.deps.protocol.call_teardown_outbox;
+    let persistence = &state.deps.protocol.call_teardown_persistence;
+    if let Err(error) = store.enqueue(intent.clone()).await {
+        warn!(
+            room = %room_jid,
+            %error,
+            "failed to persist call-thread completion retry; retrying asynchronously"
+        );
+        persistence.retry_batch(vec![intent]);
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn enqueue_muji_presence_clear(
     state: &WebSocketState,
     room_jid: &BareJid,
     full_jid: &FullJid,
