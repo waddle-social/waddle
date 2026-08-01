@@ -100,16 +100,27 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
         .clone()
         .map(crate::notification_activity::NotificationPresenceShow::from_xep0045);
     let synthetic_session = synthetic_session_for_full_jid(&sender_jid);
-    let frames = crate::server::routes::websocket::handlers::presence::handle_muc_join(
-        state,
-        state.deps.auth_state.xmpp_domain.as_str(),
-        room_jid,
-        &sender_jid,
-        nick,
-        presence_show,
-        &Some(synthetic_session),
+    let frames = tokio::time::timeout(
+        ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state,
+            state.deps.auth_state.xmpp_domain.as_str(),
+            room_jid,
+            &sender_jid,
+            nick,
+            presence_show,
+            &Some(synthetic_session),
+        ),
     )
-    .await;
+    .await
+    .map_err(|_| {
+        tracing::warn!(
+            room = %room_jid,
+            timeout_ms = ORDERED_RECEIVER_DELIVERY_TIMEOUT.as_millis(),
+            "ordered relay: reserved MUC join handling timed out"
+        );
+        OrderedRelayNackReason::MaybeCommitted
+    })?;
     remote_replies_from_frames(frames)
 }
 
@@ -135,15 +146,25 @@ pub(in super::super::super) async fn deliver_reserved_muc_update(
         return Err(OrderedRelayNackReason::ParseFailure);
     }
 
-    match crate::server::routes::websocket::handlers::presence::try_handle_muc_presence_update(
-        state,
-        room_jid,
-        &sender_jid,
-        nick,
-        presence,
+    match tokio::time::timeout(
+        ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+        crate::server::routes::websocket::handlers::presence::try_handle_muc_presence_update(
+            state,
+            room_jid,
+            &sender_jid,
+            nick,
+            presence,
+        ),
     )
     .await
-    {
+    .map_err(|_| {
+        tracing::warn!(
+            room = %room_jid,
+            timeout_ms = ORDERED_RECEIVER_DELIVERY_TIMEOUT.as_millis(),
+            "ordered relay: reserved MUC presence-update handling timed out"
+        );
+        OrderedRelayNackReason::MaybeCommitted
+    })? {
         Some(frames) => remote_replies_from_frames(frames),
         None => Err(OrderedRelayNackReason::TargetUnavailable),
     }
@@ -171,14 +192,25 @@ pub(in super::super::super) async fn deliver_reserved_muc_leave(
         return Err(OrderedRelayNackReason::ParseFailure);
     }
 
-    let frames = crate::server::routes::websocket::handlers::presence::handle_muc_leave(
-        state,
-        room_jid,
-        &sender_jid,
-        nick,
-        None,
+    let frames = tokio::time::timeout(
+        ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+        crate::server::routes::websocket::handlers::presence::handle_muc_leave(
+            state,
+            room_jid,
+            &sender_jid,
+            nick,
+            None,
+        ),
     )
-    .await;
+    .await
+    .map_err(|_| {
+        tracing::warn!(
+            room = %room_jid,
+            timeout_ms = ORDERED_RECEIVER_DELIVERY_TIMEOUT.as_millis(),
+            "ordered relay: reserved MUC leave handling timed out"
+        );
+        OrderedRelayNackReason::MaybeCommitted
+    })?;
     remote_replies_from_frames(frames)
 }
 
