@@ -258,10 +258,28 @@ async fn seed_groupchat_archive_row(
     archive_pk: &str,
     wire_id: &str,
 ) -> MamArchivedMessage {
+    let sender: jid::Jid = format!("{room}/alice").parse().expect("room/nick jid");
+    let mut archived_wire_message = xmpp_parsers::message::Message::new(None);
+    archived_wire_message.from = Some(sender.clone());
+    archived_wire_message.id = Some(xmpp_parsers::message::Id(wire_id.to_string()));
+    archived_wire_message.type_ = XmppMessageType::Groupchat;
+    archived_wire_message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "remove me".to_string());
+    archived_wire_message
+        .payloads
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
+            archive_pk,
+            &jid::Jid::from(room.clone()),
+        ));
+    let mut stanza_xml_bytes = Vec::new();
+    Element::from(archived_wire_message)
+        .write_to(&mut stanza_xml_bytes)
+        .expect("serialize archived wire message");
     let row = MamArchivedMessage {
         id: archive_pk.to_string(),
         timestamp: chrono::Utc::now(),
-        from: format!("{room}/alice").parse().expect("room/nick jid"),
+        from: sender,
         to: jid::Jid::from(room.clone()),
         body: Some("remove me".to_string()),
         stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
@@ -272,9 +290,9 @@ async fn seed_groupchat_archive_row(
         reply: None,
         origin_id: None,
         message_type: XmppMessageType::Groupchat,
-        stanza_xml: Some(format!(
-            r#"<message xmlns='jabber:client' type='groupchat' from='{room}/alice' id='{wire_id}'><body>remove me</body><stanza-id xmlns='urn:xmpp:sid:0' by='{room}' id='{archive_pk}'/></message>"#
-        )),
+        stanza_xml: Some(
+            String::from_utf8(stanza_xml_bytes).expect("archived wire message xml is utf-8"),
+        ),
         rich: None,
         nickname_generation: Some(0),
     };

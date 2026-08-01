@@ -116,8 +116,10 @@ pub(super) fn register_call_setup_counters() {
 /// through `OutboundEvent`'s derived `Clone` — share the same closed
 /// bit and the first `delivered`/`undeliverable` wins. A second close
 /// is a counted-nowhere no-op that logs at warn, and fabrication is
-/// discouraged by the [`Self::open`] constructor being the only way
-/// to build one.
+/// prevented by the [`Self::open`] constructor being `pub(crate)`:
+/// outside this crate a ticket can only be obtained from the routing
+/// effect the Jingle handler built — after it counted `attempted` —
+/// or minted deliberately in tests via [`Self::open_for_test`].
 #[derive(Debug, Clone)]
 pub struct PendingCallSetupRoute(std::sync::Arc<TicketCell>);
 
@@ -142,14 +144,30 @@ impl Drop for TicketCell {
 }
 
 impl PendingCallSetupRoute {
-    /// Open a ticket for a routed 1:1 `session-initiate`. Only the
-    /// Jingle handler (and tests standing in for it) should call
-    /// this; everything downstream receives the ticket through
-    /// `OutboundEvent::RouteToConnection`.
-    pub fn open() -> Self {
+    /// Open a ticket for a routed 1:1 `session-initiate`.
+    ///
+    /// Crate-private on purpose (#1611 review): every ticket's terminal
+    /// `ok`/`failed` increment presumes the Jingle handler already
+    /// counted `waddle.call.setup.attempted` for the same attempt, so
+    /// only that handler may mint tickets — a ticket opened without the
+    /// `attempted` increment corrupts the `CallSetupFailureRate`
+    /// denominator. Everything downstream receives the ticket through
+    /// `OutboundEvent::RouteToConnection`; cross-crate tests use
+    /// [`Self::open_for_test`].
+    pub(crate) fn open() -> Self {
         Self(std::sync::Arc::new(TicketCell(
             std::sync::atomic::AtomicBool::new(false),
         )))
+    }
+
+    /// Test-only ticket constructor that models production accounting:
+    /// it counts `waddle.call.setup.attempted` before opening, exactly
+    /// as the Jingle handler does, so suites exercising ticket closure
+    /// keep the SLI numerator and denominator consistent.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn open_for_test() -> Self {
+        increment_call_setup_attempted();
+        Self::open()
     }
 
     /// Flip the shared closed bit; `true` iff this call performed the

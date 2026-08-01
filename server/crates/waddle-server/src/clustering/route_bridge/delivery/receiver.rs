@@ -54,7 +54,7 @@ pub(in super::super) async fn deliver_reserved_full_jid_peer_live_only(
             bare_jid: target.to_bare(),
         })
         .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
-        .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .reply_timeout(ORDERED_RECEIVER_DELIVERY_TIMEOUT)
         .await
         .map_err(|error| {
             tracing::warn!(
@@ -74,7 +74,7 @@ pub(in super::super) async fn deliver_reserved_full_jid_peer_live_only(
             stanza: stanza.clone(),
         })
         .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
-        .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
+        .reply_timeout(ORDERED_RECEIVER_DELIVERY_TIMEOUT)
         .await
     {
         Ok(BroadcastOutcome::Delivered) => Ok(()),
