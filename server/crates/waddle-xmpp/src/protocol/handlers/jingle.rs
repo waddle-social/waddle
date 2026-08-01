@@ -663,10 +663,13 @@ impl JingleHandler {
             Action::SessionInitiate => {
                 self.handle_muji_session_initiate(iq, jingle, room_jid, ctx, attempt)
             }
+            // The terminate limiter is charged INSIDE the handler on the
+            // authorized mutating branch only (#1612 review round 10):
+            // charging before `has_call_participant` would let bogus
+            // unknown-session terminates exhaust the shared bare-JID
+            // bucket and starve a legitimate hangup from another
+            // resource of the same account.
             Action::SessionTerminate => {
-                if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
-                    return reply;
-                }
                 self.handle_muji_session_terminate(iq, jingle, room_jid, ctx)
             }
             _ => {
@@ -858,6 +861,15 @@ impl JingleHandler {
             if !self.sfu.has_call_participant(&call_id, &sender_identity) {
                 return unknown_session_reply(iq);
             }
+            // Charge only the authorized mutating teardown (#1612
+            // review round 10): unknown-session rejections above stay
+            // uncharged, so bogus terminates cannot exhaust the shared
+            // bare-JID budget. The websocket layer's own bucket only
+            // covers the cross-node relay path; locally-owned rooms
+            // are bounded here.
+            if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
+                return reply;
+            }
             let _ = self
                 .sfu
                 .unregister_call_participant(&call_id, &sender_identity, None);
@@ -1020,7 +1032,7 @@ impl JingleHandler {
     ) -> Option<Vec<OutboundEvent>> {
         let initiator_bare = ctx.full_jid.to_bare();
         match self.terminate_rate_limit.check_and_record(&initiator_bare) {
-            Ok(()) => None,
+            Ok(_) => None,
             Err(exceeded) => {
                 tracing::warn!(
                     jid = %initiator_bare,

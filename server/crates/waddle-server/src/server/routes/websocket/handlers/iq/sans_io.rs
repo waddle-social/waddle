@@ -373,23 +373,14 @@ fn pre_dispatch_muji_rate_limit_error(
     let sender_bare = sender.to_bare();
     let rate_limited = match action {
         xmpp_parsers::jingle::Action::SessionInitiate => return None,
-        xmpp_parsers::jingle::Action::SessionTerminate => state
-            .deps
-            .protocol
-            .muji_pre_dispatch_terminate_rate_limit
-            .check_and_record(&sender_bare)
-            .err()
-            .map(|exceeded| {
-                tracing::warn!(
-                    jid = %sender_bare,
-                    %exceeded,
-                    "rate-limit dropped Muji session-terminate before membership or relay checks"
-                );
-                waddle_xmpp::telemetry::call::increment_call_control_rate_limited(
-                    waddle_xmpp::telemetry::attributes::CallControlRateLimitedSurface::Terminate,
-                );
-                "session-terminate rate limit exceeded"
-            }),
+        // Terminates are NOT charged here (#1612 review round 10): a
+        // pre-dispatch charge cannot be refunded when the local Jingle
+        // handler later rejects an unknown session, so bogus terminates
+        // would exhaust the shared bucket. The charge instead happens
+        // where the bounded work is: at the clustered relay entry
+        // (token-refunded on no-relay outcomes) and on the authorized
+        // mutating branch inside the local Muji terminate handler.
+        xmpp_parsers::jingle::Action::SessionTerminate => return None,
         _ => state
             .deps
             .protocol
@@ -483,6 +474,47 @@ async fn relay_muji_to_room_owner(
     // — evaluating them eagerly would fabricate `room_not_found`
     // denials on every cross-node teardown.
     let is_terminate = super::jingle_muji_gate::muji_session_terminate_room(iq).is_some();
+    // Terminates are charged HERE, where the bounded work (claim
+    // lookups + cross-node relay) actually starts, and refunded by
+    // token on the no-relay outcomes below — never at pre-dispatch,
+    // where a later local unknown-session rejection could not refund
+    // (#1612 review round 10). Locally-owned rooms never reach this
+    // function; their charge lives in the Jingle handler's authorized
+    // terminate branch.
+    let terminate_charge = if is_terminate {
+        let sender_bare = full_jid.to_bare();
+        match state
+            .deps
+            .protocol
+            .muji_pre_dispatch_terminate_rate_limit
+            .check_and_record(&sender_bare)
+        {
+            Ok(token) => Some(token),
+            Err(exceeded) => {
+                tracing::warn!(
+                    jid = %sender_bare,
+                    %exceeded,
+                    "rate-limit dropped Muji session-terminate before relay work"
+                );
+                waddle_xmpp::telemetry::call::increment_call_control_rate_limited(
+                    waddle_xmpp::telemetry::attributes::CallControlRateLimitedSurface::Terminate,
+                );
+                return MujiRelayOutcome::Frames(vec![build_iq_error_xml_typed(
+                    reply.id,
+                    reply.response_from,
+                    reply.response_to,
+                    xmpp_parsers::stanza_error::StanzaError::new(
+                        xmpp_parsers::stanza_error::ErrorType::Cancel,
+                        xmpp_parsers::stanza_error::DefinedCondition::PolicyViolation,
+                        "en",
+                        "session-terminate rate limit exceeded",
+                    ),
+                )]);
+            }
+        }
+    } else {
+        None
+    };
     let is_session_initiate = matches!(
         iq,
         xmpp_parsers::iq::Iq::Set { payload, .. }
@@ -602,7 +634,20 @@ async fn relay_muji_to_room_owner(
         room_jid,
         state.deps.auth_state.xmpp_domain.as_str(),
     );
+    // Any exit that performs no relay work refunds the terminate charge
+    // (token-keyed): the budget only bounds actual relay round-trips
+    // (#1612 review round 10).
+    let refund_terminate_charge = || {
+        if let Some(token) = terminate_charge {
+            state
+                .deps
+                .protocol
+                .muji_pre_dispatch_terminate_rate_limit
+                .refund(&full_jid.to_bare(), token);
+        }
+    };
     if !addressed_to_mixer || !room_is_local {
+        refund_terminate_charge();
         return unrelayable(false, &deny);
     }
 
@@ -615,6 +660,7 @@ async fn relay_muji_to_room_owner(
     let (Some(bridge), Some(origin)) = (bridge, conn_state.ordered_relay_origin.as_ref()) else {
         // No relay substrate (clustering disabled at runtime): local
         // absence is definitive, exactly the pre-#1445 semantics.
+        refund_terminate_charge();
         return unrelayable(false, &deny);
     };
     // Stamp the authenticated full JID as `from` before relaying:
@@ -665,21 +711,15 @@ async fn relay_muji_to_room_owner(
         // local fallback for a terminate genuinely IS a no-op, because
         // there is no owner holding a registration to strand.
         MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
-            // Refund the pre-dispatch terminate charge: this request
-            // performed no relay work and cannot be an authorized
-            // teardown of a live session (nobody owns the room), so a
-            // burst of bogus unknown-session terminates must not
-            // exhaust the shared bare-JID budget and starve a
-            // legitimate hangup from another resource (#1612 review
-            // round 9). Relayed asks keep their charge — the cross-node
-            // round-trip is exactly the cost this limiter bounds.
-            if is_terminate {
-                state
-                    .deps
-                    .protocol
-                    .muji_pre_dispatch_terminate_rate_limit
-                    .forgive_most_recent(&full_jid.to_bare());
-            }
+            // Refund exactly this request's charge (token-keyed, so a
+            // concurrent same-account request's charge is never popped):
+            // no relay work happened and nobody owns the room, so a
+            // burst of bogus unknown-session terminates must not exhaust
+            // the shared bare-JID budget and starve a legitimate hangup
+            // from another resource (#1612 review rounds 9-10). Relayed
+            // asks keep their charge — the cross-node round-trip is
+            // exactly the cost this limiter bounds.
+            refund_terminate_charge();
             unrelayable(false, &deny)
         }
         // Definitely not delivered: the attempt ended here.
@@ -1546,208 +1586,298 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn blocked_direct_jingle_initiate_returns_service_unavailable_without_mint_or_register() {
-        let sfu = Arc::new(RecordingCallSfu::default());
-        let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
-        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-        let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
-        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
-        register_test_connection(state.as_ref(), &bob, bob_tx).await;
-        DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
-            .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
-            .await
-            .expect("seed blocklist");
+    /// Dedicated XEP-0191 (Blocking Command) conformance suite for
+    /// direct Jingle calls (#1612 review round 10): a blocked caller's
+    /// `session-initiate`/`session-accept` must bounce with the exact
+    /// undeliverable reply BEFORE any LiveKit token mint, registry
+    /// registration, or peer delivery.
+    mod xep0191_jingle_blocking {
+        use super::*;
 
-        let responses = super::super::handle_iq(
-            &direct_jingle_frame(
-                "blocked-call-1",
-                "bob@example.com/phone",
-                "session-initiate",
-            ),
-            "example.com",
-            "muc.example.com",
-            state.as_ref(),
-            &None,
-            &ready_phase(&alice),
-        )
-        .await;
-
-        assert_eq!(responses.len(), 1, "blocked call gets one error reply");
-        let response = &responses[0];
-        let expected = crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(
-            Box::new(parse_iq(&direct_jingle_frame(
-                "blocked-call-1",
-                "bob@example.com/phone",
-                "session-initiate",
-            ))),
-        ))
-        .map(|stanza| super::stanza_to_xml(&stanza))
-        .expect("blocked direct Jingle must produce a bounced IQ reply");
-        assert_eq!(
-            response, &expected,
-            "blocked direct Jingle must reuse the undeliverable reply builder exactly"
-        );
-        assert!(
-            response.contains("<service-unavailable")
-                && response.contains("<jingle xmlns='urn:xmpp:jingle:1'"),
-            "blocked direct call must carry the sanitized undeliverable Jingle echo: {response}"
-        );
-        assert!(
-            bob_rx.try_recv().is_err(),
-            "blocked direct call must not reach the peer connection"
-        );
-        assert!(
-            sfu.issued_snapshot().is_empty(),
-            "blocked direct call must not mint a LiveKit token"
-        );
-        assert!(
-            sfu.registered_snapshot().is_empty(),
-            "blocked direct call must not register a participant"
-        );
-    }
-
-    #[tokio::test]
-    async fn blocklist_storage_failure_returns_internal_server_error_before_dispatch() {
-        let sfu = Arc::new(RecordingCallSfu::default());
-        let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
-        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-        let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
-        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
-        register_test_connection(state.as_ref(), &bob, bob_tx).await;
-        state
-            .deps
-            .app_state
-            .db_pool
-            .global_actor()
-            .ask(DbExecute {
-                sql: "DROP TABLE blocking_list".to_string(),
-                params: Vec::new(),
-            })
-            .await
-            .expect("drop blocking table");
-
-        let responses = super::super::handle_iq(
-            &direct_jingle_frame(
-                "blocked-call-2",
-                "bob@example.com/phone",
-                "session-initiate",
-            ),
-            "example.com",
-            "muc.example.com",
-            state.as_ref(),
-            &None,
-            &ready_phase(&alice),
-        )
-        .await;
-
-        assert_eq!(responses.len(), 1, "storage failure gets one error reply");
-        let response = &responses[0];
-        assert!(
-            response.contains("type='error'") && response.contains("<internal-server-error"),
-            "blocklist failures must fail closed with internal-server-error: {response}"
-        );
-        assert!(
-            bob_rx.try_recv().is_err(),
-            "fail-closed blocklist error must not dispatch to the peer connection"
-        );
-        assert!(
-            sfu.issued_snapshot().is_empty(),
-            "fail-closed blocklist error must not mint a LiveKit token"
-        );
-        assert!(
-            sfu.registered_snapshot().is_empty(),
-            "fail-closed blocklist error must not register a participant"
-        );
-    }
-
-    #[tokio::test]
-    async fn peer_jingle_blocklist_helper_blocks_session_accept_only_for_local_non_muji_targets() {
-        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
-        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-        let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
-        DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
-            .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
-            .await
-            .expect("seed blocklist");
-
-        let blocked_accept = parse_iq(&direct_jingle_frame(
-            "blocked-call-3",
-            "bob@example.com/phone",
-            "session-accept",
-        ));
-        let blocked_reply = super::peer_jingle_blocklist_reply(
-            state.as_ref(),
-            &alice,
-            &blocked_accept,
-            "example.com",
-        )
-        .await;
-        let Some(super::PeerJingleBlocklistReply::Bounce(stanza)) = blocked_reply else {
-            panic!("session-accept to a blocked local full JID must bounce via the shared helper");
-        };
-        let Stanza::Iq(reply) = stanza else {
-            panic!("expected IQ bounce");
-        };
-        let xmpp_parsers::iq::Iq::Error { error, payload, .. } = reply.as_ref() else {
-            panic!("expected IQ error bounce");
-        };
-        assert_eq!(
-            error.defined_condition,
-            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
-        );
-        assert!(
-            payload
-                .as_ref()
-                .is_some_and(|payload| payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)),
-            "shared bounce must echo the sanitized Jingle payload"
-        );
-
-        let muji_accept = parse_iq(&muji_jingle_frame(
-            "blocked-call-4",
-            "bob@example.com/phone",
-            "session-accept",
-            "general@muc.example.com",
-        ));
-        assert!(
-            super::peer_jingle_blocklist_reply(state.as_ref(), &alice, &muji_accept, "example.com")
+        #[tokio::test]
+        async fn blocked_direct_jingle_initiate_returns_service_unavailable_without_mint_or_register(
+        ) {
+            let sfu = Arc::new(RecordingCallSfu::default());
+            let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+            register_test_connection(state.as_ref(), &bob, bob_tx).await;
+            DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+                .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
                 .await
-                .is_none(),
-            "Muji Jingle is exempt from the direct-peer blocklist gate"
-        );
+                .expect("seed blocklist");
 
-        let remote_accept = parse_iq(&direct_jingle_frame(
-            "blocked-call-5",
-            "bob@remote.example/phone",
-            "session-accept",
-        ));
-        assert!(
-            super::peer_jingle_blocklist_reply(
+            let responses = super::super::super::handle_iq(
+                &direct_jingle_frame(
+                    "blocked-call-1",
+                    "bob@example.com/phone",
+                    "session-initiate",
+                ),
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+
+            assert_eq!(responses.len(), 1, "blocked call gets one error reply");
+            let response = &responses[0];
+            let expected = crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(
+                Box::new(parse_iq(&direct_jingle_frame(
+                    "blocked-call-1",
+                    "bob@example.com/phone",
+                    "session-initiate",
+                ))),
+            ))
+            .map(|stanza| super::super::stanza_to_xml(&stanza))
+            .expect("blocked direct Jingle must produce a bounced IQ reply");
+            assert_eq!(
+                response, &expected,
+                "blocked direct Jingle must reuse the undeliverable reply builder exactly"
+            );
+            assert!(
+                response.contains("<service-unavailable")
+                    && response.contains("<jingle xmlns='urn:xmpp:jingle:1'"),
+                "blocked direct call must carry the sanitized undeliverable Jingle echo: {response}"
+            );
+            assert!(
+                bob_rx.try_recv().is_err(),
+                "blocked direct call must not reach the peer connection"
+            );
+            assert!(
+                sfu.issued_snapshot().is_empty(),
+                "blocked direct call must not mint a LiveKit token"
+            );
+            assert!(
+                sfu.registered_snapshot().is_empty(),
+                "blocked direct call must not register a participant"
+            );
+        }
+
+        #[tokio::test]
+        async fn blocklist_storage_failure_returns_internal_server_error_before_dispatch() {
+            let sfu = Arc::new(RecordingCallSfu::default());
+            let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+            register_test_connection(state.as_ref(), &bob, bob_tx).await;
+            state
+                .deps
+                .app_state
+                .db_pool
+                .global_actor()
+                .ask(DbExecute {
+                    sql: "DROP TABLE blocking_list".to_string(),
+                    params: Vec::new(),
+                })
+                .await
+                .expect("drop blocking table");
+
+            let responses = super::super::super::handle_iq(
+                &direct_jingle_frame(
+                    "blocked-call-2",
+                    "bob@example.com/phone",
+                    "session-initiate",
+                ),
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+
+            assert_eq!(responses.len(), 1, "storage failure gets one error reply");
+            let response = &responses[0];
+            assert!(
+                response.contains("type='error'") && response.contains("<internal-server-error"),
+                "blocklist failures must fail closed with internal-server-error: {response}"
+            );
+            assert!(
+                bob_rx.try_recv().is_err(),
+                "fail-closed blocklist error must not dispatch to the peer connection"
+            );
+            assert!(
+                sfu.issued_snapshot().is_empty(),
+                "fail-closed blocklist error must not mint a LiveKit token"
+            );
+            assert!(
+                sfu.registered_snapshot().is_empty(),
+                "fail-closed blocklist error must not register a participant"
+            );
+        }
+
+        #[tokio::test]
+        async fn peer_jingle_blocklist_helper_blocks_session_accept_only_for_local_non_muji_targets(
+        ) {
+            let state =
+                create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+                .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
+                .await
+                .expect("seed blocklist");
+
+            let blocked_accept = parse_iq(&direct_jingle_frame(
+                "blocked-call-3",
+                "bob@example.com/phone",
+                "session-accept",
+            ));
+            let blocked_reply = super::super::peer_jingle_blocklist_reply(
                 state.as_ref(),
                 &alice,
-                &remote_accept,
-                "example.com"
+                &blocked_accept,
+                "example.com",
             )
-            .await
-            .is_none(),
-            "non-local targets are exempt from the local pre-dispatch gate"
-        );
+            .await;
+            let Some(super::super::PeerJingleBlocklistReply::Bounce(stanza)) = blocked_reply else {
+                panic!(
+                    "session-accept to a blocked local full JID must bounce via the shared helper"
+                );
+            };
+            let Stanza::Iq(reply) = stanza else {
+                panic!("expected IQ bounce");
+            };
+            let xmpp_parsers::iq::Iq::Error { error, payload, .. } = reply.as_ref() else {
+                panic!("expected IQ error bounce");
+            };
+            assert_eq!(
+                error.defined_condition,
+                xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+            );
+            assert!(
+                payload.as_ref().is_some_and(
+                    |payload| payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
+                ),
+                "shared bounce must echo the sanitized Jingle payload"
+            );
+
+            let muji_accept = parse_iq(&muji_jingle_frame(
+                "blocked-call-4",
+                "bob@example.com/phone",
+                "session-accept",
+                "general@muc.example.com",
+            ));
+            assert!(
+                super::super::peer_jingle_blocklist_reply(
+                    state.as_ref(),
+                    &alice,
+                    &muji_accept,
+                    "example.com"
+                )
+                .await
+                .is_none(),
+                "Muji Jingle is exempt from the direct-peer blocklist gate"
+            );
+
+            let remote_accept = parse_iq(&direct_jingle_frame(
+                "blocked-call-5",
+                "bob@remote.example/phone",
+                "session-accept",
+            ));
+            assert!(
+                super::super::peer_jingle_blocklist_reply(
+                    state.as_ref(),
+                    &alice,
+                    &remote_accept,
+                    "example.com"
+                )
+                .await
+                .is_none(),
+                "non-local targets are exempt from the local pre-dispatch gate"
+            );
+        }
+
+        #[tokio::test]
+        async fn blocked_direct_jingle_accept_bounces_before_forward_or_mint() {
+            let sfu = Arc::new(RecordingCallSfu::default());
+            let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+            register_test_connection(state.as_ref(), &bob, bob_tx).await;
+            DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+                .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
+                .await
+                .expect("seed blocklist");
+
+            let responses = super::super::super::handle_iq(
+                &direct_jingle_frame(
+                    "blocked-accept-1",
+                    "bob@example.com/phone",
+                    "session-accept",
+                ),
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+
+            assert_eq!(responses.len(), 1, "blocked accept gets one error reply");
+            assert!(
+                responses[0].contains("<service-unavailable"),
+                "blocked session-accept must bounce as undeliverable: {}",
+                responses[0]
+            );
+            assert!(
+                bob_rx.try_recv().is_err(),
+                "blocked session-accept must not be forwarded to the blocker"
+            );
+            assert!(
+                sfu.issued_snapshot().is_empty(),
+                "blocked session-accept must not mint a LiveKit token"
+            );
+            assert!(
+                sfu.registered_snapshot().is_empty(),
+                "blocked session-accept must not register a participant"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn muji_terminate_rate_limit_fires_before_gate_records_leave() {
+    async fn bogus_muji_terminates_stay_uncharged_and_never_trip_the_limiter() {
+        // #1612 review round 10: unknown-session terminates carry no
+        // pre-dispatch charge — the terminate budget is only consumed
+        // by relayed asks (token-refunded on no-relay outcomes) and by
+        // authorized mutating teardowns in the handler. A burst of
+        // bogus terminates therefore cannot exhaust the shared
+        // bare-JID bucket and starve a legitimate hangup from another
+        // resource of the same account.
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let state = create_test_websocket_state_with_calls().await;
         let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let room: jid::BareJid = "uncharged-room@muc.example.com".parse().expect("room JID");
+        // A LOCAL room: the gate Allows and dispatch reaches the local
+        // Muji terminate handler, which rejects the unknown session
+        // WITHOUT charging (the exact starvation scenario from review).
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(owner_session),
+        )
+        .await;
         let max_terminates =
             waddle_xmpp::protocol::handlers::session_initiate_rate_limit::DEFAULT_MAX_TERMINATES;
 
+        // Well past the old budget: every bogus terminate must still be
+        // answered idempotently, and none may consume limiter budget.
         for attempt in 0..=max_terminates {
             let frame = muji_jingle_frame(
-                &format!("term-pre-gate-{attempt}"),
+                &format!("term-uncharged-{attempt}"),
                 "calls.example.com",
                 "session-terminate",
-                "ghost-room@muc.example.com",
+                "uncharged-room@muc.example.com",
             );
             let responses = super::super::handle_iq(
                 &frame,
@@ -1758,28 +1888,24 @@ mod tests {
                 &ready_phase(&alice),
             )
             .await;
-            if attempt == max_terminates {
-                assert_eq!(responses.len(), 1);
-                assert!(
-                    responses[0].contains("<policy-violation"),
-                    "over-budget terminate must be rejected before the gate: {}",
-                    responses[0]
-                );
-            }
+            assert_eq!(responses.len(), 1);
+            assert!(
+                !responses[0].contains("<policy-violation"),
+                "a bogus unknown-session terminate must never be answered with the \
+                 limiter's policy-violation: {}",
+                responses[0]
+            );
         }
 
         assert_eq!(
-            metrics.counter_sum("waddle.call.signaling", &[("event", "muji_leave")]),
-            Some(max_terminates as u64),
-            "the over-budget terminate must not reach the Muji gate's leave counter"
-        );
-        assert_eq!(
-            metrics.counter_sum(
-                "waddle.call.control.rate_limited",
-                &[("surface", "terminate")]
-            ),
-            Some(1),
-            "the websocket pre-gate limiter must report the terminate drop"
+            metrics
+                .counter_sum(
+                    "waddle.call.control.rate_limited",
+                    &[("surface", "terminate")]
+                )
+                .unwrap_or(0),
+            0,
+            "bogus terminates must not consume or trip the shared terminate budget"
         );
     }
 

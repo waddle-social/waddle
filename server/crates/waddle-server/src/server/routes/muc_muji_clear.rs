@@ -139,6 +139,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
 pub(crate) async fn enqueue_call_thread_end_retry(
     state: &WebSocketState,
     room_jid: &BareJid,
+    thread_id: waddle_xmpp_core::mam::ThreadId,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
@@ -155,6 +156,7 @@ pub(crate) async fn enqueue_call_thread_end_retry(
         call_id,
         target: crate::call_teardown_outbox::TeardownTarget::CallThreadEndRetry {
             room_jid: room_jid.clone(),
+            thread_id,
         },
         generation: None,
         room_sid: None,
@@ -288,6 +290,21 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(
     state: &WebSocketState,
     room_jid: &BareJid,
 ) -> WebhookEffectOutcome {
+    maybe_broadcast_call_thread_ended_for(state, room_jid, None).await
+}
+
+/// Like [`maybe_broadcast_call_thread_ended`], but fenced to a specific
+/// thread: a durable completion retry must only ever finish THE thread
+/// whose completion failed. If a new call has since replaced the room's
+/// `ActiveCallThread`, applying the ended effect would either steal the
+/// replacement's completion or stamp the wrong summary — the retry
+/// resolves `Stale` instead and leaves the live thread alone (#1612
+/// review round 10).
+pub(crate) async fn maybe_broadcast_call_thread_ended_for(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    expected_thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+) -> WebhookEffectOutcome {
     // A processing delivery is deliberately re-executed. Serialize this
     // final call-thread effect so overlapping attempts cannot both clone the
     // active entry and emit duplicate ended messages. On a retryable persist
@@ -317,6 +334,18 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(
         else {
             return WebhookEffectOutcome::Completed;
         };
+        if let Some(expected) = expected_thread {
+            if active.thread_id != expected.as_str() {
+                warn!(
+                    room = %room_jid,
+                    expected = %expected.as_str(),
+                    active = %active.thread_id,
+                    "call-thread completion retry outlived its thread; a newer call \
+                     owns the room now — dropping the stale retry"
+                );
+                return WebhookEffectOutcome::Stale;
+            }
+        }
 
         let ended = chrono::Utc::now();
         let duration = ended.signed_duration_since(active.started);

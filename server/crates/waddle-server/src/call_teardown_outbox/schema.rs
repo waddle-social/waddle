@@ -17,6 +17,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
                     generation INTEGER NULL CHECK (generation IS NULL OR generation > 0), \
                     room_sid TEXT NULL, \
                     participant_sid TEXT NULL, \
+                    thread_id TEXT NULL CHECK (thread_id IS NULL OR thread_id <> ''), \
                     producing_node TEXT NULL CHECK (producing_node IS NULL OR producing_node <> ''), \
                     status TEXT NOT NULL CHECK (status IN ('queued','in-progress','done','failed')), \
                     attempt_count INTEGER NOT NULL DEFAULT 0, \
@@ -31,8 +32,9 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
                         OR (action = 'delete_room' AND identity IS NULL AND room_jid IS NULL AND participant_sid IS NULL) \
                         OR (action = 'muji_presence_clear' AND identity IS NOT NULL AND room_jid IS NOT NULL) \
                         OR (action = 'muji_room_sweep' AND identity IS NULL AND room_jid IS NOT NULL AND room_sid IS NOT NULL AND participant_sid IS NULL) \
-                        OR (action = 'call_thread_end_retry' AND identity IS NULL AND room_jid IS NOT NULL AND participant_sid IS NULL)\
-                    )\
+                        OR (action = 'call_thread_end_retry' AND identity IS NULL AND room_jid IS NOT NULL AND participant_sid IS NULL AND thread_id IS NOT NULL)\
+                    ), \
+                    CHECK (thread_id IS NULL OR action = 'call_thread_end_retry')\
                 )"
             ),
             (),

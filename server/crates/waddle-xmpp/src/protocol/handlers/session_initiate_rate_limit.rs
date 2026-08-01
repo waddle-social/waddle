@@ -44,11 +44,19 @@ pub const DEFAULT_MAX_MUJI_ACTIONS: usize = 60;
 pub const DEFAULT_MAX_TURN_CREDENTIALS: usize = 10;
 pub const DEFAULT_WINDOW: Duration = Duration::from_secs(30);
 
+/// Opaque receipt for one successful `check_and_record`. Refunds are
+/// keyed on it so a caller can only ever remove ITS OWN recorded
+/// event — a bare `pop_back` could refund a concurrent request's
+/// charge and skew the sliding window (#1612 review round 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChargeToken(u64);
+
 #[derive(Debug)]
 struct PerBareJidSlidingWindowRateLimit {
     max_events: usize,
     window: Duration,
-    buckets: Mutex<HashMap<BareJid, VecDeque<Instant>>>,
+    next_charge_seq: std::sync::atomic::AtomicU64,
+    buckets: Mutex<HashMap<BareJid, VecDeque<(u64, Instant)>>>,
 }
 
 impl PerBareJidSlidingWindowRateLimit {
@@ -56,23 +64,28 @@ impl PerBareJidSlidingWindowRateLimit {
         Self {
             max_events,
             window,
+            next_charge_seq: std::sync::atomic::AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
         }
     }
 
-    fn check_and_record(&self, jid: &BareJid) -> Result<(), RateLimitExceeded> {
+    fn check_and_record(&self, jid: &BareJid) -> Result<ChargeToken, RateLimitExceeded> {
         self.check_and_record_at(jid, Instant::now())
     }
 
     /// Test-only entry point that lets us pass a controlled clock.
-    fn check_and_record_at(&self, jid: &BareJid, now: Instant) -> Result<(), RateLimitExceeded> {
+    fn check_and_record_at(
+        &self,
+        jid: &BareJid,
+        now: Instant,
+    ) -> Result<ChargeToken, RateLimitExceeded> {
         let mut buckets = self.buckets.lock().expect("rate-limit mutex poisoned");
         let bucket = buckets.entry(jid.clone()).or_default();
 
         // Drop expired timestamps from the head — `VecDeque` keeps
         // them in arrival order so we can stop at the first
         // still-fresh entry.
-        while let Some(&front) = bucket.front() {
+        while let Some(&(_, front)) = bucket.front() {
             if now.duration_since(front) > self.window {
                 bucket.pop_front();
             } else {
@@ -91,18 +104,23 @@ impl PerBareJidSlidingWindowRateLimit {
             });
         }
 
-        bucket.push_back(now);
-        Ok(())
+        let seq = self
+            .next_charge_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        bucket.push_back((seq, now));
+        Ok(ChargeToken(seq))
     }
 
-    /// Remove the most recent recorded event for `jid`, if any. Used to
-    /// refund a pre-dispatch charge once the request is known to have
-    /// performed none of the work the limiter exists to bound, so bogus
-    /// requests cannot exhaust the shared budget (#1612 review round 9).
-    fn forgive_most_recent(&self, jid: &BareJid) {
+    /// Remove exactly the event recorded under `token`, if it is still
+    /// in the window. Used to refund a charge once the request is known
+    /// to have performed none of the work the limiter exists to bound
+    /// (#1612 review rounds 9-10).
+    fn refund(&self, jid: &BareJid, token: ChargeToken) {
         let mut buckets = self.buckets.lock().expect("rate-limit mutex poisoned");
         if let Some(bucket) = buckets.get_mut(jid) {
-            bucket.pop_back();
+            if let Some(position) = bucket.iter().position(|(seq, _)| *seq == token.0) {
+                bucket.remove(position);
+            }
             if bucket.is_empty() {
                 buckets.remove(jid);
             }
@@ -128,14 +146,17 @@ macro_rules! define_rate_limit {
                 Self::new($default_max, DEFAULT_WINDOW)
             }
 
-            pub fn check_and_record(&self, jid: &BareJid) -> Result<(), RateLimitExceeded> {
+            pub fn check_and_record(
+                &self,
+                jid: &BareJid,
+            ) -> Result<ChargeToken, RateLimitExceeded> {
                 self.inner.check_and_record(jid)
             }
 
-            /// Refund the most recent charge for `jid` — see
-            /// [`PerBareJidSlidingWindowRateLimit::forgive_most_recent`].
-            pub fn forgive_most_recent(&self, jid: &BareJid) {
-                self.inner.forgive_most_recent(jid)
+            /// Refund exactly the charge identified by `token` — see
+            /// [`PerBareJidSlidingWindowRateLimit::refund`].
+            pub fn refund(&self, jid: &BareJid, token: ChargeToken) {
+                self.inner.refund(jid, token)
             }
 
             #[cfg(test)]
@@ -143,7 +164,7 @@ macro_rules! define_rate_limit {
                 &self,
                 jid: &BareJid,
                 now: Instant,
-            ) -> Result<(), RateLimitExceeded> {
+            ) -> Result<ChargeToken, RateLimitExceeded> {
                 self.inner.check_and_record_at(jid, now)
             }
         }
@@ -264,25 +285,25 @@ mod tests {
 
     impl CheckAt for SessionInitiateRateLimit {
         fn check_at(&self, jid: &BareJid, now: Instant) -> Result<(), RateLimitExceeded> {
-            self.check_and_record_at(jid, now)
+            self.check_and_record_at(jid, now).map(|_| ())
         }
     }
 
     impl CheckAt for TerminateRateLimit {
         fn check_at(&self, jid: &BareJid, now: Instant) -> Result<(), RateLimitExceeded> {
-            self.check_and_record_at(jid, now)
+            self.check_and_record_at(jid, now).map(|_| ())
         }
     }
 
     impl CheckAt for MujiActionRateLimit {
         fn check_at(&self, jid: &BareJid, now: Instant) -> Result<(), RateLimitExceeded> {
-            self.check_and_record_at(jid, now)
+            self.check_and_record_at(jid, now).map(|_| ())
         }
     }
 
     impl CheckAt for TurnCredentialRateLimit {
         fn check_at(&self, jid: &BareJid, now: Instant) -> Result<(), RateLimitExceeded> {
-            self.check_and_record_at(jid, now)
+            self.check_and_record_at(jid, now).map(|_| ())
         }
     }
 

@@ -97,6 +97,12 @@ pub enum TeardownTarget {
     /// idempotent and a no-op once the thread has ended.
     CallThreadEndRetry {
         room_jid: BareJid,
+        /// The exact thread whose completion failed. The drain verifies
+        /// it against the room's live `ActiveCallThread` and resolves
+        /// `Stale` on mismatch, so a retry can never complete (or
+        /// clobber) a NEWER call that replaced the entry before the row
+        /// drained (#1612 review round 10).
+        thread_id: waddle_xmpp_core::mam::ThreadId,
     },
 }
 
@@ -116,7 +122,7 @@ impl CallTeardownIntent {
         match &self.target {
             TeardownTarget::MujiPresenceClear { room_jid, .. }
             | TeardownTarget::MujiRoomSweep { room_jid }
-            | TeardownTarget::CallThreadEndRetry { room_jid } => Some(room_jid.clone()),
+            | TeardownTarget::CallThreadEndRetry { room_jid, .. } => Some(room_jid.clone()),
             TeardownTarget::Participant { .. } | TeardownTarget::Room => {
                 // Muji uses the bare room JID verbatim as CallId. Raw 1:1
                 // call IDs are opaque values which do not parse as JIDs.

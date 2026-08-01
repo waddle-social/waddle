@@ -379,14 +379,21 @@ async fn execute_intent(
         };
     }
 
-    if let TeardownTarget::CallThreadEndRetry { room_jid } = &intent.target {
+    if let TeardownTarget::CallThreadEndRetry {
+        room_jid,
+        thread_id,
+    } = &intent.target
+    {
         // Completion-only: never replays the destructive presence clear;
-        // `maybe_broadcast_call_thread_ended` is idempotent and a no-op
-        // once the thread has ended or another path completed it.
+        // the ended broadcast is idempotent and fenced to the exact
+        // thread whose completion failed — a newer call that replaced
+        // the room's active thread resolves this row `Stale` untouched.
         return match tokio::time::timeout(
             ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
-            crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(
-                state, room_jid,
+            crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended_for(
+                state,
+                room_jid,
+                Some(thread_id),
             ),
         )
         .await

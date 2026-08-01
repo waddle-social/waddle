@@ -15,7 +15,8 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
     let identity = row.get::<Option<String>>(2)?;
     let room_jid = row.get::<Option<String>>(3)?;
     let participant_sid = row.get::<Option<String>>(7)?;
-    let target = decode_target(&action, identity, room_jid, participant_sid)?;
+    let thread_id = row.get::<Option<String>>(15)?;
+    let target = decode_target(&action, identity, room_jid, participant_sid, thread_id)?;
     let generation = row
         .get::<Option<i64>>(5)?
         .map(|value| {
@@ -58,6 +59,7 @@ fn decode_target(
     identity: Option<String>,
     room_jid: Option<String>,
     participant_sid: Option<String>,
+    thread_id: Option<String>,
 ) -> Result<TeardownTarget, CallTeardownOutboxError> {
     match action {
         "remove_participant" => match (identity, room_jid) {
@@ -96,11 +98,16 @@ fn decode_target(
                 action.to_owned(),
             )),
         },
-        "call_thread_end_retry" => match (identity, room_jid, participant_sid) {
-            (None, Some(room_jid), None) => Ok(TeardownTarget::CallThreadEndRetry {
-                room_jid: BareJid::from_str(&room_jid)
-                    .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
-            }),
+        "call_thread_end_retry" => match (identity, room_jid, participant_sid, thread_id) {
+            (None, Some(room_jid), None, Some(thread_id)) => {
+                Ok(TeardownTarget::CallThreadEndRetry {
+                    room_jid: BareJid::from_str(&room_jid)
+                        .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
+                    thread_id: waddle_xmpp_core::mam::ThreadId::new(thread_id).ok_or_else(
+                        || CallTeardownOutboxError::InvalidTargetShape(action.to_owned()),
+                    )?,
+                })
+            }
             _ => Err(CallTeardownOutboxError::InvalidTargetShape(
                 action.to_owned(),
             )),
