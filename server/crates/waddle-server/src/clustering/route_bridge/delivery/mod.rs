@@ -1,10 +1,14 @@
 use super::*;
 
+pub(super) mod channels;
 pub(super) mod local;
 pub(super) mod muc;
 pub(super) mod ordered;
+pub(super) mod ordered_send;
 pub(super) mod receiver;
 pub(super) mod remote;
+pub(super) mod remote_route_helpers;
+pub(super) mod remote_socket;
 
 pub(super) use local::*;
 pub(super) use muc::reserved::{
@@ -12,7 +16,7 @@ pub(super) use muc::reserved::{
 };
 pub(crate) use muc::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 use receiver::*;
-pub(super) use remote::*;
+pub(super) use remote_route_helpers::*;
 
 pub(super) fn no_client_reply_outcome(delivery: FullJidDeliveryOutcome) -> RemoteDeliveryOutcome {
     no_client_reply_outcome_with_commit_state(delivery, false)
