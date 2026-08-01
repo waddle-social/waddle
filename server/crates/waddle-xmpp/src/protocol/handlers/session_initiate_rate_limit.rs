@@ -94,6 +94,20 @@ impl PerBareJidSlidingWindowRateLimit {
         bucket.push_back(now);
         Ok(())
     }
+
+    /// Remove the most recent recorded event for `jid`, if any. Used to
+    /// refund a pre-dispatch charge once the request is known to have
+    /// performed none of the work the limiter exists to bound, so bogus
+    /// requests cannot exhaust the shared budget (#1612 review round 9).
+    fn forgive_most_recent(&self, jid: &BareJid) {
+        let mut buckets = self.buckets.lock().expect("rate-limit mutex poisoned");
+        if let Some(bucket) = buckets.get_mut(jid) {
+            bucket.pop_back();
+            if bucket.is_empty() {
+                buckets.remove(jid);
+            }
+        }
+    }
 }
 
 macro_rules! define_rate_limit {
@@ -116,6 +130,12 @@ macro_rules! define_rate_limit {
 
             pub fn check_and_record(&self, jid: &BareJid) -> Result<(), RateLimitExceeded> {
                 self.inner.check_and_record(jid)
+            }
+
+            /// Refund the most recent charge for `jid` — see
+            /// [`PerBareJidSlidingWindowRateLimit::forgive_most_recent`].
+            pub fn forgive_most_recent(&self, jid: &BareJid) {
+                self.inner.forgive_most_recent(jid)
             }
 
             #[cfg(test)]

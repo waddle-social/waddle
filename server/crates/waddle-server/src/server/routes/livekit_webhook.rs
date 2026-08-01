@@ -40,7 +40,7 @@ use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 
 use super::muc_muji_clear::{clear_muji_presence_for_departure, WebhookEffectOutcome};
 use super::webhook_delivery::{
-    DatabaseWebhookDeliveryStore, WebhookDeliveryObservation, WebhookDeliveryStore,
+    DatabaseWebhookDeliveryStore, WebhookDeliveryObservation, WebhookDeliveryStore, WebhookEventId,
 };
 use super::websocket::{note_participant_left_by_call_id, WebSocketState};
 
@@ -134,12 +134,12 @@ async fn livekit_webhook_handler(
         .map(CallCorrelationId::as_str)
         .unwrap_or("unknown");
 
-    if let Some(event_id) = event.event_id() {
-        match router_state.deliveries.observe(event_id).await {
+    if let Some(event_id) = event.event_id().and_then(WebhookEventId::new) {
+        match router_state.deliveries.observe(&event_id).await {
             Ok(WebhookDeliveryObservation::Done) => {
                 record_webhook_outcome(event_type, WebhookOutcome::Duplicate);
                 debug!(
-                    event_id,
+                    event_id = %event_id,
                     event = %event_type.value(),
                     call.id = %call_id_field,
                     "LiveKit webhook duplicate; dropping",
@@ -149,7 +149,7 @@ async fn livekit_webhook_handler(
             Ok(WebhookDeliveryObservation::Processing) => {}
             Err(error) => {
                 warn!(
-                    event_id,
+                    event_id = %event_id,
                     event = %event_type.value(),
                     error = %error,
                     "failed to record LiveKit webhook delivery; asking LiveKit to retry"
@@ -321,10 +321,10 @@ async fn livekit_webhook_handler(
                 );
                 record_webhook_outcome(event_type, WebhookOutcome::PermanentFailure);
             }
-            if let Some(event_id) = event.event_id() {
-                if let Err(error) = router_state.deliveries.complete(event_id).await {
+            if let Some(event_id) = event.event_id().and_then(WebhookEventId::new) {
+                if let Err(error) = router_state.deliveries.complete(&event_id).await {
                     warn!(
-                        event_id,
+                        event_id = %event_id,
                         event = %event_type.value(),
                         error = %error,
                         "failed to complete LiveKit webhook delivery; asking LiveKit to retry"
@@ -1159,7 +1159,7 @@ mod tests {
             Arc::new(super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default());
         assert_eq!(
             store
-                .observe("EV_processing_redelivery")
+                .observe(&WebhookEventId::new("EV_processing_redelivery").expect("test event id"))
                 .await
                 .expect("seed processing delivery"),
             WebhookDeliveryObservation::Processing
@@ -1194,13 +1194,15 @@ mod tests {
         assert_eq!(recorder.note_snapshot().len(), 1);
         assert_eq!(
             store
-                .status("EV_processing_redelivery")
+                .status(&WebhookEventId::new("EV_processing_redelivery").expect("test event id"))
                 .expect("delivery status"),
             Some(WebhookDeliveryObservation::Done)
         );
         assert_eq!(
             store
-                .attempt_count("EV_processing_redelivery")
+                .attempt_count(
+                    &WebhookEventId::new("EV_processing_redelivery").expect("test event id")
+                )
                 .expect("attempt count"),
             Some(2)
         );
@@ -1249,13 +1251,17 @@ mod tests {
         assert_eq!(first_response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             store
-                .status("EV_retryable_participant_left")
+                .status(
+                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                )
                 .expect("processing status"),
             Some(WebhookDeliveryObservation::Processing)
         );
         assert_eq!(
             store
-                .attempt_count("EV_retryable_participant_left")
+                .attempt_count(
+                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                )
                 .expect("first attempt count"),
             Some(1)
         );
@@ -1301,13 +1307,17 @@ mod tests {
         assert_eq!(retry_recorder.note_snapshot().len(), 1);
         assert_eq!(
             store
-                .status("EV_retryable_participant_left")
+                .status(
+                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                )
                 .expect("done status"),
             Some(WebhookDeliveryObservation::Done)
         );
         assert_eq!(
             store
-                .attempt_count("EV_retryable_participant_left")
+                .attempt_count(
+                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                )
                 .expect("retry attempt count"),
             Some(2)
         );
@@ -1356,7 +1366,7 @@ mod tests {
         assert_eq!(recorder.note_snapshot().len(), 1);
         assert_eq!(
             store
-                .status("EV_absent_room_actor")
+                .status(&WebhookEventId::new("EV_absent_room_actor").expect("test event id"))
                 .expect("delivery status"),
             Some(WebhookDeliveryObservation::Done)
         );
@@ -1413,13 +1423,13 @@ mod tests {
         assert!(recorder.note_snapshot().is_empty());
         assert_eq!(
             store
-                .status("EV_permanent_bad_jid")
+                .status(&WebhookEventId::new("EV_permanent_bad_jid").expect("test event id"))
                 .expect("delivery status"),
             Some(WebhookDeliveryObservation::Done)
         );
         assert_eq!(
             store
-                .attempt_count("EV_permanent_bad_jid")
+                .attempt_count(&WebhookEventId::new("EV_permanent_bad_jid").expect("test event id"))
                 .expect("attempt count"),
             Some(1)
         );
@@ -1982,7 +1992,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             store
-                .status("EV_room_rotation_pending")
+                .status(&WebhookEventId::new("EV_room_rotation_pending").expect("test event id"))
                 .expect("processing status"),
             Some(WebhookDeliveryObservation::Processing),
             "the pending join must remain eligible for LiveKit redelivery"

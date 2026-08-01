@@ -65,8 +65,32 @@ pub(super) async fn drain_due_at(
                 Some(producer) => store.guard_if_current_producer(producer).await,
                 None => None,
             };
+            // A sid fence travels with the intent, not with the process:
+            // the executor refuses fenced work until an authoritative
+            // reconcile pass and resolves missing-registry fences against
+            // LiveKit live state, so a fenced row is safe to execute on a
+            // replacement process. Requiring the exact producer epoch
+            // would strand cleanup forever after a crash between persist
+            // and admin success (#1612 review round 9). Only UNFENCED
+            // rows still need their producer's process-local registry.
+            let sid_fenced = job.intent.room_sid.is_some()
+                || matches!(
+                    &job.intent.target,
+                    TeardownTarget::Participant {
+                        participant_sid: Some(_),
+                        ..
+                    }
+                );
             match guard {
                 Some(guard) => Some(guard),
+                None if sid_fenced => {
+                    tracing::info!(
+                        call_id = %job.intent.call_id,
+                        intent_id = %job.intent_id.as_str(),
+                        "call teardown 1:1 producer is gone; executing under sid fences"
+                    );
+                    None
+                }
                 None => {
                     let old_enough =
                         now_ms.saturating_sub(job.created_at_ms) >= OWNERSHIP_DEAD_LETTER_MS;

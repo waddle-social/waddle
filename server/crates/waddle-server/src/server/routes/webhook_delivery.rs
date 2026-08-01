@@ -18,6 +18,33 @@ const PRUNE_BATCH_SIZE: i64 = 128;
 /// the DELETE cost, keeping the hot webhook-ingest transaction small.
 const PRUNE_INTERVAL_MS: i64 = 60 * 1000;
 
+/// Validated LiveKit webhook delivery identifier — the idempotency
+/// ledger's primary key. Classified once where the verified payload is
+/// parsed so no raw string crosses the storage/CAS boundary (#1612
+/// review round 9).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WebhookEventId(String);
+
+impl WebhookEventId {
+    /// `None` for an empty/whitespace id: LiveKit has historically
+    /// shipped payloads without one, and the dedupe path treats those
+    /// as "not deduplicable" rather than keying the ledger on "".
+    pub(crate) fn new(id: &str) -> Option<Self> {
+        let id = id.trim();
+        (!id.is_empty()).then(|| Self(id.to_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for WebhookEventId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebhookDeliveryObservation {
     Processing,
@@ -41,10 +68,10 @@ pub(crate) enum WebhookDeliveryError {
 pub(crate) trait WebhookDeliveryStore: Send + Sync {
     async fn observe(
         &self,
-        event_id: &str,
+        event_id: &WebhookEventId,
     ) -> Result<WebhookDeliveryObservation, WebhookDeliveryError>;
 
-    async fn complete(&self, event_id: &str) -> Result<(), WebhookDeliveryError>;
+    async fn complete(&self, event_id: &WebhookEventId) -> Result<(), WebhookDeliveryError>;
 }
 
 pub(crate) struct DatabaseWebhookDeliveryStore {
@@ -116,7 +143,7 @@ impl DatabaseWebhookDeliveryStore {
 
     async fn observe_at(
         &self,
-        event_id: &str,
+        event_id: &WebhookEventId,
         now_ms: i64,
     ) -> Result<WebhookDeliveryObservation, WebhookDeliveryError> {
         self.initialize().await?;
@@ -157,7 +184,7 @@ impl DatabaseWebhookDeliveryStore {
                     event_id, status, attempt_count, first_seen_ms, completed_at_ms\
                  ) VALUES (?, 'processing', 1, ?, NULL) \
                  ON CONFLICT(event_id) DO NOTHING",
-                crate::db_params![event_id, now_ms],
+                crate::db_params![event_id.as_str(), now_ms],
             )
             .await?;
         if inserted == 1 {
@@ -170,7 +197,7 @@ impl DatabaseWebhookDeliveryStore {
                 "UPDATE webhook_deliveries \
                  SET attempt_count = attempt_count + 1 \
                  WHERE event_id = ? AND status = 'processing'",
-                crate::db_params![event_id],
+                crate::db_params![event_id.as_str()],
             )
             .await?;
         if retried == 1 {
@@ -181,13 +208,13 @@ impl DatabaseWebhookDeliveryStore {
         let mut rows = transaction
             .query(
                 "SELECT status FROM webhook_deliveries WHERE event_id = ?",
-                crate::db_params![event_id],
+                crate::db_params![event_id.as_str()],
             )
             .await?;
         let status = rows
             .next()
             .await?
-            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.to_owned()))?
+            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.as_str().to_owned()))?
             .get::<String>(0)?;
         let observation = match status.as_str() {
             "done" => WebhookDeliveryObservation::Done,
@@ -198,7 +225,11 @@ impl DatabaseWebhookDeliveryStore {
         Ok(observation)
     }
 
-    async fn complete_at(&self, event_id: &str, now_ms: i64) -> Result<(), WebhookDeliveryError> {
+    async fn complete_at(
+        &self,
+        event_id: &WebhookEventId,
+        now_ms: i64,
+    ) -> Result<(), WebhookDeliveryError> {
         self.initialize().await?;
         let connection = self.db.guard().await?;
         let updated = connection
@@ -206,7 +237,7 @@ impl DatabaseWebhookDeliveryStore {
                 "UPDATE webhook_deliveries \
                  SET status = 'done', completed_at_ms = ? \
                  WHERE event_id = ? AND status = 'processing'",
-                crate::db_params![now_ms, event_id],
+                crate::db_params![now_ms, event_id.as_str()],
             )
             .await?;
         if updated == 1 {
@@ -216,34 +247,36 @@ impl DatabaseWebhookDeliveryStore {
         let mut rows = connection
             .query(
                 "SELECT status FROM webhook_deliveries WHERE event_id = ?",
-                crate::db_params![event_id],
+                crate::db_params![event_id.as_str()],
             )
             .await?;
         let status = rows
             .next()
             .await?
-            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.to_owned()))?
+            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.as_str().to_owned()))?
             .get::<String>(0)?;
         match status.as_str() {
             "done" => Ok(()),
-            "processing" => Err(WebhookDeliveryError::UnknownDelivery(event_id.to_owned())),
+            "processing" => Err(WebhookDeliveryError::UnknownDelivery(
+                event_id.as_str().to_owned(),
+            )),
             _ => Err(WebhookDeliveryError::InvalidStatus(status)),
         }
     }
 
     #[cfg(test)]
-    async fn attempt_count(&self, event_id: &str) -> Result<i64, WebhookDeliveryError> {
+    async fn attempt_count(&self, event_id: &WebhookEventId) -> Result<i64, WebhookDeliveryError> {
         self.initialize().await?;
         let connection = self.db.guard().await?;
         let mut rows = connection
             .query(
                 "SELECT attempt_count FROM webhook_deliveries WHERE event_id = ?",
-                crate::db_params![event_id],
+                crate::db_params![event_id.as_str()],
             )
             .await?;
         rows.next()
             .await?
-            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.to_owned()))?
+            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.as_str().to_owned()))?
             .get::<i64>(0)
             .map_err(WebhookDeliveryError::from)
     }
@@ -253,12 +286,12 @@ impl DatabaseWebhookDeliveryStore {
 impl WebhookDeliveryStore for DatabaseWebhookDeliveryStore {
     async fn observe(
         &self,
-        event_id: &str,
+        event_id: &WebhookEventId,
     ) -> Result<WebhookDeliveryObservation, WebhookDeliveryError> {
         self.observe_at(event_id, crate::time::now_ms()).await
     }
 
-    async fn complete(&self, event_id: &str) -> Result<(), WebhookDeliveryError> {
+    async fn complete(&self, event_id: &WebhookEventId) -> Result<(), WebhookDeliveryError> {
         self.complete_at(event_id, crate::time::now_ms()).await
     }
 }
@@ -280,27 +313,27 @@ struct InMemoryDelivery {
 impl InMemoryWebhookDeliveryStore {
     pub(crate) fn status(
         &self,
-        event_id: &str,
+        event_id: &WebhookEventId,
     ) -> Result<Option<WebhookDeliveryObservation>, WebhookDeliveryError> {
         let deliveries = self
             .deliveries
             .lock()
             .map_err(|_| WebhookDeliveryError::LockPoisoned)?;
         Ok(deliveries
-            .get(event_id)
+            .get(event_id.as_str())
             .map(|delivery| delivery.observation))
     }
 
     pub(crate) fn attempt_count(
         &self,
-        event_id: &str,
+        event_id: &WebhookEventId,
     ) -> Result<Option<u64>, WebhookDeliveryError> {
         let deliveries = self
             .deliveries
             .lock()
             .map_err(|_| WebhookDeliveryError::LockPoisoned)?;
         Ok(deliveries
-            .get(event_id)
+            .get(event_id.as_str())
             .map(|delivery| delivery.attempt_count))
     }
 }
@@ -310,14 +343,14 @@ impl InMemoryWebhookDeliveryStore {
 impl WebhookDeliveryStore for InMemoryWebhookDeliveryStore {
     async fn observe(
         &self,
-        event_id: &str,
+        event_id: &WebhookEventId,
     ) -> Result<WebhookDeliveryObservation, WebhookDeliveryError> {
         let mut deliveries = self
             .deliveries
             .lock()
             .map_err(|_| WebhookDeliveryError::LockPoisoned)?;
         let delivery = deliveries
-            .entry(event_id.to_owned())
+            .entry(event_id.as_str().to_owned())
             .or_insert(InMemoryDelivery {
                 observation: WebhookDeliveryObservation::Processing,
                 attempt_count: 0,
@@ -328,14 +361,14 @@ impl WebhookDeliveryStore for InMemoryWebhookDeliveryStore {
         Ok(delivery.observation)
     }
 
-    async fn complete(&self, event_id: &str) -> Result<(), WebhookDeliveryError> {
+    async fn complete(&self, event_id: &WebhookEventId) -> Result<(), WebhookDeliveryError> {
         let mut deliveries = self
             .deliveries
             .lock()
             .map_err(|_| WebhookDeliveryError::LockPoisoned)?;
         let delivery = deliveries
-            .get_mut(event_id)
-            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.to_owned()))?;
+            .get_mut(event_id.as_str())
+            .ok_or_else(|| WebhookDeliveryError::UnknownDelivery(event_id.as_str().to_owned()))?;
         delivery.observation = WebhookDeliveryObservation::Done;
         Ok(())
     }
@@ -345,6 +378,10 @@ impl WebhookDeliveryStore for InMemoryWebhookDeliveryStore {
 mod tests {
     use super::*;
 
+    fn ev(id: &str) -> WebhookEventId {
+        WebhookEventId::new(id).expect("valid test event id")
+    }
+
     #[tokio::test]
     async fn processing_delivery_is_retried_and_attempt_count_increments() {
         let db = Database::in_memory("webhook-delivery-processing")
@@ -353,16 +390,22 @@ mod tests {
         let store = DatabaseWebhookDeliveryStore::new(db);
 
         assert_eq!(
-            store.observe("EV_processing").await.expect("first observe"),
-            WebhookDeliveryObservation::Processing
-        );
-        assert_eq!(
-            store.observe("EV_processing").await.expect("retry observe"),
+            store
+                .observe(&ev("EV_processing"))
+                .await
+                .expect("first observe"),
             WebhookDeliveryObservation::Processing
         );
         assert_eq!(
             store
-                .attempt_count("EV_processing")
+                .observe(&ev("EV_processing"))
+                .await
+                .expect("retry observe"),
+            WebhookDeliveryObservation::Processing
+        );
+        assert_eq!(
+            store
+                .attempt_count(&ev("EV_processing"))
                 .await
                 .expect("attempt count"),
             2
@@ -376,22 +419,28 @@ mod tests {
             .expect("in-memory database");
         let first_store = DatabaseWebhookDeliveryStore::new(db.clone());
         assert_eq!(
-            first_store.observe("EV_restart").await.expect("observe"),
+            first_store
+                .observe(&ev("EV_restart"))
+                .await
+                .expect("observe"),
             WebhookDeliveryObservation::Processing
         );
-        first_store.complete("EV_restart").await.expect("complete");
+        first_store
+            .complete(&ev("EV_restart"))
+            .await
+            .expect("complete");
 
         let restarted_store = DatabaseWebhookDeliveryStore::new(db);
         assert_eq!(
             restarted_store
-                .observe("EV_restart")
+                .observe(&ev("EV_restart"))
                 .await
                 .expect("observe after restart"),
             WebhookDeliveryObservation::Done
         );
         assert_eq!(
             restarted_store
-                .attempt_count("EV_restart")
+                .attempt_count(&ev("EV_restart"))
                 .await
                 .expect("attempt count"),
             1,
@@ -405,23 +454,29 @@ mod tests {
             .await
             .expect("in-memory database");
         let store = DatabaseWebhookDeliveryStore::new(db);
-        store.observe_at("EV_old", 0).await.expect("observe old");
-        store.complete_at("EV_old", 1).await.expect("complete old");
         store
-            .observe_at("EV_processing", DONE_RETENTION_MS + 1)
+            .observe_at(&ev("EV_old"), 0)
+            .await
+            .expect("observe old");
+        store
+            .complete_at(&ev("EV_old"), 1)
+            .await
+            .expect("complete old");
+        store
+            .observe_at(&ev("EV_processing"), DONE_RETENTION_MS + 1)
             .await
             .expect("observe processing");
 
         // Pruning is amortized to one observe per PRUNE_INTERVAL_MS, so
         // the triggering observe must land in a fresh interval slot.
         store
-            .observe_at("EV_trigger", DONE_RETENTION_MS + PRUNE_INTERVAL_MS + 2)
+            .observe_at(&ev("EV_trigger"), DONE_RETENTION_MS + PRUNE_INTERVAL_MS + 2)
             .await
             .expect("trigger prune");
 
         assert_eq!(
             store
-                .observe_at("EV_old", DONE_RETENTION_MS + PRUNE_INTERVAL_MS + 3)
+                .observe_at(&ev("EV_old"), DONE_RETENTION_MS + PRUNE_INTERVAL_MS + 3)
                 .await
                 .expect("re-observe expired delivery"),
             WebhookDeliveryObservation::Processing,
@@ -429,7 +484,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .attempt_count("EV_processing")
+                .attempt_count(&ev("EV_processing"))
                 .await
                 .expect("processing attempt count"),
             1,
@@ -444,18 +499,18 @@ mod tests {
             .expect("in-memory database");
         let store = DatabaseWebhookDeliveryStore::new(db);
         store
-            .observe_at("EV_stuck_processing", 0)
+            .observe_at(&ev("EV_stuck_processing"), 0)
             .await
             .expect("seed processing row");
 
         store
-            .observe_at("EV_trigger", PROCESSING_RETENTION_MS + 1)
+            .observe_at(&ev("EV_trigger"), PROCESSING_RETENTION_MS + 1)
             .await
             .expect("trigger prune");
 
         assert_eq!(
             store
-                .observe_at("EV_stuck_processing", PROCESSING_RETENTION_MS + 2)
+                .observe_at(&ev("EV_stuck_processing"), PROCESSING_RETENTION_MS + 2)
                 .await
                 .expect("re-observe pruned processing row"),
             WebhookDeliveryObservation::Processing,
@@ -463,7 +518,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .attempt_count("EV_stuck_processing")
+                .attempt_count(&ev("EV_stuck_processing"))
                 .await
                 .expect("attempt count after prune"),
             1

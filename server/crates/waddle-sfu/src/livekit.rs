@@ -90,6 +90,11 @@ pub const RECONCILE_CONCURRENCY: usize = 8;
 #[derive(Debug, Clone)]
 struct ParticipantState {
     participant_sid: Option<ParticipantSid>,
+    /// When `participant_sid` was last written from a live observation
+    /// (join webhook or occupancy probe). Lets the reconcile probe
+    /// advance a stale sid without ever rolling back a newer webhook
+    /// observation (#1612 review round 9).
+    participant_sid_observed_at: Option<DateTime<Utc>>,
     first_registered_at: DateTime<Utc>,
     registered_without_mint: bool,
 }
@@ -98,6 +103,7 @@ impl ParticipantState {
     fn new(first_registered_at: DateTime<Utc>) -> Self {
         Self {
             participant_sid: None,
+            participant_sid_observed_at: None,
             first_registered_at,
             registered_without_mint: false,
         }
@@ -108,6 +114,7 @@ impl ParticipantState {
         participant_sid: Option<ParticipantSid>,
     ) -> Self {
         Self {
+            participant_sid_observed_at: participant_sid.is_some().then_some(first_registered_at),
             participant_sid,
             first_registered_at,
             registered_without_mint: true,
@@ -118,6 +125,11 @@ impl ParticipantState {
 #[derive(Debug, Clone)]
 struct CallEntry {
     generation: CallGeneration,
+    /// When this entry was created. Guards the listing-learn arm for
+    /// sid-less entries: a fresh same-name rejoin entry created AFTER a
+    /// `ListRooms` request went out must not learn that snapshot's (old
+    /// incarnation) sid (#1612 review round 9).
+    created_at: DateTime<Utc>,
     room_sid: Option<RoomSid>,
     /// When `room_sid` was last written from a live observation (join
     /// webhook, adoption, or listing rotation). Guards reconcile-time
@@ -324,6 +336,17 @@ impl LiveKitTeardownExecutor {
         participant_sid: Option<&ParticipantSid>,
     ) -> Result<TeardownExecution, SfuError> {
         let entry_missing = self.calls.get(call_id).is_none();
+        // A participant-sid fence is locally decidable only when the
+        // registry tracks this identity in this call. A missing entry
+        // (restart / non-hosting replica) AND an existing entry that no
+        // longer tracks the identity (partial registry, identity rejoined
+        // elsewhere with a newer sid) both leave the fence unresolved —
+        // resolve it against LiveKit's live occupancy instead of
+        // discarding it (#1612 review rounds 8-9).
+        let participant_fence_unresolved_locally = self
+            .calls
+            .get(call_id)
+            .is_none_or(|entry| !entry.participants.contains_key(identity));
         match self.guard(
             call_id,
             generation,
@@ -334,13 +357,8 @@ impl LiveKitTeardownExecutor {
             TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
             TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
         }
-        // A missing registry entry cannot decide a sid fence locally
-        // (restart, or an outbox row claimed by a replica that never
-        // hosted the call, while LiveKit may already host a NEWER
-        // same-name room). Resolve the fence against LiveKit's live
-        // state instead of discarding it (#1612 review).
-        if entry_missing {
-            if let Some(fence) = participant_sid {
+        if let Some(fence) = participant_sid {
+            if participant_fence_unresolved_locally {
                 let occupancy = self.admin.room_occupancy(call_id).await?;
                 match occupancy
                     .waddle
@@ -355,7 +373,9 @@ impl LiveKitTeardownExecutor {
                     }
                     Some(_) => {}
                 }
-            } else if let Some(fence) = room_sid {
+            }
+        } else if entry_missing {
+            if let Some(fence) = room_sid {
                 if let Some(live) = self.live_room_sid(call_id).await? {
                     if &live != fence {
                         return Ok(TeardownExecution::StaleGeneration);
@@ -623,9 +643,26 @@ impl LiveKitSfu {
 
     fn prune_generation_tombstones(&self, now: DateTime<Utc>) {
         let cutoff = now - ChronoDuration::hours(GENERATION_TOMBSTONE_TTL_HOURS);
-        self.call_generations.retain(|call_id, entry| {
-            self.calls.contains_key(call_id) || !entry.tombstone_expired(cutoff)
-        });
+        // Never touch `calls` while holding a `call_generations` shard:
+        // registration/adoption/rotation hold a `calls` guard and then
+        // enter `next_call_generation` (which locks `call_generations`),
+        // so nesting the maps here in the opposite order is an AB/BA
+        // deadlock (#1612 review round 9). Snapshot candidates first,
+        // consult `calls` lock-free of `call_generations`, and let
+        // `remove_if` re-verify expiry under the shard lock.
+        let expired: Vec<CallId> = self
+            .call_generations
+            .iter()
+            .filter(|entry| entry.value().tombstone_expired(cutoff))
+            .map(|entry| entry.key().clone())
+            .collect();
+        for call_id in expired {
+            if self.calls.contains_key(&call_id) {
+                continue;
+            }
+            self.call_generations
+                .remove_if(&call_id, |_, entry| entry.tombstone_expired(cutoff));
+        }
     }
 
     fn rotate_room_incarnation_from_listing(
@@ -638,6 +675,19 @@ impl LiveKitSfu {
             return;
         };
         let Some(current_room_sid) = entry.room_sid.as_ref() else {
+            // A sid-less entry created after this listing was requested
+            // is a fresh same-name rejoin; the listing may be a snapshot
+            // of the previous (already-cleared) incarnation, and stamping
+            // its sid here would let that incarnation's delayed leave
+            // webhooks pass the fence against the new registration.
+            if entry.created_at > listing_started_at {
+                tracing::info!(
+                    call_id = %call_id,
+                    listed_room_sid = %listed_room_sid,
+                    "SFU reconcile: not learning a listing sid onto an entry created after the listing request"
+                );
+                return;
+            }
             entry.room_sid = Some(listed_room_sid.clone());
             entry.room_sid_observed_at = Some(listing_started_at);
             return;
@@ -702,6 +752,7 @@ impl LiveKitSfu {
             .collect();
         entry.insert(CallEntry {
             generation,
+            created_at: now,
             room_sid_observed_at: room_sid.as_ref().map(|_| now),
             room_sid,
             participants: participant_states,
@@ -730,6 +781,7 @@ impl LiveKitSfu {
         call_id: &CallId,
         live: &[(Identity, Option<ParticipantSid>)],
         now: DateTime<Utc>,
+        probe_freshness_boundary: DateTime<Utc>,
     ) -> usize {
         let mut merged = 0;
         {
@@ -738,8 +790,31 @@ impl LiveKitSfu {
             };
             for (identity, participant_sid) in live {
                 if let Some(participant) = entry.participants.get_mut(identity) {
-                    if participant.participant_sid.is_none() && participant_sid.is_some() {
+                    if participant_sid.is_some() && participant.participant_sid.is_none() {
                         participant.participant_sid.clone_from(participant_sid);
+                        participant.participant_sid_observed_at = Some(now);
+                    } else if participant_sid.is_some()
+                        && participant.participant_sid.as_ref() != participant_sid.as_ref()
+                        && participant
+                            .participant_sid_observed_at
+                            .is_none_or(|observed_at| observed_at < probe_freshness_boundary)
+                    {
+                        // The authoritative occupancy reports a DIFFERENT
+                        // sid than the fence we hold, and no webhook
+                        // observation newer than this pass contradicts it:
+                        // the participant reconnected within the same room
+                        // incarnation and the join delivery was lost. Keep
+                        // the fence current so a delayed old leave or
+                        // teardown job cannot match the stale sid and
+                        // clear the live participant (#1612 review
+                        // round 9).
+                        tracing::info!(
+                            call_id = %call_id,
+                            identity = %identity.as_livekit_identity(),
+                            "SFU reconcile: advancing a stale participant sid from authoritative occupancy"
+                        );
+                        participant.participant_sid.clone_from(participant_sid);
+                        participant.participant_sid_observed_at = Some(now);
                     }
                 } else {
                     entry.participants.insert(
@@ -998,6 +1073,7 @@ impl LiveKitSfu {
                                     "LiveKit join advanced the participant sid for a new participant incarnation"
                                 );
                                 state.participant_sid = Some(participant_sid.clone());
+                                state.participant_sid_observed_at = Some(observed_at);
                                 state.first_registered_at = observed_at;
                                 state.registered_without_mint = true;
                                 participant_rejoined = true;
@@ -1039,6 +1115,9 @@ impl LiveKitSfu {
                     state
                         .participant_sid
                         .clone_from(&observed_sids.participant_sid);
+                    if observed_sids.participant_sid.is_some() {
+                        state.participant_sid_observed_at = Some(observed_at);
+                    }
                 }
             }
         }
@@ -1107,8 +1186,13 @@ impl LiveKitSfu {
         // caller once their `participant_joined` arrives.
         let mut replacement_minted = false;
         if let Some((_, issued)) = self.issued.remove(&(call_id.clone(), identity.clone())) {
+            // Strict `<`: a mint in the SAME clock tick as the departure
+            // observation is ambiguous, and the safe reading is "fresh" —
+            // wrongly revoking a replacement disconnects an authorized
+            // caller, while wrongly sparing a departed token only leaves
+            // a JWT that lapses on its own `exp` (#1612 review round 9).
             let (departed_tokens, fresh_tokens): (Vec<IssuedJti>, Vec<IssuedJti>) =
-                issued.into_iter().partition(|token| token.minted_at <= now);
+                issued.into_iter().partition(|token| token.minted_at < now);
             let mut latest_exp = None;
             for issued in departed_tokens {
                 latest_exp = Some(
@@ -1599,7 +1683,7 @@ impl LiveKitSfu {
             // on the listing before per-room probes), so by this
             // point `entry.room_sid` already matches the listed sid.
             let registered = if was_registered {
-                let merged = self.merge_live_identities(&call_id, &live, now);
+                let merged = self.merge_live_identities(&call_id, &live, now, listing_started_at);
                 if merged > 0 {
                     tracing::info!(
                         call_id = %call_id,
@@ -1826,12 +1910,22 @@ impl SfuService for LiveKitSfu {
                 participants.insert(identity.clone(), ParticipantState::new(now));
                 entry.insert(CallEntry {
                     generation,
+                    created_at: now,
                     room_sid: None,
                     room_sid_observed_at: None,
                     participants,
                 });
             }
         }
+        // This registration is only reachable through the authorized
+        // Jingle gate (the webhook path uses
+        // `register_call_participant_observed`), and production mints
+        // the join token BEFORE registering. A delayed old departure
+        // sweeping between that mint and this register can revoke the
+        // fresh token and arm an eject the mint-time clear already
+        // missed — so the authorized registration clears it again
+        // (#1612 review round 9).
+        self.clear_pending_revocation_eject(call_id, identity);
         // Stamp (or refresh) the registration time so the
         // reconciliation backstop's grace window is measured from the
         // most recent (re)join, not a stale earlier attempt. A
@@ -1893,6 +1987,7 @@ impl SfuService for LiveKitSfu {
                 );
                 vacant.insert(CallEntry {
                     generation,
+                    created_at: now,
                     room_sid_observed_at: observed_sids.room_sid.as_ref().map(|_| now),
                     room_sid: observed_sids.room_sid.clone(),
                     participants,

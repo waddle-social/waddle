@@ -815,8 +815,12 @@ fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
         .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
         .expect("token");
 
-    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+    // Register BEFORE revoking: the authorized Jingle register clears
+    // any pending eject (#1612 round 9), so the armed-eject-at-observe
+    // scenario this test exercises is a revocation that lands while the
+    // participant is already registered.
     sfu.register_call_participant(&call, &alice);
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
     let observed = observed_sids(Some("RM_observed"), Some("PA_observed"));
     assert_eq!(
         sfu.observe_call_participant_sids(
@@ -3153,6 +3157,9 @@ fn reconciliation_listing_never_regresses_an_already_known_participant_sid() {
     let current = observed_sids(Some("RM_current"), Some("PA_new"));
     let stale_listed_sid = fixture_participant_sid("PA_old");
 
+    // The probe snapshot predates the webhook observation: the newer
+    // join sid must win over the in-flight listing.
+    let probe_started_at = Utc::now();
     assert_eq!(
         sfu.register_call_participant_observed(&call, &alice, &current),
         SidObservationDisposition::Applied
@@ -3162,6 +3169,7 @@ fn reconciliation_listing_never_regresses_an_already_known_participant_sid() {
             &call,
             &[(alice.clone(), Some(stale_listed_sid))],
             Utc::now(),
+            probe_started_at,
         ),
         0
     );

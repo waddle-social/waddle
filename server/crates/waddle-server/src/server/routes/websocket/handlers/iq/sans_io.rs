@@ -665,6 +665,21 @@ async fn relay_muji_to_room_owner(
         // local fallback for a terminate genuinely IS a no-op, because
         // there is no owner holding a registration to strand.
         MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
+            // Refund the pre-dispatch terminate charge: this request
+            // performed no relay work and cannot be an authorized
+            // teardown of a live session (nobody owns the room), so a
+            // burst of bogus unknown-session terminates must not
+            // exhaust the shared bare-JID budget and starve a
+            // legitimate hangup from another resource (#1612 review
+            // round 9). Relayed asks keep their charge — the cross-node
+            // round-trip is exactly the cost this limiter bounds.
+            if is_terminate {
+                state
+                    .deps
+                    .protocol
+                    .muji_pre_dispatch_terminate_rate_limit
+                    .forgive_most_recent(&full_jid.to_bare());
+            }
             unrelayable(false, &deny)
         }
         // Definitely not delivered: the attempt ended here.
