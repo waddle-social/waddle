@@ -44,6 +44,9 @@ import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import { createIncomingCallAlertController } from "../src/shell/audio-alerts";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import { useCallEngine } from "../src/lib/calls/use-call-engine";
+import { connectionStore } from "../src/lib/connection-store";
+import { DisconnectReason } from "livekit-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
 import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
@@ -1978,6 +1981,39 @@ describe("MUC group call", () => {
     expect($mucCallParticipants.get()).toEqual({});
   });
 
+  test("terminal disconnect classification bypasses the call recovery grace", async () => {
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      terminalDisconnectDetail: string | null;
+      disconnect: () => Promise<void>;
+    };
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "terminal-during-call",
+      media: audioVideo,
+      join: {
+        url: "wss://livekit.test",
+        room: "chan@muc.test",
+        identity: "alice@waddle.test/web",
+        token: "jwt.payload.sig",
+      },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+    // The WASM error callback classified this cycle as terminal (auth
+    // rejection / resource conflict) BEFORE the disconnect callback fired.
+    // Recovery is impossible — the grace window must not keep the room,
+    // capture, and call UI alive for a minute.
+    client.terminalDisconnectDetail = "Signed out: resource conflict";
+
+    events.emitDisconnected();
+
+    expect($callState.get().phase).not.toBe("active");
+    await client.disconnect();
+  });
+
   test("transient XMPP disconnect preserves an active media call and its projections", async () => {
     const events = wireClientEvents();
     const client = events.client as unknown as {
@@ -3165,5 +3201,69 @@ describe("scheduleOutgoingTimeout", () => {
     beginOutgoingCall("carol@waddle.test", "c-new", audioVideo);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(sender.send_call_retract).not.toHaveBeenCalled();
+  });
+});
+
+describe("LiveKit transport loss on an active DM call", () => {
+  afterEach(() => {
+    connectionStore.client = null;
+    clearCallState();
+  });
+
+  function activeDmCall(): void {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-media-loss",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+  }
+
+  test("a peer-unaware media failure sends the bounded wire teardown", async () => {
+    const sender = mockSender();
+    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    activeDmCall();
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    // The SFU died on OUR side only: nobody else tells the peer, so the
+    // XEP-0166 terminate (+ XEP-0353 finish) must go out before the
+    // active-call snapshot is cleared.
+    engine.emit("disconnected", {
+      origin: "transport",
+      reason: DisconnectReason.MEDIA_FAILURE,
+    });
+    await flushCallSideEffects();
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-media-loss",
+      "gone",
+    );
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("a server-initiated end sends no wire teardown", async () => {
+    const sender = mockSender();
+    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    activeDmCall();
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    // A duplicate-identity takeover means ANOTHER device of ours now owns
+    // the call — terminating would kill the succeeding device's session.
+    engine.emit("disconnected", {
+      origin: "transport",
+      reason: DisconnectReason.DUPLICATE_IDENTITY,
+    });
+    await flushCallSideEffects();
+
+    expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
+    expect($callState.get().phase).not.toBe("active");
   });
 });

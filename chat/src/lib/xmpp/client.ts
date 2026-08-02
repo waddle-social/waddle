@@ -2910,7 +2910,13 @@ export class BrowserXmppClient {
     // Established media is independent of the transient XMPP transport.
     // Preserve its UI projections while stream recovery has a bounded
     // chance to restore the signalling plane; setup phases still fail fast.
+    // A TERMINAL classification (auth rejection, resource conflict — the
+    // branch below that schedules no reconnect) or an already-latched
+    // terminal state makes recovery impossible: tear down now instead of
+    // leaving the room and capture alive for the full grace window.
     const callTeardownDeferred = !this.destroying
+      && this.terminalDisconnectDetail === null
+      && !this.inTerminalErrorState
       && this.callTransportRecovery.onTransportLost() === "deferred";
     if (!callTeardownDeferred) this.teardownCallAfterTransportLoss();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));

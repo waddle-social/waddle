@@ -1,5 +1,7 @@
 import { ref, type Ref } from "vue";
-import { $callState, clearCallState, reportCallError } from "./call-store";
+import { $callState, clearCallState, reportCallError, tearDownActiveCall } from "./call-store";
+import type { CallWireSender } from "./outbound";
+import { connectionStore } from "@/lib/connection-store";
 import { DisconnectReason } from "livekit-client";
 import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engine";
 import {
@@ -73,6 +75,34 @@ import {
   finishCallAttemptForTransportDisconnect,
   type CallKind,
 } from "./call-lifecycle-telemetry";
+
+/**
+ * Reasons where the LiveKit loss is OURS alone — the peer's media may
+ * still be up and neither the SFU nor the server will tell them we're
+ * gone, so the XMPP wire teardown must. Server-initiated ends
+ * (room deleted/closed, participant removed, duplicate identity, …)
+ * are excluded: the authority that ended us also informs the peer, and
+ * a duplicate-identity takeover must not terminate the succeeding
+ * device's call.
+ */
+function peerUnawareOfTransportLoss(reason?: DisconnectReason): boolean {
+  switch (reason) {
+    case DisconnectReason.CONNECTION_TIMEOUT:
+    case DisconnectReason.MEDIA_FAILURE:
+    case DisconnectReason.JOIN_FAILURE:
+    case DisconnectReason.SIGNAL_CLOSE:
+    case DisconnectReason.UNKNOWN_REASON:
+    case undefined:
+      return true;
+    default:
+      return false;
+  }
+}
+
+function currentCallWireSender(): CallWireSender | null {
+  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
+  return (client?.xmpp as CallWireSender | undefined) ?? null;
+}
 
 function transportDisconnectMessage(reason?: DisconnectReason): string {
   switch (reason) {
@@ -706,7 +736,16 @@ export function useCallEngine(): {
       const disconnectedMucSlot = activeMucCallSlot();
       if (origin !== "local" && disconnectedCall.phase === "active") {
         const terminal = finishCallAttemptForTransportDisconnect(disconnectedCall.sid);
-        clearCallState({ endReason: terminal?.endReason ?? "error" });
+        if (disconnectedCall.kind === "dm" && peerUnawareOfTransportLoss(reason)) {
+          // A local-transport death leaves the peer in a dangling active
+          // call unless we tell them: run the bounded wire teardown
+          // (XEP-0166 terminate + XEP-0353 finish + activity cleanup),
+          // which snapshots $callState itself — so it runs INSTEAD of
+          // clearCallState, not after it.
+          void tearDownActiveCall(currentCallWireSender(), "gone").catch(reportCallError);
+        } else {
+          clearCallState({ endReason: terminal?.endReason ?? "error" });
+        }
         reportCallError(new Error(transportDisconnectMessage(reason)));
       }
       remoteTracks.value = [];

@@ -194,6 +194,34 @@ describe("CallEngine.connect — XEP-0215 ICE injection", () => {
     expect(room.connectCalls[0].opts).toBeUndefined();
   });
 
+  test("an empty advertisement disables both rtcConfig and the refresher", async () => {
+    // resolveIceServers() returns an empty bundle on any failure. Refresh
+    // being wired must not force `{ rtcConfig: {} }` into existence (the
+    // engine's contract is to omit rtcConfig so LiveKit keeps its
+    // signalling-provided servers) — and with no retained config object a
+    // refresh would have nothing to update, so it must never fire.
+    const room = stubRoom();
+    const refreshCalls: number[] = [];
+    await engineWith(room).connect(join(), {
+      audio: false,
+      video: false,
+      iceServers: [],
+      iceServersExpiryMs: Date.now() + 1_000,
+      refreshIceServers: async () => {
+        refreshCalls.push(1);
+        return { servers: [], earliestExpiryMs: null };
+      },
+    });
+
+    expect(room.connectCalls[0].opts).toBeUndefined();
+    const onConnectionStateChanged = room.handlers.get(RoomEvent.ConnectionStateChanged) as
+      | ((state: ConnectionState) => void)
+      | undefined;
+    onConnectionStateChanged?.(ConnectionState.Reconnecting);
+    await Promise.resolve();
+    expect(refreshCalls).toEqual([]);
+  });
+
   test("refreshes credentials on transport reconnect for a future PeerConnection rebuild", async () => {
     const room = stubRoom();
     const engine = engineWith(room);

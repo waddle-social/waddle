@@ -270,7 +270,20 @@ export async function resolveCallDevicePreference(
       missing: false,
     };
   }
-  const devices = await enumerateCallDevices();
+  let devices: EnumeratedDevices;
+  try {
+    devices = await enumerateCallDevices();
+  } catch {
+    // Enumeration failing must not fail the JOIN (this runs before the
+    // Room is even constructed). Resolve to browser defaults WITHOUT the
+    // missing flag — best-effort capture surfaces any real device error.
+    return {
+      activeDeviceId: "default",
+      preferenceId: null,
+      captureDeviceId: undefined,
+      missing: false,
+    };
+  }
   if (hasEnumeratedCallDeviceId(devices, kind, deviceId)) {
     return {
       activeDeviceId: deviceId,

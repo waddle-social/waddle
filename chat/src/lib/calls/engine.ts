@@ -572,13 +572,13 @@ export class CallEngine {
       // clones it when a FULL reconnect rebuilds its PeerConnections. Updating
       // it below therefore supplies fresh credentials to a later rebuild, but
       // deliberately cannot alter the already-running PeerConnection.
+      // No advertisement (or a failed fetch) = no rtcConfig at all — and no
+      // refresher either: with nothing to hand LiveKit at connect time there
+      // is no retained config object for a refresh to update, and the call
+      // never had a client-controlled relay to lose.
       const rtcConfig: RTCConfiguration | undefined =
-        opts.refreshIceServers || (opts.iceServers && opts.iceServers.length > 0)
-          ? {
-              ...(opts.iceServers && opts.iceServers.length > 0
-                ? { iceServers: opts.iceServers }
-                : {}),
-            }
+        opts.iceServers && opts.iceServers.length > 0
+          ? { iceServers: opts.iceServers }
           : undefined;
       const connectOptions: RoomConnectOptions | undefined = rtcConfig ? { rtcConfig } : undefined;
       try {

@@ -90,15 +90,19 @@ export function iceServerBundleFromExternalServices(
       iceServers.push({ urls: `stun:${hostPort}` });
       continue;
     }
+    // turn / turns require credentials to be usable as a relay.
+    if (service.username === undefined || service.password === undefined) {
+      continue;
+    }
+    // Only services that actually joined the bundle contribute a deadline:
+    // a discarded credential-less entry's (possibly already-past) expires
+    // must not make the refresher treat every otherwise-valid bundle as
+    // expired and spin on retries.
     const expiryMs = service.expires === undefined ? Number.NaN : Date.parse(service.expires);
     if (Number.isFinite(expiryMs)) {
       earliestExpiryMs = earliestExpiryMs === null
         ? expiryMs
         : Math.min(earliestExpiryMs, expiryMs);
-    }
-    // turn / turns require credentials to be usable as a relay.
-    if (service.username === undefined || service.password === undefined) {
-      continue;
     }
     // The `?transport` parameter is turn-specific (RFC 7065).
     const transportQuery = service.transport ? `?transport=${service.transport}` : "";
