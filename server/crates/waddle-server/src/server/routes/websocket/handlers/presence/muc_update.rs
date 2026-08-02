@@ -399,8 +399,15 @@ pub(crate) async fn try_handle_muc_presence_update(
     }
 
     if clears_muji_presence {
-        crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(state, room_jid)
-            .await;
+        // The durable completion retry is persisted INSIDE
+        // `maybe_broadcast_call_thread_ended`'s per-room lock on a
+        // retryable failure (#1612 review round 13), so this caller no
+        // longer snapshots the fence post-hoc — a replacement call can
+        // no longer race the capture.
+        let _ = crate::server::routes::call_thread_end::maybe_broadcast_call_thread_ended(
+            state, room_jid,
+        )
+        .await;
     }
 
     if let Some(CallThreadAnchorMessage {

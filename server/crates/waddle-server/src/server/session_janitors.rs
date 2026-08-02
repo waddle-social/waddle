@@ -5595,6 +5595,78 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
     });
 }
 
+pub(crate) fn spawn_call_teardown_outbox_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    let interval_secs = std::env::var("WADDLE_CALL_TEARDOWN_JANITOR_INTERVAL")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.max(1))
+        .unwrap_or(5);
+    let batch_size = std::env::var("WADDLE_CALL_TEARDOWN_JANITOR_BATCH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 1_000))
+        .unwrap_or(64);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            run_call_teardown_outbox_sweep(&state, batch_size).await;
+        }
+    });
+}
+
+async fn run_call_teardown_outbox_sweep(state: &WebSocketState, batch_size: usize) {
+    async {
+        let store = &state.deps.protocol.call_teardown_outbox;
+        let mut sweep_failed = false;
+        match crate::call_teardown_outbox::drain_due(state, batch_size).await {
+            Ok(summary) => {
+                waddle_xmpp::telemetry::call::add_call_teardown_outbox_drained(summary.drained);
+                waddle_xmpp::telemetry::call::add_call_teardown_outbox_requeued(summary.requeued);
+                waddle_xmpp::telemetry::call::add_call_teardown_outbox_failed(summary.failed);
+            }
+            Err(error) => {
+                sweep_failed = true;
+                warn!(
+                    %error,
+                    "call teardown outbox drain failed; durable intents remain retryable"
+                );
+            }
+        }
+        match store.queue_stats().await {
+            Ok(stats) => {
+                waddle_xmpp::telemetry::call::record_call_teardown_outbox_depth(stats.queued_count);
+                waddle_xmpp::telemetry::call::record_call_teardown_outbox_oldest_age(
+                    stats.oldest_queued_age_ms as f64 / 1_000.0,
+                );
+            }
+            Err(error) => {
+                sweep_failed = true;
+                warn!(%error, "call teardown outbox queue metrics query failed");
+            }
+        }
+        if let Err(error) = store.prune_failed().await {
+            sweep_failed = true;
+            warn!(%error, "call teardown outbox failed-row pruning failed");
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::CallTeardownOutbox,
+            if sweep_failed {
+                SweepOutcome::Failed
+            } else {
+                SweepOutcome::Completed
+            },
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::CallTeardownOutbox))
+    .await;
+}
+
 async fn run_notification_outbox_sweep(
     state: &WebSocketState,
     batch_size: usize,

@@ -4844,6 +4844,15 @@ impl waddle_sfu::SfuService for RecordingSfu {
 
     fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
 
+    fn register_call_participant_observed(
+        &self,
+        _: &waddle_sfu::CallId,
+        _: &waddle_sfu::Identity,
+        _: &waddle_sfu::ObservedCallSids,
+    ) -> waddle_sfu::SidObservationDisposition {
+        waddle_sfu::SidObservationDisposition::Applied
+    }
+
     fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
         false
     }
@@ -4861,12 +4870,13 @@ impl waddle_sfu::SfuService for RecordingSfu {
         &self,
         call_id: &waddle_sfu::CallId,
         identity: &waddle_sfu::Identity,
-    ) -> waddle_sfu::CallState {
+        _: Option<&waddle_sfu::ObservedCallSids>,
+    ) -> waddle_sfu::TeardownDisposition {
         self.calls
             .lock()
             .expect("recording lock")
             .push((call_id.clone(), identity.clone()));
-        waddle_sfu::CallState::Ended
+        waddle_sfu::TeardownDisposition::Applied(waddle_sfu::CallState::Ended)
     }
 
     fn update_participant_capabilities(
@@ -4882,7 +4892,12 @@ impl waddle_sfu::SfuService for RecordingSfu {
         ));
     }
 
-    fn note_participant_left(&self, call_id: &waddle_sfu::CallId, identity: &waddle_sfu::Identity) {
+    fn note_participant_left(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        _: Option<&waddle_sfu::ObservedCallSids>,
+    ) -> waddle_sfu::TeardownDisposition {
         // Recorded into `note_calls`, NOT `calls`: the trait splits
         // admin-evict from bookkeeping-only dispatch, and tests need
         // to distinguish which path was taken.
@@ -4890,6 +4905,17 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .lock()
             .expect("recording lock")
             .push((call_id.clone(), identity.clone()));
+        waddle_sfu::TeardownDisposition::Applied(waddle_sfu::CallState::Ended)
+    }
+
+    fn observe_call_participant_sids(
+        &self,
+        _: &waddle_sfu::CallId,
+        _: &waddle_sfu::Identity,
+        _: Option<&waddle_sfu::ObservedCallSids>,
+        _: waddle_sfu::SidObservationDirection,
+    ) -> waddle_sfu::SidObservationDisposition {
+        waddle_sfu::SidObservationDisposition::Applied
     }
 
     fn is_revoked(&self, _: &waddle_sfu::Jti) -> bool {

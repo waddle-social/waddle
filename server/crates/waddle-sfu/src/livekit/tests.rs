@@ -8,6 +8,7 @@ use super::*;
 use crate::config::{ApiKey, ApiSecret, TurnSharedSecret};
 use chrono::Duration;
 use jid::FullJid;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use url::Url;
 
 fn fixture_config() -> SfuConfig {
@@ -34,6 +35,287 @@ fn fixture_identity(name: &str) -> Identity {
     Identity::from_jid(jid)
 }
 
+fn applied_state(disposition: TeardownDisposition) -> CallState {
+    match disposition {
+        TeardownDisposition::Applied(state) => state,
+        TeardownDisposition::StaleSid => panic!("expected applied teardown, got stale sid"),
+    }
+}
+
+fn fixture_room_sid(value: &str) -> RoomSid {
+    RoomSid::new(value).expect("valid room sid")
+}
+
+fn fixture_participant_sid(value: &str) -> ParticipantSid {
+    ParticipantSid::new(value).expect("valid participant sid")
+}
+
+fn observed_sids(room_sid: Option<&str>, participant_sid: Option<&str>) -> ObservedCallSids {
+    ObservedCallSids::new(
+        room_sid.map(fixture_room_sid),
+        participant_sid.map(fixture_participant_sid),
+    )
+}
+
+#[test]
+fn observed_join_registers_after_restart_and_defers_conflicting_room_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("restart@muc.waddle.social").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = observed_sids(Some("RM_current"), Some("PA_current"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &current),
+        SidObservationDisposition::Applied
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(stored_room_sid(&sfu, &call), current.room_sid);
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        current.participant_sid
+    );
+
+    let bob = fixture_identity("bob");
+    let stale = observed_sids(Some("RM_old"), Some("PA_old"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &bob, &stale),
+        SidObservationDisposition::RoomRotationPending
+    );
+    assert!(
+        !sfu.has_call_participant(&call, &bob),
+        "a join from an old room incarnation must not be registered"
+    );
+    assert_eq!(sfu.participant_count(&call), 1);
+}
+
+fn stored_generation(sfu: &LiveKitSfu, call_id: &CallId) -> Option<CallGeneration> {
+    sfu.calls
+        .get(call_id)
+        .map(|entry| entry.generation)
+        .or_else(|| {
+            sfu.call_generations
+                .get(call_id)
+                .and_then(|entry| entry.current_generation())
+        })
+}
+
+fn stored_generation_tombstone_cleared_at(
+    sfu: &LiveKitSfu,
+    call_id: &CallId,
+) -> Option<DateTime<Utc>> {
+    sfu.call_generations
+        .get(call_id)
+        .and_then(|entry| entry.last_cleared_at)
+}
+
+fn stored_room_sid(sfu: &LiveKitSfu, call_id: &CallId) -> Option<RoomSid> {
+    sfu.calls
+        .get(call_id)
+        .and_then(|entry| entry.room_sid.clone())
+}
+
+fn stored_participant_sid(
+    sfu: &LiveKitSfu,
+    call_id: &CallId,
+    identity: &Identity,
+) -> Option<ParticipantSid> {
+    sfu.calls.get(call_id).and_then(|entry| {
+        entry
+            .participants
+            .get(identity)
+            .and_then(|state| state.participant_sid.clone())
+    })
+}
+
+#[test]
+fn participant_registered_at_keeps_the_first_current_registration_timestamp() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-first-registered-at").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_current"), Some("PA_current"));
+    let key = (call.clone(), alice.clone());
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+    let first_registered_at = sfu
+        .participant_registered_at(&call, &alice)
+        .expect("participant registration timestamp");
+    sfu.registered_at.insert(
+        key.clone(),
+        first_registered_at - chrono::Duration::seconds(60),
+    );
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+
+    let refreshed_registered_at = *sfu
+        .registered_at
+        .get(&key)
+        .expect("refreshed grace timestamp")
+        .value();
+    assert!(
+        refreshed_registered_at > first_registered_at - chrono::Duration::seconds(60),
+        "repeat sighting must refresh the grace timestamp"
+    );
+    assert_eq!(
+        sfu.participant_registered_at(&call, &alice),
+        Some(first_registered_at),
+        "supersession fencing must keep the first absent->present timestamp"
+    );
+    assert_eq!(
+        sfu.calls
+            .get(&call)
+            .expect("call entry")
+            .participants
+            .get(&alice)
+            .expect("participant state")
+            .first_registered_at,
+        first_registered_at
+    );
+}
+
+#[test]
+fn participant_sid_advance_on_join_restamps_the_current_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-participant-sid-advance").expect("call id");
+    let alice = fixture_identity("alice");
+    let original = observed_sids(Some("RM_current"), Some("PA_original"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &original),
+        SidObservationDisposition::Applied
+    );
+    let first_registered_at = sfu
+        .participant_registered_at(&call, &alice)
+        .expect("first registration timestamp");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    let restamped_registered_at = sfu
+        .participant_registered_at(&call, &alice)
+        .expect("restamped registration timestamp");
+    assert!(
+        restamped_registered_at > first_registered_at,
+        "a new participant sid must start a new current-registration fence"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        rejoined.participant_sid
+    );
+    assert!(
+        sfu.calls
+            .get(&call)
+            .expect("call entry")
+            .participants
+            .get(&alice)
+            .expect("participant state")
+            .registered_without_mint,
+        "a rejoined participant stays pending until the first local mint of the new incarnation"
+    );
+}
+
+#[test]
+fn delayed_old_leave_with_a_superseded_participant_sid_is_stale() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-old-leave-stale").expect("call id");
+    let alice = fixture_identity("alice");
+    let original = observed_sids(Some("RM_current"), Some("PA_original"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &original),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&original)),
+        TeardownDisposition::StaleSid
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(sfu.participant_count(&call), 1);
+}
+
+#[test]
+fn leave_from_a_different_room_incarnation_remains_stale() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-old-room-leave-stale").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = observed_sids(Some("RM_current"), Some("PA_current"));
+    let old_room = observed_sids(Some("RM_old"), Some("PA_old"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &current),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&old_room),
+            SidObservationDirection::Leave,
+        ),
+        SidObservationDisposition::StaleSid
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), current.room_sid);
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        current.participant_sid
+    );
+}
+
+#[test]
+fn current_leave_with_the_latest_participant_sid_tears_down() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-current-leave").expect("call id");
+    let alice = fixture_identity("alice");
+    let original = observed_sids(Some("RM_current"), Some("PA_original"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &original),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&rejoined)),
+        TeardownDisposition::Applied(CallState::Ended)
+    );
+    assert_eq!(sfu.participant_count(&call), 0);
+}
+
 #[test]
 fn registry_tracks_participants_per_call() {
     let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
@@ -45,12 +327,12 @@ fn registry_tracks_participants_per_call() {
     sfu.register_call_participant(&call, &b);
     assert_eq!(sfu.participant_count(&call), 2);
 
-    match sfu.unregister_call_participant(&call, &a) {
+    match applied_state(sfu.unregister_call_participant(&call, &a, None)) {
         CallState::Active { remaining } => assert_eq!(remaining, 1),
         CallState::Ended => panic!("call should still be active"),
     }
 
-    match sfu.unregister_call_participant(&call, &b) {
+    match applied_state(sfu.unregister_call_participant(&call, &b, None)) {
         CallState::Ended => {}
         CallState::Active { .. } => panic!("call should end with no participants"),
     }
@@ -68,6 +350,46 @@ fn issue_join_token_returns_room_scoped_jwt() {
         .expect("token issued");
     assert_eq!(token.room, call);
     assert!(!token.jwt.as_str().is_empty());
+}
+
+#[test]
+fn participant_last_minted_at_tracks_the_current_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("c-last-minted-at").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_observed"), Some("PA_observed"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(sfu.participant_last_minted_at(&call, &alice), None);
+
+    let token = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token issued");
+
+    assert!(
+        sfu.participant_last_minted_at(&call, &alice)
+            .is_some_and(|minted_at| minted_at <= token.expires_at),
+        "the last-minted timestamp must be recorded for the current registration"
+    );
+    assert!(
+        !sfu.calls
+            .get(&call)
+            .expect("call entry")
+            .participants
+            .get(&alice)
+            .expect("participant state")
+            .registered_without_mint,
+        "the first local mint clears the pending restored-without-mint marker"
+    );
+
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&observed)),
+        TeardownDisposition::Applied(CallState::Ended)
+    );
+    assert_eq!(sfu.participant_last_minted_at(&call, &alice), None);
 }
 
 #[test]
@@ -100,7 +422,7 @@ fn unregister_revokes_every_jti_issued_to_the_participant() {
     // Register + unregister: every previously-issued jti must
     // be revoked once the participant has left the call.
     sfu.register_call_participant(&call, &alice);
-    sfu.unregister_call_participant(&call, &alice);
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
 
     assert!(sfu.is_revoked(&t1.jti));
     assert!(sfu.is_revoked(&t2.jti));
@@ -122,7 +444,7 @@ fn revocation_is_scoped_per_participant() {
 
     sfu.register_call_participant(&call, &alice);
     sfu.register_call_participant(&call, &bob);
-    sfu.unregister_call_participant(&call, &alice);
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
 
     // Alice's hangup must not revoke bob's still-active token.
     assert!(sfu.is_revoked(&alice_token.jti));
@@ -169,6 +491,11 @@ fn revoke_issued_token_drops_the_emptied_issued_bucket() {
         !sfu.issued.contains_key(&(call.clone(), alice.clone())),
         "emptied issued bucket must be removed"
     );
+    assert!(
+        !sfu.last_minted_at
+            .contains_key(&(call.clone(), alice.clone())),
+        "emptying the issued bucket must also drop the last-minted tracker entry"
+    );
 
     // A pair with another live issuance keeps its bucket.
     let t1 = sfu
@@ -180,6 +507,137 @@ fn revoke_issued_token_drops_the_emptied_issued_bucket() {
     sfu.revoke_issued_token(&call, &alice, &t2.jti);
     assert!(!sfu.is_revoked(&t1.jti));
     assert_eq!(sfu.issued_count(&call, &alice), 1);
+}
+
+#[test]
+fn revoke_issued_token_reports_a_guarded_eject_intent() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-bounce-eject").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_revoked"), Some("PA_revoked"));
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&observed),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+
+    assert!(sfu.is_revoked(&minted.jti));
+    assert!(
+        sfu.has_call_participant(&call, &alice),
+        "targeted rollback revokes one issuance, not the registry entry"
+    );
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 1, "only RemoveParticipant should be queued");
+    assert_eq!(intents[0].call_id, call);
+    assert_eq!(intents[0].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[0].room_sid, observed.room_sid);
+    match &intents[0].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &observed.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("targeted rollback must not enqueue DeleteRoom"),
+    }
+}
+
+#[test]
+fn targeted_revocation_requeues_eject_when_the_holder_joins_late() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-bounce-late-join").expect("call id");
+    let alice = fixture_identity("alice");
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+    let observed = observed_sids(Some("RM_late"), Some("PA_late"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(
+        intents.len(),
+        2,
+        "the pending eject must fire again once the revoked holder becomes observable"
+    );
+    assert_eq!(intents[0].generation, None);
+    assert_eq!(intents[0].room_sid, None);
+    assert_eq!(intents[1].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[1].room_sid, observed.room_sid);
+    match &intents[1].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &observed.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("late join convergence must only enqueue eviction"),
+    }
+}
+
+#[test]
+fn targeted_revocation_keeps_other_live_issuances_authorized() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-targeted-authorized").expect("call id");
+    let alice = fixture_identity("alice");
+    let first = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+    let second = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    sfu.revoke_issued_token(&call, &alice, &second.jti);
+
+    assert!(
+        !sfu.is_revoked(&first.jti),
+        "revoking the bounced issuance must not downgrade another live token to nothing"
+    );
+    assert_eq!(
+        reported.lock().expect("sink lock").len(),
+        0,
+        "another outstanding issuance keeps the participant authorized, so no eject is queued"
+    );
 }
 
 #[test]
@@ -233,7 +691,7 @@ fn revoked_entries_are_swept_once_past_expiry() {
     let alice = fixture_identity("alice");
     let call = CallId::new("c-sweep").unwrap();
     sfu.register_call_participant(&call, &alice);
-    sfu.unregister_call_participant(&call, &alice);
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
     assert_eq!(
         sfu.revoked_count(),
         1,
@@ -252,18 +710,225 @@ fn register_is_idempotent() {
     assert_eq!(sfu.participant_count(&call), 1);
 }
 
+#[test]
+fn generation_increments_only_when_a_call_is_recreated() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("alice@waddle.social::reused-client-sid").unwrap();
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+
+    sfu.register_call_participant(&call, &alice);
+    let first_generation = stored_generation(&sfu, &call).expect("generation stored");
+
+    sfu.register_call_participant(&call, &bob);
+    assert_eq!(
+        stored_generation(&sfu, &call),
+        Some(first_generation),
+        "same-call membership churn must keep the generation stable"
+    );
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+    assert_eq!(
+        stored_generation(&sfu, &call),
+        Some(first_generation),
+        "removing a non-last participant must not advance the generation"
+    );
+
+    let _ = sfu.unregister_call_participant(&call, &bob, None);
+    assert!(
+        !sfu.calls.contains_key(&call),
+        "empty calls must still be removed from the live registry"
+    );
+    assert_eq!(
+        stored_generation(&sfu, &call),
+        Some(first_generation),
+        "the final clear must retain the last generation as a tombstone fence"
+    );
+
+    sfu.register_call_participant(&call, &alice);
+    let second_generation = stored_generation(&sfu, &call).expect("new generation stored");
+    assert!(
+        second_generation > first_generation,
+        "re-registering after the call emptied must advance the generation"
+    );
+    assert_ne!(
+        second_generation.as_u64(),
+        1,
+        "direct-call reuse must never reset the generation counter to one"
+    );
+}
+
+#[test]
+fn sid_learning_stores_the_first_sid_and_defers_join_conflicts() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("c-sid-learning").unwrap();
+    let alice = fixture_identity("alice");
+    let first = observed_sids(Some("RM_first"), Some("PA_first"));
+    let conflicting = observed_sids(Some("RM_other"), Some("PA_other"));
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&first),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), first.room_sid);
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        first.participant_sid
+    );
+
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&conflicting),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::RoomRotationPending
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), first.room_sid);
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        first.participant_sid
+    );
+}
+
+#[test]
+fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-observe-pending-eject").expect("call id");
+    let alice = fixture_identity("alice");
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    // Register BEFORE revoking: the authorized Jingle register clears
+    // any pending eject (#1612 round 9), so the armed-eject-at-observe
+    // scenario this test exercises is a revocation that lands while the
+    // participant is already registered.
+    sfu.register_call_participant(&call, &alice);
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+    let observed = observed_sids(Some("RM_observed"), Some("PA_observed"));
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&observed),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 2);
+    assert_eq!(intents[1].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[1].room_sid, observed.room_sid);
+    match &intents[1].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &observed.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("observe-path convergence must only enqueue eviction"),
+    }
+}
+
+#[test]
+fn join_side_participant_sid_advance_can_learn_the_first_room_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("c-atomic-sid-learning").unwrap();
+    let alice = fixture_identity("alice");
+    let participant_only = observed_sids(None, Some("PA_current"));
+    let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&participant_only),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&rejoined),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        stored_room_sid(&sfu, &call),
+        rejoined.room_sid,
+        "a join-side participant-sid advance may also learn the first room sid for the current incarnation"
+    );
+}
+
+#[test]
+fn unknown_identity_teardown_does_not_teach_room_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("c-unknown-identity-sid").unwrap();
+    let alice = fixture_identity("alice");
+    let ghost = fixture_identity("mallory");
+    let stale = observed_sids(Some("RM_stale"), Some("PA_stale"));
+    let current = observed_sids(Some("RM_current"), Some("PA_current"));
+
+    sfu.register_call_participant(&call, &alice);
+    assert!(matches!(
+        sfu.note_participant_left(&call, &ghost, Some(&stale)),
+        TeardownDisposition::Applied(CallState::Active { remaining: 1 })
+    ));
+    assert_eq!(stored_room_sid(&sfu, &call), None);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&current),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), current.room_sid);
+}
+
 // -------- Admin-evict path (tokio runtime present) --------
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::admin::LiveKitAdmin;
 
+type ListedParticipants = Vec<(Identity, Option<ParticipantSid>)>;
+
 #[derive(Default)]
 struct RecordingAdmin {
+    rooms: Mutex<Vec<crate::admin::ListedRoom>>,
+    list_rooms_errors: Mutex<bool>,
     remove_calls: Mutex<Vec<(CallId, Identity)>>,
     delete_calls: Mutex<Vec<CallId>>,
+    remove_errors: Mutex<bool>,
+    delete_errors: Mutex<bool>,
+    remove_gate: Mutex<Option<Arc<Semaphore>>>,
     update_calls: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
     /// Per-call artificial latency for `update_participant`,
     /// consumed in call order. Ordering tests queue a SLOW first
@@ -273,7 +938,7 @@ struct RecordingAdmin {
     /// What LiveKit "reports" as connected per call. A call absent
     /// from the map lists as empty (room not found). Drives the
     /// reconciliation tests.
-    live: Mutex<std::collections::HashMap<CallId, Vec<Identity>>>,
+    live: Mutex<std::collections::HashMap<CallId, ListedParticipants>>,
     /// How many NON-Waddle participants LiveKit reports per call
     /// (an egress recorder, a SIP participant): occupancy that can
     /// never be a registry ghost but must still block DeleteRoom.
@@ -287,9 +952,44 @@ struct RecordingAdmin {
     list_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// Signalled once a parked `room_occupancy` call has been entered.
     list_entered: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    occupancy_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    occupancy_calls: AtomicUsize,
+    occupancy_in_flight: AtomicUsize,
+    max_occupancy_in_flight: AtomicUsize,
 }
 
 impl RecordingAdmin {
+    fn fail_remove(&self) {
+        *self.remove_errors.lock().expect("recording lock") = true;
+    }
+
+    fn fail_delete(&self) {
+        *self.delete_errors.lock().expect("recording lock") = true;
+    }
+
+    fn block_removes_on(&self, gate: Arc<Semaphore>) {
+        *self.remove_gate.lock().expect("recording lock") = Some(gate);
+    }
+
+    fn set_rooms(&self, rooms: Vec<crate::admin::ListedRoom>) {
+        *self.rooms.lock().expect("recording lock") = rooms;
+    }
+
+    fn fail_list_rooms(&self) {
+        *self.list_rooms_errors.lock().expect("recording lock") = true;
+    }
+
+    fn hold_all_occupancy(&self) {
+        *self.occupancy_gate.lock().expect("recording lock") =
+            Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    }
+
+    fn release_occupancy(&self, permits: usize) {
+        if let Some(gate) = self.occupancy_gate.lock().expect("recording lock").as_ref() {
+            gate.add_permits(permits);
+        }
+    }
+
     fn remove_snapshot(&self) -> Vec<(CallId, Identity)> {
         self.remove_calls.lock().expect("recording lock").clone()
     }
@@ -307,10 +1007,24 @@ impl RecordingAdmin {
     }
 
     fn set_live(&self, call: &CallId, identities: Vec<Identity>) {
+        self.live.lock().expect("recording lock").insert(
+            call.clone(),
+            identities
+                .into_iter()
+                .map(|identity| (identity, None))
+                .collect(),
+        );
+    }
+
+    fn set_live_with_sids(
+        &self,
+        call: &CallId,
+        participants: Vec<(Identity, Option<ParticipantSid>)>,
+    ) {
         self.live
             .lock()
             .expect("recording lock")
-            .insert(call.clone(), identities);
+            .insert(call.clone(), participants);
     }
 
     fn set_foreign_live(&self, call: &CallId, count: usize) {
@@ -318,6 +1032,25 @@ impl RecordingAdmin {
             .lock()
             .expect("recording lock")
             .insert(call.clone(), count);
+    }
+
+    fn max_occupancy_in_flight(&self) -> usize {
+        self.max_occupancy_in_flight.load(Ordering::SeqCst)
+    }
+
+    async fn await_occupancy_calls(&self, expected: usize, within: StdDuration) {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let observed = self.occupancy_calls.load(Ordering::Acquire);
+            if observed >= expected || tokio::time::Instant::now() >= deadline {
+                assert!(
+                    observed >= expected,
+                    "expected occupancy probes to reach {expected} before timeout, saw {observed}"
+                );
+                return;
+            }
+            tokio::time::sleep(StdDuration::from_millis(1)).await;
+        }
     }
 
     /// Park the next `room_occupancy` call until [`Self::release_list`].
@@ -374,6 +1107,20 @@ impl RecordingAdmin {
 }
 
 impl LiveKitAdmin for RecordingAdmin {
+    fn list_rooms(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<crate::admin::ListedRoom>, SfuError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            if *self.list_rooms_errors.lock().expect("recording lock") {
+                return Err(SfuError::InvalidCallId(
+                    "simulated ListRooms failure".into(),
+                ));
+            }
+            Ok(self.rooms.lock().expect("recording lock").clone())
+        })
+    }
+
     fn remove_participant<'a>(
         &'a self,
         room: &'a CallId,
@@ -386,6 +1133,13 @@ impl LiveKitAdmin for RecordingAdmin {
                 .lock()
                 .expect("recording lock")
                 .push((room, identity));
+            let gate = self.remove_gate.lock().expect("recording lock").clone();
+            if let Some(gate) = gate {
+                let _permit = gate.acquire().await.expect("test gate remains open");
+            }
+            if *self.remove_errors.lock().expect("recording lock") {
+                return Err(SfuError::InvalidCallId("simulated remove failure".into()));
+            }
             Ok(())
         })
     }
@@ -397,6 +1151,9 @@ impl LiveKitAdmin for RecordingAdmin {
         let room = room.clone();
         Box::pin(async move {
             self.delete_calls.lock().expect("recording lock").push(room);
+            if *self.delete_errors.lock().expect("recording lock") {
+                return Err(SfuError::InvalidCallId("simulated delete failure".into()));
+            }
             Ok(())
         })
     }
@@ -435,7 +1192,20 @@ impl LiveKitAdmin for RecordingAdmin {
     {
         let room = room.clone();
         Box::pin(async move {
+            self.occupancy_calls.fetch_add(1, Ordering::SeqCst);
+            let in_flight = self.occupancy_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_occupancy_in_flight
+                .fetch_max(in_flight, Ordering::SeqCst);
+            let occupancy_gate = self.occupancy_gate.lock().expect("recording lock").clone();
+            if let Some(gate) = occupancy_gate {
+                let permit = gate
+                    .acquire_owned()
+                    .await
+                    .expect("test occupancy semaphore stays open");
+                permit.forget();
+            }
             if *self.list_errors.lock().expect("recording lock") {
+                self.occupancy_in_flight.fetch_sub(1, Ordering::SeqCst);
                 return Err(SfuError::InvalidCallId("simulated list failure".into()));
             }
             let gate = self.list_gate.lock().expect("recording lock").clone();
@@ -446,7 +1216,7 @@ impl LiveKitAdmin for RecordingAdmin {
                 }
                 waiter.await;
             }
-            Ok(crate::admin::RoomOccupancy {
+            let occupancy = crate::admin::RoomOccupancy {
                 waddle: self
                     .live
                     .lock()
@@ -461,7 +1231,9 @@ impl LiveKitAdmin for RecordingAdmin {
                     .get(&room)
                     .copied()
                     .unwrap_or(0),
-            })
+            };
+            self.occupancy_in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(occupancy)
         })
     }
 }
@@ -489,6 +1261,388 @@ async fn drain_admin_tasks() {
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
+}
+
+#[test]
+fn teardown_without_runtime_reports_typed_intents() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("r-no-runtime").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 2);
+    assert!(matches!(
+        intents[0].target,
+        TeardownTargetLite::Participant { .. }
+    ));
+    assert!(matches!(intents[1].target, TeardownTargetLite::Room));
+    assert!(intents.iter().all(|intent| intent.generation.is_some()));
+}
+
+#[tokio::test]
+async fn failed_admin_effects_are_independently_reported() {
+    let admin = Arc::new(RecordingAdmin::default());
+    admin.fail_remove();
+    admin.fail_delete();
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    let call = CallId::new("r-admin-fail").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+    for _ in 0..100 {
+        if reported.lock().expect("sink lock").len() == 2 {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 2);
+    assert!(intents
+        .iter()
+        .any(|intent| matches!(intent.target, TeardownTargetLite::Participant { .. })));
+    assert!(intents
+        .iter()
+        .any(|intent| matches!(intent.target, TeardownTargetLite::Room)));
+}
+
+#[tokio::test]
+async fn saturated_teardown_gate_reports_without_spawning_admin_work() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let mut sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    sfu.admin_permits = Arc::new(Semaphore::new(0));
+    let call = CallId::new("r-saturated").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+
+    for _ in 0..100 {
+        if reported.lock().expect("sink lock").len() == 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(reported.lock().expect("sink lock").len(), 2);
+    assert!(admin.remove_snapshot().is_empty());
+    assert!(admin.delete_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn teardown_burst_reserves_before_spawn_and_defers_excess_work() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let gate = Arc::new(Semaphore::new(0));
+    admin.block_removes_on(Arc::clone(&gate));
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    let excess = 32;
+    for index in 0..(ADMIN_CONCURRENCY + excess) {
+        let call = CallId::new(format!("r-burst-{index}")).expect("call id");
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        let _ = sfu.unregister_call_participant(&call, &alice, None);
+    }
+    for _ in 0..100 {
+        if admin.remove_snapshot().len() == ADMIN_CONCURRENCY {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+
+    assert_eq!(admin.remove_snapshot().len(), ADMIN_CONCURRENCY);
+    assert_eq!(
+        reported.lock().expect("sink lock").len(),
+        (ADMIN_CONCURRENCY + excess) * 2,
+        "every last-participant teardown pre-reports participant and room intents, whether admitted or saturated"
+    );
+    gate.add_permits(ADMIN_CONCURRENCY);
+}
+
+#[tokio::test]
+async fn saturated_teardown_reports_use_one_supervised_persistence_task() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let gate = Arc::new(Semaphore::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let sink_gate = Arc::clone(&gate);
+    let sink_started = Arc::clone(&started);
+    let mut sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(
+        Arc::new(move |_| {
+            let gate = Arc::clone(&sink_gate);
+            let started = Arc::clone(&sink_started);
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                let _permit = gate.acquire().await.expect("report gate remains open");
+            })
+        }),
+    );
+    sfu.admin_permits = Arc::new(Semaphore::new(0));
+
+    let calls = 32;
+    for index in 0..calls {
+        let call = CallId::new(format!("r-persist-burst-{index}")).expect("call id");
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        let _ = sfu.unregister_call_participant(&call, &alice, None);
+    }
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+
+    gate.add_permits(calls * 2);
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) == calls * 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), calls * 2);
+}
+
+#[tokio::test]
+async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-sid-guard").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = observed_sids(Some("RM_current"), Some("PA_current"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &current),
+        SidObservationDisposition::Applied
+    );
+    let stale = CallTeardownIntentLite {
+        call_id: call,
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: Some(fixture_room_sid("RM_old")),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&stale)
+            .await
+            .expect("typed no-op"),
+        TeardownExecution::StaleGeneration
+    );
+    assert!(admin.remove_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-sid-unresolved").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+    let persisted = CallTeardownIntentLite {
+        call_id: call,
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: Some(fixture_room_sid("RM_old")),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&persisted)
+            .await
+            .expect("typed defer"),
+        TeardownExecution::Occupied
+    );
+    assert!(admin.remove_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_completes() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-restart-fence").expect("call id");
+    let alice = fixture_identity("alice");
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: Some(fixture_participant_sid("PA_restart")),
+        },
+        generation: Some(CallGeneration::new(1)),
+        room_sid: Some(fixture_room_sid("RM_restart")),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed defer"),
+        TeardownExecution::Occupied
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "pre-reconcile restart drain must requeue fenced teardown rows"
+    );
+
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+
+    // Post-reconcile a missing entry cannot decide the sid fence locally,
+    // so the executor verifies it against LiveKit's live occupancy: the
+    // participant is connected under the fenced sid, so removal proceeds.
+    admin.set_live_with_sids(
+        &call,
+        vec![(alice.clone(), Some(fixture_participant_sid("PA_restart")))],
+    );
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed execution"),
+        TeardownExecution::Executed
+    );
+    assert_eq!(admin.remove_snapshot(), vec![(call, alice)]);
+}
+
+#[tokio::test]
+async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fence() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-live-fence").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+    // LiveKit hosts a NEWER incarnation: same identity, different sid.
+    admin.set_live_with_sids(
+        &call,
+        vec![(alice.clone(), Some(fixture_participant_sid("PA_new")))],
+    );
+
+    let stale = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: None,
+    };
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&stale)
+            .await
+            .expect("typed stale no-op"),
+        TeardownExecution::StaleGeneration
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "a stale fenced intent must not eject the newer incarnation's participant"
+    );
+
+    // Identity no longer connected at all: the removal already happened;
+    // success without touching the room.
+    let absent = CallTeardownIntentLite {
+        call_id: CallId::new("r-live-fence-gone").expect("call id"),
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: None,
+    };
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&absent)
+            .await
+            .expect("typed already-gone no-op"),
+        TeardownExecution::Executed
+    );
+    assert!(admin.remove_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn inline_teardown_reports_participant_and_room_intents_before_admin_work_completes() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let gate = Arc::new(Semaphore::new(0));
+    admin.block_removes_on(Arc::clone(&gate));
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        }));
+    let call = CallId::new("r-inline-report-first").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+    for _ in 0..100 {
+        if reported.lock().expect("sink lock").len() == 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    {
+        let intents = reported.lock().expect("sink lock");
+        assert_eq!(
+            intents.len(),
+            2,
+            "participant and room intents must be durably reported before the blocked inline remove finishes"
+        );
+        assert!(intents
+            .iter()
+            .any(|intent| matches!(intent.target, TeardownTargetLite::Participant { .. })));
+        assert!(intents
+            .iter()
+            .any(|intent| matches!(intent.target, TeardownTargetLite::Room)));
+    }
+    assert_eq!(admin.remove_snapshot().len(), 1);
+
+    gate.add_permits(1);
+    drain_admin_tasks().await;
+    assert_eq!(
+        reported.lock().expect("sink lock").len(),
+        2,
+        "successful inline teardown must not enqueue duplicate participant or room intents"
+    );
+    assert_eq!(
+        admin.delete_snapshot(),
+        vec![call],
+        "the pre-reported room intent must coexist safely with a successful inline delete"
+    );
 }
 
 #[tokio::test]
@@ -773,7 +1927,7 @@ async fn unregister_schedules_remove_participant_on_the_admin_client() {
 
     // Alice leaves: RemoveParticipant must fire; DeleteRoom must
     // NOT fire because bob is still in the call.
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert!(matches!(state, CallState::Active { remaining: 1 }));
     drain_admin_tasks().await;
 
@@ -802,7 +1956,7 @@ async fn unregister_last_participant_also_schedules_delete_room() {
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert_eq!(state, CallState::Ended);
     drain_admin_tasks().await;
 
@@ -820,36 +1974,88 @@ async fn unregister_last_participant_also_schedules_delete_room() {
 }
 
 #[tokio::test]
-async fn unregister_of_unknown_identity_fires_remove_participant_but_not_delete_room() {
+async fn unregister_of_unknown_identity_does_not_schedule_admin_work() {
     // Edge case: a session-terminate arrives without a matching
     // register (e.g. server-side state was lost, a client races
     // a re-init, a replayed terminate from a long-dead session).
-    // `RemoveParticipant` must still fire because LiveKit may
-    // hold the participant via a separate path. `DeleteRoom`
-    // MUST NOT fire — we don't know the call's true state, and
-    // tearing it down could evict participants we never tracked.
+    // With no registry evidence we must not schedule any admin work:
+    // the call may belong to a newer incarnation or another path,
+    // and the targeted revocation/eject flow now owns the "identity
+    // may still be live" convergence instead.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
     let call = CallId::new("r-ghost").unwrap();
     let ghost = fixture_identity("mallory");
 
-    let state = sfu.unregister_call_participant(&call, &ghost);
+    let state = applied_state(sfu.unregister_call_participant(&call, &ghost, None));
     assert!(
         matches!(state, CallState::Active { remaining: 0 }),
         "ghost unregister must NOT report CallState::Ended; got {state:?}",
     );
     drain_admin_tasks().await;
 
-    let removes = admin.remove_snapshot();
-    assert_eq!(removes.len(), 1);
-    assert_eq!(
-        removes[0].1.as_livekit_identity(),
-        ghost.as_livekit_identity()
-    );
+    assert!(admin.remove_snapshot().is_empty());
     assert!(
         admin.delete_snapshot().is_empty(),
         "DeleteRoom must not fire when we never tracked the participant",
     );
+}
+
+#[test]
+fn unregister_requeues_eject_when_a_revoked_holder_rejoins_late() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("r-late-rejoin").expect("call id");
+    let alice = fixture_identity("alice");
+    let first_join = observed_sids(Some("RM_first"), Some("PA_first"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &first_join),
+        SidObservationDisposition::Applied
+    );
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, Some(&first_join)));
+    assert_eq!(state, CallState::Ended);
+    assert!(sfu.is_revoked(&minted.jti));
+
+    let second_join = observed_sids(Some("RM_second"), Some("PA_second"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &second_join),
+        SidObservationDisposition::Applied
+    );
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(
+        intents.len(),
+        3,
+        "late rejoin should append a fresh RemoveParticipant after the original participant+room intents"
+    );
+    assert!(matches!(
+        intents[0].target,
+        TeardownTargetLite::Participant { .. }
+    ));
+    assert!(matches!(intents[1].target, TeardownTargetLite::Room));
+    assert_eq!(intents[2].generation, stored_generation(&sfu, &call));
+    assert_eq!(intents[2].room_sid, second_join.room_sid);
+    match &intents[2].target {
+        TeardownTargetLite::Participant {
+            identity,
+            participant_sid,
+        } => {
+            assert_eq!(identity, &alice);
+            assert_eq!(participant_sid, &second_join.participant_sid);
+        }
+        TeardownTargetLite::Room => panic!("late rejoin convergence must only enqueue eviction"),
+    }
 }
 
 #[tokio::test]
@@ -866,7 +2072,8 @@ async fn note_participant_left_clears_local_state_without_admin_call() {
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
-    sfu.note_participant_left(&call, &alice);
+    let disposition = sfu.note_participant_left(&call, &alice, None);
+    assert!(matches!(disposition, TeardownDisposition::Applied(_)));
     drain_admin_tasks().await;
 
     assert_eq!(sfu.participant_count(&call), 0, "registry must be cleared");
@@ -877,6 +2084,177 @@ async fn note_participant_left_clears_local_state_without_admin_call() {
     assert!(
         admin.delete_snapshot().is_empty(),
         "note_participant_left must NOT spawn DeleteRoom",
+    );
+}
+
+#[tokio::test]
+async fn stale_sid_webhook_is_dropped_after_same_call_id_is_reused() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-stale-room").unwrap();
+    let alice = fixture_identity("alice");
+    let call_a = observed_sids(Some("RM_A"), Some("PA_A"));
+    let call_b = observed_sids(Some("RM_B"), Some("PA_B"));
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_a),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert!(matches!(
+        sfu.note_participant_left(&call, &alice, Some(&call_a)),
+        TeardownDisposition::Applied(CallState::Ended)
+    ));
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_b),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    let disposition = sfu.note_participant_left(&call, &alice, Some(&call_a));
+    drain_admin_tasks().await;
+
+    assert_eq!(disposition, TeardownDisposition::StaleSid);
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(stored_room_sid(&sfu, &call), call_b.room_sid);
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        call_b.participant_sid
+    );
+    assert!(
+        admin.remove_snapshot().is_empty() && admin.delete_snapshot().is_empty(),
+        "stale webhook must not trigger admin teardown"
+    );
+}
+
+#[tokio::test]
+async fn matching_sid_webhook_still_tears_down() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-match").unwrap();
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_match"), Some("PA_match"));
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&observed),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    let disposition = sfu.note_participant_left(&call, &alice, Some(&observed));
+
+    assert_eq!(disposition, TeardownDisposition::Applied(CallState::Ended));
+    assert_eq!(sfu.participant_count(&call), 0);
+}
+
+#[tokio::test]
+async fn teardown_without_sids_stays_backward_compatible() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-no-sids").unwrap();
+    let alice = fixture_identity("alice");
+    let learned = observed_sids(Some("RM_backcompat"), Some("PA_backcompat"));
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&learned),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    let disposition = sfu.note_participant_left(&call, &alice, None);
+
+    assert_eq!(disposition, TeardownDisposition::Applied(CallState::Ended));
+    assert_eq!(sfu.participant_count(&call), 0);
+}
+
+#[tokio::test]
+async fn stale_generation_skips_scheduled_remove_participant() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-stale-generation").unwrap();
+    let alice = fixture_identity("alice");
+    let call_a = observed_sids(Some("RM_old"), Some("PA_old"));
+    let call_b = observed_sids(Some("RM_new"), Some("PA_new"));
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_a),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        applied_state(sfu.unregister_call_participant(&call, &alice, Some(&call_a))),
+        CallState::Ended
+    );
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&call_b),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    drain_admin_tasks().await;
+
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "queued RemoveParticipant from the older generation must be skipped"
+    );
+}
+
+#[tokio::test]
+async fn no_call_teardown_uses_last_generation_to_protect_a_rejoin() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-no-call-stale-generation").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    assert!(matches!(
+        sfu.note_participant_left(&call, &alice, None),
+        TeardownDisposition::Applied(CallState::Ended)
+    ));
+    assert!(matches!(
+        sfu.unregister_call_participant(&call, &alice, None),
+        TeardownDisposition::Applied(CallState::Active { remaining: 0 })
+    ));
+
+    sfu.register_call_participant(&call, &alice);
+    drain_admin_tasks().await;
+
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "an unknown-call teardown queued under the prior generation must not evict the rejoin"
     );
 }
 
@@ -896,7 +2274,7 @@ async fn last_participant_delete_room_skipped_when_someone_rejoins() {
     let bob = fixture_identity("bob");
 
     sfu.register_call_participant(&call, &alice);
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert_eq!(state, CallState::Ended);
 
     // Bob rejoins before the spawned future polls. With a single-
@@ -908,10 +2286,9 @@ async fn last_participant_delete_room_skipped_when_someone_rejoins() {
     drain_admin_tasks().await;
 
     let removes = admin.remove_snapshot();
-    assert_eq!(
-        removes.len(),
-        1,
-        "RemoveParticipant for Alice must still fire"
+    assert!(
+        removes.is_empty(),
+        "queued RemoveParticipant from the older generation must be skipped"
     );
     assert!(
         admin.delete_snapshot().is_empty(),
@@ -938,7 +2315,7 @@ async fn delete_room_skipped_when_livekit_reports_another_replicas_participant()
     sfu.register_call_participant(&call, &alice);
     admin.set_live(&call, vec![alice.clone(), bob.clone()]);
 
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert_eq!(state, CallState::Ended, "locally the call just emptied");
     drain_admin_tasks().await;
 
@@ -970,7 +2347,7 @@ async fn delete_room_fires_when_livekit_reports_only_the_departing_participant()
     sfu.register_call_participant(&call, &alice);
     admin.set_live(&call, vec![alice.clone()]);
 
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert_eq!(state, CallState::Ended);
     drain_admin_tasks().await;
 
@@ -995,7 +2372,7 @@ async fn delete_room_skipped_when_only_a_foreign_participant_remains() {
     admin.set_live(&call, vec![alice.clone()]);
     admin.set_foreign_live(&call, 1);
 
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert_eq!(state, CallState::Ended);
     drain_admin_tasks().await;
 
@@ -1030,7 +2407,7 @@ async fn delete_room_skipped_when_a_participant_registers_during_the_occupancy_p
     admin.set_live(&call, vec![alice.clone()]);
     admin.hold_list();
 
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert_eq!(state, CallState::Ended);
 
     // Bob joins while the probe is parked in flight.
@@ -1065,7 +2442,7 @@ async fn delete_room_skipped_when_livekit_occupancy_cannot_be_confirmed() {
     sfu.register_call_participant(&call, &alice);
     admin.fail_list();
 
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert_eq!(state, CallState::Ended);
     drain_admin_tasks().await;
 
@@ -1103,7 +2480,7 @@ async fn reconcile_sweeps_ghost_absent_from_livekit() {
 
     let first_pass = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert!(
-        first_pass.is_empty(),
+        first_pass.swept.is_empty(),
         "one absent observation must not sweep (#1127): {first_pass:?}"
     );
     assert!(
@@ -1113,7 +2490,7 @@ async fn reconcile_sweeps_ghost_absent_from_livekit() {
 
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
-    assert_eq!(swept, vec![(call.clone(), bob.clone())]);
+    assert_eq!(swept.swept, vec![(call.clone(), bob.clone())]);
     assert!(sfu.has_call_participant(&call, &alice), "Alice must remain");
     assert!(
         !sfu.has_call_participant(&call, &bob),
@@ -1144,7 +2521,7 @@ async fn reconcile_respects_registration_grace_window() {
         .await;
 
     assert!(
-        swept.is_empty(),
+        swept.swept.is_empty(),
         "a participant inside the grace window must not be swept"
     );
     assert_eq!(sfu.participant_count(&call), 1);
@@ -1161,7 +2538,10 @@ async fn reconcile_keeps_genuinely_connected_participants() {
 
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
-    assert!(swept.is_empty(), "connected participant must not be swept");
+    assert!(
+        swept.swept.is_empty(),
+        "connected participant must not be swept"
+    );
     assert!(sfu.has_call_participant(&call, &alice));
 }
 
@@ -1179,7 +2559,7 @@ async fn reconcile_skips_calls_it_cannot_confirm() {
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
     assert!(
-        swept.is_empty(),
+        swept.swept.is_empty(),
         "a call whose participant list could not be fetched must not be swept"
     );
     assert_eq!(sfu.participant_count(&call), 1);
@@ -1201,7 +2581,10 @@ async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
 
     // Pass 1: restart — LiveKit knows no rooms (both list empty).
     let pass1 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert!(pass1.is_empty(), "restart pass must not sweep: {pass1:?}");
+    assert!(
+        pass1.swept.is_empty(),
+        "restart pass must not sweep: {pass1:?}"
+    );
     assert_eq!(sfu.participant_count(&call_a), 1);
     assert_eq!(sfu.participant_count(&call_b), 1);
 
@@ -1209,17 +2592,119 @@ async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
     admin.set_live(&call_a, vec![alice.clone()]);
     admin.set_live(&call_b, vec![bob.clone()]);
     let pass2 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert!(pass2.is_empty(), "reconnected clients must not be swept");
+    assert!(
+        pass2.swept.is_empty(),
+        "reconnected clients must not be swept"
+    );
 
     // Pass 3: streaks were reset by the connected observation, so
     // a later single absent blip still does not sweep.
     admin.set_live(&call_a, vec![]);
     let pass3 = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert!(
-        pass3.is_empty(),
+        pass3.swept.is_empty(),
         "streak must have been reset by the connected pass: {pass3:?}"
     );
     assert!(sfu.has_call_participant(&call_a, &alice));
+}
+
+#[tokio::test]
+async fn reconcile_room_sid_rotation_reincarnates_call_and_accepts_new_sid_observation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("sid-rotation@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+    let old_observed = observed_sids(Some("RM_old"), Some("PA_old"));
+    let new_observed = observed_sids(Some("RM_new"), Some("PA_new"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &old_observed),
+        SidObservationDisposition::Applied
+    );
+    let old_generation = stored_generation(&sfu, &call).expect("old generation");
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &new_observed),
+        SidObservationDisposition::RoomRotationPending,
+        "the first join from a recreated room must remain retryable until reconcile rotates the fence"
+    );
+    assert_eq!(
+        stored_room_sid(&sfu, &call),
+        old_observed.room_sid,
+        "a pending room rotation must not mutate the stored room fence"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        old_observed.participant_sid,
+        "a pending room rotation must not mutate participant state"
+    );
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
+        sid: new_observed.room_sid.clone(),
+        num_participants: Some(1),
+    }]);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let summary = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+    assert!(
+        summary.swept.is_empty(),
+        "room-sid rotation must not sweep a live participant"
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), new_observed.room_sid);
+    assert!(
+        stored_generation(&sfu, &call).expect("new generation") > old_generation,
+        "new room sid must advance the generation fence"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        None,
+        "participant sids from the old room incarnation must be cleared"
+    );
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &new_observed),
+        SidObservationDisposition::Applied,
+        "the redelivered join from the new room sid must apply after reconciliation"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        new_observed.participant_sid
+    );
+}
+
+#[tokio::test]
+async fn reconcile_listing_learns_a_missing_room_sid_without_rotating_generation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("sid-learn@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+    let learned_room_sid = fixture_room_sid("RM_learned");
+    let stale = observed_sids(Some("RM_old"), Some("PA_old"));
+
+    sfu.register_call_participant(&call, &alice);
+    let original_generation = stored_generation(&sfu, &call).expect("generation");
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
+        sid: Some(learned_room_sid.clone()),
+        num_participants: Some(1),
+    }]);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let summary = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+    assert!(summary.swept.is_empty());
+    assert_eq!(stored_room_sid(&sfu, &call), Some(learned_room_sid.clone()));
+    assert_eq!(stored_generation(&sfu, &call), Some(original_generation));
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&stale),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::RoomRotationPending,
+        "a join-side room mismatch stays retryable until an authoritative listing resolves it"
+    );
+    assert_eq!(stored_room_sid(&sfu, &call), Some(learned_room_sid));
 }
 
 #[tokio::test]
@@ -1238,24 +2723,26 @@ async fn reconcile_failed_pass_resets_absence_streak() {
     assert!(sfu
         .reconcile_active_calls(ChronoDuration::zero())
         .await
+        .swept
         .is_empty());
     // Failed pass → streak reset.
     admin.set_list_failing(true);
     assert!(sfu
         .reconcile_active_calls(ChronoDuration::zero())
         .await
+        .swept
         .is_empty());
     admin.set_list_failing(false);
     // Absent pass again → streak restarts at 1, still no sweep.
     let third = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert!(
-        third.is_empty(),
+        third.swept.is_empty(),
         "failed pass must reset the streak: {third:?}"
     );
     assert_eq!(sfu.participant_count(&call), 1);
     // Second CONSECUTIVE absent pass → swept.
     let fourth = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert_eq!(fourth, vec![(call.clone(), alice)]);
+    assert_eq!(fourth.swept, vec![(call.clone(), alice)]);
     assert_eq!(sfu.participant_count(&call), 0);
 }
 
@@ -1274,6 +2761,7 @@ async fn reconcile_streak_resets_on_reregistration() {
     assert!(sfu
         .reconcile_active_calls(ChronoDuration::zero())
         .await
+        .swept
         .is_empty());
     // Rejoin between passes.
     sfu.register_call_participant(&call, &alice);
@@ -1281,10 +2769,153 @@ async fn reconcile_streak_resets_on_reregistration() {
     assert!(
         sfu.reconcile_active_calls(ChronoDuration::zero())
             .await
+            .swept
             .is_empty(),
         "re-registration must reset the absence streak"
     );
     assert_eq!(sfu.participant_count(&call), 1);
+}
+
+#[tokio::test]
+async fn reconcile_discovers_listed_livekit_rooms_and_sweeps_disconnected_after_grace() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("recovered@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: crate::admin::ListedRoomName::classify(call.as_str().to_owned()),
+        sid: Some(RoomSid::new("RM_recovered").expect("room sid")),
+        num_participants: None,
+    }]);
+    admin.set_live(&call, vec![alice.clone()]);
+
+    let adopted = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(adopted.rooms_examined, 1);
+    assert_eq!(adopted.rooms_adopted, 1);
+    assert!(adopted.swept.is_empty());
+    assert_eq!(adopted.rooms_swept, 0);
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(
+        stored_room_sid(&sfu, &call),
+        Some(RoomSid::new("RM_recovered").expect("room sid"))
+    );
+
+    admin.set_live(&call, vec![]);
+    let first_absent = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(first_absent.rooms_swept, 0);
+    assert!(first_absent.swept.is_empty());
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    let second_absent = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(second_absent.rooms_swept, 1);
+    assert_eq!(second_absent.swept, vec![(call.clone(), alice.clone())]);
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn reconcile_list_rooms_error_does_not_skip_registry_pass() {
+    let admin = Arc::new(RecordingAdmin::default());
+    admin.fail_list_rooms();
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: crate::admin::ListedRoomName::classify("listed@muc.waddle.social".to_owned()),
+        sid: None,
+        num_participants: None,
+    }]);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("recovery@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant(&call, &alice);
+
+    let first = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(first.rooms_examined, 1);
+    assert_eq!(first.rooms_adopted, 0);
+    assert!(first.swept.is_empty());
+    let second = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(second.swept, vec![(call.clone(), alice.clone())]);
+    assert_eq!(admin.occupancy_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(admin.delete_snapshot().len(), 0);
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn reconcile_limits_concurrent_room_occupancy_probes() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    admin.hold_all_occupancy();
+
+    let room_count = RECONCILE_CONCURRENCY + 4;
+    for i in 0..room_count {
+        let call = CallId::new(format!("bulk-{i}.muc.waddle.social")).unwrap();
+        sfu.register_call_participant(&call, &fixture_identity("alice"));
+        admin.set_live(&call, vec![]);
+    }
+
+    let reconcile =
+        tokio::spawn(async move { sfu.reconcile_active_calls(ChronoDuration::zero()).await });
+
+    admin
+        .await_occupancy_calls(RECONCILE_CONCURRENCY, StdDuration::from_secs(1))
+        .await;
+    admin.release_occupancy(room_count);
+
+    let summary = reconcile
+        .await
+        .expect("reconcile task must finish once occupancy gate is released");
+
+    assert_eq!(summary.rooms_examined, room_count as u64);
+    assert_eq!(
+        admin.occupancy_calls.load(Ordering::SeqCst),
+        room_count,
+        "every room in the backlog must reach room_occupancy"
+    );
+    assert!(admin.max_occupancy_in_flight() <= RECONCILE_CONCURRENCY);
+    assert_eq!(admin.max_occupancy_in_flight(), RECONCILE_CONCURRENCY);
+}
+
+#[test]
+fn restored_participant_skips_the_first_empty_bucket_eject_after_adoption() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("r-adopted-empty-bucket").expect("call id");
+    let alice = fixture_identity("alice");
+
+    assert!(sfu.adopt_discovered_call(
+        &call,
+        Some(fixture_room_sid("RM_adopted")),
+        &[(alice.clone(), None)],
+        Utc::now()
+    ));
+    let first_minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("first post-adoption token");
+
+    sfu.revoke_issued_token(&call, &alice, &first_minted.jti);
+
+    assert!(sfu.is_revoked(&first_minted.jti));
+    assert!(
+        reported.lock().expect("sink lock").is_empty(),
+        "the first local mint after adoption must preserve the pre-restart protection"
+    );
+
+    let second_minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+    sfu.revoke_issued_token(&call, &alice, &second_minted.jti);
+
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(intents.len(), 1);
+    assert!(matches!(
+        intents[0].target,
+        TeardownTargetLite::Participant { .. }
+    ));
 }
 
 // -------- #1129 teardown/join race --------
@@ -1313,7 +2944,7 @@ fn concurrent_join_during_teardown_is_never_clobbered() {
             let call = call.clone();
             let alice = alice.clone();
             std::thread::spawn(move || {
-                let _ = sfu.unregister_call_participant(&call, &alice);
+                let _ = sfu.unregister_call_participant(&call, &alice, None);
             })
         };
         sfu.register_call_participant(&call, &bob);
@@ -1338,6 +2969,7 @@ async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
     let bob = fixture_identity("bob");
 
     sfu.register_call_participant(&call, &alice);
+    let first_generation = stored_generation(&sfu, &call).expect("first generation");
     // Simulate the joiner landing inside alice's teardown window:
     // remove alice from the set (step 1 of clear_local_state),
     // register bob, then run the full unregister — the conditional
@@ -1345,10 +2977,15 @@ async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
     sfu.calls
         .get_mut(&call)
         .expect("entry exists")
+        .participants
         .remove(&alice);
     sfu.register_call_participant(&call, &bob);
+    assert!(
+        stored_generation(&sfu, &call).expect("rejoin generation") > first_generation,
+        "registering into an observed-empty entry must advance the generation"
+    );
 
-    let state = sfu.unregister_call_participant(&call, &alice);
+    let state = applied_state(sfu.unregister_call_participant(&call, &alice, None));
     assert!(
         matches!(state, CallState::Active { remaining: 1 }),
         "joiner present at conditional-remove time must keep the call active; got {state:?}"
@@ -1359,4 +2996,428 @@ async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
         "DeleteRoom must not fire while the fresh joiner is registered"
     );
     assert!(sfu.has_call_participant(&call, &bob));
+}
+
+#[test]
+fn final_direct_call_departure_retains_a_generation_tombstone() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("alice@waddle.social::dm-reap").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    assert!(
+        sfu.call_generations.contains_key(&call),
+        "registration seeds the generation tracker"
+    );
+
+    assert_eq!(
+        applied_state(sfu.unregister_call_participant(&call, &alice, None)),
+        CallState::Ended
+    );
+    assert!(
+        sfu.call_generations.contains_key(&call),
+        "the last direct-call departure must retain a tombstone generation fence"
+    );
+    assert!(
+        stored_generation_tombstone_cleared_at(&sfu, &call).is_some(),
+        "the retained generation entry must record when the call cleared"
+    );
+}
+
+#[test]
+fn final_muc_departure_retains_generation_tracker() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::new("room@muc.waddle.social").unwrap();
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    assert!(
+        sfu.call_generations.contains_key(&call),
+        "registration seeds the generation tracker"
+    );
+
+    assert_eq!(
+        applied_state(sfu.unregister_call_participant(&call, &alice, None)),
+        CallState::Ended
+    );
+    assert!(
+        sfu.call_generations.contains_key(&call),
+        "MUC call ids are stable room names, so their generation fence must survive teardown"
+    );
+    assert!(
+        stored_generation_tombstone_cleared_at(&sfu, &call).is_some(),
+        "the retained generation entry must also record the clear time for MUC calls"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_prunes_generation_tombstones_older_than_25_hours() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("alice@waddle.social::aged-tombstone").expect("call id");
+    let alice = fixture_identity("alice");
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        applied_state(sfu.unregister_call_participant(&call, &alice, None)),
+        CallState::Ended
+    );
+    sfu.call_generations
+        .get_mut(&call)
+        .expect("generation tombstone")
+        .last_cleared_at = Some(Utc::now() - ChronoDuration::hours(26));
+
+    let _summary = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+    assert!(
+        !sfu.call_generations.contains_key(&call),
+        "reconcile must reap tombstones once they age past the 25h retention window"
+    );
+}
+
+/// #1449 codex round 3: a degraded pass (listing failed) must NOT open
+/// the startup fence — the fence exists to wait for an authoritative
+/// SID/generation inventory.
+#[tokio::test]
+async fn degraded_reconcile_pass_keeps_the_startup_fence_closed() {
+    let admin = Arc::new(RecordingAdmin::default());
+    admin.fail_list_rooms();
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+
+    let _ = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert!(
+        !sfu.reconcile_pass_completed.load(Ordering::Acquire),
+        "a pass without an authoritative listing must not open the fence"
+    );
+
+    *admin.list_rooms_errors.lock().expect("recording lock") = false;
+    let _ = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert!(
+        sfu.reconcile_pass_completed.load(Ordering::Acquire),
+        "the first authoritative pass opens the fence"
+    );
+}
+
+/// #1449 codex round 3: when one participant was already re-registered
+/// (webhook beat the reconcile pass), the remaining LiveKit-live
+/// identities must be merged into the existing entry instead of
+/// staying invisible until another join signal.
+#[tokio::test]
+async fn partially_restored_call_merges_remaining_live_identities() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("merge-room@muc.waddle.social").expect("call id");
+    let alice = Identity::from_jid("alice@waddle.social/web".parse().expect("jid"));
+    let bob = Identity::from_jid("bob@waddle.social/web".parse().expect("jid"));
+    let alice_sid = fixture_participant_sid("PA_alice_reconciled");
+    let bob_sid = fixture_participant_sid("PA_bob_merged");
+
+    // Alice's webhook re-registration arrived before the pass.
+    sfu.register_call_participant(&call, &alice);
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
+        sid: Some(RoomSid::new("RM_merge").expect("room sid")),
+        num_participants: Some(2),
+    }]);
+    admin.set_live_with_sids(
+        &call,
+        vec![
+            (alice.clone(), Some(alice_sid.clone())),
+            (bob.clone(), Some(bob_sid.clone())),
+        ],
+    );
+
+    let pass = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(
+        pass.rooms_adopted, 0,
+        "existing entries are merged, not adopted"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert!(
+        sfu.has_call_participant(&call, &bob),
+        "live identities missing from a partially restored entry must be merged"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        Some(alice_sid),
+        "reconciliation must teach a listed SID to an already-restored participant"
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &bob),
+        Some(bob_sid),
+        "a merged participant must retain the SID returned by ListParticipants"
+    );
+}
+
+#[test]
+fn reconciliation_listing_never_regresses_an_already_known_participant_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("merge-sid-race@muc.waddle.social").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = observed_sids(Some("RM_current"), Some("PA_new"));
+    let stale_listed_sid = fixture_participant_sid("PA_old");
+
+    // The probe snapshot predates the webhook observation: the newer
+    // join sid must win over the in-flight listing.
+    let probe_started_at = Utc::now();
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &current),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(stale_listed_sid))],
+            Utc::now(),
+            probe_started_at,
+        ),
+        0
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        current.participant_sid,
+        "an in-flight reconciliation listing must not overwrite a newer join SID"
+    );
+}
+
+#[tokio::test]
+async fn adopted_participant_sid_makes_fenced_removal_decidable() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("adopt-sid@muc.waddle.social").expect("call id");
+    let alice = Identity::from_jid("alice@waddle.social/web".parse().expect("jid"));
+    let room_sid = fixture_room_sid("RM_adopt_sid");
+    let participant_sid = fixture_participant_sid("PA_adopt_sid");
+
+    admin.set_rooms(vec![crate::admin::ListedRoom {
+        name: crate::admin::ListedRoomName::classify(call.to_string()),
+        sid: Some(room_sid.clone()),
+        num_participants: Some(1),
+    }]);
+    admin.set_live_with_sids(&call, vec![(alice.clone(), Some(participant_sid.clone()))]);
+
+    let pass = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+    assert_eq!(pass.rooms_adopted, 1);
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        Some(participant_sid.clone()),
+        "adoption must carry the listed participant SID into restored state"
+    );
+
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: Some(participant_sid),
+        },
+        generation: stored_generation(&sfu, &call),
+        room_sid: Some(room_sid),
+    };
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("SID-fenced removal resolves"),
+        TeardownExecution::Executed,
+        "the restored SID must prevent the teardown guard from returning Unresolved"
+    );
+    assert_eq!(admin.remove_snapshot(), vec![(call, alice)]);
+}
+
+/// #1612 review round 14: a join with a DIFFERENT sid but the SAME
+/// whole-second event time as the stored lineage is unordered. The
+/// fence is kept but marked contested, so a delayed leave matching the
+/// retained fence cannot clear what may be the live same-second
+/// reconnect; the occupancy reconcile advances the fence, after which
+/// the old leave mismatches and the live twin's leave applies.
+#[test]
+fn equal_event_time_join_contests_lineage_and_defers_matching_leave() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("contested@muc.waddle.social").expect("call id");
+    let alice = fixture_identity("alice");
+    let event_second = Utc::now();
+    let mut first = observed_sids(Some("RM_contested"), Some("PA_first"));
+    first.observed_event_at = Some(event_second);
+    let mut twin = observed_sids(Some("RM_contested"), Some("PA_twin"));
+    twin.observed_event_at = Some(event_second);
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &first),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&twin),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        first.participant_sid,
+        "an unordered equal-time join must not overwrite the stored fence"
+    );
+
+    assert!(
+        matches!(
+            sfu.note_participant_left(&call, &alice, Some(&first)),
+            TeardownDisposition::StaleSid
+        ),
+        "a leave matching a contested fence must be deferred, not executed"
+    );
+    assert!(
+        sfu.has_call_participant(&call, &alice),
+        "the possibly-live same-second reconnect must survive the deferred leave"
+    );
+
+    // The occupancy probe (started after the ambiguity arose) reports
+    // the twin as live: the fence advances and resolves the contest.
+    let twin_sid = twin.participant_sid.clone().expect("twin sid");
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(twin_sid))],
+            Utc::now(),
+            Utc::now(),
+        ),
+        0
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        twin.participant_sid
+    );
+    assert!(
+        matches!(
+            sfu.note_participant_left(&call, &alice, Some(&first)),
+            TeardownDisposition::StaleSid
+        ),
+        "the departed twin's redelivered leave must mismatch the advanced fence"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert!(
+        matches!(
+            sfu.note_participant_left(&call, &alice, Some(&twin)),
+            TeardownDisposition::Applied(_)
+        ),
+        "the resolved live sid's own leave must execute normally"
+    );
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+/// #1612 review round 14: only a probe started AFTER the ambiguity
+/// arose may confirm the stored fence and resolve the contest — a
+/// snapshot predating the contest proves nothing about which
+/// same-second twin survived.
+#[test]
+fn contested_lineage_resolves_only_via_a_probe_started_after_the_contest() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("contested-confirm@muc.waddle.social").expect("call id");
+    let alice = fixture_identity("alice");
+    let event_second = Utc::now();
+    let mut first = observed_sids(Some("RM_confirm"), Some("PA_first"));
+    first.observed_event_at = Some(event_second);
+    let mut twin = observed_sids(Some("RM_confirm"), Some("PA_twin"));
+    twin.observed_event_at = Some(event_second);
+    let first_sid = first.participant_sid.clone().expect("first sid");
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &first),
+        SidObservationDisposition::Applied
+    );
+    let pre_contest_probe_boundary = Utc::now();
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&twin),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    // A probe that went out BEFORE the contest reports the stored sid:
+    // it cannot resolve the ambiguity; the matching leave stays deferred.
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(first_sid.clone()))],
+            Utc::now(),
+            pre_contest_probe_boundary,
+        ),
+        0
+    );
+    assert!(matches!(
+        sfu.note_participant_left(&call, &alice, Some(&first)),
+        TeardownDisposition::StaleSid
+    ));
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    // A post-contest probe confirming the stored fence resolves the
+    // contest in its favor; the matching leave now executes.
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(first_sid))],
+            Utc::now(),
+            Utc::now(),
+        ),
+        0
+    );
+    assert!(matches!(
+        sfu.note_participant_left(&call, &alice, Some(&first)),
+        TeardownDisposition::Applied(_)
+    ));
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+/// #1612 review round 14: when the pre-connect admin removal completed
+/// as not-found and the join webhook was then lost, the reconcile pass
+/// only fills the ALREADY-TRACKED identity's sid (`merged == 0`). The
+/// pending revocation eject must still be re-armed for every live
+/// identity, not only newly inserted ones — reconciliation is the
+/// documented lost-webhook backstop for revoked holders.
+#[test]
+fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-reconcile-rearm-eject").expect("call id");
+    let alice = fixture_identity("alice");
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+    sfu.register_call_participant(&call, &alice);
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+    assert_eq!(reported.lock().expect("sink lock").len(), 1);
+
+    // The occupancy probe reports the still-connected revoked holder:
+    // alice is already tracked, so nothing is merged — the eject must
+    // be re-armed regardless.
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(fixture_participant_sid("PA_rearm")))],
+            Utc::now(),
+            Utc::now(),
+        ),
+        0
+    );
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(
+        intents.len(),
+        2,
+        "reconciling an already-tracked identity must re-arm its pending eject"
+    );
+    match &intents[1].target {
+        TeardownTargetLite::Participant { identity, .. } => assert_eq!(identity, &alice),
+        TeardownTargetLite::Room => panic!("eject convergence must only enqueue eviction"),
+    }
 }

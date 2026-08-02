@@ -68,6 +68,8 @@ pub enum Janitor {
     PushPublishJob,
     /// Notification outbox drain/retry/dead-letter.
     NotificationOutbox,
+    /// Durable LiveKit/Muji teardown convergence outbox.
+    CallTeardownOutbox,
     /// Expired OAuth/device auth state.
     AuthState,
     /// Dormant MUC room eviction.
@@ -90,6 +92,7 @@ impl MetricAttribute for Janitor {
             Self::PendingDeliveryClaim => "pending_delivery_claim",
             Self::PushPublishJob => "push_publish_job",
             Self::NotificationOutbox => "notification_outbox",
+            Self::CallTeardownOutbox => "call_teardown_outbox",
             Self::AuthState => "auth_state",
             Self::RoomDormancy => "room_dormancy",
             Self::UserActorReaper => "user_actor_reaper",
@@ -560,12 +563,18 @@ pub enum CallSetupFailureReason {
     /// review). A nonzero rate here is a routing-pipeline bug, not a
     /// peer or client condition.
     RouteAbandoned,
+    /// XEP-0191: the addressed peer blocks the caller, so the invite
+    /// was bounced by the pre-dispatch blocklist gate before any token
+    /// mint or registration. Counted there — the gate returns before a
+    /// `CallSetupAttempt` ever opens, and every terminal initiate must
+    /// contribute one attempted/failed pair (#1612 review round 13).
+    PeerBlocked,
 }
 
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -578,6 +587,7 @@ impl CallSetupFailureReason {
         Self::OwnerUnreachable,
         Self::PeerUnavailable,
         Self::RouteAbandoned,
+        Self::PeerBlocked,
     ];
 }
 
@@ -600,6 +610,7 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::OwnerUnreachable => "owner_unreachable",
             Self::PeerUnavailable => "peer_unavailable",
             Self::RouteAbandoned => "route_abandoned",
+            Self::PeerBlocked => "peer_blocked",
         }
     }
 }
@@ -653,6 +664,10 @@ pub enum WebhookOutcome {
     SignatureFailed,
     /// The signature was valid, but the body did not decode as an event.
     DecodeFailed,
+    /// A valid delivery's effects could not be completed and LiveKit was asked to retry.
+    RetryableFailure,
+    /// A valid delivery contained an unrecoverable value and was acknowledged after warning.
+    PermanentFailure,
 }
 
 impl sealed::Sealed for WebhookOutcome {}
@@ -666,6 +681,8 @@ impl MetricAttribute for WebhookOutcome {
             Self::Duplicate => "duplicate",
             Self::SignatureFailed => "signature_failed",
             Self::DecodeFailed => "decode_failed",
+            Self::RetryableFailure => "retryable_failure",
+            Self::PermanentFailure => "permanent_failure",
         }
     }
 }
@@ -687,6 +704,28 @@ impl MetricAttribute for RequestOutcome {
         match self {
             Self::Success => "success",
             Self::Failure => "failure",
+        }
+    }
+}
+
+/// `surface` — which call-control request surface hit a rate limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallControlRateLimitedSurface {
+    Terminate,
+    MujiAction,
+    Turn,
+}
+
+impl sealed::Sealed for CallControlRateLimitedSurface {}
+impl MetricAttribute for CallControlRateLimitedSurface {
+    fn key(&self) -> &'static str {
+        "surface"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Terminate => "terminate",
+            Self::MujiAction => "muji_action",
+            Self::Turn => "turn",
         }
     }
 }

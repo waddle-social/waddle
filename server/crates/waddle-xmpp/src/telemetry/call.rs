@@ -2,7 +2,7 @@
 //! the protocol-layer Jingle handler and the server-side Muji gate so
 //! one family is never emitted from divergent macro sites.
 
-use super::attributes::{CallSetupFailureReason, SfuDenialReason};
+use super::attributes::{CallControlRateLimitedSurface, CallSetupFailureReason, SfuDenialReason};
 
 /// Count a minted LiveKit SFU token.
 pub fn increment_sfu_token_minted() {
@@ -220,6 +220,152 @@ pub fn record_call_setup_rejected(reason: CallSetupFailureReason) {
     increment_call_setup_failed(reason);
 }
 
+/// Count a call-control request rejected by a local sliding-window
+/// limiter.
+pub fn increment_call_control_rate_limited(surface: CallControlRateLimitedSurface) {
+    crate::counter_add!(
+        "waddle.call.control.rate_limited",
+        "1",
+        "Call-control requests rejected by local rate limits.",
+        1,
+        surface,
+    );
+}
+
+/// Count a webhook-driven teardown dropped because its observed SID
+/// belongs to an older call incarnation.
+pub fn increment_call_teardown_stale_dropped() {
+    crate::counter_add!(
+        "waddle.call.teardown.stale_dropped",
+        "1",
+        "Webhook-driven call teardowns dropped due to stale room or participant SIDs.",
+        1,
+    );
+}
+
+/// Record the durable teardown queue depth observed by one janitor sweep.
+pub fn record_call_teardown_outbox_depth(depth: u64) {
+    crate::histogram_record!(
+        "waddle.call.teardown.outbox.depth",
+        "1",
+        "Queued durable call teardown intents observed at sweep time.",
+        depth as f64,
+    );
+}
+
+/// Record the age of the oldest queued teardown intent observed by a sweep.
+pub fn record_call_teardown_outbox_oldest_age(seconds: f64) {
+    crate::histogram_record!(
+        "waddle.call.teardown.outbox.oldest_age",
+        "s",
+        "Age of the oldest queued durable call teardown intent.",
+        buckets: crate::telemetry::SECOND_SCALE_BUCKETS,
+        seconds,
+    );
+}
+
+/// Count durable teardown intents completed by the outbox drain.
+pub fn add_call_teardown_outbox_drained(count: u64) {
+    if count > 0 {
+        crate::counter_add!(
+            "waddle.call.teardown.outbox.drained",
+            "1",
+            "Durable call teardown intents completed by the outbox drain.",
+            count,
+        );
+    }
+}
+
+/// Count durable teardown intents scheduled for another attempt.
+pub fn add_call_teardown_outbox_requeued(count: u64) {
+    if count > 0 {
+        crate::counter_add!(
+            "waddle.call.teardown.outbox.requeued",
+            "1",
+            "Durable call teardown intents requeued after retryable failures.",
+            count,
+        );
+    }
+}
+
+/// Count durable teardown intents that exhausted their retry budget.
+pub fn add_call_teardown_outbox_failed(count: u64) {
+    if count > 0 {
+        crate::counter_add!(
+            "waddle.call.teardown.outbox.failed",
+            "1",
+            "Durable call teardown intents moved to terminal failure.",
+            count,
+        );
+    }
+}
+
+/// Record the wall-clock duration of one LiveKit reconciliation pass.
+pub fn record_reconcile_pass_duration(seconds: f64) {
+    crate::histogram_record!(
+        "waddle.call.reconcile.pass_duration",
+        "s",
+        "Wall-clock duration of one LiveKit call reconciliation pass.",
+        buckets: crate::telemetry::SECOND_SCALE_BUCKETS,
+        seconds,
+    );
+}
+
+/// Add the number of rooms whose occupancy was examined in a pass.
+pub fn add_reconcile_rooms_examined(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.rooms_examined",
+        "1",
+        "LiveKit rooms examined by call reconciliation.",
+        count,
+    );
+}
+
+/// Add the number of LiveKit rooms adopted into the local registry.
+pub fn add_reconcile_rooms_adopted(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.rooms_adopted",
+        "1",
+        "LiveKit rooms adopted into the local call registry.",
+        count,
+    );
+}
+
+/// Add the number of rooms from which at least one ghost was swept.
+pub fn add_reconcile_rooms_swept(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.rooms_swept",
+        "1",
+        "LiveKit rooms with registry ghosts swept by reconciliation.",
+        count,
+    );
+}
+
+/// Add failed per-room occupancy probes.
+///
+/// This is alert-worthy operational evidence, but unlike the #1436
+/// reliability-rate families it must not be startup zero-registered:
+/// absence means no failure has ever ticked in this process.
+pub fn add_reconcile_occupancy_failures(count: u64) {
+    if count == 0 {
+        return;
+    }
+    crate::counter_add!(
+        "waddle.call.reconcile.occupancy_failures",
+        "1",
+        "LiveKit room occupancy probes failed during call reconciliation.",
+        count,
+    );
+}
 #[cfg(test)]
 mod pending_call_setup_route_tests {
     use super::PendingCallSetupRoute;

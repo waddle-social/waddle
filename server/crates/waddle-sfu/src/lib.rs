@@ -33,12 +33,19 @@ mod token;
 mod turn;
 mod webhook;
 
-pub use admin::{LiveKitAdmin, RoomOccupancy};
-pub use call::{CallId, CallState, Identity, MediaCapabilities};
+pub use admin::{ListedRoom, LiveKitAdmin, RoomOccupancy};
+pub use call::{
+    CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
+    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDirection, SidObservationDisposition,
+    TeardownDisposition, TeardownTargetLite,
+};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
 pub use error::SfuError;
-pub use livekit::{LiveKitSfu, RECONCILE_GRACE_SECONDS};
+pub use livekit::{
+    LiveKitSfu, LiveKitTeardownExecutor, TeardownExecution, TeardownFailureSink,
+    RECONCILE_CONCURRENCY, RECONCILE_GRACE_SECONDS,
+};
 pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
 pub use webhook::{
@@ -72,14 +79,61 @@ pub trait SfuService: Send + Sync + 'static {
     /// configuration follows.
     fn issue_turn_credentials(&self, identity: &Identity) -> Result<TurnCredential, SfuError>;
 
-    /// Record that `identity` has joined `call_id`. Idempotent: a
-    /// repeat join is a no-op (the registry is a set).
+    /// Record that `identity` has joined `call_id`. Idempotent within
+    /// one call generation: a repeat join is a no-op.
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity);
+
+    /// Register a participant learned from an authoritative
+    /// `participant_joined` webhook and atomically learn its observed
+    /// room/participant SIDs. Unlike token issuance, this only restores
+    /// local bookkeeping after a process restart.
+    ///
+    /// If an existing call entry has a conflicting room SID, the event
+    /// MUST return [`SidObservationDisposition::RoomRotationPending`]
+    /// without mutation. The webhook can then be redelivered after an
+    /// authoritative room listing rotates the stored incarnation.
+    fn register_call_participant_observed(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: &ObservedCallSids,
+    ) -> SidObservationDisposition;
 
     /// Return whether `identity` is currently registered in
     /// `call_id`. Call teardown uses this as the authorization check
     /// before revoking any other participant's token state.
     fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool;
+
+    /// Wall-clock instant `identity`'s CURRENT registration in
+    /// `call_id` was recorded, or `None` when not registered (or when
+    /// the implementation does not track registration times). The
+    /// durable teardown drain compares this against an intent's
+    /// creation time: only a registration that POSTDATES the intent
+    /// proves a rejoin — a mere live registration can equally mean
+    /// the departure this intent represents was never applied on this
+    /// node (#1449 review N1).
+    fn participant_registered_at(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+
+    /// Wall-clock instant `identity` most recently received a locally
+    /// minted join token for its CURRENT registration in `call_id`, or
+    /// `None` when not registered (or when the implementation does not
+    /// track mint times). Higher layers can combine this with
+    /// [`Self::participant_registered_at`] to distinguish a
+    /// freshly-observed participant that this node never minted for
+    /// from one that rejoined through a local token issuance.
+    fn participant_last_minted_at(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
 
     /// Record that `identity` has left `call_id` and report whether
     /// the call is still active. When the last participant leaves,
@@ -97,16 +151,29 @@ pub trait SfuService: Send + Sync + 'static {
     /// `Active { remaining }` instead): a stale or replayed teardown
     /// must not trigger room-end broadcast or SFU-side room deletion
     /// for a call the caller does not actually own membership in.
-    fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState;
+    fn unregister_call_participant(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> TeardownDisposition;
 
-    /// Targeted, bookkeeping-only revocation of ONE issued JWT for
-    /// the pair (#1444): moves `jti` into the revocation set without
-    /// touching the participant's registration, their other
-    /// issuances, or the SFU itself (no `RemoveParticipant`). This is
-    /// the compensation for a single stanza whose delivery failed —
-    /// the pair may simultaneously be live in the call through an
-    /// independent, successful negotiation, and that session must
-    /// survive the bounce.
+    /// Targeted revocation of ONE issued JWT for the pair (#1444):
+    /// moves `jti` into the revocation set without touching the
+    /// participant's registration or their other issuances, then
+    /// schedules the same generation/SID-guarded `RemoveParticipant`
+    /// convergence path that a full unregister uses when the
+    /// revocation empties the pair's active issuance window (the
+    /// downgrade-to-nothing case). LiveKit never consults our revoked
+    /// map on join, so active enforcement for a live holder has to
+    /// happen through the admin API rather than by local bookkeeping
+    /// alone.
+    ///
+    /// If the revoked token is first used only AFTER this local
+    /// revocation, convergence still comes from that guarded eject
+    /// once the live participant becomes observable again (for
+    /// example through a later participant-join observation or room
+    /// adoption/reconciliation).
     ///
     /// Implementations MUST ignore a `jti` that is not currently
     /// tracked in the pair's issued window: the identifier arrives
@@ -124,7 +191,31 @@ pub trait SfuService: Send + Sync + 'static {
     /// that the SFU already evicted the participant, and a
     /// back-channel `RemoveParticipant` would amplify into a wasted
     /// round-trip plus a race window against quick rejoins.
-    fn note_participant_left(&self, call_id: &CallId, identity: &Identity);
+    fn note_participant_left(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> TeardownDisposition;
+
+    /// Learn observed room/participant sids for an existing
+    /// `(call_id, identity)` without changing membership or issuing
+    /// admin calls. Used by SID-bearing informational events such as
+    /// `participant_joined` so later teardown can reject an older call
+    /// incarnation reusing the same human room name.
+    ///
+    /// Implementations MUST NOT create new call or participant entries
+    /// from this method. If either is unknown, the observation is
+    /// ignored and reported as applied. A join-side room-SID mismatch
+    /// is pending until reconciliation rotates the stored incarnation;
+    /// a leave-side mismatch is stale and remains a no-op.
+    fn observe_call_participant_sids(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        direction: SidObservationDirection,
+    ) -> SidObservationDisposition;
 
     /// Push replacement media grants to a live participant after an
     /// XEP-0045 voice change, without disconnecting them: losing voice
@@ -191,10 +282,20 @@ pub trait SfuService: Send + Sync + 'static {
     fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
 }
 
-/// Future returned by [`SfuReconciler::reconcile_active_calls`],
-/// resolving to the `(call, identity)` pairs swept this pass. Named so
-/// the boxed-future shape stays readable at the trait + impl sites.
-pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Vec<(CallId, Identity)>> + Send + 'a>>;
+/// Future returned by [`SfuReconciler::reconcile_active_calls`]. Named
+/// so the boxed-future shape stays readable at the trait + impl sites.
+pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = ReconcilePassSummary> + Send + 'a>>;
+
+/// Typed, telemetry-free result of one LiveKit reconciliation pass.
+/// `waddle-server` translates these values into process metrics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcilePassSummary {
+    pub swept: Vec<(CallId, Identity)>,
+    pub rooms_examined: u64,
+    pub rooms_adopted: u64,
+    pub rooms_swept: u64,
+    pub occupancy_failures: u64,
+}
 
 /// Periodic reconciliation against the SFU's ground truth.
 ///
@@ -207,11 +308,10 @@ pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Vec<(CallId, Identity
 /// LiveKit, not our in-memory registry, is the authority on who is
 /// actually connected.
 pub trait SfuReconciler: Send + Sync + 'static {
-    /// Sweep registry entries LiveKit no longer reports as connected,
-    /// respecting a registration grace window so still-connecting
-    /// participants are not mistaken for ghosts. Returns the
-    /// `(call, identity)` pairs swept so the caller can clear the
-    /// corresponding MUC Muji presence idempotently.
+    /// Discover active LiveKit rooms, adopt missing registry entries,
+    /// and sweep entries LiveKit no longer reports as connected while
+    /// respecting the registration grace window. The summary includes
+    /// swept identities for idempotent MUC Muji presence cleanup.
     fn reconcile_active_calls(&self, grace: chrono::Duration) -> ReconcileFuture<'_>;
 
     /// The identities the SFU itself reports as currently connected to

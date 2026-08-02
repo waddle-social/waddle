@@ -117,7 +117,6 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry(
 /// populated and `state.deps.protocol.sm_session_registry` backed by a real
 /// durable, claim-fenced store rather than every other fixture in this
 /// module's plain in-memory default.
-#[cfg(feature = "clustering")]
 pub(crate) async fn create_test_websocket_state_with_clustering(
     clustering: crate::clustering::ClusteringHandles,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
@@ -217,10 +216,32 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
 /// `delete_calls`. The other trait methods are unimplemented because
 /// the production code paths under test only touch the teardown
 /// surfaces.
-#[derive(Default)]
 pub(crate) struct RecordingSfu {
+    registered_calls: std::sync::Mutex<
+        Vec<(
+            waddle_sfu::CallId,
+            waddle_sfu::Identity,
+            waddle_sfu::ObservedCallSids,
+        )>,
+    >,
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
-    note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    note_calls: std::sync::Mutex<
+        Vec<(
+            waddle_sfu::CallId,
+            waddle_sfu::Identity,
+            waddle_sfu::ObservedCallSids,
+        )>,
+    >,
+    note_disposition: std::sync::Mutex<Option<waddle_sfu::TeardownDisposition>>,
+    register_disposition: std::sync::Mutex<Option<waddle_sfu::SidObservationDisposition>>,
+    observed_calls: std::sync::Mutex<
+        Vec<(
+            waddle_sfu::CallId,
+            waddle_sfu::Identity,
+            waddle_sfu::ObservedCallSids,
+        )>,
+    >,
+    participants: std::sync::Mutex<Vec<waddle_sfu::Identity>>,
     update_calls: std::sync::Mutex<
         Vec<(
             waddle_sfu::CallId,
@@ -230,13 +251,81 @@ pub(crate) struct RecordingSfu {
     >,
 }
 
+impl Default for RecordingSfu {
+    fn default() -> Self {
+        Self {
+            registered_calls: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::Mutex::new(Vec::new()),
+            note_calls: std::sync::Mutex::new(Vec::new()),
+            note_disposition: std::sync::Mutex::new(None),
+            register_disposition: std::sync::Mutex::new(None),
+            observed_calls: std::sync::Mutex::new(Vec::new()),
+            participants: std::sync::Mutex::new(Vec::new()),
+            update_calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
 impl RecordingSfu {
+    pub(crate) fn registered_with_sids_snapshot(
+        &self,
+    ) -> Vec<(
+        waddle_sfu::CallId,
+        waddle_sfu::Identity,
+        waddle_sfu::ObservedCallSids,
+    )> {
+        self.registered_calls
+            .lock()
+            .expect("recording lock")
+            .clone()
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
         self.calls.lock().expect("recording lock").clone()
     }
 
     pub(crate) fn note_snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
+        self.note_calls
+            .lock()
+            .expect("recording lock")
+            .iter()
+            .map(|(call_id, identity, _)| (call_id.clone(), identity.clone()))
+            .collect()
+    }
+
+    pub(crate) fn note_with_sids_snapshot(
+        &self,
+    ) -> Vec<(
+        waddle_sfu::CallId,
+        waddle_sfu::Identity,
+        waddle_sfu::ObservedCallSids,
+    )> {
         self.note_calls.lock().expect("recording lock").clone()
+    }
+
+    pub(crate) fn set_note_disposition(&self, disposition: waddle_sfu::TeardownDisposition) {
+        *self.note_disposition.lock().expect("recording lock") = Some(disposition);
+    }
+
+    pub(crate) fn set_register_disposition(
+        &self,
+        disposition: waddle_sfu::SidObservationDisposition,
+    ) {
+        *self.register_disposition.lock().expect("recording lock") = Some(disposition);
+    }
+
+    pub(crate) fn observed_with_sids_snapshot(
+        &self,
+    ) -> Vec<(
+        waddle_sfu::CallId,
+        waddle_sfu::Identity,
+        waddle_sfu::ObservedCallSids,
+    )> {
+        self.observed_calls.lock().expect("recording lock").clone()
+    }
+
+    pub(crate) fn set_participants(&self, participants: Vec<waddle_sfu::Identity>) {
+        *self.participants.lock().expect("recording lock") = participants;
     }
 
     pub(crate) fn update_snapshot(
@@ -269,6 +358,29 @@ impl waddle_sfu::SfuService for RecordingSfu {
 
     fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
 
+    fn register_call_participant_observed(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        observed_sids: &waddle_sfu::ObservedCallSids,
+    ) -> waddle_sfu::SidObservationDisposition {
+        if let Some(disposition) = *self.register_disposition.lock().expect("recording lock") {
+            return disposition;
+        }
+        if matches!(
+            *self.note_disposition.lock().expect("recording lock"),
+            Some(waddle_sfu::TeardownDisposition::StaleSid)
+        ) {
+            return waddle_sfu::SidObservationDisposition::StaleSid;
+        }
+        self.registered_calls.lock().expect("recording lock").push((
+            call_id.clone(),
+            identity.clone(),
+            observed_sids.clone(),
+        ));
+        waddle_sfu::SidObservationDisposition::Applied
+    }
+
     fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
         false
     }
@@ -286,23 +398,58 @@ impl waddle_sfu::SfuService for RecordingSfu {
         &self,
         call_id: &waddle_sfu::CallId,
         identity: &waddle_sfu::Identity,
-    ) -> waddle_sfu::CallState {
+        _: Option<&waddle_sfu::ObservedCallSids>,
+    ) -> waddle_sfu::TeardownDisposition {
         self.calls
             .lock()
             .expect("recording lock")
             .push((call_id.clone(), identity.clone()));
-        waddle_sfu::CallState::Ended
+        waddle_sfu::TeardownDisposition::Applied(waddle_sfu::CallState::Ended)
     }
 
-    fn note_participant_left(&self, call_id: &waddle_sfu::CallId, identity: &waddle_sfu::Identity) {
+    fn note_participant_left(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        observed_sids: Option<&waddle_sfu::ObservedCallSids>,
+    ) -> waddle_sfu::TeardownDisposition {
         // Recorded into `note_calls`, NOT `calls`: the two trait
         // methods imply different downstream effects (admin
         // RemoveParticipant vs. local-only bookkeeping) and tests
         // need to distinguish them.
-        self.note_calls
+        self.note_calls.lock().expect("recording lock").push((
+            call_id.clone(),
+            identity.clone(),
+            observed_sids.cloned().unwrap_or_default(),
+        ));
+        self.note_disposition
             .lock()
             .expect("recording lock")
-            .push((call_id.clone(), identity.clone()));
+            .unwrap_or(waddle_sfu::TeardownDisposition::Applied(
+                waddle_sfu::CallState::Ended,
+            ))
+    }
+
+    fn observe_call_participant_sids(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        observed_sids: Option<&waddle_sfu::ObservedCallSids>,
+        _: waddle_sfu::SidObservationDirection,
+    ) -> waddle_sfu::SidObservationDisposition {
+        self.observed_calls.lock().expect("recording lock").push((
+            call_id.clone(),
+            identity.clone(),
+            observed_sids.cloned().unwrap_or_default(),
+        ));
+        if matches!(
+            *self.note_disposition.lock().expect("recording lock"),
+            Some(waddle_sfu::TeardownDisposition::StaleSid)
+        ) {
+            waddle_sfu::SidObservationDisposition::StaleSid
+        } else {
+            waddle_sfu::SidObservationDisposition::Applied
+        }
     }
 
     fn update_participant_capabilities(
@@ -331,11 +478,15 @@ impl waddle_sfu::SfuService for RecordingSfu {
     }
 
     fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
-        unimplemented!("not exercised by these tests")
+        static SECRET: std::sync::OnceLock<waddle_sfu::ApiSecret> = std::sync::OnceLock::new();
+        SECRET.get_or_init(|| {
+            waddle_sfu::ApiSecret::from_text("recording-webhook-secret-32-bytes")
+                .expect("recording webhook secret meets minimum length")
+        })
     }
 
     fn participants_for_call(&self, _: &waddle_sfu::CallId) -> Vec<waddle_sfu::Identity> {
-        Vec::new()
+        self.participants.lock().expect("recording lock").clone()
     }
 }
 
@@ -490,6 +641,28 @@ async fn create_test_websocket_state_with_extension_manager(
         .await
         .expect("notification outbox"),
     );
+    let call_teardown_node_identity = app_state
+        .clustering_claims
+        .node_identity
+        .clone()
+        .unwrap_or_else(|| {
+            waddle_xmpp::ownership::SharedNodeIdentity::new(
+                waddle_xmpp::ownership::NodeIdentity::local(),
+            )
+        });
+    let call_teardown_outbox = Arc::new(
+        crate::call_teardown_outbox::CallTeardownOutboxStore::new_with_node_identity(
+            app_state.db_pool.global().clone(),
+            call_teardown_node_identity,
+        )
+        .await
+        .expect("call teardown outbox"),
+    );
+    let call_teardown_persistence =
+        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor::new(
+            Arc::clone(&call_teardown_outbox),
+            tokio::runtime::Handle::current(),
+        );
 
     let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
@@ -551,6 +724,12 @@ async fn create_test_websocket_state_with_extension_manager(
                     },
                     extension_manager,
                     dispatcher: Arc::new(dispatcher),
+                    muji_pre_dispatch_terminate_rate_limit: Arc::new(
+                        waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit::with_defaults(),
+                    ),
+                    muji_pre_dispatch_action_rate_limit: Arc::new(
+                        waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit::with_defaults(),
+                    ),
                     pubsub_storage,
                     push_store: Arc::new(
                         crate::push_registrations::DatabasePushRegistrationStore::new(
@@ -561,6 +740,9 @@ async fn create_test_websocket_state_with_extension_manager(
                     ),
                     push_service,
                     notification_outbox,
+                    call_teardown_outbox,
+                    call_teardown_persistence,
+                    call_teardown_executor: None,
                     notification_settings_projection,
                     dnd_projection,
                     dnd_reader,
@@ -577,6 +759,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                     pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                     call_threads: Arc::new(dashmap::DashMap::new()),
+                    call_thread_end_locks: Arc::new(dashmap::DashMap::new()),
                     remote_muc_memberships: Arc::new(super::RemoteMucMemberships::default()),
                     resolver_affiliation_syncs: Arc::new(
                         super::ResolverAffiliationSyncScheduler::default(),
@@ -720,7 +903,7 @@ fn scram_client_final_from_challenge(
     )
 }
 
-async fn snapshot_room(
+pub(crate) async fn snapshot_room(
     state: &WebSocketState,
     room_jid: &BareJid,
 ) -> waddle_xmpp::muc::room_actor::RoomSnapshot {

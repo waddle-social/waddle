@@ -116,6 +116,7 @@ pub(crate) use cleanup::{
 };
 pub(crate) use muc_call_sfu::{
     note_participant_left_by_call_id, note_participant_left_from_webhook,
+    observe_participant_sids_from_webhook,
 };
 pub(crate) use transport_xml::{
     build_iq_error_xml_typed, build_iq_error_xml_with_payload, build_iq_result_xml, element_to_xml,

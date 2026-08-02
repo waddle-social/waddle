@@ -37,6 +37,25 @@ pub(super) async fn handle_sans_io_iq(
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> Option<Vec<String>> {
+    handle_sans_io_iq_with_relay_override(
+        ctx,
+        state,
+        authenticated_session,
+        phase,
+        conn_state,
+        None,
+    )
+    .await
+}
+
+async fn handle_sans_io_iq_with_relay_override(
+    ctx: IqHandlerContext<'_>,
+    state: &WebSocketState,
+    authenticated_session: &Option<Session>,
+    phase: &ConnectionPhase,
+    conn_state: &mut IqConnState<'_>,
+    muji_relay_override: Option<MujiRelayOutcome>,
+) -> Option<Vec<String>> {
     let iq = ctx.iq;
     let id = ctx.id;
     let payload_ns = ctx.payload_ns;
@@ -110,6 +129,25 @@ pub(super) async fn handle_sans_io_iq(
                 not_authorized_iq_error("Authentication required."),
             )]);
         };
+        if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
+            if let Some(reply) = peer_jingle_blocklist_reply(state, full_jid, iq, domain).await {
+                return Some(vec![match reply {
+                    PeerJingleBlocklistReply::Bounce(stanza) => stanza_to_xml(&stanza),
+                    PeerJingleBlocklistReply::Error(error) => {
+                        build_iq_error_xml_typed(id, response_from, response_to, error)
+                    }
+                }]);
+            }
+            if let Some(rate_limit_error) = pre_dispatch_muji_rate_limit_error(state, full_jid, iq)
+            {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    rate_limit_error,
+                )]);
+            }
+        }
         if let Some(enabled) = carbons_toggle {
             *conn_state.carbons_enabled = enabled;
             let _ = state
@@ -167,18 +205,29 @@ pub(super) async fn handle_sans_io_iq(
                         response_from,
                         response_to,
                     };
-                    match relay_muji_to_room_owner(
-                        state, conn_state, full_jid, iq, &room_jid, reply,
+                    let relay_outcome = match muji_relay_override {
+                        Some(outcome) => outcome,
+                        None => {
+                            relay_muji_to_room_owner(
+                                state, conn_state, full_jid, iq, &room_jid, reply,
+                            )
+                            .await
+                        }
+                    };
+                    if let Some(frames) = resolve_muji_relay_outcome(
+                        state,
+                        &room_jid,
+                        full_jid,
+                        relay_outcome,
+                        IqReplyAddressing {
+                            id,
+                            response_from,
+                            response_to,
+                        },
                     )
                     .await
                     {
-                        MujiRelayOutcome::Frames(frames) => return Some(frames),
-                        // Terminate could not be relayed. Fall through
-                        // to local dispatch, which is what this path
-                        // did before the relay existed: unregistering
-                        // is idempotent, so a local no-op is strictly
-                        // better than failing the client's hangup.
-                        MujiRelayOutcome::ProcessLocally => {}
+                        return Some(frames);
                     }
                 }
             }
@@ -211,7 +260,7 @@ pub(super) async fn handle_sans_io_iq(
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
             crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-                state, &room_jid, full_jid,
+                state, &room_jid, full_jid, None,
             )
             .await;
         }
@@ -231,6 +280,151 @@ pub(super) async fn handle_sans_io_iq(
     None
 }
 
+/// Enforce the target account's XEP-0191 blocklist before a direct-call
+/// negotiation reaches the Jingle handler. That handler mints credentials and
+/// registers both identities, so filtering only at the later routing boundary
+/// is too late even though it prevents delivery to the blocked peer.
+///
+/// Muji is membership-gated separately, and extdisco uses a different
+/// namespace, so neither surface enters this check.
+enum PeerJingleBlocklistReply {
+    Bounce(Stanza),
+    Error(xmpp_parsers::stanza_error::StanzaError),
+}
+
+async fn peer_jingle_blocklist_reply(
+    state: &WebSocketState,
+    sender: &FullJid,
+    iq: &xmpp_parsers::iq::Iq,
+    local_domain: &str,
+) -> Option<PeerJingleBlocklistReply> {
+    let xmpp_parsers::iq::Iq::Set { payload, to, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != waddle_xmpp::xep::xep0166::NS_JINGLE
+        || payload.name() != "jingle"
+        || waddle_xmpp::xep::xep0272::find_muji(payload).is_some()
+    {
+        return None;
+    }
+    let action = xmpp_parsers::jingle::Jingle::try_from(payload.clone())
+        .ok()
+        .map(|jingle| jingle.action);
+    if !matches!(
+        action,
+        Some(
+            xmpp_parsers::jingle::Action::SessionInitiate
+                | xmpp_parsers::jingle::Action::SessionAccept
+        )
+    ) {
+        return None;
+    }
+    let target = to
+        .as_ref()
+        .filter(|target| target.resource().is_some() && target.domain().as_str() == local_domain)?;
+
+    // A bounced/errored session-INITIATE is a complete, terminal call
+    // setup attempt: it must contribute one attempted/failed pair even
+    // though the gate returns before a `CallSetupAttempt` ever opens
+    // (#1612 review round 13). Accepts stay uncounted — the matching
+    // initiate already paid.
+    let is_initiate = matches!(action, Some(xmpp_parsers::jingle::Action::SessionInitiate));
+    let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+    match blocking
+        .is_blocked_jid(&target.to_bare(), &Jid::from(sender.clone()))
+        .await
+    {
+        Ok(true) => {
+            if is_initiate {
+                waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                    waddle_xmpp::telemetry::attributes::CallSetupFailureReason::PeerBlocked,
+                );
+            }
+            crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(Box::new(
+                iq.clone(),
+            )))
+            .map(PeerJingleBlocklistReply::Bounce)
+        }
+        Ok(false) => None,
+        Err(error) => {
+            warn!(
+                error = %error,
+                target = %target,
+                sender = %sender,
+                "Failed to check blocklist before dispatching direct Jingle IQ"
+            );
+            if is_initiate {
+                waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                    waddle_xmpp::telemetry::attributes::CallSetupFailureReason::MembershipCheckFailed,
+                );
+            }
+            Some(PeerJingleBlocklistReply::Error(
+                internal_server_error_iq_error("Internal server error."),
+            ))
+        }
+    }
+}
+
+/// Pre-dispatch limiter for the Muji actions that can be expensive
+/// before the sans-I/O Jingle handler sees them. These buckets are
+/// intentionally separate from the handler's own limiters: the
+/// websocket path must charge before room-locality checks, membership
+/// asks, or cross-node relays do any work, while the handler still
+/// defends non-websocket dispatch.
+fn pre_dispatch_muji_rate_limit_error(
+    state: &WebSocketState,
+    sender: &FullJid,
+    iq: &xmpp_parsers::iq::Iq,
+) -> Option<xmpp_parsers::stanza_error::StanzaError> {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != waddle_xmpp::xep::xep0166::NS_JINGLE
+        || payload.name() != "jingle"
+        || waddle_xmpp::xep::xep0272::find_muji(payload).is_none()
+    {
+        return None;
+    }
+    let action = xmpp_parsers::jingle::Jingle::try_from(payload.clone())
+        .ok()
+        .map(|jingle| jingle.action)?;
+    let sender_bare = sender.to_bare();
+    let rate_limited = match action {
+        xmpp_parsers::jingle::Action::SessionInitiate => return None,
+        // Terminates are NOT charged here (#1612 review round 10): a
+        // pre-dispatch charge cannot be refunded when the local Jingle
+        // handler later rejects an unknown session, so bogus terminates
+        // would exhaust the shared bucket. The charge instead happens
+        // where the bounded work is: at the clustered relay entry
+        // (token-refunded on no-relay outcomes) and on the authorized
+        // mutating branch inside the local Muji terminate handler.
+        xmpp_parsers::jingle::Action::SessionTerminate => return None,
+        _ => state
+            .deps
+            .protocol
+            .muji_pre_dispatch_action_rate_limit
+            .check_and_record(&sender_bare)
+            .err()
+            .map(|exceeded| {
+                tracing::warn!(
+                    jid = %sender_bare,
+                    %exceeded,
+                    "rate-limit dropped Muji non-initiate action before membership or relay checks"
+                );
+                waddle_xmpp::telemetry::call::increment_call_control_rate_limited(
+                    waddle_xmpp::telemetry::attributes::CallControlRateLimitedSurface::MujiAction,
+                );
+                "Muji action rate limit exceeded"
+            }),
+    }?;
+    Some(xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Cancel,
+        xmpp_parsers::stanza_error::DefinedCondition::PolicyViolation,
+        "en",
+        rate_limited,
+    ))
+}
+
 /// What the caller should do after a relay attempt.
 #[cfg(feature = "clustering")]
 enum MujiRelayOutcome {
@@ -239,7 +433,7 @@ enum MujiRelayOutcome {
     /// Non-terminal: handle the IQ on this node after all. Only ever
     /// returned for `session-terminate`, whose local execution is an
     /// idempotent no-op and therefore a better answer than an error.
-    ProcessLocally,
+    ProcessLocally { enqueue_owner_cleanup: bool },
 }
 
 /// Resolve a Muji IQ whose room has no local actor (#1445): relay it
@@ -298,9 +492,59 @@ async fn relay_muji_to_room_owner(
     // — evaluating them eagerly would fabricate `room_not_found`
     // denials on every cross-node teardown.
     let is_terminate = super::jingle_muji_gate::muji_session_terminate_room(iq).is_some();
-    let unrelayable = |frames: &dyn Fn() -> Vec<String>| {
+    // Terminates are charged HERE, where the bounded work (claim
+    // lookups + cross-node relay) actually starts, and refunded by
+    // token on the no-relay outcomes below — never at pre-dispatch,
+    // where a later local unknown-session rejection could not refund
+    // (#1612 review round 10). Locally-owned rooms never reach this
+    // function; their charge lives in the Jingle handler's authorized
+    // terminate branch.
+    let terminate_charge = if is_terminate {
+        let sender_bare = full_jid.to_bare();
+        match state
+            .deps
+            .protocol
+            .muji_pre_dispatch_terminate_rate_limit
+            .check_and_record(&sender_bare)
+        {
+            Ok(token) => Some(token),
+            Err(exceeded) => {
+                tracing::warn!(
+                    jid = %sender_bare,
+                    %exceeded,
+                    "rate-limit dropped Muji session-terminate before relay work"
+                );
+                waddle_xmpp::telemetry::call::increment_call_control_rate_limited(
+                    waddle_xmpp::telemetry::attributes::CallControlRateLimitedSurface::Terminate,
+                );
+                return MujiRelayOutcome::Frames(vec![build_iq_error_xml_typed(
+                    reply.id,
+                    reply.response_from,
+                    reply.response_to,
+                    xmpp_parsers::stanza_error::StanzaError::new(
+                        xmpp_parsers::stanza_error::ErrorType::Cancel,
+                        xmpp_parsers::stanza_error::DefinedCondition::PolicyViolation,
+                        "en",
+                        "session-terminate rate limit exceeded",
+                    ),
+                )]);
+            }
+        }
+    } else {
+        None
+    };
+    let is_session_initiate = matches!(
+        iq,
+        xmpp_parsers::iq::Iq::Set { payload, .. }
+            if payload.ns() == waddle_xmpp::xep::xep0166::NS_JINGLE
+                && payload.name() == "jingle"
+                && payload.attr("action") == Some("session-initiate")
+    );
+    let unrelayable = |enqueue_owner_cleanup: bool, frames: &dyn Fn() -> Vec<String>| {
         if is_terminate {
-            MujiRelayOutcome::ProcessLocally
+            MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup,
+            }
         } else {
             MujiRelayOutcome::Frames(frames())
         }
@@ -336,7 +580,11 @@ async fn relay_muji_to_room_owner(
             reply.id,
             reply.response_from,
             reply.response_to,
-            *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
+            *if is_session_initiate {
+                super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare())
+            } else {
+                super::jingle_muji_gate::deny_room_not_found_without_setup_telemetry()
+            },
         )]
     };
     let relay_error_frames = || {
@@ -358,9 +606,11 @@ async fn relay_muji_to_room_owner(
     // `sfu_token.denied` / `membership_check_failed` would make a
     // clustering incident read as a permissions problem.
     let relay_failed = || {
-        waddle_xmpp::telemetry::call::record_call_setup_rejected(
-            waddle_xmpp::telemetry::attributes::CallSetupFailureReason::OwnerUnreachable,
-        );
+        if is_session_initiate {
+            waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                waddle_xmpp::telemetry::attributes::CallSetupFailureReason::OwnerUnreachable,
+            );
+        }
         relay_error_frames()
     };
     // The owner MAY have executed this already and recorded its own
@@ -402,8 +652,21 @@ async fn relay_muji_to_room_owner(
         room_jid,
         state.deps.auth_state.xmpp_domain.as_str(),
     );
+    // Any exit that performs no relay work refunds the terminate charge
+    // (token-keyed): the budget only bounds actual relay round-trips
+    // (#1612 review round 10).
+    let refund_terminate_charge = || {
+        if let Some(token) = terminate_charge {
+            state
+                .deps
+                .protocol
+                .muji_pre_dispatch_terminate_rate_limit
+                .refund(&full_jid.to_bare(), token);
+        }
+    };
     if !addressed_to_mixer || !room_is_local {
-        return unrelayable(&deny);
+        refund_terminate_charge();
+        return unrelayable(false, &deny);
     }
 
     let bridge = state
@@ -415,7 +678,8 @@ async fn relay_muji_to_room_owner(
     let (Some(bridge), Some(origin)) = (bridge, conn_state.ordered_relay_origin.as_ref()) else {
         // No relay substrate (clustering disabled at runtime): local
         // absence is definitive, exactly the pre-#1445 semantics.
-        return unrelayable(&deny);
+        refund_terminate_charge();
+        return unrelayable(false, &deny);
     };
     // Stamp the authenticated full JID as `from` before relaying:
     // clients legitimately omit `from` (the server derives the sender
@@ -459,20 +723,29 @@ async fn relay_muji_to_room_owner(
         // took it — outcome unknown to us, and its own.
         MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
             unrelayable_after_relay_failure("delivered_without_replies");
-            unrelayable(&|| relay_uncertain("delivered_without_replies"))
+            unrelayable(true, &|| relay_uncertain("delivered_without_replies"))
         }
         // No node owns the room (or this one does, with no actor): the
         // local fallback for a terminate genuinely IS a no-op, because
         // there is no owner holding a registration to strand.
         MucProxyRouteDecision::RoomUnclaimed | MucProxyRouteDecision::LocalRoom => {
-            unrelayable(&deny)
+            // Refund exactly this request's charge (token-keyed, so a
+            // concurrent same-account request's charge is never popped):
+            // no relay work happened and nobody owns the room, so a
+            // burst of bogus unknown-session terminates must not exhaust
+            // the shared bare-JID budget and starve a legitimate hangup
+            // from another resource (#1612 review rounds 9-10). Relayed
+            // asks keep their charge — the cross-node round-trip is
+            // exactly the cost this limiter bounds.
+            refund_terminate_charge();
+            unrelayable(false, &deny)
         }
         // Definitely not delivered: the attempt ended here.
         MucProxyRouteDecision::Attempted(
             OrderedRelayMucProxyOutcome::Unavailable | OrderedRelayMucProxyOutcome::Dropped,
         ) => {
             unrelayable_after_relay_failure("relay_delivery_failed");
-            unrelayable(&relay_failed)
+            unrelayable(true, &relay_failed)
         }
         // Ambiguous by construction — the owner may have committed it.
         MucProxyRouteDecision::Attempted(
@@ -480,15 +753,15 @@ async fn relay_muji_to_room_owner(
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
         ) => {
             unrelayable_after_relay_failure("relay_maybe_committed");
-            unrelayable(&|| relay_uncertain("relay_maybe_committed"))
+            unrelayable(true, &|| relay_uncertain("relay_maybe_committed"))
         }
         MucProxyRouteDecision::RoomClaimUnavailable => {
             unrelayable_after_relay_failure("room_claim_unavailable");
-            unrelayable(&relay_failed)
+            unrelayable(true, &relay_failed)
         }
         MucProxyRouteDecision::OriginUnavailable => {
             unrelayable_after_relay_failure("origin_unavailable");
-            unrelayable(&relay_failed)
+            unrelayable(true, &relay_failed)
         }
     }
 }
@@ -499,7 +772,7 @@ async fn relay_muji_to_room_owner(
 #[cfg(not(feature = "clustering"))]
 enum MujiRelayOutcome {
     Frames(Vec<String>),
-    ProcessLocally,
+    ProcessLocally { enqueue_owner_cleanup: bool },
 }
 
 #[cfg(not(feature = "clustering"))]
@@ -512,14 +785,154 @@ async fn relay_muji_to_room_owner(
     reply: IqReplyAddressing<'_>,
 ) -> MujiRelayOutcome {
     if super::jingle_muji_gate::muji_session_terminate_room(iq).is_some() {
-        return MujiRelayOutcome::ProcessLocally;
+        return MujiRelayOutcome::ProcessLocally {
+            enqueue_owner_cleanup: false,
+        };
     }
+    let denial = if matches!(
+        iq,
+        xmpp_parsers::iq::Iq::Set { payload, .. }
+            if payload.ns() == waddle_xmpp::xep::xep0166::NS_JINGLE
+                && payload.name() == "jingle"
+                && payload.attr("action") == Some("session-initiate")
+    ) {
+        super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare())
+    } else {
+        super::jingle_muji_gate::deny_room_not_found_without_setup_telemetry()
+    };
     MujiRelayOutcome::Frames(vec![build_iq_error_xml_typed(
         reply.id,
         reply.response_from,
         reply.response_to,
-        *super::jingle_muji_gate::deny_room_not_found(room_jid, &full_jid.to_bare()),
+        *denial,
     )])
+}
+
+/// Persist the owner-side convergence that a failed cross-node terminate
+/// could not deliver. The success ACK is only safe after this synchronous
+/// insert succeeds; the in-memory retry supervisor narrows an outage window
+/// but is not itself a durability boundary.
+async fn enqueue_muji_relay_teardown_fallback(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    departed: &jid::FullJid,
+) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+        Ok(call_id) => call_id,
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                %error,
+                "could not model Muji relay fallback as a typed teardown intent"
+            );
+            return Err(error.into());
+        }
+    };
+    let intents = [
+        crate::call_teardown_outbox::CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
+                room_jid: room_jid.clone(),
+                departed: departed.clone(),
+                participant_sid: None,
+            },
+            generation: None,
+            room_sid: None,
+        },
+        crate::call_teardown_outbox::CallTeardownIntent {
+            call_id,
+            target: crate::call_teardown_outbox::TeardownTarget::Participant {
+                identity: departed.clone(),
+                participant_sid: None,
+            },
+            generation: None,
+            room_sid: None,
+        },
+    ];
+    let store = &state.deps.protocol.call_teardown_outbox;
+    match store.enqueue_batch(&intents).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                room = %room_jid,
+                departed = %departed,
+                %error,
+                    "failed to persist Muji teardown fallback; rejecting the ACK and retrying asynchronously"
+            );
+            state
+                .deps
+                .protocol
+                .call_teardown_persistence
+                .retry_batch(intents.to_vec());
+            Err(error)
+        }
+    }
+}
+
+async fn fallback_muji_terminate_owner_cleanup_ack(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    departed: &jid::FullJid,
+    reply: IqReplyAddressing<'_>,
+) -> Vec<String> {
+    let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed).await;
+    let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
+        state, room_jid, departed, None,
+    )
+    .await;
+    if persisted.is_err() {
+        return vec![build_iq_error_xml_typed(
+            reply.id,
+            reply.response_from,
+            reply.response_to,
+            internal_server_error_iq_error("the leave could not be durably accepted; please retry"),
+        )];
+    }
+    muji_terminate_ack_frames(reply.id, reply.response_from, reply.response_to)
+}
+
+/// Resolve the relay decision before the normal IQ dispatcher runs.
+///
+/// A relay failure with durable owner cleanup is terminal here: the origin
+/// acknowledges the accepted leave directly and MUST NOT ask its local Jingle
+/// handler to validate a session that only the owner ever held. Returning
+/// `unknown-session` would be false because the session exists on the owner.
+/// The queued participant removal and presence clear are harmless no-ops for a
+/// non-participant, and this ingress path is rate-limited. A benign local
+/// fallback returns `None` so the existing local handler path remains intact.
+async fn resolve_muji_relay_outcome(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    departed: &jid::FullJid,
+    outcome: MujiRelayOutcome,
+    reply: IqReplyAddressing<'_>,
+) -> Option<Vec<String>> {
+    match outcome {
+        MujiRelayOutcome::Frames(frames) => Some(frames),
+        MujiRelayOutcome::ProcessLocally {
+            enqueue_owner_cleanup: false,
+        } => None,
+        MujiRelayOutcome::ProcessLocally {
+            enqueue_owner_cleanup: true,
+        } => {
+            Some(fallback_muji_terminate_owner_cleanup_ack(state, room_jid, departed, reply).await)
+        }
+    }
+}
+
+fn muji_terminate_ack_frames(
+    id: &str,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    vec![
+        crate::server::routes::websocket::transport_xml::build_iq_result_xml(
+            id,
+            response_from,
+            response_to,
+            None,
+        ),
+    ]
 }
 
 /// The (id, from, to) triple every IQ error reply is stamped with —
@@ -565,11 +978,246 @@ async fn mirror_remote_carbons_update(
 
 #[cfg(test)]
 mod tests {
-    use crate::server::routes::websocket::tests::create_test_websocket_state_with_calls;
+    use crate::call_teardown_outbox::TeardownTarget;
+    use crate::db::actor::DbExecute;
+    use crate::db::blocking::DatabaseBlockingStorage;
+    use crate::server::routes::websocket::get_room_actor;
+    use crate::server::routes::websocket::handlers::presence::handle_muc_join;
+    use crate::server::routes::websocket::tests::{
+        create_test_server_owner_session, create_test_websocket_state_with_calls,
+        create_test_websocket_state_with_sfu, register_test_connection, snapshot_room,
+        RecordingSfu,
+    };
+    use chrono::Utc;
+    use jid::{FullJid, Jid};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use waddle_sfu::{
+        ApiSecret, CallId, Identity, JoinToken, Jti, Jwt, MediaCapabilities, SfuError, SfuService,
+        TurnCredential, TurnHost, WebsocketUrl,
+    };
+    use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
+    use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
+    use waddle_xmpp::registry::OutboundStanza;
     use waddle_xmpp::xep::xep0167::MediaKind;
     use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::iq::Iq;
     use xmpp_parsers::jingle::{Action, Jingle, SessionId};
+    use xmpp_parsers::minidom::Element;
+
+    #[derive(Default)]
+    struct RecordingCallSfu {
+        issued: Mutex<Vec<(CallId, Identity, MediaCapabilities)>>,
+        registered: Mutex<Vec<(CallId, Identity)>>,
+    }
+
+    impl RecordingCallSfu {
+        fn issued_snapshot(&self) -> Vec<(CallId, Identity, MediaCapabilities)> {
+            self.issued.lock().expect("recording lock").clone()
+        }
+
+        fn registered_snapshot(&self) -> Vec<(CallId, Identity)> {
+            self.registered.lock().expect("recording lock").clone()
+        }
+    }
+
+    impl SfuService for RecordingCallSfu {
+        fn issue_join_token(
+            &self,
+            call_id: &CallId,
+            identity: &Identity,
+            capabilities: MediaCapabilities,
+        ) -> Result<JoinToken, SfuError> {
+            self.issued.lock().expect("recording lock").push((
+                call_id.clone(),
+                identity.clone(),
+                capabilities,
+            ));
+            Ok(JoinToken {
+                url: WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+                    .expect("valid ws url"),
+                room: call_id.clone(),
+                identity: identity.clone(),
+                jwt: Jwt::from_wire("test.jwt".to_string()),
+                jti: Jti::new(),
+                expires_at: Utc::now(),
+            })
+        }
+
+        fn issue_turn_credentials(&self, _: &Identity) -> Result<TurnCredential, SfuError> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn register_call_participant(&self, call_id: &CallId, identity: &Identity) {
+            self.registered
+                .lock()
+                .expect("recording lock")
+                .push((call_id.clone(), identity.clone()));
+        }
+
+        fn register_call_participant_observed(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: &waddle_sfu::ObservedCallSids,
+        ) -> waddle_sfu::SidObservationDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn has_call_participant(&self, _: &CallId, _: &Identity) -> bool {
+            false
+        }
+
+        fn revoke_issued_token(&self, _: &CallId, _: &Identity, _: &Jti) {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn unregister_call_participant(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: Option<&waddle_sfu::ObservedCallSids>,
+        ) -> waddle_sfu::TeardownDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn note_participant_left(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: Option<&waddle_sfu::ObservedCallSids>,
+        ) -> waddle_sfu::TeardownDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn observe_call_participant_sids(
+            &self,
+            _: &CallId,
+            _: &Identity,
+            _: Option<&waddle_sfu::ObservedCallSids>,
+            _: waddle_sfu::SidObservationDirection,
+        ) -> waddle_sfu::SidObservationDisposition {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn update_participant_capabilities(&self, _: &CallId, _: &Identity, _: MediaCapabilities) {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn is_revoked(&self, _: &Jti) -> bool {
+            false
+        }
+
+        fn ws_url(&self) -> &WebsocketUrl {
+            static URL: std::sync::OnceLock<WebsocketUrl> = std::sync::OnceLock::new();
+            URL.get_or_init(|| {
+                WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+                    .expect("valid ws url")
+            })
+        }
+
+        fn turn_host(&self) -> &TurnHost {
+            static HOST: std::sync::OnceLock<TurnHost> = std::sync::OnceLock::new();
+            HOST.get_or_init(|| TurnHost::new("turn.test"))
+        }
+
+        fn webhook_secret(&self) -> &ApiSecret {
+            static SECRET: std::sync::OnceLock<ApiSecret> = std::sync::OnceLock::new();
+            SECRET.get_or_init(|| {
+                ApiSecret::from_text("recording-webhook-secret-32-bytes")
+                    .expect("recording webhook secret meets minimum length")
+            })
+        }
+
+        fn participants_for_call(&self, _: &CallId) -> Vec<Identity> {
+            Vec::new()
+        }
+    }
+
+    fn ready_phase(jid: &FullJid) -> waddle_xmpp::protocol::ConnectionPhase {
+        waddle_xmpp::protocol::ConnectionPhase::ready(jid.clone(), false)
+    }
+
+    fn parse_iq(xml: &str) -> Iq {
+        match parse_frame(xml).expect("iq parses") {
+            InboundFrame::Stanza(stanza) => match *stanza {
+                Stanza::Iq(iq) => *iq,
+                _ => panic!("expected iq stanza"),
+            },
+            _ => panic!("expected iq stanza"),
+        }
+    }
+
+    fn direct_jingle_frame(id: &str, target: &str, action: &str) -> String {
+        let description = Element::builder("description", waddle_xmpp::xep::xep0167::NS_JINGLE_RTP)
+            .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+            .append(
+                Element::builder("payload-type", waddle_xmpp::xep::xep0167::NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+                    .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+                    .build(),
+            )
+            .append(Element::builder("rtcp-mux", waddle_xmpp::xep::xep0167::NS_JINGLE_RTP).build())
+            .build();
+        let content = Element::builder("content", waddle_xmpp::xep::xep0166::NS_JINGLE)
+            .attr(
+                minidom::rxml::xml_ncname!("creator").to_owned(),
+                "initiator",
+            )
+            .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+            .append(description)
+            .append(
+                Element::builder(
+                    waddle_xmpp::xep::xep_waddle_livekit_transport::TRANSPORT_NAME,
+                    waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT,
+                )
+                .build(),
+            )
+            .build();
+        let mut jingle: Element = Jingle::new(
+            action.parse().expect("valid Jingle action"),
+            SessionId("dmcall1".into()),
+        )
+        .with_initiator(
+            "alice@example.com/web"
+                .parse()
+                .expect("valid initiator JID"),
+        )
+        .into();
+        jingle.append_child(content);
+
+        super::iq_to_xml(Iq::Set {
+            from: None,
+            to: Some(target.parse().expect("valid target JID")),
+            id: id.into(),
+            payload: jingle,
+        })
+    }
+
+    fn muji_jingle_frame(id: &str, target: &str, action: &str, room: &str) -> String {
+        let mut jingle: Element = Jingle::new(
+            action.parse().expect("valid Jingle action"),
+            SessionId("muji1".into()),
+        )
+        .with_initiator(
+            "alice@example.com/web"
+                .parse()
+                .expect("valid initiator JID"),
+        )
+        .into();
+        jingle
+            .append_child(Muji::for_room(room.parse().expect("valid Muji room JID")).to_element());
+
+        super::iq_to_xml(Iq::Set {
+            from: None,
+            to: Some(target.parse().expect("valid target JID")),
+            id: id.into(),
+            payload: jingle,
+        })
+    }
 
     fn muji_initiate_iq(room: &str) -> Iq {
         let jingle = Jingle::new(Action::SessionInitiate, SessionId("i-sid".into()));
@@ -615,6 +1263,228 @@ mod tests {
             id: "term-1".into(),
             payload: elem,
         }
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_persists_presence_and_participant_intents() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+
+        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice)
+            .await
+            .expect("persist fallback intents");
+
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim fallback intents");
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs
+            .iter()
+            .any(|job| matches!(job.intent.target, TeardownTarget::MujiPresenceClear { .. })));
+        assert!(jobs
+            .iter()
+            .any(|job| matches!(job.intent.target, TeardownTarget::Participant { .. })));
+        assert!(jobs.iter().all(|job| job.intent.generation.is_none()));
+        assert!(jobs.iter().all(|job| job.intent.room_sid.is_none()));
+    }
+
+    #[tokio::test]
+    async fn sans_io_owner_cleanup_fallback_returns_before_local_jingle_dispatch() {
+        let sfu = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(Arc::clone(&sfu) as Arc<_>).await;
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let iq = muji_terminate_iq("general@muc.example.com");
+        let phase = ready_phase(&alice);
+        let authenticated_session = None;
+        let mut carbons = false;
+        let mut roster = false;
+        let mut blocklist = false;
+        let mut conn_state = super::IqConnState {
+            carbons_enabled: &mut carbons,
+            roster_interested: &mut roster,
+            blocklist_interested: &mut blocklist,
+            registry_owner: None,
+            state_machine: None,
+            ordered_relay_origin: None,
+        };
+
+        let frames = super::handle_sans_io_iq_with_relay_override(
+            super::IqHandlerContext {
+                iq: &iq,
+                id: iq.id(),
+                payload_ns: waddle_xmpp::xep::xep0166::NS_JINGLE,
+                target_to: Some("calls.example.com"),
+                has_destroy: false,
+                domain: "example.com",
+                muc_domain: "muc.example.com",
+                upload_domain: "upload.example.com",
+                spaces_domain: "spaces.example.com",
+                community_domain: "community.example.com",
+                extensions_domain: "extensions.example.com",
+                push_domain: "push.example.com",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+            &state,
+            &authenticated_session,
+            &phase,
+            &mut conn_state,
+            Some(super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            }),
+        )
+        .await
+        .expect("registered Jingle handler owns the IQ");
+
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            parse_iq(&frames[0]),
+            Iq::Result { payload: None, .. }
+        ));
+        assert!(
+            sfu.snapshot().is_empty(),
+            "the full sans-IO path must return before local Jingle unregister dispatch"
+        );
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim fallback intents");
+        assert_eq!(jobs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_acks_before_local_muji_handler_dispatch() {
+        let sfu = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(Arc::clone(&sfu) as Arc<_>).await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(owner_session),
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room)
+            .await
+            .expect("room actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                muji: Muji {
+                    room: None,
+                    preparing: false,
+                    contents: vec![MujiContent::new(
+                        "audio",
+                        Creator::Initiator,
+                        MediaKind::Audio,
+                    )],
+                },
+            })
+            .await
+            .expect("muji update")
+            .expect("occupant update");
+
+        let frames = super::resolve_muji_relay_outcome(
+            &state,
+            &room,
+            &alice,
+            super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            },
+            super::IqReplyAddressing {
+                id: "term-ack",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await
+        .expect("owner-cleanup relay outcome is terminal before dispatch");
+
+        assert_eq!(frames.len(), 1, "fallback branch must answer immediately");
+        let reply = parse_iq(&frames[0]);
+        assert!(
+            matches!(reply, Iq::Result { payload: None, .. }),
+            "owner-cleanup fallback must return an empty IQ result instead of reaching the local Muji handler",
+        );
+        assert!(
+            snapshot_room(state.as_ref(), &room)
+                .await
+                .room
+                .muji_for_session("alice", &alice)
+                .is_none(),
+            "the fallback ack path must still run the local Muji clear-after side effect",
+        );
+        assert!(
+            sfu.snapshot().is_empty(),
+            "the terminal relay outcome must not reach the local Jingle handler unregister path",
+        );
+
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim fallback intents");
+        assert_eq!(jobs.len(), 2, "owner cleanup must stay durable");
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_rejects_ack_when_durable_enqueue_fails() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let connection = state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .guard()
+            .await
+            .expect("database");
+        connection
+            .execute("DROP TABLE call_teardown_outbox", ())
+            .await
+            .expect("drop outbox table");
+
+        let frames = super::resolve_muji_relay_outcome(
+            &state,
+            &room,
+            &alice,
+            super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            },
+            super::IqReplyAddressing {
+                id: "term-enqueue-failed",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await
+        .expect("owner-cleanup relay outcome remains terminal");
+
+        let reply = parse_iq(&frames[0]);
+        let Iq::Error { error, .. } = reply else {
+            panic!("durability failure must not acknowledge the leave")
+        };
+        assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::InternalServerError
+        );
+        assert_eq!(error.type_, xmpp_parsers::stanza_error::ErrorType::Wait);
     }
 
     /// #1445: a relay failure is not a membership decision. Routing it
@@ -712,7 +1582,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(outcome, super::MujiRelayOutcome::ProcessLocally),
+            matches!(outcome, super::MujiRelayOutcome::ProcessLocally { .. }),
             "an unrelayable terminate must fall back to local execution"
         );
         assert_eq!(
@@ -731,6 +1601,379 @@ mod tests {
                 .unwrap_or(0),
             0,
             "a hangup is not a call-setup attempt"
+        );
+    }
+
+    /// Dedicated XEP-0191 (Blocking Command) conformance suite for
+    /// direct Jingle calls (#1612 review round 10): a blocked caller's
+    /// `session-initiate`/`session-accept` must bounce with the exact
+    /// undeliverable reply BEFORE any LiveKit token mint, registry
+    /// registration, or peer delivery.
+    mod xep0191_jingle_blocking {
+        use super::*;
+
+        #[tokio::test]
+        async fn blocked_direct_jingle_initiate_returns_service_unavailable_without_mint_or_register(
+        ) {
+            let sfu = Arc::new(RecordingCallSfu::default());
+            let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+            register_test_connection(state.as_ref(), &bob, bob_tx).await;
+            DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+                .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
+                .await
+                .expect("seed blocklist");
+
+            let responses = super::super::super::handle_iq(
+                &direct_jingle_frame(
+                    "blocked-call-1",
+                    "bob@example.com/phone",
+                    "session-initiate",
+                ),
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+
+            assert_eq!(responses.len(), 1, "blocked call gets one error reply");
+            let response = &responses[0];
+            let expected = crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(
+                Box::new(parse_iq(&direct_jingle_frame(
+                    "blocked-call-1",
+                    "bob@example.com/phone",
+                    "session-initiate",
+                ))),
+            ))
+            .map(|stanza| super::super::stanza_to_xml(&stanza))
+            .expect("blocked direct Jingle must produce a bounced IQ reply");
+            assert_eq!(
+                response, &expected,
+                "blocked direct Jingle must reuse the undeliverable reply builder exactly"
+            );
+            assert!(
+                response.contains("<service-unavailable")
+                    && response.contains("<jingle xmlns='urn:xmpp:jingle:1'"),
+                "blocked direct call must carry the sanitized undeliverable Jingle echo: {response}"
+            );
+            assert!(
+                bob_rx.try_recv().is_err(),
+                "blocked direct call must not reach the peer connection"
+            );
+            assert!(
+                sfu.issued_snapshot().is_empty(),
+                "blocked direct call must not mint a LiveKit token"
+            );
+            assert!(
+                sfu.registered_snapshot().is_empty(),
+                "blocked direct call must not register a participant"
+            );
+        }
+
+        #[tokio::test]
+        async fn blocklist_storage_failure_returns_internal_server_error_before_dispatch() {
+            let sfu = Arc::new(RecordingCallSfu::default());
+            let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+            register_test_connection(state.as_ref(), &bob, bob_tx).await;
+            state
+                .deps
+                .app_state
+                .db_pool
+                .global_actor()
+                .ask(DbExecute {
+                    sql: "DROP TABLE blocking_list".to_string(),
+                    params: Vec::new(),
+                })
+                .await
+                .expect("drop blocking table");
+
+            let responses = super::super::super::handle_iq(
+                &direct_jingle_frame(
+                    "blocked-call-2",
+                    "bob@example.com/phone",
+                    "session-initiate",
+                ),
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+
+            assert_eq!(responses.len(), 1, "storage failure gets one error reply");
+            let response = &responses[0];
+            assert!(
+                response.contains("type='error'") && response.contains("<internal-server-error"),
+                "blocklist failures must fail closed with internal-server-error: {response}"
+            );
+            assert!(
+                bob_rx.try_recv().is_err(),
+                "fail-closed blocklist error must not dispatch to the peer connection"
+            );
+            assert!(
+                sfu.issued_snapshot().is_empty(),
+                "fail-closed blocklist error must not mint a LiveKit token"
+            );
+            assert!(
+                sfu.registered_snapshot().is_empty(),
+                "fail-closed blocklist error must not register a participant"
+            );
+        }
+
+        #[tokio::test]
+        async fn peer_jingle_blocklist_helper_blocks_session_accept_only_for_local_non_muji_targets(
+        ) {
+            let state =
+                create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+                .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
+                .await
+                .expect("seed blocklist");
+
+            let blocked_accept = parse_iq(&direct_jingle_frame(
+                "blocked-call-3",
+                "bob@example.com/phone",
+                "session-accept",
+            ));
+            let blocked_reply = super::super::peer_jingle_blocklist_reply(
+                state.as_ref(),
+                &alice,
+                &blocked_accept,
+                "example.com",
+            )
+            .await;
+            let Some(super::super::PeerJingleBlocklistReply::Bounce(stanza)) = blocked_reply else {
+                panic!(
+                    "session-accept to a blocked local full JID must bounce via the shared helper"
+                );
+            };
+            let Stanza::Iq(reply) = stanza else {
+                panic!("expected IQ bounce");
+            };
+            let xmpp_parsers::iq::Iq::Error { error, payload, .. } = reply.as_ref() else {
+                panic!("expected IQ error bounce");
+            };
+            assert_eq!(
+                error.defined_condition,
+                xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+            );
+            assert!(
+                payload.as_ref().is_some_and(
+                    |payload| payload.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
+                ),
+                "shared bounce must echo the sanitized Jingle payload"
+            );
+
+            let muji_accept = parse_iq(&muji_jingle_frame(
+                "blocked-call-4",
+                "bob@example.com/phone",
+                "session-accept",
+                "general@muc.example.com",
+            ));
+            assert!(
+                super::super::peer_jingle_blocklist_reply(
+                    state.as_ref(),
+                    &alice,
+                    &muji_accept,
+                    "example.com"
+                )
+                .await
+                .is_none(),
+                "Muji Jingle is exempt from the direct-peer blocklist gate"
+            );
+
+            let remote_accept = parse_iq(&direct_jingle_frame(
+                "blocked-call-5",
+                "bob@remote.example/phone",
+                "session-accept",
+            ));
+            assert!(
+                super::super::peer_jingle_blocklist_reply(
+                    state.as_ref(),
+                    &alice,
+                    &remote_accept,
+                    "example.com"
+                )
+                .await
+                .is_none(),
+                "non-local targets are exempt from the local pre-dispatch gate"
+            );
+        }
+
+        #[tokio::test]
+        async fn blocked_direct_jingle_accept_bounces_before_forward_or_mint() {
+            let sfu = Arc::new(RecordingCallSfu::default());
+            let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+            let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+            let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+            let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+            register_test_connection(state.as_ref(), &bob, bob_tx).await;
+            DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone())
+                .add_blocks(&bob.to_bare(), &[Jid::from(alice.clone())])
+                .await
+                .expect("seed blocklist");
+
+            let responses = super::super::super::handle_iq(
+                &direct_jingle_frame(
+                    "blocked-accept-1",
+                    "bob@example.com/phone",
+                    "session-accept",
+                ),
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+
+            assert_eq!(responses.len(), 1, "blocked accept gets one error reply");
+            assert!(
+                responses[0].contains("<service-unavailable"),
+                "blocked session-accept must bounce as undeliverable: {}",
+                responses[0]
+            );
+            assert!(
+                bob_rx.try_recv().is_err(),
+                "blocked session-accept must not be forwarded to the blocker"
+            );
+            assert!(
+                sfu.issued_snapshot().is_empty(),
+                "blocked session-accept must not mint a LiveKit token"
+            );
+            assert!(
+                sfu.registered_snapshot().is_empty(),
+                "blocked session-accept must not register a participant"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bogus_muji_terminates_stay_uncharged_and_never_trip_the_limiter() {
+        // #1612 review round 10: unknown-session terminates carry no
+        // pre-dispatch charge — the terminate budget is only consumed
+        // by relayed asks (token-refunded on no-relay outcomes) and by
+        // authorized mutating teardowns in the handler. A burst of
+        // bogus terminates therefore cannot exhaust the shared
+        // bare-JID bucket and starve a legitimate hangup from another
+        // resource of the same account.
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let room: jid::BareJid = "uncharged-room@muc.example.com".parse().expect("room JID");
+        // A LOCAL room: the gate Allows and dispatch reaches the local
+        // Muji terminate handler, which rejects the unknown session
+        // WITHOUT charging (the exact starvation scenario from review).
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(owner_session),
+        )
+        .await;
+        let max_terminates =
+            waddle_xmpp::protocol::handlers::session_initiate_rate_limit::DEFAULT_MAX_TERMINATES;
+
+        // Well past the old budget: every bogus terminate must still be
+        // answered idempotently, and none may consume limiter budget.
+        for attempt in 0..=max_terminates {
+            let frame = muji_jingle_frame(
+                &format!("term-uncharged-{attempt}"),
+                "calls.example.com",
+                "session-terminate",
+                "uncharged-room@muc.example.com",
+            );
+            let responses = super::super::handle_iq(
+                &frame,
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+            assert_eq!(responses.len(), 1);
+            assert!(
+                !responses[0].contains("<policy-violation"),
+                "a bogus unknown-session terminate must never be answered with the \
+                 limiter's policy-violation: {}",
+                responses[0]
+            );
+        }
+
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "waddle.call.control.rate_limited",
+                    &[("surface", "terminate")]
+                )
+                .unwrap_or(0),
+            0,
+            "bogus terminates must not consume or trip the shared terminate budget"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn muji_non_initiate_rate_limit_fires_before_room_relay() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let max_actions =
+            waddle_xmpp::protocol::handlers::session_initiate_rate_limit::DEFAULT_MAX_MUJI_ACTIONS;
+
+        for attempt in 0..=max_actions {
+            let frame = muji_jingle_frame(
+                &format!("muji-action-{attempt}"),
+                "calls.example.com",
+                "transport-info",
+                "ghost-room@muc.example.com",
+            );
+            let responses = super::super::handle_iq(
+                &frame,
+                "example.com",
+                "muc.example.com",
+                state.as_ref(),
+                &None,
+                &ready_phase(&alice),
+            )
+            .await;
+            assert_eq!(responses.len(), 1);
+            if attempt == 0 {
+                assert!(
+                    responses[0].contains("<forbidden"),
+                    "under-budget foreign-room Muji action should still hit the room-locality path"
+                );
+            }
+            if attempt == max_actions {
+                assert!(
+                    responses[0].contains("<policy-violation"),
+                    "over-budget Muji action must be rejected before room relay/membership work: {}",
+                    responses[0]
+                );
+            }
+        }
+
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.control.rate_limited",
+                &[("surface", "muji_action")]
+            ),
+            Some(1),
+            "the websocket pre-gate limiter must report the Muji-action drop"
         );
     }
 }

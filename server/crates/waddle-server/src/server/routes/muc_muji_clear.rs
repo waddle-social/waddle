@@ -7,23 +7,30 @@
 //! occupants. Centralising the logic keeps the wire shape identical.
 
 use jid::{BareJid, FullJid};
-use minidom::Element;
 use tracing::{debug, warn};
+use waddle_sfu::{ObservedCallSids, TeardownDisposition};
 use waddle_xmpp::muc::build_occupant_presence;
 use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
+use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
-use waddle_xmpp::xep::{
-    build_call_thread_ended, build_hint_element, CallThreadDuration, CallThreadEnded, Hint,
-    NS_FASTEN,
-};
 use waddle_xmpp_core::Stanza;
-use xmpp_parsers::message::{Message, MessageType};
 
 use super::websocket::{
-    get_room_actor, interpret_loop::build_interpret_deps, note_participant_left_from_webhook,
-    WebSocketState,
+    get_room_actor_result, note_participant_left_from_webhook,
+    observe_participant_sids_from_webhook, WebSocketState,
 };
+
+/// The disposition of a webhook-driven side effect.  A retryable result keeps
+/// the delivery in progress so LiveKit redelivers it; permanent input or
+/// already-gone-room cases are acknowledged after their warning is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebhookEffectOutcome {
+    Completed,
+    Stale,
+    Retryable(&'static str),
+    Permanent(&'static str),
+}
 
 /// Clear `full_jid`'s Muji advertisement in `room_jid` and broadcast
 /// the leave marker to remaining occupants. Idempotent: a participant
@@ -33,16 +40,47 @@ pub(crate) async fn clear_muji_presence_for_departure(
     state: &WebSocketState,
     room_jid: &BareJid,
     full_jid: &FullJid,
-) {
+    observed_sids: Option<&ObservedCallSids>,
+) -> WebhookEffectOutcome {
     debug!(
         room = %room_jid,
         identity = %full_jid,
         "Clearing Muji presence for departed participant"
     );
 
-    let Some(actor) = get_room_actor(state, room_jid).await else {
-        note_participant_left_from_webhook(state, room_jid, full_jid);
-        return;
+    if matches!(
+        observe_participant_sids_from_webhook(state, room_jid, full_jid, observed_sids),
+        Some(waddle_sfu::SidObservationDisposition::StaleSid)
+    ) {
+        return WebhookEffectOutcome::Stale;
+    }
+
+    let actor = match get_room_actor_result(state, room_jid).await {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
+            warn!(
+                room = %room_jid,
+                identity = %full_jid,
+                "MUC room actor is absent during LiveKit departure cleanup; queueing owner-gated Muji clear"
+            );
+            if enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids)
+                .await
+                .is_err()
+            {
+                return WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed");
+            }
+            record_participant_left(state, room_jid, full_jid, observed_sids);
+            return WebhookEffectOutcome::Completed;
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                identity = %full_jid,
+                error = %error,
+                "failed to resolve MUC room actor during LiveKit departure cleanup"
+            );
+            return WebhookEffectOutcome::Retryable("room_registry_lookup_failed");
+        }
     };
     let outcome = match actor
         .ask(ClearMujiPresence {
@@ -57,24 +95,81 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "Participant not in MUC actor; SFU registry cleanup only"
             );
-            note_participant_left_from_webhook(state, room_jid, full_jid);
-            return;
+            record_participant_left(state, room_jid, full_jid, observed_sids);
+            return super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid)
+                .await;
         }
         Err(error) => {
             warn!(
                 room = %room_jid,
                 identity = %full_jid,
                 error = ?error,
-                "Room actor rejected Muji clear; falling through to SFU unregister"
+                "room actor rejected Muji clear; asking LiveKit to retry"
             );
-            note_participant_left_from_webhook(state, room_jid, full_jid);
-            return;
+            return WebhookEffectOutcome::Retryable("room_actor_ask_failed");
         }
     };
 
     broadcast_muji_clear(state, room_jid, full_jid, &outcome);
-    note_participant_left_from_webhook(state, room_jid, full_jid);
-    maybe_broadcast_call_thread_ended(state, room_jid).await;
+    record_participant_left(state, room_jid, full_jid, observed_sids);
+    super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid).await
+}
+
+async fn enqueue_muji_presence_clear(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
+) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+        Ok(call_id) => call_id,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                identity = %full_jid,
+                %error,
+                "could not model absent-room Muji cleanup as a teardown intent"
+            );
+            return Ok(());
+        }
+    };
+    let intent = crate::call_teardown_outbox::CallTeardownIntent {
+        call_id,
+        target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
+            room_jid: room_jid.clone(),
+            departed: full_jid.clone(),
+            participant_sid: observed_sids.and_then(|sids| sids.participant_sid.clone()),
+        },
+        generation: None,
+        room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
+    };
+    let store = &state.deps.protocol.call_teardown_outbox;
+    let persistence = &state.deps.protocol.call_teardown_persistence;
+    if let Err(error) = store.enqueue(intent.clone()).await {
+        warn!(
+            room = %room_jid,
+            identity = %full_jid,
+            %error,
+            "failed to persist absent-room Muji clear; keeping webhook retryable and retrying asynchronously"
+        );
+        persistence.retry_batch(vec![intent]);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn record_participant_left(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
+) {
+    if matches!(
+        note_participant_left_from_webhook(state, room_jid, full_jid, observed_sids),
+        Some(TeardownDisposition::StaleSid)
+    ) {
+        increment_call_teardown_stale_dropped();
+    }
 }
 
 /// Broadcast a server-originated Muji-presence clear to every remaining
@@ -131,87 +226,134 @@ pub(crate) fn broadcast_muji_clear(
     }
 }
 
-pub(crate) async fn maybe_broadcast_call_thread_ended(state: &WebSocketState, room_jid: &BareJid) {
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return;
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{clear_muji_presence_for_departure, WebhookEffectOutcome};
+    use crate::server::routes::call_thread_end::{
+        maybe_broadcast_call_thread_ended, remove_completed_call_thread,
     };
-    let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) else {
-        return;
+    use crate::server::routes::websocket::handlers::presence::handle_muc_join;
+    use crate::server::routes::websocket::tests::{
+        create_test_server_owner_session, create_test_websocket_state_with_sfu, RecordingSfu,
     };
-    if !sfu.participants_for_call(&call_id).is_empty() {
-        return;
+    use crate::server::routes::websocket::ActiveCallThread;
+    use jid::{BareJid, FullJid};
+    fn active_call_thread(initiator: BareJid) -> ActiveCallThread {
+        ActiveCallThread {
+            anchor_origin_id: "anchor-origin-id".to_owned(),
+            initiator,
+            media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+            started: chrono::Utc::now() - chrono::Duration::minutes(5),
+            thread_id: "call-thread-id".to_owned(),
+        }
     }
-    let Some((_, active)) = state.deps.protocol.call_threads.remove(room_jid) else {
-        return;
-    };
 
-    let ended = chrono::Utc::now();
-    let duration = ended.signed_duration_since(active.started);
-    let duration = CallThreadDuration::parse(&format_call_thread_duration(duration))
-        .expect("formatted call-thread duration is valid");
-    let message = build_call_thread_ended_message(
-        room_jid,
-        &active.anchor_origin_id,
-        &CallThreadEnded {
-            ended,
-            duration: duration.clone(),
-        },
-    );
-    let deps = build_interpret_deps(state, None);
-    let _ =
-        super::interpret::broadcast_room_system_message(&deps, room_jid.clone(), Box::new(message))
-            .await;
+    #[tokio::test]
+    async fn absent_room_outbox_enqueue_failure_is_retryable() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let db = state.deps.app_state.db_pool.global();
+        let connection = db.guard().await.expect("db");
+        connection
+            .execute("DROP TABLE call_teardown_outbox", ())
+            .await
+            .expect("drop outbox table");
 
-    // Stamp the ended summary onto every subscriber's inbox/threads
-    // projection of this thread. The fastening above is the wire record;
-    // this persists the same `ended` + `duration` onto the durable rows
-    // keyed by the anchor's `urn:waddle:threads:0` thread id so the
-    // threads view can surface the ended summary without replaying MAM.
-    if let Err(error) = state
-        .deps
-        .protocol
-        .inbox_storage
-        .mark_call_thread_ended(room_jid, &active.thread_id, ended, &duration)
-        .await
-    {
-        warn!(
-            room = %room_jid,
-            %error,
-            "failed to persist call-thread ended summary to inbox"
+        let room_jid: BareJid = "enqueue-failure@muc.example.com".parse().expect("room jid");
+        let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
+
+        let outcome =
+            clear_muji_presence_for_departure(state.as_ref(), &room_jid, &full_jid, None).await;
+
+        assert_eq!(
+            outcome,
+            WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed")
         );
     }
-}
 
-fn build_call_thread_ended_message(
-    room_jid: &BareJid,
-    anchor_origin_id: &str,
-    ended: &CallThreadEnded,
-) -> Message {
-    let apply_to = Element::builder("apply-to", NS_FASTEN)
-        .attr(
-            minidom::rxml::xml_ncname!("id").to_owned(),
-            anchor_origin_id,
+    #[tokio::test]
+    async fn failed_call_thread_end_broadcast_is_retryable_and_retains_entry() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let room_jid: BareJid = "missing-call-room@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let initiator: BareJid = "alice@example.com".parse().expect("initiator jid");
+        state
+            .deps
+            .protocol
+            .call_threads
+            .insert(room_jid.clone(), active_call_thread(initiator));
+
+        let outcome = maybe_broadcast_call_thread_ended(state.as_ref(), &room_jid).await;
+
+        assert_eq!(
+            outcome,
+            WebhookEffectOutcome::Retryable("call_thread_end_broadcast_failed")
+        );
+        assert!(
+            state.deps.protocol.call_threads.contains_key(&room_jid),
+            "a failed ended fastening must retain the active entry for redelivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_call_thread_end_broadcast_removes_entry() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let room_jid: BareJid = "live-call-room@muc.example.com".parse().expect("room jid");
+        let initiator: FullJid = "alice@example.com/web".parse().expect("initiator jid");
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &initiator,
+            "alice",
+            None,
+            &Some(owner_session),
         )
-        .append(build_call_thread_ended(ended))
-        .build();
-    let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.from = Some(jid::Jid::from(room_jid.clone()));
-    message.type_ = MessageType::Groupchat;
-    message.payloads.push(apply_to);
-    message.payloads.push(build_hint_element(Hint::Store));
-    message
-}
+        .await;
+        state
+            .deps
+            .protocol
+            .call_threads
+            .insert(room_jid.clone(), active_call_thread(initiator.to_bare()));
 
-fn format_call_thread_duration(duration: chrono::Duration) -> String {
-    let seconds = duration.num_seconds().max(0);
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let seconds = seconds % 60;
-    if hours > 0 {
-        format!("PT{hours}H{minutes}M{seconds}S")
-    } else if minutes > 0 {
-        format!("PT{minutes}M{seconds}S")
-    } else {
-        format!("PT{seconds}S")
+        let outcome = maybe_broadcast_call_thread_ended(state.as_ref(), &room_jid).await;
+
+        assert_eq!(outcome, WebhookEffectOutcome::Completed);
+        assert!(
+            !state.deps.protocol.call_threads.contains_key(&room_jid),
+            "a successfully broadcast ended fastening must consume the active entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_old_call_thread_never_removes_a_same_room_replacement() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let room_jid: BareJid = "reused-call-room@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let initiator: BareJid = "alice@example.com".parse().expect("initiator jid");
+        let completed = active_call_thread(initiator.clone());
+        let mut replacement = active_call_thread(initiator);
+        replacement.anchor_origin_id = "replacement-anchor".to_owned();
+        replacement.thread_id = "replacement-thread".to_owned();
+        state
+            .deps
+            .protocol
+            .call_threads
+            .insert(room_jid.clone(), replacement.clone());
+
+        remove_completed_call_thread(state.as_ref(), &room_jid, &completed);
+
+        let retained = state
+            .deps
+            .protocol
+            .call_threads
+            .get(&room_jid)
+            .expect("replacement remains");
+        assert_eq!(retained.thread_id, replacement.thread_id);
+        assert_eq!(retained.anchor_origin_id, replacement.anchor_origin_id);
     }
 }

@@ -11,6 +11,7 @@ description = "LiveKit SFU bridge: JWT minting, TURN credential issuance, and pe
 base64 = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
+futures = { workspace = true }
 hmac = { workspace = true }
 jid = { workspace = true }
 jsonwebtoken = { workspace = true }

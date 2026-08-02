@@ -12,7 +12,8 @@ use crate::server::routes::websocket::{
     ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 use crate::server::session_janitors::{
-    spawn_auth_state_janitor, spawn_critical_registry_supervisor, spawn_graceful_shutdown_drain,
+    spawn_auth_state_janitor, spawn_call_teardown_outbox_janitor,
+    spawn_critical_registry_supervisor, spawn_graceful_shutdown_drain,
     spawn_notification_outbox_janitor, spawn_orphan_reaper_janitor,
     spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
     spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
@@ -352,6 +353,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     );
     spawn_pending_delivery_claim_janitor(&websocket_state);
     spawn_notification_outbox_janitor(&websocket_state);
+    spawn_call_teardown_outbox_janitor(&websocket_state);
     spawn_push_service_publish_job_janitor(&websocket_state);
     spawn_auth_state_janitor(&websocket_state);
     spawn_room_dormancy_janitor(&websocket_state);
@@ -555,6 +557,28 @@ async fn create_websocket_state(
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
 
+    let call_teardown_node_identity = state
+        .clustering_claims
+        .node_identity
+        .clone()
+        .unwrap_or_else(|| {
+            waddle_xmpp::ownership::SharedNodeIdentity::new(
+                waddle_xmpp::ownership::NodeIdentity::local(),
+            )
+        });
+    let call_teardown_outbox = Arc::new(
+        crate::call_teardown_outbox::CallTeardownOutboxStore::new_with_node_identity(
+            state.db_pool.global().clone(),
+            call_teardown_node_identity,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to initialize call teardown outbox: {error}"))?,
+    );
+    let call_teardown_persistence =
+        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor::new(
+            Arc::clone(&call_teardown_outbox),
+            tokio::runtime::Handle::current(),
+        );
     // Build the sans-I/O stanza dispatcher with the handlers migrated so far.
     // See `waddle_xmpp::protocol` for the state-machine design; any IQ
     // namespace registered here short-circuits the legacy string-matching
@@ -575,12 +599,56 @@ async fn create_websocket_state(
     // here so a background task can poll LiveKit for ghosts once
     // `websocket_state` exists (see `spawn_reconciliation_task` below).
     let mut sfu_reconciler: Option<std::sync::Arc<dyn waddle_sfu::SfuReconciler>> = None;
+    let mut call_teardown_executor: Option<waddle_sfu::LiveKitTeardownExecutor> = None;
     match waddle_sfu::SfuConfig::from_env() {
         Ok(Some(sfu_config)) => {
             let turn_tls_port = sfu_config.turn_tls_port;
             let turn_udp_port = sfu_config.turn_udp_port;
             match waddle_sfu::LiveKitSfu::new(sfu_config) {
                 Ok(sfu_impl) => {
+                    let sink_store = Arc::clone(&call_teardown_outbox);
+                    let failure_sink: waddle_sfu::TeardownFailureSink = Arc::new(move |lite| {
+                        let target = match lite.target {
+                            waddle_sfu::TeardownTargetLite::Participant {
+                                identity,
+                                participant_sid,
+                            } => crate::call_teardown_outbox::TeardownTarget::Participant {
+                                identity: identity.as_jid().clone(),
+                                participant_sid,
+                            },
+                            waddle_sfu::TeardownTargetLite::Room => {
+                                crate::call_teardown_outbox::TeardownTarget::Room
+                            }
+                        };
+                        let intent = crate::call_teardown_outbox::CallTeardownIntent {
+                            call_id: lite.call_id,
+                            target,
+                            generation: lite.generation,
+                            room_sid: lite.room_sid,
+                        };
+                        let sink_store = Arc::clone(&sink_store);
+                        Box::pin(async move {
+                            let mut retry_delay = std::time::Duration::from_secs(5);
+                            loop {
+                                match sink_store.enqueue(intent.clone()).await {
+                                    Ok(_) => break,
+                                    Err(error) => {
+                                        warn!(
+                                            %error,
+                                            retry_delay_ms = retry_delay.as_millis(),
+                                            "failed to persist reported call teardown intent; retrying"
+                                        );
+                                        tokio::time::sleep(retry_delay).await;
+                                        retry_delay = retry_delay
+                                            .saturating_mul(2)
+                                            .min(std::time::Duration::from_secs(10 * 60));
+                                    }
+                                }
+                            }
+                        })
+                    });
+                    let sfu_impl = sfu_impl.with_teardown_failure_sink(failure_sink);
+                    call_teardown_executor = Some(sfu_impl.teardown_executor());
                     // Build the concrete SFU once, then hand out two
                     // trait-object views of it: the sync `SfuService`
                     // the XMPP handlers + WebSocket layer consume, and
@@ -796,10 +864,19 @@ async fn create_websocket_state(
                 command_registry: websocket_command_registry,
                 extension_manager,
                 dispatcher: stanza_dispatcher,
+                muji_pre_dispatch_terminate_rate_limit: Arc::new(
+                    waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit::with_defaults(),
+                ),
+                muji_pre_dispatch_action_rate_limit: Arc::new(
+                    waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit::with_defaults(),
+                ),
                 pubsub_storage,
                 push_store,
                 push_service,
                 notification_outbox,
+                call_teardown_outbox,
+                call_teardown_persistence,
+                call_teardown_executor,
                 notification_settings_projection,
                 dnd_projection,
                 dnd_reader,
@@ -813,6 +890,7 @@ async fn create_websocket_state(
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                 pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                 call_threads: Arc::new(dashmap::DashMap::new()),
+                call_thread_end_locks: Arc::new(dashmap::DashMap::new()),
                 remote_muc_memberships: Arc::new(
                     crate::server::routes::websocket::RemoteMucMemberships::default(),
                 ),

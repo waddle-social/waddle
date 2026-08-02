@@ -7,6 +7,18 @@ pub fn i64_sql_type(driver: DatabaseDriver) -> &'static str {
     }
 }
 
+/// Null-safe equality operator per driver. SQLite's `IS` has been
+/// null-safe forever, while the standard `IS NOT DISTINCT FROM`
+/// spelling only landed in SQLite 3.39 — and the build links the host
+/// SQLite, so its availability is environment-dependent (#1612 review
+/// round 11).
+pub fn null_safe_eq(driver: DatabaseDriver) -> &'static str {
+    match driver {
+        DatabaseDriver::Postgres => "IS NOT DISTINCT FROM",
+        DatabaseDriver::Sqlite => "IS",
+    }
+}
+
 pub async fn widen_postgres_i64_column_to_bigint(
     db: &Database,
     table: &'static str,

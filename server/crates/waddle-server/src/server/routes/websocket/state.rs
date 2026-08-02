@@ -1274,6 +1274,18 @@ pub struct ProtocolServices {
     /// carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.
     pub dispatcher: Arc<StanzaDispatcher>,
+    /// WebSocket-layer pre-dispatch limiter for Muji `session-terminate`.
+    /// This is intentionally a separate bucket set from the handler's
+    /// own defense-in-depth limiter: the websocket path must charge
+    /// before room-locality checks or cross-node relays fan out work.
+    pub muji_pre_dispatch_terminate_rate_limit:
+        Arc<waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit>,
+    /// WebSocket-layer pre-dispatch limiter for Muji non-initiate actions.
+    /// Kept separate from the handler-side limiter so the effective
+    /// budget remains unchanged while foreign-room and membership-gated
+    /// requests are metered before they trigger expensive checks.
+    pub muji_pre_dispatch_action_rate_limit:
+        Arc<waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit>,
     /// Shared PubSub/PEP storage (XEP-0060/XEP-0163).
     pub pubsub_storage: Arc<dyn PubSubStorage>,
     /// XEP-0357 push subscription storage.
@@ -1284,6 +1296,16 @@ pub struct ProtocolServices {
     /// committed XMPP state into durable XEP-0357 PubSub publish jobs while
     /// leaving canonical registration state in `push_store`.
     pub notification_outbox: Arc<crate::notification_outbox::NotificationOutboxStore>,
+    /// Durable convergence queue for failed LiveKit admin teardown and
+    /// cross-node Muji-presence cleanup effects.
+    pub call_teardown_outbox: Arc<crate::call_teardown_outbox::CallTeardownOutboxStore>,
+    /// Single supervised producer retry path used when a direct atomic Muji
+    /// teardown insertion encounters a transient database failure.
+    pub(crate) call_teardown_persistence:
+        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor,
+    /// Async LiveKit admin view of the concrete SFU, retained separately
+    /// from the synchronous protocol service for the teardown janitor.
+    pub call_teardown_executor: Option<waddle_sfu::LiveKitTeardownExecutor>,
     /// Durable derived projection of XEP-0492 notification settings from
     /// canonical XMPP state.
     pub notification_settings_projection:
@@ -1359,6 +1381,11 @@ pub struct ProtocolServices {
     /// can later fasten a historical `<call-thread-ended/>` record to that
     /// exact anchor with XEP-0422 `<apply-to/>`.
     pub call_threads: Arc<dashmap::DashMap<BareJid, ActiveCallThread>>,
+    /// Per-room serialization of the call-thread "ended" completion so a
+    /// webhook delivery and a MUC presence clear racing on the same room
+    /// produce exactly one ended broadcast. Explicit state (not a module
+    /// static) so the dependency is visible and per-instance in tests.
+    pub call_thread_end_locks: Arc<dashmap::DashMap<BareJid, Arc<tokio::sync::Mutex<()>>>>,
     /// Remote-owned MUC rooms this node admitted a local connection into.
     /// Used by unclean disconnect cleanup to send the XEP-0045 unavailable
     /// presence to the authoritative remote RoomActor even though no local

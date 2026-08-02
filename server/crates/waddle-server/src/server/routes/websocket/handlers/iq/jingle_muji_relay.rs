@@ -117,7 +117,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
     // client's replica would find neither.
     if let Some(room_jid) = clear_after {
         crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-            state, &room_jid, &sender,
+            state, &room_jid, &sender, None,
         )
         .await;
     }

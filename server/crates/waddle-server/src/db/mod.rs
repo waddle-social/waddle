@@ -20,7 +20,7 @@ use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
 pub use migrations::MigrationRunner;
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
-pub use schema::{i64_sql_type, widen_postgres_i64_column_to_bigint};
+pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};
 pub use value::{row_value, DbDecode, IntoParams, Row, Rows, Value, ValueExt};
 
 #[macro_export]

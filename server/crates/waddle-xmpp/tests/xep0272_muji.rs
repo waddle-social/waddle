@@ -426,6 +426,21 @@ fn first_error_condition(events: &[OutboundEvent]) -> Option<DefinedCondition> {
     })
 }
 
+fn first_error_application_condition(events: &[OutboundEvent]) -> Option<&Element> {
+    events.iter().find_map(|ev| {
+        let OutboundEvent::SendStanza(stanza) = ev else {
+            return None;
+        };
+        let Stanza::Iq(reply) = stanza.as_ref() else {
+            return None;
+        };
+        let Iq::Error { error, .. } = reply.as_ref() else {
+            return None;
+        };
+        error.other.as_ref()
+    })
+}
+
 fn has_session_accept_to(events: &[OutboundEvent], expected_to: &str) -> bool {
     session_accept_payload_to(events, expected_to).is_some()
 }
@@ -600,7 +615,10 @@ fn muji_session_terminate_to_local_mixer_passes_federation_guard() {
         "muji-1",
     );
     let jid = test_full_jid();
-    let handler = JingleHandler::new(fixture_sfu());
+    let sfu = fixture_sfu();
+    let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
+    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone()));
+    let handler = JingleHandler::new(sfu);
     let events = handler.handle(&iq, &ctx(&jid));
 
     assert!(
@@ -648,6 +666,19 @@ impl RecordingAdmin {
 }
 
 impl waddle_sfu::LiveKitAdmin for RecordingAdmin {
+    fn list_rooms(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<waddle_sfu::ListedRoom>, waddle_sfu::SfuError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn remove_participant<'a>(
         &'a self,
         room: &'a waddle_sfu::CallId,
@@ -829,6 +860,49 @@ async fn muji_session_terminate_skips_delete_room_when_call_still_has_participan
     );
 }
 
+#[tokio::test]
+async fn muji_unknown_participant_terminate_returns_unknown_session_without_admin_calls() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let alice = test_full_jid();
+    let bob: jid::FullJid = "bob@waddle.test/desktop".parse().unwrap();
+
+    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(alice.clone()));
+
+    let iq = muji_session_terminate_iq(
+        &bob.to_string(),
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-unknown-terminate",
+    );
+    let handler = JingleHandler::new(sfu);
+    let events = handler.handle(&iq, &ctx(&bob));
+    drain_spawned_admin_tasks().await;
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::ItemNotFound),
+        "unknown Muji terminator must get item-not-found/unknown-session: {events:?}",
+    );
+    assert!(
+        first_error_application_condition(&events).is_some_and(|condition| {
+            condition.name() == "unknown-session"
+                && condition.ns() == waddle_xmpp::xep::xep0166::NS_JINGLE_ERRORS
+        }),
+        "unknown Muji terminate must include the XEP-0166 unknown-session application condition"
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "unknown Muji terminator must not schedule RemoveParticipant",
+    );
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "unknown Muji terminator must not schedule DeleteRoom",
+    );
+}
+
 // ── Role-derived media grants in the minted LiveKit token ──────────
 
 /// Decoded `video` grant claim of a minted LiveKit join JWT.
@@ -906,7 +980,8 @@ fn muji_initiate_with_participant_grants_mints_publishing_token() {
     );
 
     let grant = accepted_video_grant(&events);
-    assert!(grant.can_publish && grant.can_subscribe && grant.can_publish_data);
+    assert!(grant.can_publish && grant.can_subscribe);
+    assert!(!grant.can_publish_data);
 }
 
 /// A visitor (occupant without voice) gets a listen-only token: the

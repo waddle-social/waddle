@@ -18,7 +18,10 @@
 //! session in is a benign no-op.
 
 use jid::{BareJid, FullJid};
-use waddle_sfu::{CallId, Identity, MediaCapabilities};
+use waddle_sfu::{
+    CallId, Identity, MediaCapabilities, ObservedCallSids, SidObservationDisposition,
+    TeardownDisposition,
+};
 use waddle_xmpp_core::types::Voice;
 
 use super::state::WebSocketState;
@@ -60,7 +63,7 @@ pub(crate) fn unregister_participant_via_sfu(
         return;
     };
     let identity = Identity::from_jid(jid.clone());
-    let _ = sfu.unregister_call_participant(&call_id, &identity);
+    let _ = sfu.unregister_call_participant(&call_id, &identity, None);
 }
 
 /// Converge `jid`'s live SFU media grants with their XEP-0045 voice
@@ -362,11 +365,33 @@ pub(crate) fn note_participant_left_from_webhook(
     state: &WebSocketState,
     room_jid: &BareJid,
     jid: &FullJid,
-) {
+    observed_sids: Option<&ObservedCallSids>,
+) -> Option<TeardownDisposition> {
     let Ok(call_id) = CallId::new(room_jid.to_string()) else {
-        return;
+        return None;
     };
-    note_participant_left_by_call_id(state, &call_id, jid);
+    note_participant_left_by_call_id(state, &call_id, jid, observed_sids)
+}
+
+/// Non-destructively validate and learn webhook SIDs before an async
+/// MUC actor cleanup. Keeping membership intact until the actor step
+/// succeeds preserves `room_finished`'s survivor recovery path when a
+/// transient actor failure asks LiveKit to retry.
+pub(crate) fn observe_participant_sids_from_webhook(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
+) -> Option<SidObservationDisposition> {
+    let call_id = CallId::new(room_jid.to_string()).ok()?;
+    let sfu = state.deps.protocol.sfu.as_ref()?;
+    let identity = Identity::from_jid(jid.clone());
+    Some(sfu.observe_call_participant_sids(
+        &call_id,
+        &identity,
+        observed_sids,
+        waddle_sfu::SidObservationDirection::Leave,
+    ))
 }
 
 /// Raw-`CallId` variant of [`note_participant_left_from_webhook`] for
@@ -379,12 +404,11 @@ pub(crate) fn note_participant_left_by_call_id(
     state: &WebSocketState,
     call_id: &CallId,
     jid: &FullJid,
-) {
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return;
-    };
+    observed_sids: Option<&ObservedCallSids>,
+) -> Option<TeardownDisposition> {
+    let sfu = state.deps.protocol.sfu.as_ref()?;
     let identity = Identity::from_jid(jid.clone());
-    sfu.note_participant_left(call_id, &identity);
+    Some(sfu.note_participant_left(call_id, &identity, observed_sids))
 }
 
 #[cfg(test)]
