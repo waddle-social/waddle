@@ -323,15 +323,28 @@ async fn peer_jingle_blocklist_reply(
         .as_ref()
         .filter(|target| target.resource().is_some() && target.domain().as_str() == local_domain)?;
 
+    // A bounced/errored session-INITIATE is a complete, terminal call
+    // setup attempt: it must contribute one attempted/failed pair even
+    // though the gate returns before a `CallSetupAttempt` ever opens
+    // (#1612 review round 13). Accepts stay uncounted — the matching
+    // initiate already paid.
+    let is_initiate = matches!(action, Some(xmpp_parsers::jingle::Action::SessionInitiate));
     let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
     match blocking
         .is_blocked_jid(&target.to_bare(), &Jid::from(sender.clone()))
         .await
     {
-        Ok(true) => crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(
-            Box::new(iq.clone()),
-        ))
-        .map(PeerJingleBlocklistReply::Bounce),
+        Ok(true) => {
+            if is_initiate {
+                waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                    waddle_xmpp::telemetry::attributes::CallSetupFailureReason::PeerBlocked,
+                );
+            }
+            crate::server::routes::interpret::undeliverable_iq_reply(&Stanza::Iq(Box::new(
+                iq.clone(),
+            )))
+            .map(PeerJingleBlocklistReply::Bounce)
+        }
         Ok(false) => None,
         Err(error) => {
             warn!(
@@ -340,6 +353,11 @@ async fn peer_jingle_blocklist_reply(
                 sender = %sender,
                 "Failed to check blocklist before dispatching direct Jingle IQ"
             );
+            if is_initiate {
+                waddle_xmpp::telemetry::call::record_call_setup_rejected(
+                    waddle_xmpp::telemetry::attributes::CallSetupFailureReason::MembershipCheckFailed,
+                );
+            }
             Some(PeerJingleBlocklistReply::Error(
                 internal_server_error_iq_error("Internal server error."),
             ))

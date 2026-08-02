@@ -399,60 +399,15 @@ pub(crate) async fn try_handle_muc_presence_update(
     }
 
     if clears_muji_presence {
-        let outcome = crate::server::routes::call_thread_end::maybe_broadcast_call_thread_ended(
+        // The durable completion retry is persisted INSIDE
+        // `maybe_broadcast_call_thread_ended`'s per-room lock on a
+        // retryable failure (#1612 review round 13), so this caller no
+        // longer snapshots the fence post-hoc — a replacement call can
+        // no longer race the capture.
+        let _ = crate::server::routes::call_thread_end::maybe_broadcast_call_thread_ended(
             state, room_jid,
         )
         .await;
-        // Unlike the webhook ingress, this ordinary MUC presence path has
-        // no LiveKit redelivery behind it: a retryable completion failure
-        // (transient inbox-storage or broadcast error) would otherwise be
-        // dropped here, silently suppressing the ended broadcast and
-        // leaving the active call-thread entry in memory (#1612 review).
-        // Hand the retry to the durable outbox via the COMPLETION-ONLY
-        // target — the presence clear itself already succeeded, and
-        // replaying it could clobber a quick rejoin's advertisement.
-        if matches!(
-            outcome,
-            crate::server::routes::muc_muji_clear::WebhookEffectOutcome::Retryable(_)
-        ) {
-            // A retryable failure leaves the active entry in place, so
-            // the FAILED thread's identity is still readable here; the
-            // durable retry is fenced to it so a newer call replacing
-            // the entry before the row drains cannot be clobbered
-            // (#1612 review round 10).
-            let failed_thread = state
-                .deps
-                .protocol
-                .call_threads
-                .get(room_jid)
-                .and_then(|active| {
-                    Some((
-                        ThreadId::new(active.thread_id.clone())?,
-                        waddle_xmpp_core::xep0359::OriginId::new(active.anchor_origin_id.clone()),
-                        active.started,
-                    ))
-                });
-            if let Some((failed_thread, anchor_origin_id, started)) = failed_thread {
-                if let Err(error) =
-                    crate::server::routes::call_thread_end::enqueue_call_thread_end_retry(
-                        state,
-                        room_jid,
-                        failed_thread,
-                        anchor_origin_id,
-                        started,
-                        chrono::Utc::now(),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        room = %room_jid,
-                        %error,
-                        "call-thread completion retry could not be enqueued; the ended \
-                         broadcast is deferred to the room-sweep reconcile backstop"
-                    );
-                }
-            }
-        }
     }
 
     if let Some(CallThreadAnchorMessage {

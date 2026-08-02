@@ -1103,16 +1103,37 @@ impl LiveKitSfu {
                                     observed_sids.observed_event_at,
                                     state.participant_sid_event_at,
                                 ) {
-                                    if event_at <= stored_event_at {
+                                    if event_at < stored_event_at {
                                         tracing::warn!(
                                             call_id = %call_id,
                                             identity = %identity.as_livekit_identity(),
                                             participant_sid = %participant_sid,
                                             stored_participant_sid = %stored_participant_sid,
-                                            "LiveKit join ignored as stale: event time does not \
-                                             postdate the stored sid's lineage"
+                                            "LiveKit join ignored as stale: event time predates \
+                                             the stored sid's lineage"
                                         );
                                         return SidGuardDisposition::StaleSid;
+                                    }
+                                    // `createdAt` is whole seconds, so a
+                                    // legitimate same-second reconnect and a
+                                    // stale redelivery are indistinguishable
+                                    // at equality. Neither overwrite nor
+                                    // stale-ack: keep the stored fence and
+                                    // let the freshness-gated occupancy
+                                    // reconcile resolve which sid is live
+                                    // (#1612 review round 13).
+                                    if event_at == stored_event_at {
+                                        tracing::info!(
+                                            call_id = %call_id,
+                                            identity = %identity.as_livekit_identity(),
+                                            participant_sid = %participant_sid,
+                                            stored_participant_sid = %stored_participant_sid,
+                                            "LiveKit join with equal event time is unordered; \
+                                             deferring sid resolution to reconciliation"
+                                        );
+                                        return SidGuardDisposition::Applied {
+                                            participant_rejoined: false,
+                                        };
                                     }
                                 }
                                 tracing::info!(
@@ -1263,21 +1284,22 @@ impl LiveKitSfu {
             }
             // A surviving replacement token proves a concurrent
             // re-authorization: arming the eject would disconnect it.
-            // Re-check the LIVE bucket too (#1612 review round 12): a
-            // fresh initiate racing this sweep can repopulate `issued`
-            // (and clear the eject at mint AND register) between the
-            // `remove` above and this arm — its token being visible
-            // here means the identity is re-authorized. A mint whose
-            // push has not landed yet is followed by its registration's
-            // own eject clear, which runs after any arm below.
-            let fresh_reinserted = self
-                .issued
-                .get(&(call_id.clone(), identity.clone()))
-                .is_some_and(|bucket| !bucket.is_empty());
-            if let (Some(latest_exp), false, false) =
-                (latest_exp, replacement_minted, fresh_reinserted)
-            {
-                self.arm_pending_revocation_eject(call_id, identity, latest_exp);
+            // The live-bucket recheck and the arm are ATOMIC under the
+            // `issued` entry guard (#1612 review rounds 12-13): the
+            // mint path holds this same guard across its eject clear
+            // and token push, so under the guard either the fresh token
+            // is already visible (we skip the arm) or the racing mint
+            // has not run yet — in which case its own eject clear, and
+            // the registration's clear after it, erase the arm we make
+            // here. No check/act gap remains.
+            if let (Some(latest_exp), false) = (latest_exp, replacement_minted) {
+                let key = (call_id.clone(), identity.clone());
+                let bucket = self.issued.entry(key.clone()).or_default();
+                if bucket.is_empty() {
+                    self.arm_pending_revocation_eject(call_id, identity, latest_exp);
+                }
+                drop(bucket);
+                self.issued.remove_if(&key, |_, bucket| bucket.is_empty());
             }
         }
         self.registered_at
@@ -1759,7 +1781,38 @@ impl LiveKitSfu {
                 }
                 registered
             } else {
-                if self.adopt_discovered_call(&call_id, listed_room_sid, &live, now) {
+                // Revalidate the room sid at adoption time (#1612 review
+                // round 13): the original room can finish and a same-name
+                // successor start between the pass's `ListRooms` and this
+                // occupancy probe, and adopting the successor's occupants
+                // under the predecessor's sid poisons the fence — a
+                // delayed old `room_finished` would then clear the live
+                // call. A fresh single listing is acceptable here: this
+                // path only runs for registry-vacant (restart) rooms. On
+                // listing failure adopt sid-less; later observations
+                // teach the current sid under the usual gates.
+                let adoption_room_sid = match self.admin.list_rooms().await {
+                    Ok(rooms) => rooms
+                        .into_iter()
+                        .find(|room| room.name.as_waddle() == Some(&call_id))
+                        .and_then(|room| room.sid),
+                    Err(error) => {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            %error,
+                            "SFU reconcile: sid revalidation listing failed; adopting sid-less"
+                        );
+                        None
+                    }
+                };
+                if adoption_room_sid != listed_room_sid {
+                    tracing::info!(
+                        call_id = %call_id,
+                        "SFU reconcile: room sid changed between listing and occupancy probe; \
+                         adopting with the revalidated sid"
+                    );
+                }
+                if self.adopt_discovered_call(&call_id, adoption_room_sid, &live, now) {
                     rooms_adopted += 1;
                     tracing::info!(
                         call_id = %call_id,

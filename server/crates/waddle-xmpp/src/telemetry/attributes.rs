@@ -563,12 +563,18 @@ pub enum CallSetupFailureReason {
     /// review). A nonzero rate here is a routing-pipeline bug, not a
     /// peer or client condition.
     RouteAbandoned,
+    /// XEP-0191: the addressed peer blocks the caller, so the invite
+    /// was bounced by the pre-dispatch blocklist gate before any token
+    /// mint or registration. Counted there — the gate returns before a
+    /// `CallSetupAttempt` ever opens, and every terminal initiate must
+    /// contribute one attempted/failed pair (#1612 review round 13).
+    PeerBlocked,
 }
 
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -581,6 +587,7 @@ impl CallSetupFailureReason {
         Self::OwnerUnreachable,
         Self::PeerUnavailable,
         Self::RouteAbandoned,
+        Self::PeerBlocked,
     ];
 }
 
@@ -603,6 +610,7 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::OwnerUnreachable => "owner_unreachable",
             Self::PeerUnavailable => "peer_unavailable",
             Self::RouteAbandoned => "route_abandoned",
+            Self::PeerBlocked => "peer_blocked",
         }
     }
 }

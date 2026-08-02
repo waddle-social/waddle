@@ -145,7 +145,7 @@ pub(super) async fn drain_due_at(
                 if matches!(
                     &job.intent.target,
                     TeardownTarget::CallThreadEndRetry { .. }
-                ) && room_is_globally_unclaimed(state, &room_jid)
+                ) && room_has_no_claim_at_all(state, &room_jid)
                     .await
                     .unwrap_or(false)
                 {
@@ -330,6 +330,36 @@ async fn room_is_globally_unclaimed(
 /// ago.
 fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
     claim.is_none_or(|snapshot| !snapshot.owner_lease_fresh)
+}
+
+/// Strictly no claim row at all — NOT the stale-lease case, which is a
+/// transient failover window where a successor is about to take over.
+/// The completion-retry ownership bypass uses this so a non-owner
+/// cannot best-effort-complete (and mark done) a row during the blip
+/// that the room's next owner would have broadcast properly (#1612
+/// review round 13). Dead-lettering keeps the looser predicate.
+async fn room_has_no_claim_at_all(state: &WebSocketState, room_jid: &BareJid) -> Result<bool, ()> {
+    let Some(claim_store) = state.deps.app_state.clustering_claims.claim_store.as_ref() else {
+        return Ok(true);
+    };
+    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+    match tokio::time::timeout(
+        ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
+        claim_store.current_claim(&entity),
+    )
+    .await
+    {
+        Ok(Ok(claim)) => Ok(claim.is_none()),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                room = %room_jid,
+                %error,
+                "call teardown outbox could not confirm room claim absence; retaining intent"
+            );
+            Err(())
+        }
+        Err(_) => Err(()),
+    }
 }
 
 async fn local_room_jids(

@@ -30,6 +30,41 @@ fn call_thread_end_lock(state: &WebSocketState, room_jid: &BareJid) -> Arc<tokio
         .clone()
 }
 
+/// Persist the completion fence for a FIRST-attempt retryable failure,
+/// while still holding the per-room completion lock — a replacement
+/// call cannot swap `call_threads` between the failure and this
+/// snapshot, and the webhook ingress gets the same durable recovery
+/// as the ordinary presence path (#1612 review round 13, fixing both
+/// the webhook-only-Retryable gap and the post-lock fence race).
+/// Fenced (outbox-driven) attempts skip this: their row is requeued
+/// by the drain itself.
+async fn persist_completion_retry_if_first_attempt(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    active: &crate::server::routes::websocket::ActiveCallThread,
+    ended: chrono::DateTime<chrono::Utc>,
+    first_attempt: bool,
+) {
+    if !first_attempt {
+        return;
+    }
+    let Some(thread_id) = waddle_xmpp_core::mam::ThreadId::new(active.thread_id.clone()) else {
+        return;
+    };
+    let anchor = waddle_xmpp_core::xep0359::OriginId::new(active.anchor_origin_id.clone());
+    if let Err(error) =
+        enqueue_call_thread_end_retry(state, room_jid, thread_id, anchor, active.started, ended)
+            .await
+    {
+        warn!(
+            room = %room_jid,
+            %error,
+            "call-thread completion retry could not be persisted; relying on the \
+             caller's transport-level retry"
+        );
+    }
+}
+
 /// Persist a completion-only retry of the call-thread "ended" broadcast.
 /// Deliberately NOT a `MujiPresenceClear`: the presence clear already
 /// succeeded on the caller's path, and replaying it from the outbox could
@@ -173,7 +208,7 @@ pub(crate) async fn maybe_broadcast_call_thread_ended_for(
             .expect("formatted call-thread duration is valid");
         let message = build_call_thread_ended_message(
             room_jid,
-            &active.anchor_origin_id,
+            &waddle_xmpp_core::xep0359::OriginId::new(active.anchor_origin_id.clone()),
             &CallThreadEnded {
                 ended,
                 duration: duration.clone(),
@@ -196,6 +231,14 @@ pub(crate) async fn maybe_broadcast_call_thread_ended_for(
                 %error,
                 "failed to persist call-thread ended summary to inbox"
             );
+            persist_completion_retry_if_first_attempt(
+                state,
+                room_jid,
+                &active,
+                ended,
+                expected_thread.is_none(),
+            )
+            .await;
             return WebhookEffectOutcome::Retryable("inbox_call_thread_end_persist_failed");
         }
 
@@ -211,6 +254,14 @@ pub(crate) async fn maybe_broadcast_call_thread_ended_for(
             // `mark_call_thread_ended` has upsert-style overwrite semantics,
             // so retaining the active entry and re-running persistence on a
             // LiveKit redelivery is safe.
+            persist_completion_retry_if_first_attempt(
+                state,
+                room_jid,
+                &active,
+                ended,
+                expected_thread.is_none(),
+            )
+            .await;
             return WebhookEffectOutcome::Retryable("call_thread_end_broadcast_failed");
         }
         remove_completed_call_thread(state, room_jid, &active);
@@ -259,7 +310,7 @@ async fn complete_call_thread_from_fence(
         .expect("formatted call-thread duration is valid");
     let message = build_call_thread_ended_message(
         room_jid,
-        fence.anchor_origin_id.as_str(),
+        fence.anchor_origin_id,
         &CallThreadEnded {
             ended,
             duration: duration.clone(),
@@ -306,13 +357,13 @@ async fn complete_call_thread_from_fence(
 
 fn build_call_thread_ended_message(
     room_jid: &BareJid,
-    anchor_origin_id: &str,
+    anchor_origin_id: &waddle_xmpp_core::xep0359::OriginId,
     ended: &CallThreadEnded,
 ) -> Message {
     let apply_to = Element::builder("apply-to", NS_FASTEN)
         .attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
-            anchor_origin_id,
+            anchor_origin_id.as_str(),
         )
         .append(build_call_thread_ended(ended))
         .build();
