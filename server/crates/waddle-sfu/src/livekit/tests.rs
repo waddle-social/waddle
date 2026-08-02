@@ -3223,3 +3223,201 @@ async fn adopted_participant_sid_makes_fenced_removal_decidable() {
     );
     assert_eq!(admin.remove_snapshot(), vec![(call, alice)]);
 }
+
+/// #1612 review round 14: a join with a DIFFERENT sid but the SAME
+/// whole-second event time as the stored lineage is unordered. The
+/// fence is kept but marked contested, so a delayed leave matching the
+/// retained fence cannot clear what may be the live same-second
+/// reconnect; the occupancy reconcile advances the fence, after which
+/// the old leave mismatches and the live twin's leave applies.
+#[test]
+fn equal_event_time_join_contests_lineage_and_defers_matching_leave() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("contested@muc.waddle.social").expect("call id");
+    let alice = fixture_identity("alice");
+    let event_second = Utc::now();
+    let mut first = observed_sids(Some("RM_contested"), Some("PA_first"));
+    first.observed_event_at = Some(event_second);
+    let mut twin = observed_sids(Some("RM_contested"), Some("PA_twin"));
+    twin.observed_event_at = Some(event_second);
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &first),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&twin),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        first.participant_sid,
+        "an unordered equal-time join must not overwrite the stored fence"
+    );
+
+    assert!(
+        matches!(
+            sfu.note_participant_left(&call, &alice, Some(&first)),
+            TeardownDisposition::StaleSid
+        ),
+        "a leave matching a contested fence must be deferred, not executed"
+    );
+    assert!(
+        sfu.has_call_participant(&call, &alice),
+        "the possibly-live same-second reconnect must survive the deferred leave"
+    );
+
+    // The occupancy probe (started after the ambiguity arose) reports
+    // the twin as live: the fence advances and resolves the contest.
+    let twin_sid = twin.participant_sid.clone().expect("twin sid");
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(twin_sid))],
+            Utc::now(),
+            Utc::now(),
+        ),
+        0
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        twin.participant_sid
+    );
+    assert!(
+        matches!(
+            sfu.note_participant_left(&call, &alice, Some(&first)),
+            TeardownDisposition::StaleSid
+        ),
+        "the departed twin's redelivered leave must mismatch the advanced fence"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert!(
+        matches!(
+            sfu.note_participant_left(&call, &alice, Some(&twin)),
+            TeardownDisposition::Applied(_)
+        ),
+        "the resolved live sid's own leave must execute normally"
+    );
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+/// #1612 review round 14: only a probe started AFTER the ambiguity
+/// arose may confirm the stored fence and resolve the contest — a
+/// snapshot predating the contest proves nothing about which
+/// same-second twin survived.
+#[test]
+fn contested_lineage_resolves_only_via_a_probe_started_after_the_contest() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("contested-confirm@muc.waddle.social").expect("call id");
+    let alice = fixture_identity("alice");
+    let event_second = Utc::now();
+    let mut first = observed_sids(Some("RM_confirm"), Some("PA_first"));
+    first.observed_event_at = Some(event_second);
+    let mut twin = observed_sids(Some("RM_confirm"), Some("PA_twin"));
+    twin.observed_event_at = Some(event_second);
+    let first_sid = first.participant_sid.clone().expect("first sid");
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &first),
+        SidObservationDisposition::Applied
+    );
+    let pre_contest_probe_boundary = Utc::now();
+    assert_eq!(
+        sfu.observe_call_participant_sids(
+            &call,
+            &alice,
+            Some(&twin),
+            SidObservationDirection::Join,
+        ),
+        SidObservationDisposition::Applied
+    );
+
+    // A probe that went out BEFORE the contest reports the stored sid:
+    // it cannot resolve the ambiguity; the matching leave stays deferred.
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(first_sid.clone()))],
+            Utc::now(),
+            pre_contest_probe_boundary,
+        ),
+        0
+    );
+    assert!(matches!(
+        sfu.note_participant_left(&call, &alice, Some(&first)),
+        TeardownDisposition::StaleSid
+    ));
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    // A post-contest probe confirming the stored fence resolves the
+    // contest in its favor; the matching leave now executes.
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(first_sid))],
+            Utc::now(),
+            Utc::now(),
+        ),
+        0
+    );
+    assert!(matches!(
+        sfu.note_participant_left(&call, &alice, Some(&first)),
+        TeardownDisposition::Applied(_)
+    ));
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+/// #1612 review round 14: when the pre-connect admin removal completed
+/// as not-found and the join webhook was then lost, the reconcile pass
+/// only fills the ALREADY-TRACKED identity's sid (`merged == 0`). The
+/// pending revocation eject must still be re-armed for every live
+/// identity, not only newly inserted ones — reconciliation is the
+/// documented lost-webhook backstop for revoked holders.
+#[test]
+fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&reported);
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            sink_values.lock().expect("sink lock").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::new("c-reconcile-rearm-eject").expect("call id");
+    let alice = fixture_identity("alice");
+    let minted = sfu
+        .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+        .expect("token");
+    sfu.register_call_participant(&call, &alice);
+    sfu.revoke_issued_token(&call, &alice, &minted.jti);
+    assert_eq!(reported.lock().expect("sink lock").len(), 1);
+
+    // The occupancy probe reports the still-connected revoked holder:
+    // alice is already tracked, so nothing is merged — the eject must
+    // be re-armed regardless.
+    assert_eq!(
+        sfu.merge_live_identities(
+            &call,
+            &[(alice.clone(), Some(fixture_participant_sid("PA_rearm")))],
+            Utc::now(),
+            Utc::now(),
+        ),
+        0
+    );
+    let intents = reported.lock().expect("sink lock");
+    assert_eq!(
+        intents.len(),
+        2,
+        "reconciling an already-tracked identity must re-arm its pending eject"
+    );
+    match &intents[1].target {
+        TeardownTargetLite::Participant { identity, .. } => assert_eq!(identity, &alice),
+        TeardownTargetLite::Room => panic!("eject convergence must only enqueue eviction"),
+    }
+}

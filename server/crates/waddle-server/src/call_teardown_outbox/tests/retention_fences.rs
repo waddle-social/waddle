@@ -586,3 +586,100 @@ async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
         "without a later mint, the queued eject must execute"
     );
 }
+
+/// #1612 review round 14: after a restart nobody rejoined this MUC, so
+/// it never re-enters `LocalRoomJids` and holds no claim anywhere. A
+/// sid-fenced LiveKit teardown must still be ATTEMPTED — the executor
+/// resolves the fence against LiveKit's live state, and without this
+/// bypass the connected participant would linger until the row
+/// dead-letters. Without a wired executor the attempt lands as a
+/// retryable executor-unavailable, which is exactly the proof the
+/// ownership gate let it through instead of releasing it untouched.
+#[tokio::test]
+async fn sid_fenced_room_scoped_intent_executes_when_room_has_no_claim() {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let now_ms = 2_000_000_i64;
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: CallId::new("orphaned@muc.example.test").expect("room call id"),
+                target: TeardownTarget::Participant {
+                    identity: FullJid::from_str("alice@example.test/device").expect("full JID"),
+                    participant_sid: Some(ParticipantSid::new("PA_orphaned").expect("sid")),
+                },
+                generation: None,
+                room_sid: Some(RoomSid::new("RM_orphaned").expect("room sid")),
+            },
+            now_ms - 1,
+        )
+        .await
+        .expect("enqueue");
+
+    let summary = super::drain::drain_due_at(&state, 8, now_ms)
+        .await
+        .expect("drain");
+
+    assert_eq!(
+        summary.requeued, 1,
+        "a sid-fenced row for an unclaimed room must be attempted, not released"
+    );
+    assert_eq!(summary.failed, 0);
+    let stored = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+    assert_eq!(stored.status, CallTeardownStatus::Queued);
+    assert_eq!(stored.attempt_count, 1);
+}
+
+/// The unfenced counterpart: without a sid fence the LiveKit removal
+/// cannot be safely decided off-owner, so the ownership gate keeps
+/// releasing the row untouched even when the room has no claim.
+#[tokio::test]
+async fn unfenced_room_scoped_intent_stays_gated_without_a_claim() {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let now_ms = 2_000_000_i64;
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: CallId::new("orphaned-unfenced@muc.example.test").expect("room call id"),
+                target: TeardownTarget::Participant {
+                    identity: FullJid::from_str("alice@example.test/device").expect("full JID"),
+                    participant_sid: None,
+                },
+                generation: None,
+                room_sid: Some(RoomSid::new("RM_orphaned_unfenced").expect("room sid")),
+            },
+            now_ms - 1,
+        )
+        .await
+        .expect("enqueue");
+
+    let summary = super::drain::drain_due_at(&state, 8, now_ms)
+        .await
+        .expect("drain");
+
+    assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 0);
+    assert_eq!(summary.failed, 0);
+    let stored = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+    assert_eq!(stored.status, CallTeardownStatus::Queued);
+    assert_eq!(stored.attempt_count, 0);
+}

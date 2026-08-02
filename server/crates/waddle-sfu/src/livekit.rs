@@ -101,6 +101,15 @@ struct ParticipantState {
     /// refused when its event time does not postdate this (#1612
     /// review round 12).
     participant_sid_event_at: Option<DateTime<Utc>>,
+    /// Set when a join carrying a DIFFERENT sid arrived with an event
+    /// time EQUAL to the stored lineage: whole-second `createdAt`
+    /// cannot order the two, so neither sid is authoritative. While
+    /// contested, a leave matching the stored fence is deferred rather
+    /// than executed — a delayed old leave must not clear a live
+    /// same-second reconnect. Cleared by the occupancy reconcile once
+    /// a probe STARTED AFTER the ambiguity arose confirms which sid is
+    /// live, or by a strictly newer join (#1612 review round 14).
+    participant_sid_contested_at: Option<DateTime<Utc>>,
     first_registered_at: DateTime<Utc>,
     registered_without_mint: bool,
 }
@@ -111,6 +120,7 @@ impl ParticipantState {
             participant_sid: None,
             participant_sid_observed_at: None,
             participant_sid_event_at: None,
+            participant_sid_contested_at: None,
             first_registered_at,
             registered_without_mint: false,
         }
@@ -123,9 +133,27 @@ impl ParticipantState {
         Self {
             participant_sid_observed_at: participant_sid.is_some().then_some(first_registered_at),
             participant_sid_event_at: None,
+            participant_sid_contested_at: None,
             participant_sid,
             first_registered_at,
             registered_without_mint: true,
+        }
+    }
+
+    /// A fresh registration sourced from a webhook observation. Unlike
+    /// [`Self::restored`] (probe/adoption results, which carry no event
+    /// clock), this preserves the producing event's `createdAt` so the
+    /// stored sid starts with its event lineage — without it, the next
+    /// same-second join would skip both lineage gates and overwrite the
+    /// fence (#1612 review round 14).
+    fn observed(first_registered_at: DateTime<Utc>, observed_sids: &ObservedCallSids) -> Self {
+        Self {
+            participant_sid_event_at: observed_sids
+                .participant_sid
+                .is_some()
+                .then_some(observed_sids.observed_event_at)
+                .flatten(),
+            ..Self::restored(first_registered_at, observed_sids.participant_sid.clone())
         }
     }
 }
@@ -811,6 +839,7 @@ impl LiveKitSfu {
                     {
                         participant.participant_sid.clone_from(participant_sid);
                         participant.participant_sid_observed_at = Some(now);
+                        participant.participant_sid_contested_at = None;
                     } else if participant_sid.is_some()
                         // Only a stored sid may be ADVANCED here; a sid-less
                         // state is exclusively the first-fill branch above,
@@ -838,6 +867,21 @@ impl LiveKitSfu {
                         );
                         participant.participant_sid.clone_from(participant_sid);
                         participant.participant_sid_observed_at = Some(now);
+                        participant.participant_sid_contested_at = None;
+                    } else if participant_sid.is_some()
+                        && participant.participant_sid.as_ref() == participant_sid.as_ref()
+                        && participant
+                            .participant_sid_contested_at
+                            .is_some_and(|contested_at| contested_at < probe_freshness_boundary)
+                    {
+                        // The authoritative occupancy CONFIRMS the
+                        // stored fence, and the probe went out after
+                        // the ambiguity arose, so the contest is
+                        // resolved in the stored sid's favor. A probe
+                        // predating the contest proves nothing about
+                        // which same-second twin survived (#1612
+                        // review round 14).
+                        participant.participant_sid_contested_at = None;
                     }
                 } else {
                     entry.participants.insert(
@@ -848,13 +892,18 @@ impl LiveKitSfu {
                 }
             }
         }
-        if merged > 0 {
-            for (identity, _participant_sid) in live {
-                let key = (call_id.clone(), identity.clone());
-                self.registered_at.entry(key.clone()).or_insert(now);
-                self.absent_streak.remove(&key);
-                self.schedule_pending_revocation_eject_if_needed(call_id, identity);
-            }
+        // Re-arm pending revocation ejects for EVERY reconciled live
+        // identity, not only newly inserted ones (#1612 review round
+        // 14): when the pre-connect admin removal completed as
+        // not-found and the join webhook was lost, reconciliation only
+        // fills or advances the ALREADY-TRACKED identity's sid — the
+        // merged-count gate would skip the eject backstop and leave
+        // the revoked holder connected.
+        for (identity, _participant_sid) in live {
+            let key = (call_id.clone(), identity.clone());
+            self.registered_at.entry(key.clone()).or_insert(now);
+            self.absent_streak.remove(&key);
+            self.schedule_pending_revocation_eject_if_needed(call_id, identity);
         }
         merged
     }
@@ -1118,10 +1167,13 @@ impl LiveKitSfu {
                                     // legitimate same-second reconnect and a
                                     // stale redelivery are indistinguishable
                                     // at equality. Neither overwrite nor
-                                    // stale-ack: keep the stored fence and
-                                    // let the freshness-gated occupancy
+                                    // stale-ack: keep the stored fence,
+                                    // mark the lineage CONTESTED so a
+                                    // delayed leave matching the retained
+                                    // fence cannot clear the live
+                                    // reconnect, and let the occupancy
                                     // reconcile resolve which sid is live
-                                    // (#1612 review round 13).
+                                    // (#1612 review rounds 13-14).
                                     if event_at == stored_event_at {
                                         tracing::info!(
                                             call_id = %call_id,
@@ -1131,6 +1183,7 @@ impl LiveKitSfu {
                                             "LiveKit join with equal event time is unordered; \
                                              deferring sid resolution to reconciliation"
                                         );
+                                        state.participant_sid_contested_at = Some(observed_at);
                                         return SidGuardDisposition::Applied {
                                             participant_rejoined: false,
                                         };
@@ -1146,6 +1199,7 @@ impl LiveKitSfu {
                                 state.participant_sid = Some(participant_sid.clone());
                                 state.participant_sid_observed_at = Some(observed_at);
                                 state.participant_sid_event_at = observed_sids.observed_event_at;
+                                state.participant_sid_contested_at = None;
                                 state.first_registered_at = observed_at;
                                 state.registered_without_mint = true;
                                 participant_rejoined = true;
@@ -1161,6 +1215,26 @@ impl LiveKitSfu {
                                 return SidGuardDisposition::StaleSid;
                             }
                         }
+                    } else if matches!(direction, SidObservationDirection::Leave)
+                        && state.participant_sid_contested_at.is_some()
+                    {
+                        // The stored fence matches, but its lineage is
+                        // contested by an unordered same-second join:
+                        // this leave may belong to the departed twin
+                        // while the OTHER sid is the live reconnect.
+                        // Defer the destructive clear; the occupancy
+                        // reconcile either advances the fence (making
+                        // a redelivered leave mismatch) or removes a
+                        // genuinely absent participant via the absent
+                        // streak (#1612 review round 14).
+                        tracing::warn!(
+                            call_id = %call_id,
+                            identity = %identity.as_livekit_identity(),
+                            participant_sid = %participant_sid,
+                            "LiveKit leave deferred: participant sid lineage is contested \
+                             by an unordered same-second join"
+                        );
+                        return SidGuardDisposition::StaleSid;
                     }
                 }
             }
@@ -2106,9 +2180,7 @@ impl SfuService for LiveKitSfu {
                 entry
                     .participants
                     .entry(identity.clone())
-                    .or_insert_with(|| {
-                        ParticipantState::restored(now, observed_sids.participant_sid.clone())
-                    });
+                    .or_insert_with(|| ParticipantState::observed(now, observed_sids));
                 if entry.room_sid.is_none() {
                     entry.room_sid.clone_from(&observed_sids.room_sid);
                     if observed_sids.room_sid.is_some() {
@@ -2121,7 +2193,7 @@ impl SfuService for LiveKitSfu {
                 let mut participants = HashMap::new();
                 participants.insert(
                     identity.clone(),
-                    ParticipantState::restored(now, observed_sids.participant_sid.clone()),
+                    ParticipantState::observed(now, observed_sids),
                 );
                 vacant.insert(CallEntry {
                     generation,

@@ -134,20 +134,17 @@ pub(super) async fn drain_due_at(
                 }
             };
             if !owned {
-                // A completion-only retry needs no room actor for its
-                // durable effect (the inbox summary), and after a restart
-                // a dynamic room nobody rejoined never re-enters
-                // LocalRoomJids — the ownership gate would starve the row
-                // until dead-letter (#1612 review round 12). When NOBODY
-                // owns the room, execute the persisted fence here; when
-                // another node owns it, keep releasing so the owner runs
-                // it with its live actor.
-                if matches!(
-                    &job.intent.target,
-                    TeardownTarget::CallThreadEndRetry { .. }
-                ) && room_has_no_claim_at_all(state, &room_jid)
-                    .await
-                    .unwrap_or(false)
+                // Some targets need no room actor and may execute here
+                // when NOBODY owns the room; when another node owns it,
+                // keep releasing so the owner runs it with its live
+                // actor. Without this, after a restart a dynamic room
+                // nobody rejoined never re-enters LocalRoomJids and the
+                // ownership gate would starve the row until dead-letter
+                // (#1612 review rounds 12 and 14).
+                if executes_without_room_owner(&job.intent)
+                    && room_has_no_claim_at_all(state, &room_jid)
+                        .await
+                        .unwrap_or(false)
                 {
                     // fall through to execution below
                 } else {
@@ -332,6 +329,27 @@ fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
     claim.is_none_or(|snapshot| !snapshot.owner_lease_fresh)
 }
 
+/// Targets allowed to execute on a node that does not own the room
+/// actor, provided the room has no claim at all. A completion-only
+/// retry needs no actor for its durable effect (the inbox summary).
+/// Participant/Room LiveKit teardowns are safe exactly when they carry
+/// the sid fence the executor resolves against LiveKit's LIVE state
+/// once the local entry is missing (occupancy / listing match before
+/// the destructive call) — so a restart-orphaned room nobody rejoined
+/// still gets its LiveKit cleanup instead of leaving the participant
+/// connected until dead-letter (#1612 review round 14). Muji presence
+/// effects require the owning room actor and stay gated.
+fn executes_without_room_owner(intent: &CallTeardownIntent) -> bool {
+    match &intent.target {
+        TeardownTarget::CallThreadEndRetry { .. } => true,
+        TeardownTarget::Participant {
+            participant_sid, ..
+        } => participant_sid.is_some(),
+        TeardownTarget::Room => intent.room_sid.is_some(),
+        TeardownTarget::MujiPresenceClear { .. } | TeardownTarget::MujiRoomSweep { .. } => false,
+    }
+}
+
 /// Strictly no claim row at all — NOT the stale-lease case, which is a
 /// transient failover window where a successor is about to take over.
 /// The completion-retry ownership bypass uses this so a non-owner
@@ -358,7 +376,14 @@ async fn room_has_no_claim_at_all(state: &WebSocketState, room_jid: &BareJid) ->
             );
             Err(())
         }
-        Err(_) => Err(()),
+        Err(_) => {
+            tracing::warn!(
+                room = %room_jid,
+                timeout_ms = ROOM_OWNERSHIP_LOOKUP_TIMEOUT.as_millis() as u64,
+                "call teardown outbox room claim-absence lookup timed out; retaining intent"
+            );
+            Err(())
+        }
     }
 }
 
