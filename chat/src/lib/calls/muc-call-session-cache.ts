@@ -4,6 +4,8 @@ import { reportError } from "@/lib/telemetry";
 import { map } from "nanostores";
 import type { CallMedia, LiveKitJoin } from "./types";
 import {
+  callCacheSessionStorage,
+  clearCallCacheKeysWithPrefix,
   localStorageForLegacyPurge,
   purgeLegacyStoragePrefixFromLocalStorage,
 } from "./call-token-storage-migration";
@@ -183,8 +185,12 @@ export function clearMucCallSessionCacheForAccount(selfBareJid: string): void {
 
 export function clearAllMucCallSessionCacheForTests(): void {
   $mucCallTerminatePendingSessions.set({});
-  clearKeysWithPrefix(storage(), CACHE_PREFIX);
-  clearKeysWithPrefix(localStorageForLegacyPurge(), CACHE_PREFIX);
+  clearCallCacheKeysWithPrefix(storage(), CACHE_PREFIX, "muc call session cache clear failed");
+  clearCallCacheKeysWithPrefix(
+    localStorageForLegacyPurge(),
+    CACHE_PREFIX,
+    "muc call session cache clear failed",
+  );
 }
 
 function normalizeEntry(entry: CachedMucCallSession): CachedMucCallSession | null {
@@ -367,28 +373,5 @@ function isLiveKitJoin(value: unknown): value is LiveKitJoin {
 }
 
 function storage(): Storage | null {
-  purgeLegacyStoragePrefixFromLocalStorage(CACHE_PREFIX);
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function clearKeysWithPrefix(s: Storage | null, prefix: string): void {
-  if (!s) return;
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < s.length; index += 1) {
-      const key = s.key(index);
-      if (key?.startsWith(`${prefix}.`)) keys.push(key);
-    }
-    for (const key of keys) s.removeItem(key);
-  } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "muc call session cache clear failed",
-    });
-  }
+  return callCacheSessionStorage(CACHE_PREFIX);
 }

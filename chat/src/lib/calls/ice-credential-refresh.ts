@@ -1,24 +1,13 @@
 import type { IceServerBundle } from "./ice-servers";
+import { browserTimerClock, type TimerClock } from "./timer-clock";
 
 const REFRESH_SKEW_MS = 60_000;
 const RETRY_MS = 30_000;
-
-export type IceRefreshClock = {
-  now(): number;
-  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
-  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
-};
 
 export type IceCredentialRefresher = {
   start(earliestExpiryMs: number | null): void;
   refreshNow(): Promise<void>;
   stop(): void;
-};
-
-const browserClock: IceRefreshClock = {
-  now: () => Date.now(),
-  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimeout: (timer) => clearTimeout(timer),
 };
 
 /**
@@ -32,9 +21,9 @@ export function createIceCredentialRefresher(options: {
   isCurrent: () => boolean;
   onRefreshed: () => void;
   onExpired: () => void;
-  clock?: IceRefreshClock;
+  clock?: TimerClock;
 }): IceCredentialRefresher {
-  const clock = options.clock ?? browserClock;
+  const clock = options.clock ?? browserTimerClock;
   let expiryMs: number | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let refreshInFlight: Promise<void> | null = null;

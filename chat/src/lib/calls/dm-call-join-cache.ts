@@ -2,6 +2,8 @@ import type { CallMedia, LiveKitJoin } from "./types";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { reportError } from "@/lib/telemetry";
 import {
+  callCacheSessionStorage,
+  clearCallCacheKeysWithPrefix,
   localStorageForLegacyPurge,
   purgeLegacyStoragePrefixFromLocalStorage,
 } from "./call-token-storage-migration";
@@ -94,8 +96,12 @@ export function clearDmCallJoinCacheForAccount(selfBareJid: string): void {
 }
 
 export function clearAllDmCallJoinCacheForTests(): void {
-  clearKeysWithPrefix(storage(), CACHE_PREFIX);
-  clearKeysWithPrefix(localStorageForLegacyPurge(), CACHE_PREFIX);
+  clearCallCacheKeysWithPrefix(storage(), CACHE_PREFIX, "dm call join cache clear failed");
+  clearCallCacheKeysWithPrefix(
+    localStorageForLegacyPurge(),
+    CACHE_PREFIX,
+    "dm call join cache clear failed",
+  );
 }
 
 function normalizeEntry(entry: CachedDmCallJoin): CachedDmCallJoin | null {
@@ -218,28 +224,5 @@ function isLiveKitJoin(value: unknown): value is LiveKitJoin {
 }
 
 function storage(): Storage | null {
-  purgeLegacyStoragePrefixFromLocalStorage(CACHE_PREFIX);
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function clearKeysWithPrefix(s: Storage | null, prefix: string): void {
-  if (!s) return;
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < s.length; index += 1) {
-      const key = s.key(index);
-      if (key?.startsWith(`${prefix}.`)) keys.push(key);
-    }
-    for (const key of keys) s.removeItem(key);
-  } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "dm call join cache clear failed",
-    });
-  }
+  return callCacheSessionStorage(CACHE_PREFIX);
 }

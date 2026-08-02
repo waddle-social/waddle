@@ -2,8 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import {
   CALL_TRANSPORT_RECOVERY_GRACE_MS,
   createCallTransportRecovery,
-  type CallTransportRecoveryClock,
 } from "../src/lib/calls/call-transport-recovery";
+import type { TimerClock } from "../src/lib/calls/timer-clock";
 
 type ScheduledTimer = {
   callback: () => void;
@@ -11,7 +11,7 @@ type ScheduledTimer = {
   id: number;
 };
 
-class FakeClock implements CallTransportRecoveryClock {
+class FakeClock implements TimerClock {
   private currentMs = 0;
   private nextId = 1;
   private timers: ScheduledTimer[] = [];

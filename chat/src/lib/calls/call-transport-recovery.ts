@@ -1,21 +1,11 @@
-export const CALL_TRANSPORT_RECOVERY_GRACE_MS = 60_000;
+import { browserTimerClock, type TimerClock } from "./timer-clock";
 
-export type CallTransportRecoveryClock = {
-  now(): number;
-  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
-  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
-};
+export const CALL_TRANSPORT_RECOVERY_GRACE_MS = 60_000;
 
 export type CallTransportRecovery = {
   onTransportLost(): "deferred" | "not-deferred";
   onTransportReady(): void;
   dispose(): void;
-};
-
-const browserClock: CallTransportRecoveryClock = {
-  now: () => Date.now(),
-  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimeout: (timer) => clearTimeout(timer),
 };
 
 /**
@@ -26,9 +16,9 @@ const browserClock: CallTransportRecoveryClock = {
 export function createCallTransportRecovery(options: {
   isCallMediaActive(): boolean;
   teardown(): void;
-  clock?: CallTransportRecoveryClock;
+  clock?: TimerClock;
 }): CallTransportRecovery {
-  const clock = options.clock ?? browserClock;
+  const clock = options.clock ?? browserTimerClock;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   function cancel(): void {

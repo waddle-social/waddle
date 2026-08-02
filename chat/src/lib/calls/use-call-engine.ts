@@ -2,7 +2,6 @@ import { ref, type Ref } from "vue";
 import { $callState, clearCallState, reportCallError } from "./call-store";
 import { DisconnectReason } from "livekit-client";
 import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engine";
-import { applyCallDeviceSelection } from "./call-device-selection";
 import {
   advanceActiveSpeakers,
   emptyActiveSpeakerState,
@@ -22,7 +21,11 @@ import {
   setLiveCallParticipants,
 } from "./muc-call-live-participants";
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
-import { enumerateCallDevices, hasEnumeratedCallDeviceId } from "./device-prefs";
+import {
+  enumerateCallDevices,
+  hasEnumeratedCallDeviceId,
+  missingCallDeviceError,
+} from "./device-prefs";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
 import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
@@ -271,12 +274,6 @@ let callDeviceChangeTimer: ReturnType<typeof setTimeout> | null = null;
 let callDeviceChangeGeneration = 0;
 let pendingCallDeviceChange: { micId: string | null; camId: string | null } | null = null;
 
-function missingActiveCallDeviceError(kind: "mic" | "cam"): Error {
-  const error = new Error(`${kind} device was removed during the call`);
-  error.name = "NotFoundError";
-  return error;
-}
-
 async function reconcileRemovedActiveDevices(
   engine: CallEngine,
   generation: number,
@@ -286,13 +283,16 @@ async function reconcileRemovedActiveDevices(
   if (generation !== callDeviceChangeGeneration) return;
 
   const activeMicId = activeBeforeChange.micId;
+  // Fall back on the ENGINE only — the saved preference survives, so
+  // replugging the device restores the user's choice on the next call
+  // (or the next explicit selection) instead of silently forgetting it.
   if (
     activeMicId &&
     activeMicId !== "default" &&
     !hasEnumeratedCallDeviceId(devices, "mic", activeMicId)
   ) {
-    recordMediaIssue("mic", missingActiveCallDeviceError("mic"));
-    await applyCallDeviceSelection("mic", null, engine);
+    recordMediaIssue("mic", missingCallDeviceError("mic"));
+    await engine.setMicDevice("default");
     if (generation !== callDeviceChangeGeneration) return;
   }
 
@@ -302,8 +302,8 @@ async function reconcileRemovedActiveDevices(
     activeCamId !== "default" &&
     !hasEnumeratedCallDeviceId(devices, "cam", activeCamId)
   ) {
-    recordMediaIssue("cam", missingActiveCallDeviceError("cam"));
-    await applyCallDeviceSelection("cam", null, engine);
+    recordMediaIssue("cam", missingCallDeviceError("cam"));
+    await engine.setCameraDevice("default");
   }
 }
 
@@ -617,7 +617,7 @@ export function useCallEngine(): {
       // the issue so the non-blocking notice can explain it and offer
       // a retry. NOT routed through reportCallError — the persistent
       // notice is the single channel, avoiding a double-surfaced error.
-      recordMediaIssue(source === "audio" ? "mic" : "cam", error);
+      recordMediaIssue(source === "audio" ? "mic" : source === "video" ? "cam" : "screen", error);
     });
     singletonEngine.on("audioPlaybackStatusChanged", (canPlaybackAudio) => {
       setCallAudioPlaybackBlocked(!canPlaybackAudio);

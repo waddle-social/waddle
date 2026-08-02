@@ -10,6 +10,7 @@ import {
 } from "../src/lib/calls/call-media-issues";
 import { __setFaroForTesting } from "../src/lib/telemetry";
 import { useCallEngine } from "../src/lib/calls/use-call-engine";
+import { $devicePrefs, setMicDevice } from "../src/lib/calls/device-prefs";
 
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 
@@ -161,6 +162,21 @@ describe("$callMediaIssues store", () => {
     expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });
   });
 
+  test("an engine media error without a device kind surfaces as a screen issue", () => {
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    // livekit maps ScreenShare/Unknown sources to an undefined kind; the
+    // engine routes those to source "screen" instead of dropping them.
+    engine.emit("mediaDevicesError", {
+      source: "screen",
+      error: domError("NotReadableError"),
+    });
+
+    expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: "in-use" });
+  });
+
   test("devicechange falling out from under the active mic records missing and falls back", async () => {
     let onDeviceChange: (() => void) | null = null;
     let removedHandler: (() => void) | null = null;
@@ -194,6 +210,7 @@ describe("$callMediaIssues store", () => {
     const originalSetSpeakerDevice = engine.setSpeakerDevice;
     const micCalls: string[] = [];
     let activeMicId = "gone-mic";
+    setMicDevice("gone-mic");
     try {
       engine.activeDeviceId = (kind: MediaDeviceKind) =>
         kind === "audioinput" ? activeMicId : null;
@@ -217,10 +234,14 @@ describe("$callMediaIssues store", () => {
 
       expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });
       expect(micCalls).toEqual(["default"]);
+      // The fallback is engine-only: the SAVED preference survives, so
+      // replugging the device restores the user's choice on the next call.
+      expect($devicePrefs.get().mic).toBe("gone-mic");
 
       engine.emit("disconnected", { origin: "local" });
       expect(removedHandler).toBe(onDeviceChange);
     } finally {
+      setMicDevice(null);
       engine.activeDeviceId = originalActiveDeviceId;
       engine.setMicDevice = originalSetMicDevice;
       engine.setCameraDevice = originalSetCameraDevice;

@@ -1,4 +1,5 @@
 import {
+  missingCallDeviceError,
   resolveCallDevicePreference,
   type AudioProcessingPrefs,
   setAiNoiseModel,
@@ -33,9 +34,7 @@ export async function applyCallDeviceSelection(
 ): Promise<void> {
   const resolved = await resolveCallDevicePreference(kind, deviceId);
   if (resolved.missing && kind !== "speaker") {
-    const error = new Error(`${kind} device is no longer available`);
-    error.name = "NotFoundError";
-    recordMediaIssue(kind, error);
+    recordMediaIssue(kind, missingCallDeviceError(kind));
   }
   if (kind === "mic") {
     await engine.setMicDevice(resolved.activeDeviceId);

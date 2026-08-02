@@ -36,6 +36,7 @@ import {
   type AudioProcessingConstraints,
   type AudioProcessingPrefs,
   type ResolvedCallDevicePreference,
+  missingCallDeviceError,
   resolveCallDevicePreference,
 } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
@@ -64,8 +65,8 @@ import type { IceServerBundle } from "./ice-servers";
 import {
   createIceCredentialRefresher,
   type IceCredentialRefresher,
-  type IceRefreshClock,
 } from "./ice-credential-refresh";
+import type { TimerClock } from "./timer-clock";
 
 /**
  * The local mic track surface the AI-noise reconciler drives — the subset of
@@ -172,12 +173,6 @@ export type ParticipantAudioVolumeIdentity = {
   source: CallAudioTrackSource;
 };
 
-function missingCallDeviceError(kind: "mic" | "cam"): Error {
-  const error = new Error(`${kind} device is no longer available`);
-  error.name = "NotFoundError";
-  return error;
-}
-
 function defaultCallDevicePreference(): ResolvedCallDevicePreference {
   return {
     activeDeviceId: "default",
@@ -263,7 +258,7 @@ export type CallEngineEvents = {
    * rather than ending the call. Mirrors LiveKit's
    * `RoomEvent.MediaDevicesError` but carries which capture failed.
    */
-  mediaDevicesError: (info: { source: "audio" | "video"; error: unknown }) => void;
+  mediaDevicesError: (info: { source: "audio" | "video" | "screen"; error: unknown }) => void;
   /**
    * Fires when the *applied* browser-native audio processing of the
    * local mic changes — on mic publish, unpublish, or a mid-call mic
@@ -453,7 +448,7 @@ export class CallEngine {
    * `RTCPeerConnection`, which `new Room()` reaches for at construction.
    */
   private readonly makeRoom: (options: RoomOptions) => Room;
-  private readonly iceRefreshClock: IceRefreshClock | undefined;
+  private readonly iceRefreshClock: TimerClock | undefined;
   private iceCredentialRefresher: IceCredentialRefresher | null = null;
   private readonly scopedRoomListeners = new WeakMap<Room, {
     activeDeviceChanged: RoomEventCallbacks[RoomEvent.ActiveDeviceChanged];
@@ -467,7 +462,7 @@ export class CallEngine {
     backgroundOps?: CameraBackgroundOps;
     videoCodecSupport?: VideoCodecSupport;
     makeRoom?: (options: RoomOptions) => Room;
-    iceRefreshClock?: IceRefreshClock;
+    iceRefreshClock?: TimerClock;
   }) {
     this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
     this.backgroundOps = opts?.backgroundOps ?? cameraBackgroundOps;
@@ -1466,7 +1461,15 @@ export class CallEngine {
     }
     if (kind === "videoinput") {
       this.emit("mediaDevicesError", { source: "video", error });
+      return;
     }
+    // Playback-sink failures already surface via audioPlaybackStatusChanged.
+    if (kind === "audiooutput") return;
+    // livekit-client's sourceToKind maps ScreenShare (and Unknown) to an
+    // undefined kind. Screen capture is the only remaining local source, so
+    // an SDK-initiated screen failure (e.g. a track restart) surfaces there
+    // instead of being dropped without any actionable UI.
+    this.emit("mediaDevicesError", { source: "screen", error });
   }
 
   /**

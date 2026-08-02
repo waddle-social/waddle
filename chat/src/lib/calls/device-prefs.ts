@@ -240,6 +240,16 @@ function enumeratedDevicesForKind(
   return devices.speakers;
 }
 
+/**
+ * The one NotFoundError shape every missing-device path emits, so
+ * `recordMediaIssue`'s classifier sees a single canonical name.
+ */
+export function missingCallDeviceError(kind: "mic" | "cam"): Error {
+  const error = new Error(`${kind} device is no longer available`);
+  error.name = "NotFoundError";
+  return error;
+}
+
 export function hasEnumeratedCallDeviceId(
   devices: EnumeratedDevices,
   kind: CallDevicePreferenceKind,
