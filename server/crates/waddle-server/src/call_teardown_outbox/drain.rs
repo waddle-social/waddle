@@ -134,33 +134,51 @@ pub(super) async fn drain_due_at(
                 }
             };
             if !owned {
-                let old_enough =
-                    now_ms.saturating_sub(job.created_at_ms) >= OWNERSHIP_DEAD_LETTER_MS;
-                let globally_unclaimed = old_enough
-                    && room_is_globally_unclaimed(state, &room_jid)
-                        .await
-                        .unwrap_or(false);
-                if globally_unclaimed {
-                    tracing::warn!(
-                        call_id = %job.intent.call_id,
-                        intent_id = %job.intent_id.as_str(),
-                        room = %room_jid,
-                        age_ms = now_ms.saturating_sub(job.created_at_ms),
-                        "call teardown room-scoped intent never reached an owning node; dead-lettering"
-                    );
-                    if store
-                        .fail_claim_at(&job, CallTeardownLastError::RoomNeverOwned, now_ms)
-                        .await?
-                    {
-                        summary.failed += 1;
+                // A completion-only retry needs no room actor for its
+                // durable effect (the inbox summary), and after a restart
+                // a dynamic room nobody rejoined never re-enters
+                // LocalRoomJids — the ownership gate would starve the row
+                // until dead-letter (#1612 review round 12). When NOBODY
+                // owns the room, execute the persisted fence here; when
+                // another node owns it, keep releasing so the owner runs
+                // it with its live actor.
+                if matches!(
+                    &job.intent.target,
+                    TeardownTarget::CallThreadEndRetry { .. }
+                ) && room_is_globally_unclaimed(state, &room_jid)
+                    .await
+                    .unwrap_or(false)
+                {
+                    // fall through to execution below
+                } else {
+                    let old_enough =
+                        now_ms.saturating_sub(job.created_at_ms) >= OWNERSHIP_DEAD_LETTER_MS;
+                    let globally_unclaimed = old_enough
+                        && room_is_globally_unclaimed(state, &room_jid)
+                            .await
+                            .unwrap_or(false);
+                    if globally_unclaimed {
+                        tracing::warn!(
+                            call_id = %job.intent.call_id,
+                            intent_id = %job.intent_id.as_str(),
+                            room = %room_jid,
+                            age_ms = now_ms.saturating_sub(job.created_at_ms),
+                            "call teardown room-scoped intent never reached an owning node; dead-lettering"
+                        );
+                        if store
+                            .fail_claim_at(&job, CallTeardownLastError::RoomNeverOwned, now_ms)
+                            .await?
+                        {
+                            summary.failed += 1;
+                        }
+                        continue;
                     }
+                    // Ownership misses and lookup failures are not attempts.
+                    // The claim is CAS-released immediately so the owning
+                    // node need not wait for stale-claim recovery.
+                    store.release_claim_at(&job, now_ms).await?;
                     continue;
                 }
-                // Ownership misses and lookup failures are not attempts. The
-                // claim is CAS-released immediately so the owning node need
-                // not wait for stale-claim recovery.
-                store.release_claim_at(&job, now_ms).await?;
-                continue;
             }
         }
 
@@ -384,6 +402,7 @@ async fn execute_intent(
         thread_id,
         anchor_origin_id,
         started,
+        ended,
     } = &intent.target
     {
         // Completion-only: never replays the destructive presence clear.
@@ -392,14 +411,15 @@ async fn execute_intent(
         // completed from the row itself rather than acknowledged away.
         return match tokio::time::timeout(
             ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
-            crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended_for(
+            crate::server::routes::call_thread_end::maybe_broadcast_call_thread_ended_for(
                 state,
                 room_jid,
                 Some(
-                    crate::server::routes::muc_muji_clear::CallThreadCompletionFence {
+                    crate::server::routes::call_thread_end::CallThreadCompletionFence {
                         thread_id,
                         anchor_origin_id,
                         started: *started,
+                        ended: *ended,
                     },
                 ),
             ),

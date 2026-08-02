@@ -15,18 +15,13 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
     let identity = row.get::<Option<String>>(2)?;
     let room_jid = row.get::<Option<String>>(3)?;
     let participant_sid = row.get::<Option<String>>(7)?;
-    let thread_id = row.get::<Option<String>>(15)?;
-    let anchor_origin_id = row.get::<Option<String>>(16)?;
-    let thread_started_at_ms = row.get::<Option<i64>>(17)?;
-    let target = decode_target(
-        &action,
-        identity,
-        room_jid,
-        participant_sid,
-        thread_id,
-        anchor_origin_id,
-        thread_started_at_ms,
-    )?;
+    let thread = ThreadPayloadColumns {
+        thread_id: row.get::<Option<String>>(15)?,
+        anchor_origin_id: row.get::<Option<String>>(16)?,
+        thread_started_at_ms: row.get::<Option<i64>>(17)?,
+        thread_ended_at_ms: row.get::<Option<i64>>(18)?,
+    };
+    let target = decode_target(&action, identity, room_jid, participant_sid, thread)?;
     let generation = row
         .get::<Option<i64>>(5)?
         .map(|value| {
@@ -64,14 +59,21 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
     })
 }
 
+/// The `call_thread_end_retry` payload columns, grouped so the row
+/// decoder's signature stays reviewable.
+struct ThreadPayloadColumns {
+    thread_id: Option<String>,
+    anchor_origin_id: Option<String>,
+    thread_started_at_ms: Option<i64>,
+    thread_ended_at_ms: Option<i64>,
+}
+
 fn decode_target(
     action: &str,
     identity: Option<String>,
     room_jid: Option<String>,
     participant_sid: Option<String>,
-    thread_id: Option<String>,
-    anchor_origin_id: Option<String>,
-    thread_started_at_ms: Option<i64>,
+    thread: ThreadPayloadColumns,
 ) -> Result<TeardownTarget, CallTeardownOutboxError> {
     match action {
         "remove_participant" => match (identity, room_jid) {
@@ -114,9 +116,10 @@ fn decode_target(
             identity,
             room_jid,
             participant_sid,
-            thread_id,
-            anchor_origin_id,
-            thread_started_at_ms,
+            thread.thread_id,
+            thread.anchor_origin_id,
+            thread.thread_started_at_ms,
+            thread.thread_ended_at_ms,
         ) {
             (
                 None,
@@ -125,6 +128,7 @@ fn decode_target(
                 Some(thread_id),
                 Some(anchor_origin_id),
                 Some(thread_started_at_ms),
+                Some(thread_ended_at_ms),
             ) if !anchor_origin_id.is_empty() => Ok(TeardownTarget::CallThreadEndRetry {
                 room_jid: BareJid::from_str(&room_jid)
                     .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
@@ -133,6 +137,9 @@ fn decode_target(
                 })?,
                 anchor_origin_id: waddle_xmpp_core::xep0359::OriginId::new(anchor_origin_id),
                 started: chrono::DateTime::from_timestamp_millis(thread_started_at_ms).ok_or_else(
+                    || CallTeardownOutboxError::InvalidTargetShape(action.to_owned()),
+                )?,
+                ended: chrono::DateTime::from_timestamp_millis(thread_ended_at_ms).ok_or_else(
                     || CallTeardownOutboxError::InvalidTargetShape(action.to_owned()),
                 )?,
             }),

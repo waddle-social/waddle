@@ -32,8 +32,8 @@ use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_sfu::{
     verify_webhook_signature, CallCorrelationId, CallId, LiveKitWebhookEvent, ObservedCallSids,
-    ParticipantEnvelope, ParticipantInfo, RoomInfo, RoomSid, SfuReconciler,
-    SidObservationDisposition, TeardownDisposition, WebhookVerifyError, RECONCILE_GRACE_SECONDS,
+    ParticipantEnvelope, RoomEnvelope, RoomSid, SfuReconciler, SidObservationDisposition,
+    TeardownDisposition, WebhookVerifyError, RECONCILE_GRACE_SECONDS,
 };
 use waddle_xmpp::telemetry::attributes::{MetricAttribute, WebhookEventType, WebhookOutcome};
 use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
@@ -222,7 +222,7 @@ async fn livekit_webhook_handler(
                                 &state,
                                 &env.room.name,
                                 identity.as_jid().to_string().as_str(),
-                                Some(&observed_sids_for_room(&env.room)),
+                                Some(&observed_sids_for_room(env)),
                             )
                             .await;
                             if matches!(survivor_outcome, WebhookEffectOutcome::Retryable(_)) {
@@ -266,7 +266,7 @@ async fn livekit_webhook_handler(
             // otherwise publish for the remainder of the token's TTL.
             // Re-deriving their current voice here and pushing it
             // converges them within one webhook round-trip.
-            let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+            let observed_sids = observed_sids_for_participant(env);
             match register_participant_from_join(&state, env, &observed_sids) {
                 SidObservationDisposition::RoomRotationPending => {
                     WebhookEffectOutcome::Retryable("room_sid_rotation_pending")
@@ -385,15 +385,26 @@ pub(crate) fn register_webhook_counters() {
     }
 }
 
-fn observed_sids_for_participant(
-    room: &RoomInfo,
-    participant: &ParticipantInfo,
-) -> ObservedCallSids {
-    ObservedCallSids::new(room.sid.clone(), participant.sid.clone())
+fn observed_sids_for_participant(env: &ParticipantEnvelope) -> ObservedCallSids {
+    ObservedCallSids {
+        room_sid: env.room.sid.clone(),
+        participant_sid: env.participant.sid.clone(),
+        // Envelope `createdAt` (unix seconds) orders redelivered joins
+        // against already-learned sids (#1612 review round 12).
+        observed_event_at: env
+            .created_at
+            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0)),
+    }
 }
 
-fn observed_sids_for_room(room: &RoomInfo) -> ObservedCallSids {
-    ObservedCallSids::new(room.sid.clone(), None)
+fn observed_sids_for_room(env: &RoomEnvelope) -> ObservedCallSids {
+    ObservedCallSids {
+        room_sid: env.room.sid.clone(),
+        participant_sid: None,
+        observed_event_at: env
+            .created_at
+            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0)),
+    }
 }
 
 async fn enqueue_muji_room_sweep(
@@ -548,7 +559,7 @@ async fn process_participant_left(
     state: &WebSocketState,
     env: &ParticipantEnvelope,
 ) -> WebhookEffectOutcome {
-    let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+    let observed_sids = observed_sids_for_participant(env);
     process_participant_left_for_identity(
         state,
         &env.room.name,
@@ -734,7 +745,8 @@ mod tests {
     use std::io;
     use std::sync::Mutex;
     use waddle_sfu::{
-        Identity, MediaCapabilities, ObservedCallSids, ParticipantSid, RoomSid, TeardownDisposition,
+        Identity, MediaCapabilities, ObservedCallSids, ParticipantInfo, ParticipantSid, RoomInfo,
+        RoomSid, TeardownDisposition,
     };
     use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
     use waddle_xmpp::protocol::ConnectionPhase;
@@ -1590,6 +1602,7 @@ mod tests {
     #[test]
     fn webhook_event_type_maps_every_modelled_payload_kind() {
         let env = ParticipantEnvelope {
+            created_at: None,
             id: None,
             room: waddle_sfu::RoomInfo {
                 name: "r".into(),
@@ -1887,6 +1900,7 @@ mod tests {
         let call_id = "alice@example.com::dm-observed";
         let departed = "bob@example.com/phone";
         let observed_sids = ObservedCallSids {
+            observed_event_at: None,
             room_sid: Some(RoomSid::new("RM_observed").expect("room sid")),
             participant_sid: Some(ParticipantSid::new("PA_observed").expect("participant sid")),
         };
@@ -1915,6 +1929,7 @@ mod tests {
         let recorder = Arc::new(RecordingSfu::default());
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let env = ParticipantEnvelope {
+            created_at: None,
             id: Some("EV_joined_observed".to_owned()),
             room: RoomInfo {
                 name: "alice@example.com::dm-observed".to_owned(),
@@ -1926,7 +1941,7 @@ mod tests {
                 state: None,
             },
         };
-        let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+        let observed_sids = observed_sids_for_participant(&env);
 
         assert_eq!(
             register_participant_from_join(state.as_ref(), &env, &observed_sids),
@@ -2013,6 +2028,7 @@ mod tests {
         recorder.set_note_disposition(TeardownDisposition::StaleSid);
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let env = ParticipantEnvelope {
+            created_at: None,
             id: Some("EV_joined_stale".to_owned()),
             room: RoomInfo {
                 name: "alice@example.com::dm-stale".to_owned(),
@@ -2024,7 +2040,7 @@ mod tests {
                 state: None,
             },
         };
-        let observed_sids = observed_sids_for_participant(&env.room, &env.participant);
+        let observed_sids = observed_sids_for_participant(&env);
 
         assert_eq!(
             register_participant_from_join(state.as_ref(), &env, &observed_sids),
@@ -2223,6 +2239,7 @@ mod tests {
         )
         .await;
         let observed_sids = ObservedCallSids {
+            observed_event_at: None,
             room_sid: Some(RoomSid::new("RM_stale").expect("room sid")),
             participant_sid: Some(ParticipantSid::new("PA_stale").expect("participant sid")),
         };

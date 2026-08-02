@@ -95,6 +95,12 @@ struct ParticipantState {
     /// advance a stale sid without ever rolling back a newer webhook
     /// observation (#1612 review round 9).
     participant_sid_observed_at: Option<DateTime<Utc>>,
+    /// The producing EVENT's `createdAt` for the stored sid, when the
+    /// webhook envelope supplied one. Event-clock lineage (distinct
+    /// from the local-clock stamp above): a redelivered stale join is
+    /// refused when its event time does not postdate this (#1612
+    /// review round 12).
+    participant_sid_event_at: Option<DateTime<Utc>>,
     first_registered_at: DateTime<Utc>,
     registered_without_mint: bool,
 }
@@ -104,6 +110,7 @@ impl ParticipantState {
         Self {
             participant_sid: None,
             participant_sid_observed_at: None,
+            participant_sid_event_at: None,
             first_registered_at,
             registered_without_mint: false,
         }
@@ -115,6 +122,7 @@ impl ParticipantState {
     ) -> Self {
         Self {
             participant_sid_observed_at: participant_sid.is_some().then_some(first_registered_at),
+            participant_sid_event_at: None,
             participant_sid,
             first_registered_at,
             registered_without_mint: true,
@@ -1080,6 +1088,33 @@ impl LiveKitSfu {
                     if stored_participant_sid != participant_sid {
                         match direction {
                             SidObservationDirection::Join => {
+                                // A join may only ADVANCE the sid when its
+                                // event time postdates the stored sid's
+                                // event lineage: the delivery ledger
+                                // deliberately re-executes `processing`
+                                // events, so a stale redelivered join for
+                                // the PREVIOUS incarnation can arrive after
+                                // the reconnect's join was processed —
+                                // rolling the fence backward would let the
+                                // old leave clear the live participant
+                                // (#1612 review round 12). Unknown event
+                                // times keep the prior advance semantics.
+                                if let (Some(event_at), Some(stored_event_at)) = (
+                                    observed_sids.observed_event_at,
+                                    state.participant_sid_event_at,
+                                ) {
+                                    if event_at <= stored_event_at {
+                                        tracing::warn!(
+                                            call_id = %call_id,
+                                            identity = %identity.as_livekit_identity(),
+                                            participant_sid = %participant_sid,
+                                            stored_participant_sid = %stored_participant_sid,
+                                            "LiveKit join ignored as stale: event time does not \
+                                             postdate the stored sid's lineage"
+                                        );
+                                        return SidGuardDisposition::StaleSid;
+                                    }
+                                }
                                 tracing::info!(
                                     call_id = %call_id,
                                     identity = %identity.as_livekit_identity(),
@@ -1089,6 +1124,7 @@ impl LiveKitSfu {
                                 );
                                 state.participant_sid = Some(participant_sid.clone());
                                 state.participant_sid_observed_at = Some(observed_at);
+                                state.participant_sid_event_at = observed_sids.observed_event_at;
                                 state.first_registered_at = observed_at;
                                 state.registered_without_mint = true;
                                 participant_rejoined = true;
@@ -1132,6 +1168,7 @@ impl LiveKitSfu {
                         .clone_from(&observed_sids.participant_sid);
                     if observed_sids.participant_sid.is_some() {
                         state.participant_sid_observed_at = Some(observed_at);
+                        state.participant_sid_event_at = observed_sids.observed_event_at;
                     }
                 }
             }
@@ -1226,7 +1263,20 @@ impl LiveKitSfu {
             }
             // A surviving replacement token proves a concurrent
             // re-authorization: arming the eject would disconnect it.
-            if let (Some(latest_exp), false) = (latest_exp, replacement_minted) {
+            // Re-check the LIVE bucket too (#1612 review round 12): a
+            // fresh initiate racing this sweep can repopulate `issued`
+            // (and clear the eject at mint AND register) between the
+            // `remove` above and this arm — its token being visible
+            // here means the identity is re-authorized. A mint whose
+            // push has not landed yet is followed by its registration's
+            // own eject clear, which runs after any arm below.
+            let fresh_reinserted = self
+                .issued
+                .get(&(call_id.clone(), identity.clone()))
+                .is_some_and(|bucket| !bucket.is_empty());
+            if let (Some(latest_exp), false, false) =
+                (latest_exp, replacement_minted, fresh_reinserted)
+            {
                 self.arm_pending_revocation_eject(call_id, identity, latest_exp);
             }
         }
@@ -1990,6 +2040,15 @@ impl SfuService for LiveKitSfu {
                 if entry.participants.is_empty() {
                     entry.generation =
                         self.next_call_generation(call_id, entry.generation.as_u64());
+                    // Observed reuse of a temporarily-empty entry is a
+                    // new incarnation exactly like the Jingle-register
+                    // arm: refresh the freshness stamps, or an
+                    // in-flight listing of the previous room passes the
+                    // `created_at` gate and rotates the fresh room sid
+                    // backward (#1612 review round 12).
+                    entry.created_at = now;
+                    entry.room_sid = None;
+                    entry.room_sid_observed_at = None;
                 }
                 entry
                     .participants
@@ -1999,6 +2058,9 @@ impl SfuService for LiveKitSfu {
                     });
                 if entry.room_sid.is_none() {
                     entry.room_sid.clone_from(&observed_sids.room_sid);
+                    if observed_sids.room_sid.is_some() {
+                        entry.room_sid_observed_at = Some(now);
+                    }
                 }
             }
             dashmap::Entry::Vacant(vacant) => {

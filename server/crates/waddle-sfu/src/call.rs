@@ -207,6 +207,12 @@ impl std::fmt::Display for CallGeneration {
 pub struct ObservedCallSids {
     pub room_sid: Option<RoomSid>,
     pub participant_sid: Option<ParticipantSid>,
+    /// The producing webhook envelope's `createdAt`, when known. Orders
+    /// redelivered join events against already-learned sids so a
+    /// re-executed stale join cannot regress a newer fence (#1612
+    /// review round 12). `None` (occupancy probes, old envelopes)
+    /// keeps the prior advance semantics.
+    pub observed_event_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ObservedCallSids {
@@ -214,6 +220,7 @@ impl ObservedCallSids {
         Self {
             room_sid,
             participant_sid,
+            observed_event_at: None,
         }
     }
 
@@ -221,6 +228,7 @@ impl ObservedCallSids {
         Self {
             room_sid: None,
             participant_sid: None,
+            observed_event_at: None,
         }
     }
 }

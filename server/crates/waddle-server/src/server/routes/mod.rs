@@ -3,6 +3,7 @@ pub mod auth; // Provider auth broker, session management
 pub mod auth_page; // Web-based auth page for XMPP credentials
 mod auth_telemetry; // Unified auth rejection/success observability (#1328)
 pub mod calendar_feed; // Read-only iCalendar projection of xCal community events
+pub mod call_thread_end; // Durable call-thread ended summary + outbox retry
 pub mod device; // OAuth Device Flow for CLI
 pub mod extension_webhooks; // Extension webhook ingress
 pub mod interpret; // OutboundEvent effect interpreter for sans-I/O protocol

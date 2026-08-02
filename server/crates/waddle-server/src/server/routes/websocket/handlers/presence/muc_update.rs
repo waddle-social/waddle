@@ -399,7 +399,7 @@ pub(crate) async fn try_handle_muc_presence_update(
     }
 
     if clears_muji_presence {
-        let outcome = crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(
+        let outcome = crate::server::routes::call_thread_end::maybe_broadcast_call_thread_ended(
             state, room_jid,
         )
         .await;
@@ -434,12 +434,13 @@ pub(crate) async fn try_handle_muc_presence_update(
                 });
             if let Some((failed_thread, anchor_origin_id, started)) = failed_thread {
                 if let Err(error) =
-                    crate::server::routes::muc_muji_clear::enqueue_call_thread_end_retry(
+                    crate::server::routes::call_thread_end::enqueue_call_thread_end_retry(
                         state,
                         room_jid,
                         failed_thread,
                         anchor_origin_id,
                         started,
+                        chrono::Utc::now(),
                     )
                     .await
                 {

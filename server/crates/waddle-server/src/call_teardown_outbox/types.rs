@@ -108,8 +108,13 @@ pub enum TeardownTarget {
         /// the reconstructed `<call-thread-ended/>` record.
         anchor_origin_id: waddle_xmpp_core::xep0359::OriginId,
         /// When the failed thread's call started; the ended summary's
-        /// duration is derived from it at completion time.
+        /// duration is derived from it.
         started: chrono::DateTime<chrono::Utc>,
+        /// When the call actually ended (captured when the completion
+        /// first failed). Every retry reuses this instant, so an outage
+        /// between failure and drain cannot inflate the reported
+        /// duration (#1612 review round 12).
+        ended: chrono::DateTime<chrono::Utc>,
     },
 }
 
@@ -170,15 +175,20 @@ pub enum CallTeardownRetryReason {
 }
 
 impl CallTeardownRetryReason {
-    /// Reasons caused purely by LiveKit control-plane unavailability.
-    /// These never dead-letter on the attempt cap (#1612 review round
-    /// 8): the guarded effects are idempotent/no-op bounded, failed
-    /// rows are never replayed, and no MUC reconciliation backstop
-    /// covers raw 1:1 removals — so an outage longer than the retry
-    /// budget would otherwise abandon the teardown forever. They keep
-    /// retrying at the capped backoff until LiveKit answers.
+    /// Reasons whose rows are the SOLE durable recovery for their
+    /// effect and whose failure cause is infrastructure unavailability.
+    /// These never dead-letter on the attempt cap (#1612 review rounds
+    /// 8 and 12): the guarded effects are idempotent/no-op bounded,
+    /// failed rows are never replayed, and no backstop covers them —
+    /// LiveKit teardowns have no MUC reconciliation for raw 1:1
+    /// removals, and a call-thread completion row is the only record of
+    /// the ended summary once the in-memory entry is gone. They keep
+    /// retrying at the capped backoff until the dependency answers.
     pub(crate) const fn is_infrastructure_transient(self) -> bool {
-        matches!(self, Self::LiveKitExecutorUnavailable | Self::LiveKitAdmin)
+        matches!(
+            self,
+            Self::LiveKitExecutorUnavailable | Self::LiveKitAdmin | Self::CallThreadEnd
+        )
     }
 
     pub(crate) const fn as_db_value(self) -> &'static str {

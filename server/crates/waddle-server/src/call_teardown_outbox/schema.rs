@@ -20,6 +20,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
                     thread_id TEXT NULL CHECK (thread_id IS NULL OR thread_id <> ''), \
                     anchor_origin_id TEXT NULL CHECK (anchor_origin_id IS NULL OR anchor_origin_id <> ''), \
                     thread_started_at_ms {timestamp_type} NULL, \
+                    thread_ended_at_ms {timestamp_type} NULL, \
                     producing_node TEXT NULL CHECK (producing_node IS NULL OR producing_node <> ''), \
                     status TEXT NOT NULL CHECK (status IN ('queued','in-progress','done','failed')), \
                     attempt_count INTEGER NOT NULL DEFAULT 0, \
@@ -34,9 +35,9 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
                         OR (action = 'delete_room' AND identity IS NULL AND room_jid IS NULL AND participant_sid IS NULL) \
                         OR (action = 'muji_presence_clear' AND identity IS NOT NULL AND room_jid IS NOT NULL) \
                         OR (action = 'muji_room_sweep' AND identity IS NULL AND room_jid IS NOT NULL AND room_sid IS NOT NULL AND participant_sid IS NULL) \
-                        OR (action = 'call_thread_end_retry' AND identity IS NULL AND room_jid IS NOT NULL AND participant_sid IS NULL AND thread_id IS NOT NULL AND anchor_origin_id IS NOT NULL AND thread_started_at_ms IS NOT NULL)\
+                        OR (action = 'call_thread_end_retry' AND identity IS NULL AND room_jid IS NOT NULL AND participant_sid IS NULL AND thread_id IS NOT NULL AND anchor_origin_id IS NOT NULL AND thread_started_at_ms IS NOT NULL AND thread_ended_at_ms IS NOT NULL)\
                     ), \
-                    CHECK ((thread_id IS NULL AND anchor_origin_id IS NULL AND thread_started_at_ms IS NULL) OR action = 'call_thread_end_retry')\
+                    CHECK ((thread_id IS NULL AND anchor_origin_id IS NULL AND thread_started_at_ms IS NULL AND thread_ended_at_ms IS NULL) OR action = 'call_thread_end_retry')\
                 )"
             ),
             (),
@@ -60,6 +61,17 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_status_due \
              ON call_teardown_outbox (status, next_attempt_at_ms, created_at_ms)",
+            (),
+        )
+        .await?;
+    // The enqueue-path dedupe SELECT filters on (status, call_id,
+    // action, …); without its own index it degrades to scanning the
+    // queued backlog on the websocket/webhook hot path (#1612 review
+    // round 12).
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_dedupe \
+             ON call_teardown_outbox (status, call_id, action)",
             (),
         )
         .await?;

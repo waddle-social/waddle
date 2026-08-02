@@ -214,6 +214,12 @@ pub struct ParticipantEnvelope {
     /// historically; the dedupe path treats absence as "not
     /// deduplicable" rather than failing.
     pub id: Option<String>,
+    /// LiveKit envelope `createdAt` (unix seconds). Optional for
+    /// backward compatibility; when present it orders redelivered
+    /// events so a stale re-executed join cannot roll a participant
+    /// sid backward (#1612 review round 12).
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<i64>,
     pub room: RoomInfo,
     pub participant: ParticipantInfo,
 }
@@ -223,6 +229,9 @@ pub struct ParticipantEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoomEnvelope {
     pub id: Option<String>,
+    /// See [`ParticipantEnvelope::created_at`].
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<i64>,
     pub room: RoomInfo,
 }
 
@@ -436,6 +445,7 @@ mod tests {
     fn event_id_round_trips_through_typed_variants() {
         let env = ParticipantEnvelope {
             id: Some("EV_42".into()),
+            created_at: None,
             room: RoomInfo {
                 name: "r".into(),
                 sid: None,

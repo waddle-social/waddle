@@ -95,9 +95,9 @@ impl CallTeardownOutboxStore {
                 .execute(
                     "INSERT INTO call_teardown_outbox (\
                         intent_id, call_id, identity, room_jid, action, generation, \
-                        room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, producing_node, status, attempt_count, last_error, \
+                        room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, thread_ended_at_ms, producing_node, status, attempt_count, last_error, \
                         next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
                     crate::db_params![
                         intent_id.as_str(),
                         intent.call_id.as_str(),
@@ -110,6 +110,7 @@ impl CallTeardownOutboxStore {
                         encoded.thread_id,
                         encoded.anchor_origin_id,
                         encoded.thread_started_at_ms,
+                        encoded.thread_ended_at_ms,
                         producing_node,
                         STATUS_QUEUED,
                         now_ms,
@@ -159,6 +160,7 @@ impl CallTeardownOutboxStore {
                        AND thread_id {ns} ? \
                        AND anchor_origin_id {ns} ? \
                        AND thread_started_at_ms {ns} ? \
+                       AND thread_ended_at_ms {ns} ? \
                        AND producing_node {ns} ? \
                      LIMIT 1"
                 ),
@@ -174,6 +176,7 @@ impl CallTeardownOutboxStore {
                     encoded.thread_id,
                     encoded.anchor_origin_id,
                     encoded.thread_started_at_ms,
+                    encoded.thread_ended_at_ms,
                     producing_node.clone(),
                 ],
             )
@@ -186,9 +189,9 @@ impl CallTeardownOutboxStore {
             .execute(
                 "INSERT INTO call_teardown_outbox (\
                     intent_id, call_id, identity, room_jid, action, generation, \
-                    room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, producing_node, status, attempt_count, last_error, \
+                    room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, thread_ended_at_ms, producing_node, status, attempt_count, last_error, \
                     next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
                 crate::db_params![
                     intent_id.as_str(),
                     intent.call_id.as_str(),
@@ -201,6 +204,7 @@ impl CallTeardownOutboxStore {
                     encoded.thread_id,
                     encoded.anchor_origin_id,
                     encoded.thread_started_at_ms,
+                    encoded.thread_ended_at_ms,
                     producing_node,
                     STATUS_QUEUED,
                     now_ms,
@@ -352,7 +356,7 @@ pub(super) fn select_columns() -> &'static str {
     "SELECT intent_id, call_id, identity, room_jid, action, generation, \
             room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
             next_attempt_at_ms, claim_token, created_at_ms, thread_id, anchor_origin_id, \
-            thread_started_at_ms \
+            thread_started_at_ms, thread_ended_at_ms \
      FROM call_teardown_outbox"
 }
 
@@ -365,6 +369,7 @@ struct EncodedTarget<'a> {
     thread_id: Option<&'a str>,
     anchor_origin_id: Option<&'a str>,
     thread_started_at_ms: Option<i64>,
+    thread_ended_at_ms: Option<i64>,
 }
 
 impl<'a> EncodedTarget<'a> {
@@ -382,6 +387,7 @@ impl<'a> EncodedTarget<'a> {
             thread_id: None,
             anchor_origin_id: None,
             thread_started_at_ms: None,
+            thread_ended_at_ms: None,
         }
     }
 }
@@ -416,6 +422,7 @@ fn encode_target(target: &TeardownTarget) -> EncodedTarget<'_> {
             thread_id,
             anchor_origin_id,
             started,
+            ended,
         } => EncodedTarget {
             action: "call_thread_end_retry",
             identity: None,
@@ -424,6 +431,7 @@ fn encode_target(target: &TeardownTarget) -> EncodedTarget<'_> {
             thread_id: Some(thread_id.as_str()),
             anchor_origin_id: Some(anchor_origin_id.as_str()),
             thread_started_at_ms: Some(started.timestamp_millis()),
+            thread_ended_at_ms: Some(ended.timestamp_millis()),
         },
     }
 }
