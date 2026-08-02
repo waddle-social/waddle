@@ -5,7 +5,7 @@ import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filter
 import type { BroadcastShow } from "@/presence/effective-show";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
-import { $callState, applyCallEvent, clearCallState, clearPendingDmCallTerminate, flushPendingDmCallTerminate, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
+import { $callState, applyCallEvent, clearPendingDmCallTerminate, flushPendingDmCallTerminate, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
 import { readvertiseMucCallPresence, setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
 import {
   applyDmCallEvent,
@@ -2916,6 +2916,15 @@ export class BrowserXmppClient {
   private async readvertiseActiveMucCallPresence(xmpp: XmppClientInstance): Promise<void> {
     const state = $callState.get();
     if (state.phase !== "active" || state.kind !== "muc") return;
+    // Fence every await on the CAPTURED call identity: the slot can be
+    // replaced mid-flight (hang up + new call), and a stale restoration
+    // attempt must neither tear down nor advertise the replacement
+    // (#1621 review round 5).
+    const sid = state.sid;
+    const stillThisCall = (): boolean => {
+      const current = $callState.get();
+      return current.phase === "active" && current.kind === "muc" && current.sid === sid;
+    };
     // Resolves immediately when the rejoin already confirmed; joins
     // (single-flight) and waits otherwise. The advertisement must land
     // on the FRESH occupant, not race the join presence. One retry
@@ -2929,17 +2938,39 @@ export class BrowserXmppClient {
         await this.ensureJoined(state.peer);
         break;
       } catch {
-        if (this.xmpp !== xmpp || $callState.get().phase !== "active") return;
+        if (this.xmpp !== xmpp || !stillThisCall()) return;
         if (attempt === 1) {
-          await tearDownActiveCall(this.callWireSender(), "gone");
-          void useCallEngine().engine.disconnect();
+          await this.endCallAndClearProjections(this.callWireSender());
           return;
         }
       }
     }
     if (this.xmpp !== xmpp || !this.connected) return;
-    if ($callState.get().phase !== "active") return;
-    await readvertiseMucCallPresence(xmpp as unknown as RawIqSender);
+    if (!stillThisCall()) return;
+    const advertised = await readvertiseMucCallPresence(xmpp as unknown as RawIqSender);
+    if (!advertised && stillThisCall() && this.xmpp === xmpp) {
+      // The rejoin worked but the <muji/> advertisement did not (send
+      // rejected, or a stale wasm bundle without the FFI): the fresh
+      // occupant would stay unadvertised for the call's remainder with
+      // nothing left to retry it — same zombie as an unrestorable room.
+      await this.endCallAndClearProjections(this.callWireSender());
+    }
+  }
+
+  /**
+   * End the current call and clear every MUC projection store. The
+   * single teardown shape shared by transport-loss expiry and failed
+   * call restoration, so the two paths cannot drift (#1621 review
+   * rounds 4-5). With a null sender the wire steps are skipped and an
+   * active DM call retains its pending terminate.
+   */
+  private async endCallAndClearProjections(sender: CallWireSender | null): Promise<void> {
+    await tearDownActiveCall(sender, "gone");
+    clearMucCallParticipants();
+    clearAllRaisedHands();
+    clearAllMuted();
+    clearAllLiveCallParticipants();
+    void useCallEngine().engine.disconnect();
   }
 
   private teardownCallAfterTransportLoss(): void {
@@ -2948,12 +2979,7 @@ export class BrowserXmppClient {
     // terminate for the next session-ready — otherwise the peer dangles
     // active and the local reconnect offer survives for 24h (#1621
     // review round 4). Synchronous through the null-sender path.
-    void tearDownActiveCall(null, "gone");
-    clearMucCallParticipants();
-    clearAllRaisedHands();
-    clearAllMuted();
-    clearAllLiveCallParticipants();
-    void useCallEngine().engine.disconnect();
+    void this.endCallAndClearProjections(null);
   }
 
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {

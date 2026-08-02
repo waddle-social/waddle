@@ -183,11 +183,12 @@ describe("call device preference resolution", () => {
     });
   });
 
-  test("enumeration failure resolves a saved device to defaults without failing the join", async () => {
-    // This runs BEFORE the Room is constructed: a rejecting
-    // enumerateDevices() must degrade to browser defaults (no `missing`
-    // notice — best-effort capture surfaces any real device error), never
-    // propagate and turn a saved preference into a fatal join failure.
+  test("enumeration failure keeps the requested device instead of failing or defaulting", async () => {
+    // Enumeration is only a pre-check: a rejecting enumerateDevices()
+    // must neither propagate (the join would die before the Room is
+    // built) nor silently swap an explicit pick for the default — the
+    // requested id is attempted as-is and a genuinely unavailable
+    // device rejects at switch/capture time instead.
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,
       value: {
@@ -200,9 +201,9 @@ describe("call device preference resolution", () => {
     });
 
     await expect(resolveCallDevicePreference("mic", "headset-mic")).resolves.toEqual({
-      activeDeviceId: "default",
-      preferenceId: null,
-      captureDeviceId: undefined,
+      activeDeviceId: "headset-mic",
+      preferenceId: "headset-mic",
+      captureDeviceId: "headset-mic",
       missing: false,
     });
   });

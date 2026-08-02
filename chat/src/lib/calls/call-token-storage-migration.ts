@@ -1,16 +1,20 @@
 import { reportError } from "@/lib/telemetry";
 
-const purgedLegacyPrefixes = new Set<string>();
-
+/**
+ * Runs on EVERY cache access, not once: during a rolling deployment an
+ * already-open pre-migration tab keeps writing bearer tokens into the
+ * shared origin-wide localStorage after this tab's first purge, so a
+ * one-shot guard would leave the recreated token persisted (#1621
+ * review round 5). The scan is a handful of keys on rare call-cache
+ * touches.
+ */
 export function purgeLegacyStoragePrefixFromLocalStorage(prefix: string): void {
-  if (purgedLegacyPrefixes.has(prefix)) return;
   const storage = legacyLocalStorage();
   if (!storage) return;
   try {
     for (const key of keysWithPrefix(storage, prefix)) storage.removeItem(key);
-    purgedLegacyPrefixes.add(prefix);
   } catch {
-    // Keep the prefix eligible for a later retry when storage access recovers.
+    // Retried on the next cache access when storage access recovers.
   }
 }
 
@@ -45,10 +49,6 @@ export function clearCallCacheKeysWithPrefix(
   } catch (err) {
     reportError("storage.write", err, { recoverable: true, detail });
   }
-}
-
-export function resetLegacyCallStorageMigrationForTests(): void {
-  purgedLegacyPrefixes.clear();
 }
 
 function keysWithPrefix(storage: Storage, prefix: string): string[] {

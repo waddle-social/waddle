@@ -274,13 +274,16 @@ export async function resolveCallDevicePreference(
   try {
     devices = await enumerateCallDevices();
   } catch {
-    // Enumeration failing must not fail the JOIN (this runs before the
-    // Room is even constructed). Resolve to browser defaults WITHOUT the
-    // missing flag — best-effort capture surfaces any real device error.
+    // Enumeration is only a pre-check; failing must neither fail the
+    // JOIN (capture is best-effort) nor silently swap an EXPLICIT pick
+    // for the default. Attempt the requested device as-is: a genuinely
+    // unavailable id rejects at switch/capture time, and callers then
+    // keep the previous active device and saved preference (#1621
+    // review rounds 2 and 5).
     return {
-      activeDeviceId: "default",
-      preferenceId: null,
-      captureDeviceId: undefined,
+      activeDeviceId: deviceId,
+      preferenceId: deviceId,
+      captureDeviceId: deviceId,
       missing: false,
     };
   }

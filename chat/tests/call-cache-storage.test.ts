@@ -5,7 +5,6 @@ import {
   readMucCallSession,
   rememberMucCallSession,
 } from "../src/lib/calls/muc-call-session-cache";
-import { resetLegacyCallStorageMigrationForTests } from "../src/lib/calls/call-token-storage-migration";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
@@ -36,7 +35,6 @@ beforeEach(() => {
   installWindowStorage();
   clearAllDmCallJoinCacheForTests();
   clearAllMucCallSessionCacheForTests();
-  resetLegacyCallStorageMigrationForTests();
 });
 
 afterEach(() => {
@@ -45,12 +43,29 @@ afterEach(() => {
   const g = globalThis as ShimmedGlobal;
   g.window?.localStorage.clear();
   g.window?.sessionStorage.clear();
-  resetLegacyCallStorageMigrationForTests();
   if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
   else Reflect.deleteProperty(globalThis, "window");
 });
 
 describe("call cache storage", () => {
+  test("re-purges legacy localStorage tokens written after the first pass", () => {
+    const g = globalThis as ShimmedGlobal;
+    // First cache touch purges whatever pre-migration builds left behind.
+    readDmCallJoin({ selfBareJid: SELF_BARE_JID, peerJid: PEER_JID, sid: "s1", selfFullJid: SELF_FULL_JID });
+    // A still-open pre-migration tab (rolling deployment) writes another
+    // bearer token into the SHARED origin-wide localStorage afterwards.
+    g.window?.localStorage.setItem(DM_CACHE_KEY, JSON.stringify([{ sid: "stale" }]));
+    g.window?.localStorage.setItem(MUC_CACHE_KEY, JSON.stringify([{ sid: "stale" }]));
+
+    // The next cache access must purge it again — a one-shot guard would
+    // leave the recreated token persisted for its full exp.
+    readDmCallJoin({ selfBareJid: SELF_BARE_JID, peerJid: PEER_JID, sid: "s1", selfFullJid: SELF_FULL_JID });
+    readMucCallSession({ roomJid: ROOM_JID, selfFullJid: SELF_FULL_JID });
+
+    expect(g.window?.localStorage.getItem(DM_CACHE_KEY)).toBeNull();
+    expect(g.window?.localStorage.getItem(MUC_CACHE_KEY)).toBeNull();
+  });
+
   test("writes cached join tokens to sessionStorage, not localStorage", () => {
     rememberDmCallJoin({
       selfBareJid: SELF_BARE_JID,
