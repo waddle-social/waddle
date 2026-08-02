@@ -23,6 +23,7 @@ import {
 import { applyMutePresence, clearAllMuted } from "@/lib/calls/call-mute";
 import { clearAllLiveCallParticipants } from "@/lib/calls/muc-call-live-participants";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
+import { createCallTransportRecovery } from "@/lib/calls/call-transport-recovery";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent, ExternalService } from "@/lib/calls/types";
 import { coerceExternalServices } from "@/lib/calls/ice-servers";
@@ -130,6 +131,7 @@ import {
   type RoomAutoJoinBlock,
 } from "./room-auto-join-policy";
 import { clearDmCallJoinCacheForAccount } from "@/lib/calls/dm-call-join-cache";
+import { clearMucCallSessionCacheForAccount } from "@/lib/calls/muc-call-session-cache";
 import {
   discoverExtensionCommands,
   discoverExtensionRoutes,
@@ -452,6 +454,10 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
+  private readonly callTransportRecovery = createCallTransportRecovery({
+    isCallMediaActive: () => $callState.get().phase === "active",
+    teardown: () => this.teardownCallAfterTransportLoss(),
+  });
   /** Terminal lifecycle latch. A disposed client is never reconnectable. */
   private disposed = false;
   private disposePromise: Promise<void> | null = null;
@@ -1210,6 +1216,7 @@ export class BrowserXmppClient {
 
   private async disconnectInternal(): Promise<void> {
     this.destroying = true;
+    this.callTransportRecovery.dispose();
     this.outboundQueue.dispose();
     this.roomDiscoveryGeneration += 1;
     this.currentRoomCatalogFingerprintEvidence.clear();
@@ -1263,6 +1270,7 @@ export class BrowserXmppClient {
     this.resumedSessionRoomKeys.clear();
     this.sessionReadyHandledXmpp = null;
     clearDmCallJoinCacheForAccount(this.session.jid);
+    clearMucCallSessionCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
     clearAllRaisedHands();
@@ -2668,6 +2676,7 @@ export class BrowserXmppClient {
 
   private async runSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
     if (this.xmpp !== xmpp) return;
+    this.callTransportRecovery.onTransportReady();
     this.connected = true; this.reconnect.resetAttempts();
     this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
     // Coalesce duplicate triggers. Three event hooks call
@@ -2880,6 +2889,15 @@ export class BrowserXmppClient {
       try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
     }
   }
+  private teardownCallAfterTransportLoss(): void {
+    clearCallState({ endReason: "error" });
+    clearMucCallParticipants();
+    clearAllRaisedHands();
+    clearAllMuted();
+    clearAllLiveCallParticipants();
+    void useCallEngine().engine.disconnect();
+  }
+
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     this.roomJoinRetry.cancelAll();
@@ -2889,25 +2907,12 @@ export class BrowserXmppClient {
     // readiness without re-sending join presence (#1221).
     this.resumedSessionRoomKeys = new Set(this.joinedMucReady);
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
-    // The wire is gone — no point trying to send session-terminate.
-    // Clear the local call slot so the UI doesn't strand on a stale
-    // active overlay across reconnect; the reconnect path doesn't
-    // re-establish call state (XEP-0353 has no resume semantics for
-    // an in-flight call once the responder's connection drops).
-    //
-    // We MUST also drop the LiveKit room. The CallOverlay's
-    // `onBeforeUnmount` is the usual route, but it won't fire when the
-    // overlay re-renders to `phase: idle` and stays mounted (the parent
-    // tree owns it) — the engine would keep an open SFU socket
-    // pumping bytes until the next call replaced it. Tearing the
-    // singleton engine down here is idempotent (no-op when nothing's
-    // connected).
-    clearCallState({ endReason: "error" });
-    clearMucCallParticipants();
-    clearAllRaisedHands();
-    clearAllMuted();
-    clearAllLiveCallParticipants();
-    void useCallEngine().engine.disconnect();
+    // Established media is independent of the transient XMPP transport.
+    // Preserve its UI projections while stream recovery has a bounded
+    // chance to restore the signalling plane; setup phases still fail fast.
+    const callTeardownDeferred = !this.destroying
+      && this.callTransportRecovery.onTransportLost() === "deferred";
+    if (!callTeardownDeferred) this.teardownCallAfterTransportLoss();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     // `joinedMucs` keys are already canonical `roomJoinKey`s (#1221).
     this.retainedJoinedRoomJids = new Set([

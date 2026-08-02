@@ -20,8 +20,17 @@ import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../
 
 import {
   $mucCallLiveParticipants,
+  clearAllLiveCallParticipants,
   setLiveCallParticipants,
 } from "../src/lib/calls/muc-call-live-participants";
+import {
+  $mucRaisedHands,
+  clearAllRaisedHands,
+} from "../src/lib/calls/call-raised-hand";
+import {
+  $mucMutedParticipants,
+  clearAllMuted,
+} from "../src/lib/calls/call-mute";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
 import {
@@ -55,6 +64,8 @@ function wireClientEvents(sender: Partial<CallWireSender> = {}) {
     presence_type?: string;
     muc_jid?: string | null;
     muji?: { preparing: boolean; active: boolean };
+    hand_raised?: boolean;
+    muted?: boolean;
   }) => void) | null = null;
   let onCall: ((event: CallEvent) => void) | null = null;
   let onDisconnected: (() => void) | null = null;
@@ -211,22 +222,15 @@ function mockSender(): CallWireSender {
 
 const WINDOW_SENTINEL = Symbol("call-teardown-window");
 type ShimmedGlobal = typeof globalThis & {
-  window?: { localStorage: Storage } & { [WINDOW_SENTINEL]?: true };
+  window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
 
 beforeAll(() => {
   const g = globalThis as ShimmedGlobal;
   if (typeof g.window !== "undefined") return;
-  const store = new Map<string, string>();
-  const storage: Storage = {
-    get length() { return store.size; },
-    clear: () => store.clear(),
-    getItem: (key) => store.get(key) ?? null,
-    key: (index) => Array.from(store.keys())[index] ?? null,
-    removeItem: (key) => { store.delete(key); },
-    setItem: (key, value) => { store.set(key, String(value)); },
-  };
-  g.window = Object.assign({ localStorage: storage }, { [WINDOW_SENTINEL]: true as const });
+  const storage = createStorage();
+  const sessionStorage = createStorage();
+  g.window = Object.assign({ localStorage: storage, sessionStorage }, { [WINDOW_SENTINEL]: true as const });
 });
 
 afterAll(() => {
@@ -235,6 +239,18 @@ afterAll(() => {
     delete (g as { window?: unknown }).window;
   }
 });
+
+function createStorage(): Storage {
+  const store = new Map<string, string>();
+  return {
+    get length() { return store.size; },
+    clear: () => store.clear(),
+    getItem: (key) => store.get(key) ?? null,
+    key: (index) => Array.from(store.keys())[index] ?? null,
+    removeItem: (key) => { store.delete(key); },
+    setItem: (key, value) => { store.set(key, String(value)); },
+  };
+}
 
 afterEach(() => {
   clearCallState();
@@ -247,6 +263,9 @@ afterEach(() => {
   // keeps that state from leaking into other test files (e.g.
   // `muc-call-presence.test.ts`) that expect an empty store.
   clearMucCallParticipants();
+  clearAllRaisedHands();
+  clearAllMuted();
+  clearAllLiveCallParticipants();
   clearAllMucCallSessionCacheForTests();
   __resetCallLifecycleTelemetryForTesting();
   __setFaroForTesting(null);
@@ -1957,6 +1976,91 @@ describe("MUC group call", () => {
 
     expect(disconnect).toHaveBeenCalledTimes(1);
     expect($mucCallParticipants.get()).toEqual({});
+  });
+
+  test("transient XMPP disconnect preserves an active media call and its projections", async () => {
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      disconnect: () => Promise<void>;
+    };
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "active-during-reconnect",
+      media: audioVideo,
+      join: {
+        url: "wss://livekit.test",
+        room: "chan@muc.test",
+        identity: "alice@waddle.test/web",
+        token: "jwt.payload.sig",
+      },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+    events.emitPresence({
+      from: "chan@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+      hand_raised: true,
+      muted: true,
+    });
+    setLiveCallParticipants("chan@muc.test", [
+      "alice@waddle.test/web",
+      "bob@waddle.test/phone",
+    ]);
+
+    events.emitDisconnected();
+
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      sid: "active-during-reconnect",
+    });
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+    expect($mucRaisedHands.get()).toEqual({
+      "chan@muc.test": ["alice@waddle.test/web"],
+    });
+    expect($mucMutedParticipants.get()).toEqual({
+      "chan@muc.test": ["alice@waddle.test/web"],
+    });
+    expect($mucCallLiveParticipants.get()).toEqual({
+      "chan@muc.test": [
+        "alice@waddle.test/web",
+        "bob@waddle.test/phone",
+      ],
+    });
+
+    await client.disconnect();
+  });
+
+  test("session-ready cancels call recovery before duplicate-ready coalescing", async () => {
+    const events = wireClientEvents();
+    const onTransportReady = mock(() => undefined);
+    const client = events.client as unknown as {
+      callTransportRecovery: {
+        dispose(): void;
+        onTransportLost(): "deferred" | "not-deferred";
+        onTransportReady(): void;
+      };
+      runSessionReady(
+        xmpp: typeof events.xmpp,
+        lifecycle: { type: "fresh" | "resumed" },
+      ): Promise<void>;
+    };
+    client.callTransportRecovery = {
+      dispose: () => undefined,
+      onTransportLost: () => "not-deferred",
+      onTransportReady,
+    };
+
+    await client.runSessionReady(events.xmpp, { type: "fresh" });
+    await client.runSessionReady(events.xmpp, { type: "fresh" });
+
+    expect(onTransportReady).toHaveBeenCalledTimes(2);
+    await client.disconnect();
   });
 
   test("BrowserXmppClient ignores stale call and presence events after disconnect", async () => {
