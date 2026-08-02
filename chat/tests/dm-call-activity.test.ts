@@ -19,22 +19,15 @@ const audio = { audio: true, video: false };
 const now = new Date("2026-05-25T10:00:00.000Z");
 const WINDOW_SENTINEL = Symbol("dm-call-activity-window");
 type ShimmedGlobal = typeof globalThis & {
-  window?: { localStorage: Storage } & { [WINDOW_SENTINEL]?: true };
+  window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
 
 beforeAll(() => {
   const g = globalThis as ShimmedGlobal;
   if (typeof g.window !== "undefined") return;
-  const store = new Map<string, string>();
-  const storage: Storage = {
-    get length() { return store.size; },
-    clear: () => store.clear(),
-    getItem: (key) => store.get(key) ?? null,
-    key: (index) => Array.from(store.keys())[index] ?? null,
-    removeItem: (key) => { store.delete(key); },
-    setItem: (key, value) => { store.set(key, String(value)); },
-  };
-  g.window = Object.assign({ localStorage: storage }, { [WINDOW_SENTINEL]: true as const });
+  const storage = createStorage();
+  const sessionStorage = createStorage();
+  g.window = Object.assign({ localStorage: storage, sessionStorage }, { [WINDOW_SENTINEL]: true as const });
 });
 
 afterAll(() => {
@@ -61,6 +54,18 @@ function base64UrlJson(value: Record<string, unknown>): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function createStorage(): Storage {
+  const store = new Map<string, string>();
+  return {
+    get length() { return store.size; },
+    clear: () => store.clear(),
+    getItem: (key) => store.get(key) ?? null,
+    key: (index) => Array.from(store.keys())[index] ?? null,
+    removeItem: (key) => { store.delete(key); },
+    setItem: (key, value) => { store.set(key, String(value)); },
+  };
 }
 
 describe("DM call activity", () => {

@@ -1,9 +1,18 @@
 import type { CallMedia, LiveKitJoin } from "./types";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { reportError } from "@/lib/telemetry";
+import {
+  localStorageForLegacyPurge,
+  purgeLegacyStoragePrefixFromLocalStorage,
+} from "./call-token-storage-migration";
 
 const CACHE_PREFIX = "waddle.chat.dm-call-joins";
 const MAX_CACHE_ENTRIES = 32;
+
+// Remove bearer tokens written by pre-#1450 builds as soon as this cache is
+// initialized. `storage()` repeats the one-shot call so SSR-first imports can
+// retry after hydration makes browser storage available.
+purgeLegacyStoragePrefixFromLocalStorage(CACHE_PREFIX);
 const CACHE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type CachedDmCallJoin = {
@@ -85,21 +94,8 @@ export function clearDmCallJoinCacheForAccount(selfBareJid: string): void {
 }
 
 export function clearAllDmCallJoinCacheForTests(): void {
-  const s = storage();
-  if (!s) return;
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < s.length; index += 1) {
-      const key = s.key(index);
-      if (key?.startsWith(`${CACHE_PREFIX}.`)) keys.push(key);
-    }
-    for (const key of keys) s.removeItem(key);
-  } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "dm call join cache clear failed",
-    });
-  }
+  clearKeysWithPrefix(storage(), CACHE_PREFIX);
+  clearKeysWithPrefix(localStorageForLegacyPurge(), CACHE_PREFIX);
 }
 
 function normalizeEntry(entry: CachedDmCallJoin): CachedDmCallJoin | null {
@@ -222,10 +218,28 @@ function isLiveKitJoin(value: unknown): value is LiveKitJoin {
 }
 
 function storage(): Storage | null {
+  purgeLegacyStoragePrefixFromLocalStorage(CACHE_PREFIX);
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage;
+    return window.sessionStorage ?? null;
   } catch {
     return null;
+  }
+}
+
+function clearKeysWithPrefix(s: Storage | null, prefix: string): void {
+  if (!s) return;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < s.length; index += 1) {
+      const key = s.key(index);
+      if (key?.startsWith(`${prefix}.`)) keys.push(key);
+    }
+    for (const key of keys) s.removeItem(key);
+  } catch (err) {
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "dm call join cache clear failed",
+    });
   }
 }

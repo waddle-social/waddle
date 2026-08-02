@@ -9,6 +9,9 @@ import {
   recordMediaIssue,
 } from "../src/lib/calls/call-media-issues";
 import { __setFaroForTesting } from "../src/lib/telemetry";
+import { useCallEngine } from "../src/lib/calls/use-call-engine";
+
+const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 
 function domError(name: string): Error {
   const err = new Error(`${name} message`);
@@ -19,6 +22,12 @@ function domError(name: string): Error {
 afterEach(() => {
   clearAllMediaIssues();
   __setFaroForTesting(null);
+  const engine = useCallEngine().engine as unknown as {
+    emit: (event: string, ...args: unknown[]) => void;
+  };
+  engine.emit("disconnected", { origin: "local" });
+  if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+  else Reflect.deleteProperty(globalThis, "navigator");
 });
 
 describe("classifyMediaError", () => {
@@ -137,5 +146,85 @@ describe("$callMediaIssues store", () => {
     recordMediaIssue("screen", domError("AbortError"));
     clearAllMediaIssues();
     expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: null });
+  });
+
+  test("the engine mediaDevicesError event records a mid-call issue", () => {
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    engine.emit("mediaDevicesError", {
+      source: "audio",
+      error: domError("NotFoundError"),
+    });
+
+    expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });
+  });
+
+  test("devicechange falling out from under the active mic records missing and falls back", async () => {
+    let onDeviceChange: (() => void) | null = null;
+    let removedHandler: (() => void) | null = null;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          enumerateDevices: async () => [
+            { deviceId: "replacement-mic", kind: "audioinput", label: "Replacement" },
+          ],
+          addEventListener: (_event: string, handler: () => void) => {
+            onDeviceChange = handler;
+          },
+          removeEventListener: (_event: string, handler: () => void) => {
+            removedHandler = handler;
+          },
+        },
+      },
+    });
+
+    const engine = useCallEngine().engine as unknown as {
+      activeDeviceId: (kind: MediaDeviceKind) => string | null;
+      emit: (event: string, ...args: unknown[]) => void;
+      setMicDevice: (deviceId: string) => Promise<void>;
+      setCameraDevice: (deviceId: string) => Promise<void>;
+      setSpeakerDevice: (deviceId: string) => Promise<void>;
+    };
+    const originalActiveDeviceId = engine.activeDeviceId;
+    const originalSetMicDevice = engine.setMicDevice;
+    const originalSetCameraDevice = engine.setCameraDevice;
+    const originalSetSpeakerDevice = engine.setSpeakerDevice;
+    const micCalls: string[] = [];
+    let activeMicId = "gone-mic";
+    try {
+      engine.activeDeviceId = (kind: MediaDeviceKind) =>
+        kind === "audioinput" ? activeMicId : null;
+      engine.setMicDevice = async (deviceId: string) => {
+        micCalls.push(deviceId);
+      };
+      engine.setCameraDevice = async () => undefined;
+      engine.setSpeakerDevice = async () => undefined;
+
+      engine.emit("connected", {
+        localIdentity: "alice@waddle.test/web",
+        remoteIdentities: [],
+        roomName: "room@muc.waddle.test::call",
+      });
+      onDeviceChange?.();
+      // LiveKit's own listener auto-selects the first remaining device before
+      // our debounced reconciliation runs. We must still remember that the
+      // device active at event time was the one removed.
+      activeMicId = "replacement-mic";
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });
+      expect(micCalls).toEqual(["default"]);
+
+      engine.emit("disconnected", { origin: "local" });
+      expect(removedHandler).toBe(onDeviceChange);
+    } finally {
+      engine.activeDeviceId = originalActiveDeviceId;
+      engine.setMicDevice = originalSetMicDevice;
+      engine.setCameraDevice = originalSetCameraDevice;
+      engine.setSpeakerDevice = originalSetSpeakerDevice;
+    }
   });
 });

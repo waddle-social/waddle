@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ConnectionState,
   DisconnectReason,
   RoomEvent,
   type Room,
@@ -7,6 +8,7 @@ import {
   type RoomOptions,
 } from "livekit-client";
 import { CallEngine } from "../src/lib/calls/engine";
+import { createIceCredentialRefresher } from "../src/lib/calls/ice-credential-refresh";
 import { videoCodecSupport } from "../src/lib/calls/video-codec/support";
 import type { LiveKitJoin } from "../src/lib/calls/types";
 
@@ -92,6 +94,80 @@ const iceServers: RTCIceServer[] = [
   { urls: "stun:turn.waddle.social:3478" },
 ];
 
+describe("XEP-0215 credential refresh scheduling", () => {
+  test("fires one minute before the earliest expiry and applies fresh credentials", async () => {
+    const now = Date.parse("2026-07-31T12:00:00Z");
+    let scheduled: (() => void) | null = null;
+    let scheduledDelay = -1;
+    const applied: RTCIceServer[][] = [];
+    let resolveRefreshed: () => void = () => undefined;
+    const refreshed = new Promise<void>((resolve) => {
+      resolveRefreshed = resolve;
+    });
+    const refresher = createIceCredentialRefresher({
+      refresh: async () => ({
+        servers: [{ urls: "turns:fresh.waddle.test:443", username: "u2", credential: "p2" }],
+        earliestExpiryMs: now + 600_000,
+      }),
+      apply: (bundle) => applied.push(bundle.servers),
+      isCurrent: () => true,
+      onRefreshed: resolveRefreshed,
+      onExpired: () => undefined,
+      clock: {
+        now: () => now,
+        setTimeout: (callback, delayMs) => {
+          scheduled = callback;
+          scheduledDelay = delayMs;
+          return 1 as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout: () => undefined,
+      },
+    });
+
+    refresher.start(now + 300_000);
+    expect(scheduledDelay).toBe(240_000);
+    expect(scheduled).not.toBeNull();
+    (scheduled as unknown as () => void)();
+    await refreshed;
+
+    expect(applied).toEqual([[
+      { urls: "turns:fresh.waddle.test:443", username: "u2", credential: "p2" },
+    ]]);
+  });
+
+  test("stop clears the call-scoped timer and prevents a stale callback from refreshing", async () => {
+    const cleared: Array<ReturnType<typeof setTimeout>> = [];
+    let scheduled: (() => void) | null = null;
+    let refreshCalls = 0;
+    const timer = 7 as unknown as ReturnType<typeof setTimeout>;
+    const refresher = createIceCredentialRefresher({
+      refresh: async () => {
+        refreshCalls += 1;
+        return { servers: iceServers, earliestExpiryMs: null };
+      },
+      apply: () => undefined,
+      isCurrent: () => true,
+      onRefreshed: () => undefined,
+      onExpired: () => undefined,
+      clock: {
+        now: () => 1_000,
+        setTimeout: (callback) => {
+          scheduled = callback;
+          return timer;
+        },
+        clearTimeout: (handle) => cleared.push(handle),
+      },
+    });
+
+    refresher.start(120_000);
+    refresher.stop();
+    expect(cleared).toEqual([timer]);
+    (scheduled as unknown as () => void)();
+    await Promise.resolve();
+    expect(refreshCalls).toBe(0);
+  });
+});
+
 describe("CallEngine.connect — XEP-0215 ICE injection", () => {
   test("passes the mapped iceServers via rtcConfig at connect", async () => {
     const room = stubRoom();
@@ -116,6 +192,74 @@ describe("CallEngine.connect — XEP-0215 ICE injection", () => {
     await engineWith(room).connect(join(), { audio: false, video: false, iceServers: [] });
 
     expect(room.connectCalls[0].opts).toBeUndefined();
+  });
+
+  test("refreshes credentials on transport reconnect for a future PeerConnection rebuild", async () => {
+    const room = stubRoom();
+    const engine = engineWith(room);
+    const refreshed: number[] = [];
+    engine.on("iceCredentialsRefreshed", () => refreshed.push(1));
+    let releaseRefresh: (bundle: {
+      servers: RTCIceServer[];
+      earliestExpiryMs: number | null;
+    }) => void = () => undefined;
+    const refreshResult = new Promise<{
+      servers: RTCIceServer[];
+      earliestExpiryMs: number | null;
+    }>((resolve) => {
+      releaseRefresh = resolve;
+    });
+
+    await engine.connect(join(), {
+      audio: false,
+      video: false,
+      iceServers,
+      iceServersExpiryMs: null,
+      refreshIceServers: () => refreshResult,
+    });
+    const rtcConfig = room.connectCalls[0].opts?.rtcConfig;
+    const onConnectionStateChanged = room.handlers.get(RoomEvent.ConnectionStateChanged) as
+      | ((state: ConnectionState) => void)
+      | undefined;
+    const freshServers: RTCIceServer[] = [
+      { urls: "turns:fresh.waddle.test:443", username: "new", credential: "secret" },
+    ];
+
+    onConnectionStateChanged?.(ConnectionState.Reconnecting);
+    releaseRefresh({ servers: freshServers, earliestExpiryMs: null });
+    await refreshResult;
+    await Promise.resolve();
+
+    // LiveKit 2.19 retains this config object and clones it for a full
+    // reconnect. Its current PeerConnection is not updated in place.
+    expect(rtcConfig?.iceServers).toEqual(freshServers);
+    expect(refreshed).toEqual([1]);
+  });
+
+  test("disconnect clears the proactive credential refresh timer", async () => {
+    const room = stubRoom();
+    const timer = 11 as unknown as ReturnType<typeof setTimeout>;
+    const cleared: Array<ReturnType<typeof setTimeout>> = [];
+    const engine = new CallEngine({
+      makeRoom: () => room as unknown as Room,
+      videoCodecSupport: videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] }),
+      iceRefreshClock: {
+        now: () => 1_000,
+        setTimeout: () => timer,
+        clearTimeout: (handle) => cleared.push(handle),
+      },
+    });
+
+    await engine.connect(join(), {
+      audio: false,
+      video: false,
+      iceServers,
+      iceServersExpiryMs: 120_000,
+      refreshIceServers: async () => ({ servers: iceServers, earliestExpiryMs: null }),
+    });
+    await engine.disconnect();
+
+    expect(cleared).toEqual([timer]);
   });
 
   test("rejects a second concurrent connect before the first resolves, building only one Room", async () => {
@@ -219,7 +363,7 @@ describe("CallEngine.connect — XEP-0215 ICE injection", () => {
     await onDisconnected?.(DisconnectReason.DUPLICATE_IDENTITY);
 
     expect((engine as unknown as { room: Room | null }).room).toBeNull();
-    expect(room.offCalls).toHaveLength(14);
+    expect(room.offCalls).toHaveLength(16);
     expect(room.handlers.size).toBe(0);
     expect(disconnected).toEqual([{
       origin: "transport",
@@ -228,6 +372,32 @@ describe("CallEngine.connect — XEP-0215 ICE injection", () => {
 
     await engine.connect(join(), { audio: false, video: false });
     expect(room.connectCalls).toHaveLength(2);
+  });
+
+  test("forwards LiveKit media-device errors for active mic and camera failures", async () => {
+    const room = stubRoom();
+    const engine = engineWith(room);
+    const seen: Array<{ source: "audio" | "video"; error: Error }> = [];
+    engine.on("mediaDevicesError", (info) => {
+      seen.push(info as { source: "audio" | "video"; error: Error });
+    });
+
+    await engine.connect(join(), { audio: false, video: false });
+    const onMediaDevicesError = room.handlers.get(RoomEvent.MediaDevicesError) as
+      | ((error: Error, kind?: MediaDeviceKind) => void)
+      | undefined;
+    const micError = new Error("mic gone");
+    micError.name = "NotFoundError";
+    const camError = new Error("cam gone");
+    camError.name = "NotReadableError";
+
+    onMediaDevicesError?.(micError, "audioinput");
+    onMediaDevicesError?.(camError, "videoinput");
+
+    expect(seen).toEqual([
+      { source: "audio", error: micError },
+      { source: "video", error: camError },
+    ]);
   });
 
   test("an operation from call N cannot fall back after call N+1 connects", async () => {

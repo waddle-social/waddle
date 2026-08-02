@@ -210,6 +210,16 @@ describe("callIceEventAttributes", () => {
 });
 
 describe("createCallIceBeacon", () => {
+  test("forwards credential refresh and expiry lifecycle beacons", () => {
+    const credentials: string[] = [];
+    const beacon = createCallIceBeacon(() => undefined, (event) => credentials.push(event));
+
+    beacon.noteCredentials("refreshed");
+    beacon.noteCredentials("expired");
+
+    expect(credentials).toEqual(["refreshed", "expired"]);
+  });
+
   test("a report that measured nothing is not beaconed", () => {
     const seen: CallIceSnapshot[] = [];
     const beacon = createCallIceBeacon((snapshot) => seen.push(snapshot));

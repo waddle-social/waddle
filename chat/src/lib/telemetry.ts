@@ -48,6 +48,7 @@ import {
 } from "./calls/call-media-path-telemetry";
 import {
   callIceEventAttributes,
+  type IceCredentialEvent,
   type CallIceSnapshot,
 } from "./calls/call-ice-telemetry";
 import { callCorrelationId, deriveCallCorrelationId } from "./calls/call-correlation";
@@ -1206,6 +1207,19 @@ export function reportCallMediaPath(snapshot: CallMediaPathSnapshot, callKind: C
 export function reportCallIce(snapshot: CallIceSnapshot, callKind: CallKind): void {
   faro?.api.pushEvent("chat.call.ice", {
     ...callIceEventAttributes(snapshot),
+    call_kind: callKind,
+    call_id: callCorrelationId(),
+  });
+}
+
+/**
+ * Beacon XEP-0215 TURN credential refresh/expiry without including the
+ * credential, server address, or expiry timestamp. The closed status value is
+ * intentionally low-cardinality and shares the call ICE correlation id.
+ */
+export function reportCallIceCredentials(event: IceCredentialEvent, callKind: CallKind): void {
+  faro?.api.pushEvent("chat.call.ice_credentials", {
+    credential_state: event,
     call_kind: callKind,
     call_id: callCorrelationId(),
   });

@@ -2,6 +2,7 @@ import { ref, type Ref } from "vue";
 import { $callState, clearCallState, reportCallError } from "./call-store";
 import { DisconnectReason } from "livekit-client";
 import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engine";
+import { applyCallDeviceSelection } from "./call-device-selection";
 import {
   advanceActiveSpeakers,
   emptyActiveSpeakerState,
@@ -21,6 +22,7 @@ import {
   setLiveCallParticipants,
 } from "./muc-call-live-participants";
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
+import { enumerateCallDevices, hasEnumeratedCallDeviceId } from "./device-prefs";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
 import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
@@ -49,12 +51,16 @@ import {
   type CallStatDirection,
   type CallStatSample,
 } from "./call-stats";
-import { reportCallAudioProcessing, reportCallIce, reportCallMediaPath } from "../telemetry";
+import {
+  reportCallAudioProcessing,
+  reportCallIce,
+  reportCallIceCredentials,
+  reportCallMediaPath,
+} from "../telemetry";
 import {
   resetCallConnectionQuality,
   setCallConnectionPhase,
   setCallConnectionQuality,
-  type CallConnectionPhase,
 } from "./connection-quality";
 import { resetCallActiveSince, setCallActiveSince } from "./call-duration";
 import {
@@ -240,6 +246,9 @@ const callMediaPathBeacon = createCallMediaPathBeacon((snapshot) => {
 const callIceBeacon = createCallIceBeacon((snapshot) => {
   const callKind = currentCallKind();
   if (callKind) reportCallIce(snapshot, callKind);
+}, (event) => {
+  const callKind = currentCallKind();
+  if (callKind) reportCallIceCredentials(event, callKind);
 });
 
 /** Cadence of the observational media-path poll. Codec/ICE settle within the
@@ -255,6 +264,92 @@ let mediaPathSampling = false;
 // just-reset beacon — which would otherwise suppress the next call's first
 // event when both calls share a codec/ICE path.
 let mediaPathGeneration = 0;
+
+const CALL_DEVICE_CHANGE_DEBOUNCE_MS = 200;
+let unsubscribeCallDeviceChange: (() => void) | null = null;
+let callDeviceChangeTimer: ReturnType<typeof setTimeout> | null = null;
+let callDeviceChangeGeneration = 0;
+let pendingCallDeviceChange: { micId: string | null; camId: string | null } | null = null;
+
+function missingActiveCallDeviceError(kind: "mic" | "cam"): Error {
+  const error = new Error(`${kind} device was removed during the call`);
+  error.name = "NotFoundError";
+  return error;
+}
+
+async function reconcileRemovedActiveDevices(
+  engine: CallEngine,
+  generation: number,
+  activeBeforeChange: { micId: string | null; camId: string | null },
+): Promise<void> {
+  const devices = await enumerateCallDevices();
+  if (generation !== callDeviceChangeGeneration) return;
+
+  const activeMicId = activeBeforeChange.micId;
+  if (
+    activeMicId &&
+    activeMicId !== "default" &&
+    !hasEnumeratedCallDeviceId(devices, "mic", activeMicId)
+  ) {
+    recordMediaIssue("mic", missingActiveCallDeviceError("mic"));
+    await applyCallDeviceSelection("mic", null, engine);
+    if (generation !== callDeviceChangeGeneration) return;
+  }
+
+  const activeCamId = activeBeforeChange.camId;
+  if (
+    activeCamId &&
+    activeCamId !== "default" &&
+    !hasEnumeratedCallDeviceId(devices, "cam", activeCamId)
+  ) {
+    recordMediaIssue("cam", missingActiveCallDeviceError("cam"));
+    await applyCallDeviceSelection("cam", null, engine);
+  }
+}
+
+function stopCallDeviceChangeListener(): void {
+  callDeviceChangeGeneration += 1;
+  if (callDeviceChangeTimer) {
+    clearTimeout(callDeviceChangeTimer);
+    callDeviceChangeTimer = null;
+  }
+  pendingCallDeviceChange = null;
+  unsubscribeCallDeviceChange?.();
+  unsubscribeCallDeviceChange = null;
+}
+
+function startCallDeviceChangeListener(engine: CallEngine): void {
+  stopCallDeviceChangeListener();
+  const generation = callDeviceChangeGeneration;
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.addEventListener) return;
+  const handler = () => {
+    // Capture BEFORE the debounce. LiveKit registers its own devicechange
+    // listener when the Room is built and may auto-switch activeDeviceMap to
+    // the first remaining device before our async enumeration finishes. A
+    // later read would then hide that the in-use device was removed.
+    const snapshot = {
+      micId: engine.activeDeviceId("audioinput"),
+      camId: engine.activeDeviceId("videoinput"),
+    };
+    pendingCallDeviceChange = {
+      micId: pendingCallDeviceChange?.micId ?? snapshot.micId,
+      camId: pendingCallDeviceChange?.camId ?? snapshot.camId,
+    };
+    if (callDeviceChangeTimer) clearTimeout(callDeviceChangeTimer);
+    callDeviceChangeTimer = setTimeout(() => {
+      callDeviceChangeTimer = null;
+      const activeBeforeChange = pendingCallDeviceChange;
+      pendingCallDeviceChange = null;
+      if (!activeBeforeChange) return;
+      void reconcileRemovedActiveDevices(engine, generation, activeBeforeChange)
+        .catch(reportCallError);
+    }, CALL_DEVICE_CHANGE_DEBOUNCE_MS);
+  };
+  navigator.mediaDevices.addEventListener("devicechange", handler);
+  unsubscribeCallDeviceChange = () => {
+    navigator.mediaDevices.removeEventListener("devicechange", handler);
+  };
+}
 // Previous byte/timestamp sample per audio track, so the media-path poll can
 // derive the send/recv bitrate (a rate needs two samples) and band it. Keyed by
 // the same track key used in the diagnostics dialog; cleared between calls in
@@ -509,6 +604,13 @@ export function useCallEngine(): {
       // connection-quality lifecycle.
       setCallActiveSince(Date.now());
     });
+    const engineForDeviceChanges = singletonEngine;
+    singletonEngine.on("connected", () => {
+      // Keep a call-lifetime `devicechange` listener active even when the
+      // settings dialog is closed, so a hot-unplugged in-use mic/camera can
+      // surface a notice and fall back to the browser default immediately.
+      startCallDeviceChangeListener(engineForDeviceChanges);
+    });
     singletonEngine.on("mediaDevicesError", ({ source, error }) => {
       // A best-effort mic/cam capture failed (no device / denied
       // permission). The call stays connected as receive-only; record
@@ -574,6 +676,12 @@ export function useCallEngine(): {
       // so signaling blips never inflate the ICE-restart SLI.
       callIceBeacon.noteIceRestart();
     });
+    singletonEngine.on("iceCredentialsRefreshed", () => {
+      callIceBeacon.noteCredentials("refreshed");
+    });
+    singletonEngine.on("iceCredentialsExpired", () => {
+      callIceBeacon.noteCredentials("expired");
+    });
     singletonEngine.on("activeSpeakersChanged", (identities) => {
       // LiveKit re-derived who is speaking. Feed it through the brief hold so
       // the Gallery highlight does not flicker on transient sounds.
@@ -625,6 +733,7 @@ export function useCallEngine(): {
       micAudioProcessingBeacon.reset();
       // Stop the media-path poll and re-arm its beacon for the next call.
       stopMediaPathPolling();
+      stopCallDeviceChangeListener();
       callMediaPathBeacon.reset();
       // Same for the ICE beacon: drop this call's seen-set and restart
       // count so the next call measures its own connectivity.

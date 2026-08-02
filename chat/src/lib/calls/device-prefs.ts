@@ -211,6 +211,8 @@ type EnumeratedDevice = {
   label: string;
 };
 
+export type CallDevicePreferenceKind = "mic" | "cam" | "speaker";
+
 /**
  * Categorized list of devices for the settings popover. Empty arrays
  * when the user hasn't granted permission yet — the popover renders
@@ -221,6 +223,59 @@ export type EnumeratedDevices = {
   cams: EnumeratedDevice[];
   speakers: EnumeratedDevice[];
 };
+
+export type ResolvedCallDevicePreference = {
+  activeDeviceId: string;
+  preferenceId: string | null;
+  captureDeviceId: string | undefined;
+  missing: boolean;
+};
+
+function enumeratedDevicesForKind(
+  devices: EnumeratedDevices,
+  kind: CallDevicePreferenceKind,
+): readonly EnumeratedDevice[] {
+  if (kind === "mic") return devices.mics;
+  if (kind === "cam") return devices.cams;
+  return devices.speakers;
+}
+
+export function hasEnumeratedCallDeviceId(
+  devices: EnumeratedDevices,
+  kind: CallDevicePreferenceKind,
+  deviceId: string,
+): boolean {
+  return enumeratedDevicesForKind(devices, kind).some((device) => device.deviceId === deviceId);
+}
+
+export async function resolveCallDevicePreference(
+  kind: CallDevicePreferenceKind,
+  deviceId: string | null,
+): Promise<ResolvedCallDevicePreference> {
+  if (deviceId === null) {
+    return {
+      activeDeviceId: "default",
+      preferenceId: null,
+      captureDeviceId: undefined,
+      missing: false,
+    };
+  }
+  const devices = await enumerateCallDevices();
+  if (hasEnumeratedCallDeviceId(devices, kind, deviceId)) {
+    return {
+      activeDeviceId: deviceId,
+      preferenceId: deviceId,
+      captureDeviceId: deviceId,
+      missing: false,
+    };
+  }
+  return {
+    activeDeviceId: "default",
+    preferenceId: null,
+    captureDeviceId: undefined,
+    missing: true,
+  };
+}
 
 export async function enumerateCallDevices(): Promise<EnumeratedDevices> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {

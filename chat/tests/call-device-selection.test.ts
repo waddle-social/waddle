@@ -13,6 +13,25 @@ import {
 import { $aiNoiseFilterError } from "../src/lib/calls/ai-noise-filter-error-state";
 import { $backgroundEffectError } from "../src/lib/calls/background-effect-error-state";
 import { BACKGROUND_OFF } from "../src/lib/calls/background-effect/effect-id";
+import {
+  $callMediaIssues,
+  clearAllMediaIssues,
+} from "../src/lib/calls/call-media-issues";
+
+const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+
+function setEnumeratedDevices(
+  devices: Array<{ deviceId: string; kind: MediaDeviceKind; label: string }>,
+): void {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        enumerateDevices: async () => devices,
+      },
+    },
+  });
+}
 
 afterEach(() => {
   $devicePrefs.set({
@@ -25,10 +44,18 @@ afterEach(() => {
   });
   $aiNoiseFilterError.set(null);
   $backgroundEffectError.set(null);
+  clearAllMediaIssues();
+  if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+  else Reflect.deleteProperty(globalThis, "navigator");
 });
 
 describe("call device selection", () => {
   test("persists and applies mic, camera, and speaker selections to the active call", async () => {
+    setEnumeratedDevices([
+      { deviceId: "headset-mic", kind: "audioinput", label: "Headset" },
+      { deviceId: "desk-cam", kind: "videoinput", label: "Desk cam" },
+      { deviceId: "usb-speaker", kind: "audiooutput", label: "USB speaker" },
+    ]);
     const engine = {
       setMicDevice: mock(async (_id: string) => undefined),
       setCameraDevice: mock(async (_id: string) => undefined),
@@ -77,6 +104,9 @@ describe("call device selection", () => {
   });
 
   test("does not persist a preference when the active call rejects the device switch", async () => {
+    setEnumeratedDevices([
+      { deviceId: "fallback-mic", kind: "audioinput", label: "Fallback mic" },
+    ]);
     const engine = {
       setMicDevice: mock(async (_id: string) => {
         throw new Error("device unavailable");
@@ -104,6 +134,23 @@ describe("call device selection", () => {
       aiNoiseModel: null,
       backgroundEffect: BACKGROUND_OFF,
     });
+  });
+
+  test("persists the browser default when the requested saved device id is missing", async () => {
+    setEnumeratedDevices([
+      { deviceId: "fallback-mic", kind: "audioinput", label: "Fallback mic" },
+    ]);
+    const engine = {
+      setMicDevice: mock(async (_id: string) => undefined),
+      setCameraDevice: mock(async (_id: string) => undefined),
+      setSpeakerDevice: mock(async (_id: string) => undefined),
+    };
+
+    await applyCallDeviceSelection("mic", "stale-mic", engine);
+
+    expect(engine.setMicDevice).toHaveBeenCalledWith("default");
+    expect($devicePrefs.get().mic).toBeNull();
+    expect($callMediaIssues.get().mic).toBe("missing");
   });
 
   test("persists and applies audio processing selections to the active call", async () => {

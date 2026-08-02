@@ -56,14 +56,27 @@ const AUDIO_CALL: CallMedia = { audio: true, video: false };
 
 const WINDOW_SENTINEL = Symbol("muc-call-resume-window");
 type ShimmedGlobal = typeof globalThis & {
-  window?: { localStorage: Storage } & { [WINDOW_SENTINEL]?: true };
+  window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
 
 beforeAll(() => {
   const g = globalThis as ShimmedGlobal;
   if (typeof g.window !== "undefined") return;
+  const storage = createStorage();
+  const sessionStorage = createStorage();
+  g.window = Object.assign({ localStorage: storage, sessionStorage }, { [WINDOW_SENTINEL]: true as const });
+});
+
+afterAll(() => {
+  const g = globalThis as ShimmedGlobal;
+  if (g.window?.[WINDOW_SENTINEL]) {
+    delete (g as { window?: unknown }).window;
+  }
+});
+
+function createStorage(): Storage {
   const store = new Map<string, string>();
-  const storage: Storage = {
+  return {
     get length() {
       return store.size;
     },
@@ -77,15 +90,7 @@ beforeAll(() => {
       store.set(key, String(value));
     },
   };
-  g.window = Object.assign({ localStorage: storage }, { [WINDOW_SENTINEL]: true as const });
-});
-
-afterAll(() => {
-  const g = globalThis as ShimmedGlobal;
-  if (g.window?.[WINDOW_SENTINEL]) {
-    delete (g as { window?: unknown }).window;
-  }
-});
+}
 
 beforeEach(() => {
   clearAllMucCallSessionCacheForTests();

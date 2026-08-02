@@ -1,4 +1,5 @@
 import {
+  resolveCallDevicePreference,
   type AudioProcessingPrefs,
   setAiNoiseModel,
   setBackgroundEffectPref,
@@ -11,6 +12,7 @@ import { clearAiNoiseFilterError } from "./ai-noise-filter-error-state";
 import { clearBackgroundEffectError } from "./background-effect-error-state";
 import type { NoiseModelId } from "./ai-noise-filter/model-id";
 import type { BackgroundEffect } from "./background-effect/effect-id";
+import { recordMediaIssue } from "./call-media-issues";
 
 export type CallDeviceKind = "mic" | "cam" | "speaker";
 
@@ -29,19 +31,24 @@ export async function applyCallDeviceSelection(
   deviceId: string | null,
   engine: CallDeviceSelectionEngine,
 ): Promise<void> {
-  const activeDeviceId = deviceId ?? "default";
+  const resolved = await resolveCallDevicePreference(kind, deviceId);
+  if (resolved.missing && kind !== "speaker") {
+    const error = new Error(`${kind} device is no longer available`);
+    error.name = "NotFoundError";
+    recordMediaIssue(kind, error);
+  }
   if (kind === "mic") {
-    await engine.setMicDevice(activeDeviceId);
-    setMicDevice(deviceId);
+    await engine.setMicDevice(resolved.activeDeviceId);
+    setMicDevice(resolved.preferenceId);
     return;
   }
   if (kind === "cam") {
-    await engine.setCameraDevice(activeDeviceId);
-    setCamDevice(deviceId);
+    await engine.setCameraDevice(resolved.activeDeviceId);
+    setCamDevice(resolved.preferenceId);
     return;
   }
-  await engine.setSpeakerDevice(activeDeviceId);
-  setSpeakerDevice(deviceId);
+  await engine.setSpeakerDevice(resolved.activeDeviceId);
+  setSpeakerDevice(resolved.preferenceId);
 }
 
 export async function applyAudioProcessingSelection(
