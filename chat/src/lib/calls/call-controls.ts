@@ -52,8 +52,10 @@ function isScreenSharePickerCancel(error: unknown): boolean {
 }
 
 function getSender(): CallWireSender | null {
-  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
-  return (client?.xmpp as CallWireSender | undefined) ?? null;
+  // Session-ready-gated: a half-open reconnect-phase handle must not
+  // consume a hangup's teardown — a null sender routes it into the
+  // pending-terminate retention instead (#1621 review round 4).
+  return connectionStore.client?.callWireSender() ?? null;
 }
 
 /**
@@ -234,6 +236,14 @@ export function resetCallControls(micEnabled: boolean, camEnabled: boolean): voi
   micRequestGen++;
   camRequestGen++;
   screenShareRequestGen++;
+  // Detach the new call's ops from any UNRESOLVED previous-call op (a
+  // camera permission prompt or display picker still open): the stale
+  // op is generation-dead when it finally settles, but chaining behind
+  // it would block the new call's first action until then (#1621
+  // review round 4).
+  micOpChain = Promise.resolve();
+  camOpChain = Promise.resolve();
+  screenShareOpChain = Promise.resolve();
   $callMicEnabled.set(micEnabled);
   $callCamEnabled.set(camEnabled);
   $callScreenShareEnabled.set(false);

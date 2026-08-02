@@ -177,7 +177,7 @@ describe("$callMediaIssues store", () => {
     expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: "in-use" });
   });
 
-  test("devicechange falling out from under the active mic records missing and falls back", async () => {
+  test("devicechange falling out from under the active mic falls back without a false notice", async () => {
     let onDeviceChange: (() => void) | null = null;
     let removedHandler: (() => void) | null = null;
     Object.defineProperty(globalThis, "navigator", {
@@ -232,10 +232,12 @@ describe("$callMediaIssues store", () => {
       activeMicId = "replacement-mic";
       await new Promise((resolve) => setTimeout(resolve, 250));
 
-      expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });
+      // The fallback SUCCEEDED: capture is live on the default, so no
+      // "missing" notice is recorded (its enable action would disable
+      // the working device — #1621 round 4), and the SAVED preference
+      // survives so replugging restores the user's choice.
+      expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: null });
       expect(micCalls).toEqual(["default"]);
-      // The fallback is engine-only: the SAVED preference survives, so
-      // replugging the device restores the user's choice on the next call.
       expect($devicePrefs.get().mic).toBe("gone-mic");
 
       engine.emit("disconnected", { origin: "local" });

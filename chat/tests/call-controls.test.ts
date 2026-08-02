@@ -179,7 +179,7 @@ describe("call page lifecycle controls", () => {
       send_raw_iq: mock(async () => "<iq type='result'/>"),
     };
     connectionStore.client = {
-      xmpp: sender,
+      callWireSender: () => sender,
     } as unknown as typeof connectionStore.client;
     $callState.set({
       phase: "active",
@@ -262,7 +262,7 @@ describe("hangupActiveCall media-first ordering (#1446)", () => {
         return new Promise<void>(() => undefined); // server never replies
       }),
     };
-    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    connectionStore.client = { callWireSender: () => sender } as unknown as typeof connectionStore.client;
     const { engine } = useCallEngine();
     (engine as unknown as { room: unknown }).room = {
       off: () => undefined,
@@ -297,7 +297,7 @@ describe("hangupActiveCall media-first ordering (#1446)", () => {
     const sender = {
       send_call_session_terminate: mock(async () => undefined),
     };
-    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    connectionStore.client = { callWireSender: () => sender } as unknown as typeof connectionStore.client;
     const { engine } = useCallEngine();
     (engine as unknown as { room: unknown }).room = {
       off: () => undefined,

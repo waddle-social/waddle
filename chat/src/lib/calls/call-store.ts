@@ -1056,21 +1056,48 @@ export async function tearDownActiveCall(
     } catch (err) {
       reportWireError(err);
     }
-  } else if (s.phase === "active" && s.kind === "dm") {
-    // XMPP died before (or with) the media, so nothing can carry the
-    // terminate right now. Clean the local surfaces immediately — the
-    // accepted activity and cached join must stop offering a reconnect
-    // into a dead call — and retain a pending wire teardown that the
-    // next session-ready flushes, so the peer still receives the
-    // XEP-0166 terminate + XEP-0353 finish instead of dangling active
-    // (#1621 review round 2).
-    clearDmCallActivity(s.peer, s.sid);
-    forgetDmCallJoin({
-      selfBareJid: barePeerJid(s.join.identity),
-      peerJid: s.peer,
-      sid: s.sid,
-    });
-    $pendingDmCallTerminate.set({ peer: s.peer, sid: s.sid, reason });
+  } else {
+    // No sender: XMPP died before (or with) the media. The wire steps
+    // are impossible right now, but the LOCAL halves of each phase's
+    // teardown must still run (#1621 review rounds 2 and 4).
+    switch (s.phase) {
+      case "active":
+        if (s.kind === "dm") {
+          // The accepted activity and cached join must stop offering a
+          // reconnect into a dead call, and the peer still deserves the
+          // XEP-0166 terminate + XEP-0353 finish — retained for the
+          // next session-ready to flush.
+          clearDmCallActivity(s.peer, s.sid);
+          forgetDmCallJoin({
+            selfBareJid: barePeerJid(s.join.identity),
+            peerJid: s.peer,
+            sid: s.sid,
+          });
+          $pendingDmCallTerminate.set({ peer: s.peer, sid: s.sid, reason });
+        }
+        break;
+      case "incoming":
+        incomingCallAlerts?.stop(s.sid);
+        clearDmCallActivity(s.from, s.sid);
+        break;
+      case "outgoing":
+        clearDmCallActivity(s.to, s.sid);
+        break;
+      case "muc-pending":
+        rejectPendingMujiAccept(
+          s.sid,
+          new Error("Muji session-accept wait cancelled while clearing call state"),
+          s.attemptId,
+        );
+        cancelMucCallPreparationWaiters(
+          s.peer,
+          s.selfNick,
+          new Error("Muji preparing wait cancelled while clearing call state"),
+        );
+        break;
+      default:
+        break;
+    }
   }
 }
 

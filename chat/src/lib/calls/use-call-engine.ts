@@ -317,13 +317,20 @@ async function reconcileRemovedActiveDevices(
   // Fall back on the ENGINE only — the saved preference survives, so
   // replugging the device restores the user's choice on the next call
   // (or the next explicit selection) instead of silently forgetting it.
+  // A notice is recorded ONLY when the fallback itself fails: after a
+  // successful switch capture is live on the default, and a "missing"
+  // notice would mislabel the call as listener-only with an enable
+  // action that disables the working device (#1621 review round 4).
   if (
     activeMicId &&
     activeMicId !== "default" &&
     !hasEnumeratedCallDeviceId(devices, "mic", activeMicId)
   ) {
-    recordMediaIssue("mic", missingCallDeviceError("mic"));
-    await engine.setMicDevice("default");
+    try {
+      await engine.setMicDevice("default");
+    } catch (err) {
+      recordMediaIssue("mic", err instanceof Error ? err : missingCallDeviceError("mic"));
+    }
     if (generation !== callDeviceChangeGeneration) return;
   }
 
@@ -333,8 +340,11 @@ async function reconcileRemovedActiveDevices(
     activeCamId !== "default" &&
     !hasEnumeratedCallDeviceId(devices, "cam", activeCamId)
   ) {
-    recordMediaIssue("cam", missingCallDeviceError("cam"));
-    await engine.setCameraDevice("default");
+    try {
+      await engine.setCameraDevice("default");
+    } catch (err) {
+      recordMediaIssue("cam", err instanceof Error ? err : missingCallDeviceError("cam"));
+    }
   }
 }
 

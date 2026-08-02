@@ -2916,13 +2916,26 @@ export class BrowserXmppClient {
   private async readvertiseActiveMucCallPresence(xmpp: XmppClientInstance): Promise<void> {
     const state = $callState.get();
     if (state.phase !== "active" || state.kind !== "muc") return;
-    try {
-      // Resolves immediately when the rejoin already confirmed; joins
-      // (single-flight) and waits otherwise. The advertisement must land
-      // on the FRESH occupant, not race the join presence.
-      await this.ensureJoined(state.peer);
-    } catch {
-      return;
+    // Resolves immediately when the rejoin already confirmed; joins
+    // (single-flight) and waits otherwise. The advertisement must land
+    // on the FRESH occupant, not race the join presence. One retry
+    // covers a self-presence timeout whose scheduled rejoin succeeds;
+    // after that a call whose room cannot be restored is a zombie —
+    // no occupancy, no XEP-0272 advertisement, no control plane — so
+    // it is ended cleanly instead of preserved indefinitely (#1621
+    // review round 4).
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.ensureJoined(state.peer);
+        break;
+      } catch {
+        if (this.xmpp !== xmpp || $callState.get().phase !== "active") return;
+        if (attempt === 1) {
+          await tearDownActiveCall(this.callWireSender(), "gone");
+          void useCallEngine().engine.disconnect();
+          return;
+        }
+      }
     }
     if (this.xmpp !== xmpp || !this.connected) return;
     if ($callState.get().phase !== "active") return;
@@ -2930,7 +2943,12 @@ export class BrowserXmppClient {
   }
 
   private teardownCallAfterTransportLoss(): void {
-    clearCallState({ endReason: "error" });
+    // Sender-less teardown, not a bare clearCallState: an active DM call
+    // gets its activity/cached-join cleanup AND retains the pending wire
+    // terminate for the next session-ready — otherwise the peer dangles
+    // active and the local reconnect offer survives for 24h (#1621
+    // review round 4). Synchronous through the null-sender path.
+    void tearDownActiveCall(null, "gone");
     clearMucCallParticipants();
     clearAllRaisedHands();
     clearAllMuted();

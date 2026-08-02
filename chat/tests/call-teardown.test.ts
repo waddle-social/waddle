@@ -3313,6 +3313,40 @@ describe("sender-less DM teardown retention", () => {
     expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
   });
 
+  test("transport-loss teardown of an active DM call retains the wire terminate", async () => {
+    // The 60s grace expiring (or a terminal disconnect classification)
+    // routes through the sender-less teardown: local surfaces clear NOW,
+    // and the peer's XEP-0166/0353 signal survives for the next session.
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      terminalDisconnectDetail: string | null;
+      disconnect: () => Promise<void>;
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-grace-expiry",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    client.terminalDisconnectDetail = "Signed out: resource conflict";
+
+    events.emitDisconnected();
+    await flushCallSideEffects();
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    const sender = mockSender();
+    await flushPendingDmCallTerminate(sender);
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-grace-expiry",
+      "gone",
+    );
+    await client.disconnect();
+  });
+
   test("a failed flush retains the pending terminate for the next session-ready", async () => {
     $callState.set({
       phase: "active",
