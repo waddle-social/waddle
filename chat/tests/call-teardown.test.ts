@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import {
   $callState,
+  clearPendingDmCallTerminate,
+  flushPendingDmCallTerminate,
   $lastCallError,
   beginOutgoingCall,
   clearCallState,
@@ -3224,7 +3226,9 @@ describe("LiveKit transport loss on an active DM call", () => {
 
   test("a peer-unaware media failure sends the bounded wire teardown", async () => {
     const sender = mockSender();
-    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    connectionStore.client = {
+      callWireSender: () => sender,
+    } as unknown as typeof connectionStore.client;
     activeDmCall();
     const engine = useCallEngine().engine as unknown as {
       emit: (event: string, ...args: unknown[]) => void;
@@ -3249,7 +3253,9 @@ describe("LiveKit transport loss on an active DM call", () => {
 
   test("a server-initiated end sends no wire teardown", async () => {
     const sender = mockSender();
-    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    connectionStore.client = {
+      callWireSender: () => sender,
+    } as unknown as typeof connectionStore.client;
     activeDmCall();
     const engine = useCallEngine().engine as unknown as {
       emit: (event: string, ...args: unknown[]) => void;
@@ -3265,5 +3271,82 @@ describe("LiveKit transport loss on an active DM call", () => {
 
     expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
     expect($callState.get().phase).not.toBe("active");
+  });
+});
+
+describe("sender-less DM teardown retention", () => {
+  afterEach(() => {
+    clearPendingDmCallTerminate();
+    clearCallState();
+    clearDmCallActivities();
+  });
+
+  test("a null-sender teardown clears local surfaces and defers the wire terminate", async () => {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-outage",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+
+    // XMPP died first: nothing can carry the terminate right now.
+    await tearDownActiveCall(null, "gone");
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(readDmCallActivity("bob@waddle.test/desktop")).toBeNull();
+
+    // The next session-ready delivers the retained teardown so the peer
+    // does not dangle in an active call.
+    const sender = mockSender();
+    await flushPendingDmCallTerminate(sender);
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-outage",
+      "gone",
+    );
+    expect(sender.send_call_finish).toHaveBeenCalledTimes(1);
+
+    // One-shot: a second flush must not re-send.
+    await flushPendingDmCallTerminate(sender);
+    expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
+  });
+
+  test("terminal server disconnect reasons clear the DM activity", async () => {
+    connectionStore.client = null;
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-room-deleted",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: new Date().toISOString(),
+      now: new Date(),
+      event: {
+        kind: "proceed",
+        from: "bob@waddle.test/desktop",
+        to: "alice@waddle.test/web",
+        sid: "dm-room-deleted",
+      },
+    });
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    engine.emit("disconnected", {
+      origin: "transport",
+      reason: DisconnectReason.ROOM_DELETED,
+    });
+    await flushCallSideEffects();
+
+    expect($callState.get().phase).not.toBe("active");
+    expect(readDmCallActivity("bob@waddle.test/desktop")).toBeNull();
   });
 });

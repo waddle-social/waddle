@@ -1,6 +1,5 @@
 import {
-  missingCallDeviceError,
-  resolveCallDevicePreference,
+  type ResolvedCallDevicePreference,
   type AudioProcessingPrefs,
   setAiNoiseModel,
   setBackgroundEffectPref,
@@ -13,14 +12,13 @@ import { clearAiNoiseFilterError } from "./ai-noise-filter-error-state";
 import { clearBackgroundEffectError } from "./background-effect-error-state";
 import type { NoiseModelId } from "./ai-noise-filter/model-id";
 import type { BackgroundEffect } from "./background-effect/effect-id";
-import { recordMediaIssue } from "./call-media-issues";
 
 export type CallDeviceKind = "mic" | "cam" | "speaker";
 
 export type CallDeviceSelectionEngine = {
-  setMicDevice(deviceId: string): Promise<void>;
-  setCameraDevice(deviceId: string): Promise<void>;
-  setSpeakerDevice(deviceId: string): Promise<void>;
+  setMicDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null>;
+  setCameraDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null>;
+  setSpeakerDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null>;
 };
 
 export type CallAudioProcessingSelectionEngine = {
@@ -32,22 +30,26 @@ export async function applyCallDeviceSelection(
   deviceId: string | null,
   engine: CallDeviceSelectionEngine,
 ): Promise<void> {
-  const resolved = await resolveCallDevicePreference(kind, deviceId);
-  if (resolved.missing && kind !== "speaker") {
-    recordMediaIssue(kind, missingCallDeviceError(kind));
-  }
+  // Resolve exactly ONCE — inside the engine, which returns what it
+  // actually applied. Persisting anything else lets the preference (and
+  // any UI reading it) claim a device the live call is not capturing
+  // from when the device list changes between two enumerations (#1621
+  // review round 2). A null resolution means no live room (settings
+  // outside a call) — persist the picker's intent verbatim; the picker
+  // only offers enumerated devices.
+  const requested = deviceId ?? "default";
   if (kind === "mic") {
-    await engine.setMicDevice(resolved.activeDeviceId);
-    setMicDevice(resolved.preferenceId);
+    const applied = await engine.setMicDevice(requested);
+    setMicDevice(applied ? applied.preferenceId : deviceId);
     return;
   }
   if (kind === "cam") {
-    await engine.setCameraDevice(resolved.activeDeviceId);
-    setCamDevice(resolved.preferenceId);
+    const applied = await engine.setCameraDevice(requested);
+    setCamDevice(applied ? applied.preferenceId : deviceId);
     return;
   }
-  await engine.setSpeakerDevice(resolved.activeDeviceId);
-  setSpeakerDevice(resolved.preferenceId);
+  const applied = await engine.setSpeakerDevice(requested);
+  setSpeakerDevice(applied ? applied.preferenceId : deviceId);
 }
 
 export async function applyAudioProcessingSelection(

@@ -23,6 +23,8 @@ import {
   setLiveCallParticipants,
 } from "./muc-call-live-participants";
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
+import { clearDmCallActivity } from "./dm-call-activity";
+import { forgetDmCallJoin } from "./dm-call-join-cache";
 import {
   enumerateCallDevices,
   hasEnumeratedCallDeviceId,
@@ -100,8 +102,7 @@ function peerUnawareOfTransportLoss(reason?: DisconnectReason): boolean {
 }
 
 function currentCallWireSender(): CallWireSender | null {
-  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
-  return (client?.xmpp as CallWireSender | undefined) ?? null;
+  return connectionStore.client?.callWireSender() ?? null;
 }
 
 function transportDisconnectMessage(reason?: DisconnectReason): string {
@@ -745,6 +746,19 @@ export function useCallEngine(): {
           void tearDownActiveCall(currentCallWireSender(), "gone").catch(reportCallError);
         } else {
           clearCallState({ endReason: terminal?.endReason ?? "error" });
+          if (disconnectedCall.kind === "dm" && reason !== DisconnectReason.DUPLICATE_IDENTITY) {
+            // The call is authoritatively over (room deleted/closed, we
+            // were removed, server shut down): the accepted activity and
+            // cached join must stop offering a reconnect into it.
+            // DUPLICATE_IDENTITY keeps both — the succeeding device owns
+            // the still-live call.
+            clearDmCallActivity(disconnectedCall.peer, disconnectedCall.sid);
+            forgetDmCallJoin({
+              selfBareJid: disconnectedCall.join.identity,
+              peerJid: disconnectedCall.peer,
+              sid: disconnectedCall.sid,
+            });
+          }
         }
         reportCallError(new Error(transportDisconnectMessage(reason)));
       }

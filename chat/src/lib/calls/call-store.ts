@@ -12,6 +12,7 @@ import {
   applyDmCallEvent,
   clearDmCallActivity,
 } from "./dm-call-activity";
+import { forgetDmCallJoin } from "./dm-call-join-cache";
 import {
   forgetMucCallSession,
   rememberMucCallSession,
@@ -1055,7 +1056,56 @@ export async function tearDownActiveCall(
     } catch (err) {
       reportWireError(err);
     }
+  } else if (s.phase === "active" && s.kind === "dm") {
+    // XMPP died before (or with) the media, so nothing can carry the
+    // terminate right now. Clean the local surfaces immediately — the
+    // accepted activity and cached join must stop offering a reconnect
+    // into a dead call — and retain a pending wire teardown that the
+    // next session-ready flushes, so the peer still receives the
+    // XEP-0166 terminate + XEP-0353 finish instead of dangling active
+    // (#1621 review round 2).
+    clearDmCallActivity(s.peer, s.sid);
+    forgetDmCallJoin({
+      selfBareJid: barePeerJid(s.join.identity),
+      peerJid: s.peer,
+      sid: s.sid,
+    });
+    pendingDmCallTerminate = { peer: s.peer, sid: s.sid, reason };
   }
+}
+
+let pendingDmCallTerminate: {
+  peer: string;
+  sid: string;
+  reason: "success" | "gone";
+} | null = null;
+
+/**
+ * Deliver the wire teardown a sender-less [`tearDownActiveCall`] had to
+ * defer. Called from the XMPP session-ready path; sid-scoped, so a
+ * terminate for a call the peer already abandoned is a harmless no-op
+ * on their side.
+ */
+export async function flushPendingDmCallTerminate(sender: CallWireSender): Promise<void> {
+  const pending = pendingDmCallTerminate;
+  if (!pending) return;
+  pendingDmCallTerminate = null;
+  try {
+    const outcome = await boundedTeardownSend(
+      () => outboundCalls.sessionTerminateWithOutcome(sender, pending.peer, pending.sid, pending.reason),
+      { attempts: TERMINATE_SEND_ATTEMPTS },
+    );
+    if (outcome === "ok" || outcome === "orphaned") {
+      await boundedTeardownSend(() => outboundCalls.finish(sender, pending.peer, pending.sid), {});
+    }
+  } catch (err) {
+    reportCallError(err);
+  }
+}
+
+/** Logout must not leak a terminate into the next account's session. */
+export function clearPendingDmCallTerminate(): void {
+  pendingDmCallTerminate = null;
 }
 
 /**

@@ -375,3 +375,31 @@ export async function broadcastMucCallSelfMute(
     return false;
   }
 }
+
+/**
+ * Re-emit the active MUC call's full XEP-0272 advertisement (with the
+ * current hand/mute markers). A fresh XMPP bind wiped our server-side
+ * occupant, and the plain rejoin presence recreates it WITHOUT
+ * `<muji/>` — other occupants would show a still-running call as ended
+ * for its remainder. Called after the call room's rejoin confirms
+ * (#1621 review round 2).
+ */
+export async function readvertiseMucCallPresence(sender: RawIqSender): Promise<boolean> {
+  const state = $callState.get();
+  if (state.phase !== "active" || state.kind !== "muc" || !state.selfNick) {
+    return false;
+  }
+  if (!sender.update_muji_presence) return false;
+  const roomJid = normalizeMucCallRoomJid(state.peer);
+  if (!roomJid) return false;
+  try {
+    await sender.update_muji_presence(roomJid, state.selfNick, true, false, state.media.video, {
+      handRaised: selfRaisedHandFor(roomJid),
+      muted: selfCallMuted(),
+    });
+    return true;
+  } catch (err) {
+    reportCallError(err);
+    return false;
+  }
+}

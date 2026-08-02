@@ -5,8 +5,8 @@ import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filter
 import type { BroadcastShow } from "@/presence/effective-show";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
-import { $callState, applyCallEvent, clearCallState, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
-import { setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
+import { $callState, applyCallEvent, clearCallState, clearPendingDmCallTerminate, flushPendingDmCallTerminate, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
+import { readvertiseMucCallPresence, setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
 import {
   applyDmCallEvent,
   clearDmCallActivities,
@@ -458,6 +458,15 @@ export class BrowserXmppClient {
     isCallMediaActive: () => $callState.get().phase === "active",
     teardown: () => this.teardownCallAfterTransportLoss(),
   });
+
+  /**
+   * The call-signalling surface of the live WASM handle, or null when
+   * disconnected. The single sanctioned way for call code to reach the
+   * wire — no peeking at the private handle through casts.
+   */
+  callWireSender(): CallWireSender | null {
+    return (this.xmpp as unknown as CallWireSender | null) ?? null;
+  }
   /** Terminal lifecycle latch. A disposed client is never reconnectable. */
   private disposed = false;
   private disposePromise: Promise<void> | null = null;
@@ -1217,6 +1226,7 @@ export class BrowserXmppClient {
   private async disconnectInternal(): Promise<void> {
     this.destroying = true;
     this.callTransportRecovery.dispose();
+    clearPendingDmCallTerminate();
     this.outboundQueue.dispose();
     this.roomDiscoveryGeneration += 1;
     this.currentRoomCatalogFingerprintEvidence.clear();
@@ -2677,6 +2687,9 @@ export class BrowserXmppClient {
   private async runSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
     if (this.xmpp !== xmpp) return;
     this.callTransportRecovery.onTransportReady();
+    // A sender-less teardown during the outage deferred its wire
+    // terminate; deliver it now that a stream exists.
+    void flushPendingDmCallTerminate(xmpp as unknown as CallWireSender);
     this.connected = true; this.reconnect.resetAttempts();
     this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
     // Coalesce duplicate triggers. Three event hooks call
@@ -2708,6 +2721,10 @@ export class BrowserXmppClient {
       // Single-flight per epoch (`fanOutAutoJoin`) keeps this to one
       // join per room across the three fan-out triggers (#1221).
       this.fanOutJoinableRooms();
+      // The fresh bind's rejoin presence recreates our occupant WITHOUT
+      // the XEP-0272 advertisement the server wiped — re-emit it for a
+      // still-active MUC call once the call room's join confirms.
+      void this.readvertiseActiveMucCallPresence(xmpp);
     } else {
       // Resumed: occupancy survived the SM detach-for-resume server-side
       // (no MUC leave was broadcast). Re-seed readiness for the
@@ -2889,6 +2906,22 @@ export class BrowserXmppClient {
       try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
     }
   }
+  private async readvertiseActiveMucCallPresence(xmpp: XmppClientInstance): Promise<void> {
+    const state = $callState.get();
+    if (state.phase !== "active" || state.kind !== "muc") return;
+    try {
+      // Resolves immediately when the rejoin already confirmed; joins
+      // (single-flight) and waits otherwise. The advertisement must land
+      // on the FRESH occupant, not race the join presence.
+      await this.ensureJoined(state.peer);
+    } catch {
+      return;
+    }
+    if (this.xmpp !== xmpp || !this.connected) return;
+    if ($callState.get().phase !== "active") return;
+    await readvertiseMucCallPresence(xmpp as unknown as RawIqSender);
+  }
+
   private teardownCallAfterTransportLoss(): void {
     clearCallState({ endReason: "error" });
     clearMucCallParticipants();

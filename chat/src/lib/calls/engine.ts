@@ -569,9 +569,16 @@ export class CallEngine {
       // livekit-client 2.19.1 exposes rtcConfig only at connect time: Room has
       // no public setConfiguration/restartIce API. Keep this exact mutable
       // object alive because the SDK retains it as RTCEngine.rtcConfig and
-      // clones it when a FULL reconnect rebuilds its PeerConnections. Updating
-      // it below therefore supplies fresh credentials to a later rebuild, but
-      // deliberately cannot alter the already-running PeerConnection.
+      // reads it whenever it (re)builds a PeerConnection: a resume
+      // (ReconnectResponse -> makeRTCConfiguration -> pc.setConfiguration +
+      // ICE restart) and a full reconnect both consume the refreshed list.
+      // That is the designed recovery contract for a relay allocation that
+      // outlives its time-limited TURN REST credential: the allocation's
+      // refresh fails, ICE degrades, and the SDK's own reconnect comes back
+      // through THIS object with valid credentials — a brief automatic
+      // blip instead of a permanently dead relay path. Proactively
+      // restarting ICE ourselves is not possible against the SDK's private
+      // PeerConnections without reaching into internals.
       // No advertisement (or a failed fetch) = no rtcConfig at all — and no
       // refresher either: with nothing to hand LiveKit at connect time there
       // is no retained config object for a refresh to update, and the call
@@ -747,28 +754,32 @@ export class CallEngine {
    * publication in place — no re-publish, no Jingle round-trip — so
    * the change is invisible to the peer.
    */
-  async setMicDevice(deviceId: string): Promise<void> {
+  async setMicDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null> {
     const room = this.room;
-    if (!room) return;
+    if (!room) return null;
     const generation = this.connectGeneration;
     const resolved = await resolveCallDevicePreference(
       "mic",
       deviceId === "default" ? null : deviceId,
     );
-    if (!this.isCurrentRoom(room, generation)) return;
+    if (!this.isCurrentRoom(room, generation)) return null;
     try {
       await room.switchActiveDevice("audioinput", resolved.activeDeviceId);
     } catch (error) {
-      if (!this.isCurrentRoom(room, generation)) return;
+      if (!this.isCurrentRoom(room, generation)) return null;
       throw error;
     }
-    if (!this.isCurrentRoom(room, generation)) return;
+    if (!this.isCurrentRoom(room, generation)) return null;
     if (resolved.missing) {
       this.emit("mediaDevicesError", {
         source: "audio",
         error: missingCallDeviceError("mic"),
       });
     }
+    // The single authoritative resolution: callers persist THIS, so the
+    // saved preference can never claim a device the live call is not
+    // actually capturing from (#1621 review round 2).
+    return resolved;
   }
 
   /**
@@ -1068,28 +1079,29 @@ export class CallEngine {
   /**
    * Same shape as `setMicDevice` but for the camera device.
    */
-  async setCameraDevice(deviceId: string): Promise<void> {
+  async setCameraDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null> {
     const room = this.room;
-    if (!room) return;
+    if (!room) return null;
     const generation = this.connectGeneration;
     const resolved = await resolveCallDevicePreference(
       "cam",
       deviceId === "default" ? null : deviceId,
     );
-    if (!this.isCurrentRoom(room, generation)) return;
+    if (!this.isCurrentRoom(room, generation)) return null;
     try {
       await room.switchActiveDevice("videoinput", resolved.activeDeviceId);
     } catch (error) {
-      if (!this.isCurrentRoom(room, generation)) return;
+      if (!this.isCurrentRoom(room, generation)) return null;
       throw error;
     }
-    if (!this.isCurrentRoom(room, generation)) return;
+    if (!this.isCurrentRoom(room, generation)) return null;
     if (resolved.missing) {
       this.emit("mediaDevicesError", {
         source: "video",
         error: missingCallDeviceError("cam"),
       });
     }
+    return resolved;
   }
 
   /**
@@ -1098,8 +1110,8 @@ export class CallEngine {
    * route Web Audio output sinks; falls back to a no-op on unsupported
    * browsers.
    */
-  async setSpeakerDevice(deviceId: string): Promise<void> {
-    await this.applySpeakerDevice(deviceId);
+  async setSpeakerDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null> {
+    return this.applySpeakerDevice(deviceId);
   }
 
   async startAudio(): Promise<void> {
@@ -1126,23 +1138,26 @@ export class CallEngine {
     }
   }
 
-  private async applySpeakerDevice(deviceId: string): Promise<void> {
+  private async applySpeakerDevice(
+    deviceId: string,
+  ): Promise<ResolvedCallDevicePreference | null> {
     const room = this.room;
-    if (!room) return;
+    if (!room) return null;
     const generation = this.connectGeneration;
-    if (typeof room.switchActiveDevice !== "function") return;
+    if (typeof room.switchActiveDevice !== "function") return null;
     const resolved = await resolveCallDevicePreference(
       "speaker",
       deviceId === "default" ? null : deviceId,
     );
-    if (!this.isCurrentRoom(room, generation)) return;
+    if (!this.isCurrentRoom(room, generation)) return null;
     try {
       await room.switchActiveDevice("audiooutput", resolved.activeDeviceId);
-      if (!this.isCurrentRoom(room, generation)) return;
+      if (!this.isCurrentRoom(room, generation)) return null;
     } catch {
       // Browser doesn't support sinkId; the user already saw the
       // disabled chip in the picker. Swallow silently here.
     }
+    return resolved;
   }
 
   async disconnect(): Promise<void> {

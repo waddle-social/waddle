@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { $callState, clearCallState, tearDownActiveCall } from "../src/lib/calls/call-store";
 import {
   canResumeMucCallActivity,
+  readvertiseMucCallPresence,
   resumeMucCallActivity,
 } from "../src/lib/calls/muc-call-actions";
 import {
@@ -272,6 +273,57 @@ describe("resumeMucCallActivity", () => {
         video: true,
       },
     ]);
+  });
+
+  test("readvertiseMucCallPresence re-emits the full advertisement for the active call", async () => {
+    // A fresh XMPP bind wiped the server-side occupant; the plain rejoin
+    // presence carries no <muji/>, so the still-running call must
+    // re-advertise (with current hand/mute markers) once the room join
+    // confirms (#1621 round 2).
+    $callState.set({
+      phase: "active",
+      peer: ROOM_JID,
+      sid: "sid-readvertise",
+      media: { audio: true, video: true },
+      join: forgeLiveKitJoin({ identity: SELF_FULL_JID, secondsFromNow: 600 }),
+      kind: "muc",
+      selfNick: SELF_NICK,
+      selfFullJid: SELF_FULL_JID,
+    });
+    const calls: Array<{
+      roomJid: string;
+      nick: string;
+      active: boolean;
+      video: boolean;
+      flags: unknown;
+    }> = [];
+
+    const ok = await readvertiseMucCallPresence({
+      update_muji_presence: async (roomJid, nick, active, _preparing, video, flags) => {
+        calls.push({ roomJid, nick, active, video, flags });
+      },
+    });
+
+    expect(ok).toBe(true);
+    expect(calls).toEqual([
+      {
+        roomJid: ROOM_JID,
+        nick: SELF_NICK,
+        active: true,
+        video: true,
+        flags: { handRaised: false, muted: false },
+      },
+    ]);
+  });
+
+  test("readvertiseMucCallPresence is a no-op without an active MUC call", async () => {
+    clearCallState();
+    const ok = await readvertiseMucCallPresence({
+      update_muji_presence: async () => {
+        throw new Error("must not be called");
+      },
+    });
+    expect(ok).toBe(false);
   });
 
   test("refuses to resume when $callState is not idle", async () => {

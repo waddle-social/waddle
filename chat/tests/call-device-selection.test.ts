@@ -136,21 +136,26 @@ describe("call device selection", () => {
     });
   });
 
-  test("persists the browser default when the requested saved device id is missing", async () => {
-    setEnumeratedDevices([
-      { deviceId: "fallback-mic", kind: "audioinput", label: "Fallback mic" },
-    ]);
+  test("persists what the engine actually applied when the saved device is missing", async () => {
+    // Resolution happens ONCE, inside the engine; the selection layer
+    // persists the returned resolution so the preference can never claim
+    // a device the live call is not capturing from (#1621 round 2). The
+    // engine's own mediaDevicesError event carries the missing notice.
     const engine = {
-      setMicDevice: mock(async (_id: string) => undefined),
-      setCameraDevice: mock(async (_id: string) => undefined),
-      setSpeakerDevice: mock(async (_id: string) => undefined),
+      setMicDevice: mock(async (_id: string) => ({
+        activeDeviceId: "default",
+        preferenceId: null,
+        captureDeviceId: undefined,
+        missing: true,
+      })),
+      setCameraDevice: mock(async (_id: string) => null),
+      setSpeakerDevice: mock(async (_id: string) => null),
     };
 
     await applyCallDeviceSelection("mic", "stale-mic", engine);
 
-    expect(engine.setMicDevice).toHaveBeenCalledWith("default");
+    expect(engine.setMicDevice).toHaveBeenCalledWith("stale-mic");
     expect($devicePrefs.get().mic).toBeNull();
-    expect($callMediaIssues.get().mic).toBe("missing");
   });
 
   test("persists and applies audio processing selections to the active call", async () => {
