@@ -42,8 +42,7 @@ const state = useStore($callState);
 const { engine } = useCallEngine();
 
 function getSender(): CallWireSender | null {
-  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
-  return (client?.xmpp as CallWireSender | undefined) ?? null;
+  return connectionStore.client?.callWireSender() ?? null;
 }
 
 // XEP-0215: ask our own server for its advertised TURN/STUN before connecting

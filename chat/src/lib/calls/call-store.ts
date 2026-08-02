@@ -1070,42 +1070,65 @@ export async function tearDownActiveCall(
       peerJid: s.peer,
       sid: s.sid,
     });
-    pendingDmCallTerminate = { peer: s.peer, sid: s.sid, reason };
+    $pendingDmCallTerminate.set({ peer: s.peer, sid: s.sid, reason });
   }
 }
 
-let pendingDmCallTerminate: {
+type PendingDmCallTerminate = {
   peer: string;
   sid: string;
   reason: "success" | "gone";
-} | null = null;
+};
+
+/**
+ * The deferred wire teardown of a sender-less [`tearDownActiveCall`] —
+ * store-idiomatic (an atom like the call slot itself) so the state is
+ * observable and testable rather than hidden module mutation.
+ */
+const $pendingDmCallTerminate = atom<PendingDmCallTerminate | null>(null);
+let pendingDmTerminateFlushInFlight = false;
 
 /**
  * Deliver the wire teardown a sender-less [`tearDownActiveCall`] had to
  * defer. Called from the XMPP session-ready path; sid-scoped, so a
  * terminate for a call the peer already abandoned is a harmless no-op
- * on their side.
+ * on their side. The pending row is cleared only AFTER the terminate
+ * succeeds (or classifies orphaned) — a failed or interrupted send
+ * keeps it retained for the NEXT session-ready instead of silently
+ * dropping the peer's only end-of-call signal (#1621 review round 3).
  */
 export async function flushPendingDmCallTerminate(sender: CallWireSender): Promise<void> {
-  const pending = pendingDmCallTerminate;
+  if (pendingDmTerminateFlushInFlight) return;
+  const pending = $pendingDmCallTerminate.get();
   if (!pending) return;
-  pendingDmCallTerminate = null;
+  pendingDmTerminateFlushInFlight = true;
   try {
     const outcome = await boundedTeardownSend(
       () => outboundCalls.sessionTerminateWithOutcome(sender, pending.peer, pending.sid, pending.reason),
       { attempts: TERMINATE_SEND_ATTEMPTS },
     );
-    if (outcome === "ok" || outcome === "orphaned") {
+    if (outcome !== "ok" && outcome !== "orphaned") return;
+    if ($pendingDmCallTerminate.get() === pending) {
+      $pendingDmCallTerminate.set(null);
+    }
+    try {
+      // The XEP-0353 finish bookend is best-effort: the terminate above
+      // already ended the call for the peer.
       await boundedTeardownSend(() => outboundCalls.finish(sender, pending.peer, pending.sid), {});
+    } catch (err) {
+      reportCallError(err);
     }
   } catch (err) {
+    // Retained: the next session-ready retries with its fresh stream.
     reportCallError(err);
+  } finally {
+    pendingDmTerminateFlushInFlight = false;
   }
 }
 
 /** Logout must not leak a terminate into the next account's session. */
 export function clearPendingDmCallTerminate(): void {
-  pendingDmCallTerminate = null;
+  $pendingDmCallTerminate.set(null);
 }
 
 /**

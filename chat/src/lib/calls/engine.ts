@@ -36,7 +36,6 @@ import {
   type AudioProcessingConstraints,
   type AudioProcessingPrefs,
   type ResolvedCallDevicePreference,
-  missingCallDeviceError,
   resolveCallDevicePreference,
 } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
@@ -631,18 +630,12 @@ export class CallEngine {
         remoteIdentities: Array.from(room.remoteParticipants.values()).map((p) => p.identity),
         roomName: room.name || join.room,
       });
-      if (resolvedMic.missing) {
-        this.emit("mediaDevicesError", {
-          source: "audio",
-          error: missingCallDeviceError("mic"),
-        });
-      }
-      if (resolvedCam.missing) {
-        this.emit("mediaDevicesError", {
-          source: "video",
-          error: missingCallDeviceError("cam"),
-        });
-      }
+      // A stale saved device resolved to the browser default is NOT a
+      // capture issue: the default may publish perfectly well, and a
+      // "missing" notice here would mislabel a working call as
+      // listener-only (its "Enable mic" action would then DISABLE the
+      // live mic). Real capture failures surface from the best-effort
+      // publication below (#1621 review round 3).
       // Publishing is BEST-EFFORT and decoupled from joining. `room.connect`
       // above already succeeded, so the user is a fully working receive-only
       // (listen/watch) participant — a missing device or a denied
@@ -770,15 +763,11 @@ export class CallEngine {
       throw error;
     }
     if (!this.isCurrentRoom(room, generation)) return null;
-    if (resolved.missing) {
-      this.emit("mediaDevicesError", {
-        source: "audio",
-        error: missingCallDeviceError("mic"),
-      });
-    }
-    // The single authoritative resolution: callers persist THIS, so the
-    // saved preference can never claim a device the live call is not
-    // actually capturing from (#1621 review round 2).
+    // A missing requested device fell back to the browser default and the
+    // switch SUCCEEDED — capture is live, so no capture issue is recorded
+    // (#1621 review round 3). The single authoritative resolution: callers
+    // persist THIS, so the saved preference can never claim a device the
+    // live call is not actually capturing from (#1621 review round 2).
     return resolved;
   }
 
@@ -1095,12 +1084,6 @@ export class CallEngine {
       throw error;
     }
     if (!this.isCurrentRoom(room, generation)) return null;
-    if (resolved.missing) {
-      this.emit("mediaDevicesError", {
-        source: "video",
-        error: missingCallDeviceError("cam"),
-      });
-    }
     return resolved;
   }
 
@@ -1153,9 +1136,14 @@ export class CallEngine {
     try {
       await room.switchActiveDevice("audiooutput", resolved.activeDeviceId);
       if (!this.isCurrentRoom(room, generation)) return null;
-    } catch {
-      // Browser doesn't support sinkId; the user already saw the
-      // disabled chip in the picker. Swallow silently here.
+    } catch (error) {
+      // Mirror mic/cam: a failed sink switch must NOT hand back a
+      // resolution the caller would persist as applied. Unsupported
+      // browsers never reach here from the picker (the speaker section
+      // is disabled via isSpeakerOutputSelectionSupported); the connect
+      // path catches this rethrow itself.
+      if (!this.isCurrentRoom(room, generation)) return null;
+      throw error;
     }
     return resolved;
   }

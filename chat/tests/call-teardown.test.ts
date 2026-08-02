@@ -3313,6 +3313,52 @@ describe("sender-less DM teardown retention", () => {
     expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
   });
 
+  test("a failed flush retains the pending terminate for the next session-ready", async () => {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-retained",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(null, "gone");
+
+    // The first recovered stream dies mid-send: the peer's only
+    // end-of-call signal must survive for the NEXT session-ready.
+    const doomed = mockSender();
+    (doomed.send_call_session_terminate as unknown as { mockImplementation: (fn: () => Promise<void>) => void })
+      .mockImplementation(async () => {
+        throw new Error("stream died mid-send");
+      });
+    await flushPendingDmCallTerminate(doomed);
+
+    const healthy = mockSender();
+    await flushPendingDmCallTerminate(healthy);
+    expect(healthy.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-retained",
+      "gone",
+    );
+  });
+
+  test("callWireSender is null until the session is ready", () => {
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      callWireSender: () => unknown;
+      connected: boolean;
+    };
+
+    // The handle exists (wireEvents bound it) but no session-ready ran:
+    // handing it out would burn a teardown on a doomed half-open stream
+    // instead of retaining it for the next session.
+    expect(client.callWireSender()).toBeNull();
+
+    client.connected = true;
+    expect(client.callWireSender()).not.toBeNull();
+  });
+
   test("terminal server disconnect reasons clear the DM activity", async () => {
     connectionStore.client = null;
     $callState.set({

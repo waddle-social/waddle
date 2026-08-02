@@ -13,10 +13,7 @@ import {
 import { $aiNoiseFilterError } from "../src/lib/calls/ai-noise-filter-error-state";
 import { $backgroundEffectError } from "../src/lib/calls/background-effect-error-state";
 import { BACKGROUND_OFF } from "../src/lib/calls/background-effect/effect-id";
-import {
-  $callMediaIssues,
-  clearAllMediaIssues,
-} from "../src/lib/calls/call-media-issues";
+import { clearAllMediaIssues } from "../src/lib/calls/call-media-issues";
 
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 
@@ -134,6 +131,30 @@ describe("call device selection", () => {
       aiNoiseModel: null,
       backgroundEffect: BACKGROUND_OFF,
     });
+  });
+
+  test("a failed speaker switch persists no preference", async () => {
+    const engine = {
+      setMicDevice: mock(async (_id: string) => null),
+      setCameraDevice: mock(async (_id: string) => null),
+      setSpeakerDevice: mock(async (_id: string) => {
+        throw new Error("sink switch failed");
+      }),
+    };
+    $devicePrefs.set({
+      mic: null,
+      cam: null,
+      speaker: "old-speaker",
+      audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
+    });
+
+    await expect(applyCallDeviceSelection("speaker", "usb-speaker", engine)).rejects.toThrow(
+      "sink switch failed",
+    );
+
+    expect($devicePrefs.get().speaker).toBe("old-speaker");
   });
 
   test("persists what the engine actually applied when the saved device is missing", async () => {

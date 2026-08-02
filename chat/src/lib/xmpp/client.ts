@@ -465,6 +465,13 @@ export class BrowserXmppClient {
    * wire — no peeking at the private handle through casts.
    */
   callWireSender(): CallWireSender | null {
+    // A half-open handle (assigned during connect, before session-ready)
+    // defers application IQs and may be doomed: handing it out would
+    // route a DM teardown into the sender-present branch, burn the
+    // terminate on a dead stream, and skip the pending-teardown
+    // retention that the null-sender path provides (#1621 review
+    // round 3). Only a session-ready stream is a usable sender.
+    if (!this.connected) return null;
     return (this.xmpp as unknown as CallWireSender | null) ?? null;
   }
   /** Terminal lifecycle latch. A disposed client is never reconnectable. */
