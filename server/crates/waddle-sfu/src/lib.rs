@@ -248,6 +248,30 @@ pub trait SfuService: Send + Sync + 'static {
     /// undeliverable IQs grow the revocation set without bound.
     fn revoke_issued_token(&self, call_id: &CallId, identity: &Identity, jti: &Jti);
 
+    /// Session-scoped variant of [`Self::note_participant_left`]
+    /// (#1608): apply the local-only cleanup only when the stored
+    /// session binding accepts `presented` (unbound accepts any, bound
+    /// requires equality). Check and removal are atomic in tracking
+    /// implementations, so a signaling-driven cleanup that raced a
+    /// same-identity rebind cannot remove the NEW session's
+    /// registration.
+    fn note_participant_left_if_session_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        presented: Option<&SessionBinding>,
+    ) -> SessionScopedTeardown {
+        match self.participant_session_binding(call_id, identity) {
+            Some(bound) if presented != Some(&bound) => SessionScopedTeardown::SessionMismatch,
+            _ => SessionScopedTeardown::Applied(self.note_participant_left(
+                call_id,
+                identity,
+                observed_sids,
+            )),
+        }
+    }
+
     /// Local-only cleanup driven by an SFU-originated signal that
     /// `identity` has already left `call_id` (e.g. LiveKit's
     /// `participant_left` webhook). Mirrors the bookkeeping side of

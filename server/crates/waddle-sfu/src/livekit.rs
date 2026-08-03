@@ -1449,6 +1449,43 @@ impl LiveKitSfu {
             .remove(&(call_id.clone(), identity.clone()));
     }
 
+    /// Session-gated local-only cleanup shared by the trait's plain
+    /// and session-scoped `note_participant_left` entry points
+    /// (#1608). LiveKit's `participant_left` webhook is the SFU
+    /// acknowledging it already removed the participant — usually
+    /// because we asked it to. Doing only the local cleanup avoids a
+    /// feedback loop where the webhook fires another
+    /// `RemoveParticipant` against an already-removed participant.
+    fn note_participant_left_gated(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        session_gate: SessionGate<'_>,
+    ) -> SessionScopedTeardown {
+        let clear = match self.clear_local_state(call_id, identity, observed_sids, session_gate) {
+            ClearDisposition::Cleared(clear) => clear,
+            ClearDisposition::SessionMismatch => return SessionScopedTeardown::SessionMismatch,
+            ClearDisposition::StaleSid => {
+                return SessionScopedTeardown::Applied(TeardownDisposition::StaleSid);
+            }
+            ClearDisposition::NoCall => {
+                return SessionScopedTeardown::Applied(TeardownDisposition::Applied(
+                    CallState::Active { remaining: 0 },
+                ));
+            }
+        };
+
+        let state = if clear.was_present && clear.emptied {
+            CallState::Ended
+        } else {
+            CallState::Active {
+                remaining: clear.remaining,
+            }
+        };
+        SessionScopedTeardown::Applied(TeardownDisposition::Applied(state))
+    }
+
     /// Session-gated unregister shared by the trait's plain and
     /// session-scoped teardown entry points (#1608). On
     /// `SessionMismatch` NOTHING has been mutated and no SFU-side
@@ -2573,31 +2610,29 @@ impl SfuService for LiveKitSfu {
         identity: &Identity,
         observed_sids: Option<&ObservedCallSids>,
     ) -> TeardownDisposition {
-        // LiveKit's `participant_left` webhook is the SFU
-        // acknowledging it already removed the participant — usually
-        // because we asked it to. Doing only the local cleanup avoids
-        // a feedback loop where the webhook fires another
-        // `RemoveParticipant` against an already-removed participant
-        // (LiveKit would return `not_found`, which is mapped to
-        // success, but the round-trip is wasted and amplifies the
-        // race with quick rejoins).
-        let clear = match self.clear_local_state(call_id, identity, observed_sids, SessionGate::Any)
-        {
-            ClearDisposition::Cleared(clear) => clear,
-            ClearDisposition::StaleSid => return TeardownDisposition::StaleSid,
-            ClearDisposition::NoCall | ClearDisposition::SessionMismatch => {
-                return TeardownDisposition::Applied(CallState::Active { remaining: 0 });
+        match self.note_participant_left_gated(call_id, identity, observed_sids, SessionGate::Any) {
+            SessionScopedTeardown::Applied(disposition) => disposition,
+            // Unreachable with `SessionGate::Any`; degrade to the
+            // same no-op disposition an unknown identity gets.
+            SessionScopedTeardown::SessionMismatch => {
+                TeardownDisposition::Applied(CallState::Active { remaining: 0 })
             }
-        };
+        }
+    }
 
-        let state = if clear.was_present && clear.emptied {
-            CallState::Ended
-        } else {
-            CallState::Active {
-                remaining: clear.remaining,
-            }
-        };
-        TeardownDisposition::Applied(state)
+    fn note_participant_left_if_session_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        presented: Option<&SessionBinding>,
+    ) -> SessionScopedTeardown {
+        self.note_participant_left_gated(
+            call_id,
+            identity,
+            observed_sids,
+            SessionGate::Presented(presented),
+        )
     }
 
     fn observe_call_participant_sids(

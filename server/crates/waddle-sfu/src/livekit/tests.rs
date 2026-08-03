@@ -3685,4 +3685,49 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
         "the spawned eject must be refused after the rejoin rebound the identity"
     );
     assert!(sfu.has_call_participant(&call, &alice));
+
+    // Control: prove the yield budget above is sufficient for a
+    // spawned eject to reach the recording admin on this runtime — a
+    // teardown WITHOUT a racing rejoin must surface its
+    // RemoveParticipant under the identical await structure, so the
+    // empty assertion above cannot pass vacuously.
+    let session_bob = SessionBinding::new("muji-session-bob").expect("binding");
+    sfu.register_call_participant_with_session(&call, &bob, &session_bob);
+    match sfu.unregister_call_participant_if_session_matches(&call, &bob, Some(&session_bob), None)
+    {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("control terminate must apply, got {other:?}"),
+    }
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let removes = admin.remove_calls.lock().expect("recording lock");
+    assert_eq!(
+        removes.len(),
+        1,
+        "the control teardown proves the yield budget executes spawned ejects"
+    );
+    assert_eq!(removes[0].1, bob);
+}
+
+#[test]
+fn session_scoped_note_left_refuses_a_rebound_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let rebound = SessionBinding::new("muji-rebound").expect("binding");
+    let stale = SessionBinding::new("muji-stale").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &rebound);
+    assert_eq!(
+        sfu.note_participant_left_if_session_matches(&call, &alice, None, Some(&stale)),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    match sfu.note_participant_left_if_session_matches(&call, &alice, None, Some(&rebound)) {
+        SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended)) => {}
+        other => panic!("matching note-left must apply, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
 }
