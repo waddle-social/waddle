@@ -22,8 +22,8 @@ use tokio::sync::Semaphore;
 use crate::admin::{admin_base_url_from_ws, ListedRoomName, LiveKitAdmin, ReqwestLiveKitAdmin};
 use crate::call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SidObservationDirection,
-    SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
+    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SessionScopedTeardown,
+    SidObservationDirection, SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
 };
 use crate::config::{SfuConfig, WebsocketUrl};
 use crate::error::SfuError;
@@ -273,6 +273,27 @@ enum ClearDisposition {
     Cleared(ClearOutcome),
     NoCall,
     StaleSid,
+    /// The stored session binding rejected the presented signaling
+    /// session identifier; nothing was mutated (#1608).
+    SessionMismatch,
+}
+
+/// Signaling-session precondition for [`LiveKitSfu::clear_local_state`]
+/// (#1608). Checked under the same call-entry guard as the removal, so
+/// gate and clear are one atomic step.
+#[derive(Clone, Copy)]
+enum SessionGate<'a> {
+    /// No session constraint: webhook-driven clears, reconciliation
+    /// sweeps, and plain unregisters, whose authority is membership
+    /// (the participant verifiably left) rather than a signaling
+    /// stanza that could be a stale replay.
+    Any,
+    /// Clear only when the stored binding accepts the presented
+    /// identifier: an unbound registration accepts anything, a bound
+    /// registration requires equality. `Presented(None)` models a sid
+    /// that could not become a binding — it can never match a bound
+    /// session.
+    Presented(Option<&'a SessionBinding>),
 }
 
 pub type TeardownFailureSink =
@@ -1297,11 +1318,167 @@ impl LiveKitSfu {
     /// registry nor exposed to the spawned `DeleteRoom` (the caller
     /// derives its emptiness decision from `emptied`, which is `false`
     /// in that case).
+    /// Shared body of `register_call_participant` /
+    /// `register_call_participant_with_session`. The registration and
+    /// its session binding are written under ONE call-entry guard so a
+    /// concurrent session-scoped teardown can never observe the new
+    /// registration carrying the previous session's binding or a
+    /// half-updated one (#1608). A registration without a binding
+    /// (`session = None`) — the 1:1 paths and non-signaling callers —
+    /// clears any previous binding for the same reason: it belongs to
+    /// a NEW session the registry knows no identifier for.
+    fn register_participant_with_binding(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        session: Option<&SessionBinding>,
+    ) {
+        let now = Utc::now();
+        match self.calls.entry(call_id.clone()) {
+            dashmap::Entry::Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                if entry.participants.is_empty() {
+                    entry.generation =
+                        self.next_call_generation(call_id, entry.generation.as_u64());
+                    entry.room_sid = None;
+                    // A reused temporarily-empty entry IS a new
+                    // incarnation: refresh the freshness stamps too, or
+                    // an in-flight `ListRooms` snapshot of the previous
+                    // room would pass the `created_at` gate and stamp
+                    // the old sid onto this fresh registration (#1612
+                    // review round 11).
+                    entry.created_at = now;
+                    entry.room_sid_observed_at = None;
+                }
+                entry
+                    .participants
+                    .entry(identity.clone())
+                    .and_modify(|participant| participant.session = session.cloned())
+                    .or_insert_with(|| ParticipantState {
+                        session: session.cloned(),
+                        ..ParticipantState::new(now)
+                    });
+            }
+            dashmap::Entry::Vacant(entry) => {
+                let generation = self.next_call_generation(call_id, 0);
+                let mut participants = HashMap::new();
+                participants.insert(
+                    identity.clone(),
+                    ParticipantState {
+                        session: session.cloned(),
+                        ..ParticipantState::new(now)
+                    },
+                );
+                entry.insert(CallEntry {
+                    generation,
+                    created_at: now,
+                    room_sid: None,
+                    room_sid_observed_at: None,
+                    participants,
+                });
+            }
+        }
+        // This registration is only reachable through the authorized
+        // Jingle gate (the webhook path uses
+        // `register_call_participant_observed`), and production mints
+        // the join token BEFORE registering. A delayed old departure
+        // sweeping between that mint and this register can revoke the
+        // fresh token and arm an eject the mint-time clear already
+        // missed — so the authorized registration clears it again
+        // (#1612 review round 9).
+        self.clear_pending_revocation_eject(call_id, identity);
+        // Stamp (or refresh) the registration time so the
+        // reconciliation backstop's grace window is measured from the
+        // most recent (re)join, not a stale earlier attempt. A
+        // (re-)registration also resets the absence streak (#1127):
+        // any prior not-seen observations belong to the previous
+        // connection attempt.
+        self.registered_at
+            .insert((call_id.clone(), identity.clone()), now);
+        self.absent_streak
+            .remove(&(call_id.clone(), identity.clone()));
+    }
+
+    /// Session-gated unregister shared by the trait's plain and
+    /// session-scoped teardown entry points (#1608). On
+    /// `SessionMismatch` NOTHING has been mutated and no SFU-side
+    /// eviction is scheduled.
+    fn unregister_participant_gated(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        session_gate: SessionGate<'_>,
+    ) -> SessionScopedTeardown {
+        let clear = self.clear_local_state(call_id, identity, observed_sids, session_gate);
+        let (was_present, emptied, generation, room_sid, participant_sid, remaining) = match clear {
+            ClearDisposition::Cleared(ClearOutcome {
+                was_present,
+                emptied,
+                generation,
+                room_sid,
+                participant_sid,
+                remaining,
+            }) => (
+                was_present,
+                emptied,
+                Some(generation),
+                room_sid,
+                participant_sid,
+                remaining,
+            ),
+            ClearDisposition::SessionMismatch => return SessionScopedTeardown::SessionMismatch,
+            ClearDisposition::StaleSid => {
+                return SessionScopedTeardown::Applied(TeardownDisposition::StaleSid);
+            }
+            ClearDisposition::NoCall => {
+                return SessionScopedTeardown::Applied(TeardownDisposition::Applied(
+                    CallState::Active { remaining: 0 },
+                ));
+            }
+        };
+
+        let state = if was_present && emptied {
+            CallState::Ended
+        } else {
+            // `Active { remaining }` covers two cases that look the
+            // same to the caller (don't broadcast "call ended"): the
+            // normal "other participants are still here" path, and
+            // the defensive "this participant was never registered"
+            // path where `remaining == 0` does not imply we just
+            // emptied a known-active call. Treating an unknown
+            // identity as `Ended` would broadcast a phantom
+            // call-ended signal to the MUC.
+            CallState::Active { remaining }
+        };
+
+        // Schedule the LiveKit-side evict. `RemoveParticipant` always
+        // runs (LiveKit may know about the participant even when our
+        // local registry has lost track — federation, stale state).
+        // `DeleteRoom` only fires when the atomic conditional removal
+        // confirmed we just emptied a call we previously tracked
+        // (#1129 — a concurrent joiner keeps `emptied == false`), and
+        // the spawn re-checks the registry inside the future to close
+        // the rejoin race.
+        let we_just_emptied = was_present && emptied;
+        self.schedule_remote_teardown(
+            call_id.clone(),
+            identity.clone(),
+            we_just_emptied,
+            generation,
+            room_sid,
+            participant_sid,
+        );
+
+        SessionScopedTeardown::Applied(TeardownDisposition::Applied(state))
+    }
+
     fn clear_local_state(
         &self,
         call_id: &CallId,
         identity: &Identity,
         observed_sids: Option<&ObservedCallSids>,
+        session_gate: SessionGate<'_>,
     ) -> ClearDisposition {
         let now = Utc::now();
         let mut entry = match self.calls.get_mut(call_id) {
@@ -1320,6 +1497,21 @@ impl LiveKitSfu {
             SidGuardDisposition::StaleSid
         ) {
             return ClearDisposition::StaleSid;
+        }
+        // #1608: the session gate and the removal below share this
+        // call-entry guard, so a concurrent initiate rebinding the
+        // registration either lands before this check (and rejects the
+        // stale clear) or after the whole clear — never in between.
+        if let SessionGate::Presented(presented) = session_gate {
+            if let Some(bound) = entry
+                .participants
+                .get(identity)
+                .and_then(|participant| participant.session.as_ref())
+            {
+                if presented != Some(bound) {
+                    return ClearDisposition::SessionMismatch;
+                }
+            }
         }
 
         let participant_sid = entry
@@ -1954,7 +2146,7 @@ impl LiveKitSfu {
                     );
                     continue;
                 }
-                let outcome = self.clear_local_state(&call_id, &identity, None);
+                let outcome = self.clear_local_state(&call_id, &identity, None, SessionGate::Any);
                 if let ClearDisposition::Cleared(ClearOutcome {
                     was_present: true, ..
                 }) = outcome
@@ -2089,67 +2281,16 @@ impl SfuService for LiveKitSfu {
     }
 
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity) {
-        let now = Utc::now();
-        match self.calls.entry(call_id.clone()) {
-            dashmap::Entry::Occupied(mut entry) => {
-                let entry = entry.get_mut();
-                if entry.participants.is_empty() {
-                    entry.generation =
-                        self.next_call_generation(call_id, entry.generation.as_u64());
-                    entry.room_sid = None;
-                    // A reused temporarily-empty entry IS a new
-                    // incarnation: refresh the freshness stamps too, or
-                    // an in-flight `ListRooms` snapshot of the previous
-                    // room would pass the `created_at` gate and stamp
-                    // the old sid onto this fresh registration (#1612
-                    // review round 11).
-                    entry.created_at = now;
-                    entry.room_sid_observed_at = None;
-                }
-                entry
-                    .participants
-                    .entry(identity.clone())
-                    // A re-registration belongs to a NEW signaling
-                    // session: drop the previous session's binding so
-                    // it starts unbound until the caller rebinds with
-                    // the new sid. Keeping the old binding would let a
-                    // stale same-room terminate match it forever
-                    // (#1608).
-                    .and_modify(|participant| participant.session = None)
-                    .or_insert_with(|| ParticipantState::new(now));
-            }
-            dashmap::Entry::Vacant(entry) => {
-                let generation = self.next_call_generation(call_id, 0);
-                let mut participants = HashMap::new();
-                participants.insert(identity.clone(), ParticipantState::new(now));
-                entry.insert(CallEntry {
-                    generation,
-                    created_at: now,
-                    room_sid: None,
-                    room_sid_observed_at: None,
-                    participants,
-                });
-            }
-        }
-        // This registration is only reachable through the authorized
-        // Jingle gate (the webhook path uses
-        // `register_call_participant_observed`), and production mints
-        // the join token BEFORE registering. A delayed old departure
-        // sweeping between that mint and this register can revoke the
-        // fresh token and arm an eject the mint-time clear already
-        // missed — so the authorized registration clears it again
-        // (#1612 review round 9).
-        self.clear_pending_revocation_eject(call_id, identity);
-        // Stamp (or refresh) the registration time so the
-        // reconciliation backstop's grace window is measured from the
-        // most recent (re)join, not a stale earlier attempt. A
-        // (re-)registration also resets the absence streak (#1127):
-        // any prior not-seen observations belong to the previous
-        // connection attempt.
-        self.registered_at
-            .insert((call_id.clone(), identity.clone()), now);
-        self.absent_streak
-            .remove(&(call_id.clone(), identity.clone()));
+        self.register_participant_with_binding(call_id, identity, None);
+    }
+
+    fn register_call_participant_with_session(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        session: &SessionBinding,
+    ) {
+        self.register_participant_with_binding(call_id, identity, Some(session));
     }
 
     fn register_call_participant_observed(
@@ -2230,19 +2371,6 @@ impl SfuService for LiveKitSfu {
         self.calls
             .get(call_id)
             .is_some_and(|entry| entry.participants.contains_key(identity))
-    }
-
-    fn bind_participant_session(
-        &self,
-        call_id: &CallId,
-        identity: &Identity,
-        session: &SessionBinding,
-    ) {
-        if let Some(mut entry) = self.calls.get_mut(call_id) {
-            if let Some(participant) = entry.participants.get_mut(identity) {
-                participant.session = Some(session.clone());
-            }
-        }
     }
 
     fn participant_session_binding(
@@ -2338,62 +2466,30 @@ impl SfuService for LiveKitSfu {
         identity: &Identity,
         observed_sids: Option<&ObservedCallSids>,
     ) -> TeardownDisposition {
-        let clear = self.clear_local_state(call_id, identity, observed_sids);
-        let (was_present, emptied, generation, room_sid, participant_sid, remaining) = match clear {
-            ClearDisposition::Cleared(ClearOutcome {
-                was_present,
-                emptied,
-                generation,
-                room_sid,
-                participant_sid,
-                remaining,
-            }) => (
-                was_present,
-                emptied,
-                Some(generation),
-                room_sid,
-                participant_sid,
-                remaining,
-            ),
-            ClearDisposition::StaleSid => return TeardownDisposition::StaleSid,
-            ClearDisposition::NoCall => {
-                return TeardownDisposition::Applied(CallState::Active { remaining: 0 });
+        match self.unregister_participant_gated(call_id, identity, observed_sids, SessionGate::Any)
+        {
+            SessionScopedTeardown::Applied(disposition) => disposition,
+            // Unreachable with `SessionGate::Any`; degrade to the
+            // same no-op disposition an unknown identity gets.
+            SessionScopedTeardown::SessionMismatch => {
+                TeardownDisposition::Applied(CallState::Active { remaining: 0 })
             }
-        };
+        }
+    }
 
-        let state = if was_present && emptied {
-            CallState::Ended
-        } else {
-            // `Active { remaining }` covers two cases that look the
-            // same to the caller (don't broadcast "call ended"): the
-            // normal "other participants are still here" path, and
-            // the defensive "this participant was never registered"
-            // path where `remaining == 0` does not imply we just
-            // emptied a known-active call. Treating an unknown
-            // identity as `Ended` would broadcast a phantom
-            // call-ended signal to the MUC.
-            CallState::Active { remaining }
-        };
-
-        // Schedule the LiveKit-side evict. `RemoveParticipant` always
-        // runs (LiveKit may know about the participant even when our
-        // local registry has lost track — federation, stale state).
-        // `DeleteRoom` only fires when the atomic conditional removal
-        // confirmed we just emptied a call we previously tracked
-        // (#1129 — a concurrent joiner keeps `emptied == false`), and
-        // the spawn re-checks the registry inside the future to close
-        // the rejoin race.
-        let we_just_emptied = was_present && emptied;
-        self.schedule_remote_teardown(
-            call_id.clone(),
-            identity.clone(),
-            we_just_emptied,
-            generation,
-            room_sid,
-            participant_sid,
-        );
-
-        TeardownDisposition::Applied(state)
+    fn unregister_call_participant_if_session_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        presented: Option<&SessionBinding>,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> SessionScopedTeardown {
+        self.unregister_participant_gated(
+            call_id,
+            identity,
+            observed_sids,
+            SessionGate::Presented(presented),
+        )
     }
 
     fn note_participant_left(
@@ -2410,10 +2506,11 @@ impl SfuService for LiveKitSfu {
         // (LiveKit would return `not_found`, which is mapped to
         // success, but the round-trip is wasted and amplifies the
         // race with quick rejoins).
-        let clear = match self.clear_local_state(call_id, identity, observed_sids) {
+        let clear = match self.clear_local_state(call_id, identity, observed_sids, SessionGate::Any)
+        {
             ClearDisposition::Cleared(clear) => clear,
             ClearDisposition::StaleSid => return TeardownDisposition::StaleSid,
-            ClearDisposition::NoCall => {
+            ClearDisposition::NoCall | ClearDisposition::SessionMismatch => {
                 return TeardownDisposition::Applied(CallState::Active { remaining: 0 });
             }
         };

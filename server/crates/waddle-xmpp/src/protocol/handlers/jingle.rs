@@ -23,7 +23,8 @@ use xmpp_parsers::jingle::{Action, Content, Jingle, SessionId, Transport};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use waddle_sfu::{
-    CallCorrelationId, CallId, Identity, MediaCapabilities, SessionBinding, SfuError, SfuService,
+    CallCorrelationId, CallId, Identity, MediaCapabilities, SessionBinding, SessionScopedTeardown,
+    SfuError, SfuService,
 };
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
@@ -727,6 +728,25 @@ impl JingleHandler {
                 );
             }
         };
+        // #1608: every ACCEPTED Muji session must be protected by the
+        // stale-terminate sid gate, so an initiate whose sid cannot
+        // become a binding (blank, or over the 256-byte cap —
+        // `xmpp_parsers` puts no length limit on Jingle sids) is
+        // rejected before any token is minted or registry state
+        // touched. Accepting it unbound would leave exactly one
+        // participant whose live call an old queued terminate could
+        // still tear down.
+        let session = match SessionBinding::new(jingle.sid.0.clone()) {
+            Ok(session) => session,
+            Err(_) => {
+                attempt.failed(CallSetupFailureReason::BadRequest);
+                return error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    "Muji session-initiate sid must be non-blank and at most 256 bytes",
+                );
+            }
+        };
         let correlation = CallCorrelationId::for_call(&call_id);
 
         // Identity is the authenticated full JID. A Muji
@@ -772,21 +792,16 @@ impl JingleHandler {
             attempt.failed(reason.setup_failure_reason());
             return reason.into_error_reply(iq, &jingle.sid, &mixer_jid);
         }
-        self.sfu.register_call_participant(&call_id, &identity);
-        // Bind the registration to this session-initiate's Jingle sid
-        // (#1608): a later terminate carrying a DIFFERENT sid is a
-        // stale leftover from a previous call in the same room and
-        // must not tear this session down. A rejoin re-registers and
-        // rebinds, so the stored binding always names the newest
-        // session. `xmpp_parsers` puts no length cap on a Jingle sid,
-        // so a pathological over-cap sid fails to bind; the
-        // registration then stays unbound and keeps the room-scoped
-        // pre-#1608 teardown — the exposure is confined to that
-        // client's own session.
-        if let Ok(session) = SessionBinding::new(jingle.sid.0.clone()) {
-            self.sfu
-                .bind_participant_session(&call_id, &identity, &session);
-        }
+        // Register and bind to this session-initiate's Jingle sid in
+        // one atomic registry operation (#1608): a later terminate
+        // carrying a DIFFERENT sid is a stale leftover from a previous
+        // call in the same room and must not tear this session down. A
+        // rejoin re-registers and rebinds atomically, so the stored
+        // binding always names the newest session with no window in
+        // which a concurrent stale terminate could observe the new
+        // registration unbound.
+        self.sfu
+            .register_call_participant_with_session(&call_id, &identity, &session);
 
         // XEP-0166 §6.3 ack: respond to the session-initiate IQ
         // with an EMPTY IQ result IMMEDIATELY. The session-accept
@@ -885,19 +900,23 @@ impl JingleHandler {
             // unknown-session instead of ending the live session. An
             // unbound registration (webhook-restored, or a stub that
             // does not track bindings) accepts any sid, as before.
-            if let Some(bound) = self
+            // `presented = None` (a sid too pathological to bind) can
+            // never match a bound session.
+            let presented = SessionBinding::new(jingle.sid.0.clone()).ok();
+            let bound = self
                 .sfu
-                .participant_session_binding(&call_id, &sender_identity)
-            {
-                if bound.as_str() != jingle.sid.0.as_str() {
-                    // This branch is deliberately uncharged (stale
-                    // rejections must not starve a legitimate hangup),
-                    // and the sid is client-controlled with no parser
-                    // length cap — log only a bounded prefix so
-                    // repeated junk terminates cannot amplify into the
-                    // log pipeline.
+                .participant_session_binding(&call_id, &sender_identity);
+            if let Some(bound) = bound {
+                if presented.as_ref() != Some(&bound) {
+                    // Advisory pre-check so the stale rejection stays
+                    // uncharged (it must not starve a legitimate
+                    // hangup). Debug, not warn: the sid is
+                    // client-controlled and this path is uncharged, so
+                    // per-stanza warn events would be an amplification
+                    // vector; the client-visible unknown-session reply
+                    // is the operational signal.
                     let stale_sid_prefix: String = jingle.sid.0.chars().take(32).collect();
-                    tracing::warn!(
+                    tracing::debug!(
                         room = %room_jid,
                         sender = %ctx.full_jid,
                         %stale_sid_prefix,
@@ -916,9 +935,22 @@ impl JingleHandler {
             if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
                 return reply;
             }
-            let _ = self
-                .sfu
-                .unregister_call_participant(&call_id, &sender_identity, None);
+            // The pre-check above and this removal are NOT one lock:
+            // a concurrent initiate can rebind the registration in
+            // between. The session-scoped unregister re-checks under
+            // the registry's call-entry guard, so a terminate that
+            // read binding A can never remove a registration that has
+            // just been rebound to B (charging the limiter for this
+            // vanishingly-rare raced rejection is accepted).
+            if self.sfu.unregister_call_participant_if_session_matches(
+                &call_id,
+                &sender_identity,
+                presented.as_ref(),
+                None,
+            ) == SessionScopedTeardown::SessionMismatch
+            {
+                return unknown_session_reply(iq);
+            }
         }
         // Empty IQ result per XEP-0166 §6.7.
         let mixer: Jid = calls_mixer_jid(ctx.domain).into();

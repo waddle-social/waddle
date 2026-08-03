@@ -61,15 +61,16 @@ impl std::fmt::Display for CallId {
 /// and must not tear the current registration down.
 ///
 /// The value is an opaque client-chosen token; the only constraints
-/// are non-emptiness and a length cap so a crafted sid cannot balloon
-/// registry memory.
+/// are non-blankness (a whitespace-only sid is semantically empty and
+/// must not become an authoritative binding) and a length cap so a
+/// crafted sid cannot balloon registry memory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionBinding(String);
 
 impl SessionBinding {
     pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
         let value = value.into();
-        if value.is_empty() || value.len() > MAX_SID_LEN {
+        if value.trim().is_empty() || value.len() > MAX_SID_LEN {
             return Err(SfuError::InvalidSessionBinding);
         }
         Ok(Self(value))
@@ -344,6 +345,17 @@ impl MediaCapabilities {
 pub enum CallState {
     Active { remaining: usize },
     Ended,
+}
+
+/// Result of a session-scoped teardown (#1608): either the teardown
+/// ran (with its ordinary [`TeardownDisposition`]) or the presented
+/// signaling-session identifier did not match the stored binding and
+/// NOTHING was mutated — no registry removal, no JWT revocation, no
+/// SFU-side eviction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScopedTeardown {
+    Applied(TeardownDisposition),
+    SessionMismatch,
 }
 
 /// Result of a teardown path guarded by observed LiveKit sids.

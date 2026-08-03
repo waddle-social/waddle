@@ -142,6 +142,7 @@ async fn enqueue_muji_presence_clear(
         },
         generation: None,
         room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
+        session: None,
     };
     let store = &state.deps.protocol.call_teardown_outbox;
     let persistence = &state.deps.protocol.call_teardown_persistence;

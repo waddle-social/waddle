@@ -43,6 +43,7 @@ fn unfenced_participant_intent() -> CallTeardownIntent {
         },
         generation: None,
         room_sid: None,
+        session: None,
     }
 }
 
@@ -55,6 +56,7 @@ fn participant_intent() -> CallTeardownIntent {
         },
         generation: Some(CallGeneration::try_from(1).unwrap()),
         room_sid: Some(RoomSid::new("RM_test").unwrap()),
+        session: None,
     }
 }
 

@@ -99,6 +99,7 @@ pub(crate) async fn enqueue_call_thread_end_retry(
         },
         generation: None,
         room_sid: None,
+        session: None,
     };
     let store = &state.deps.protocol.call_teardown_outbox;
     let persistence = &state.deps.protocol.call_teardown_persistence;

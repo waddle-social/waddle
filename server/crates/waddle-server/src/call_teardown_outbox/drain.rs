@@ -271,6 +271,21 @@ fn stale_superseded_by_live_participant(
         | TeardownTarget::CallThreadEndRetry { .. } => return false,
     };
     let identity = Identity::from_jid(participant.clone());
+    // #1608 (PR #1626 review): when the intent records the signaling
+    // session whose terminate produced it, a live registration bound
+    // to a DIFFERENT session proves supersession directly — no clock
+    // comparison, no skew budget. This closes the relay-fallback
+    // window where the intent is created AFTER the replacement
+    // registration and the timestamp fence alone would execute it.
+    // An unbound live registration proves nothing either way and
+    // falls through to the timestamp fence.
+    if let Some(intent_session) = &intent.session {
+        if let Some(bound) = sfu.participant_session_binding(&intent.call_id, &identity) {
+            if &bound != intent_session {
+                return true;
+            }
+        }
+    }
     [
         sfu.participant_registered_at(&intent.call_id, &identity),
         sfu.participant_last_minted_at(&intent.call_id, &identity),

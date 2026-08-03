@@ -625,6 +625,7 @@ async fn create_websocket_state(
                             target,
                             generation: lite.generation,
                             room_sid: lite.room_sid,
+                            session: None,
                         };
                         let sink_store = Arc::clone(&sink_store);
                         Box::pin(async move {

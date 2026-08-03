@@ -17,6 +17,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
                     generation INTEGER NULL CHECK (generation IS NULL OR generation > 0), \
                     room_sid TEXT NULL, \
                     participant_sid TEXT NULL, \
+                    session_binding TEXT NULL CHECK (session_binding IS NULL OR session_binding <> ''), \
                     thread_id TEXT NULL CHECK (thread_id IS NULL OR thread_id <> ''), \
                     anchor_origin_id TEXT NULL CHECK (anchor_origin_id IS NULL OR anchor_origin_id <> ''), \
                     thread_started_at_ms {timestamp_type} NULL, \
@@ -52,6 +53,20 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
         }
     };
     if let Err(error) = connection.execute(add_producing_node, ()).await {
+        let message = error.to_string().to_lowercase();
+        if !message.contains("duplicate column") && !message.contains("already exists") {
+            return Err(error.into());
+        }
+    }
+    let add_session_binding = match driver {
+        crate::db::DatabaseDriver::Postgres => {
+            "ALTER TABLE call_teardown_outbox ADD COLUMN IF NOT EXISTS session_binding TEXT NULL CHECK (session_binding IS NULL OR session_binding <> '')"
+        }
+        crate::db::DatabaseDriver::Sqlite => {
+            "ALTER TABLE call_teardown_outbox ADD COLUMN session_binding TEXT NULL CHECK (session_binding IS NULL OR session_binding <> '')"
+        }
+    };
+    if let Err(error) = connection.execute(add_session_binding, ()).await {
         let message = error.to_string().to_lowercase();
         if !message.contains("duplicate column") && !message.contains("already exists") {
             return Err(error.into());

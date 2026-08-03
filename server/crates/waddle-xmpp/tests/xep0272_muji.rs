@@ -1183,3 +1183,40 @@ async fn muji_session_terminate_with_matching_sid_tears_down_as_today() {
     );
     assert_eq!(admin.remove_snapshot().len(), 1);
 }
+
+#[test]
+fn muji_session_initiate_with_unbindable_sid_is_rejected_before_registering() {
+    // Codex review P2 on #1626: an accepted initiate whose sid cannot
+    // be bound (over the 256-byte SessionBinding cap — xmpp_parsers
+    // puts no limit on Jingle sids) would leave the registration
+    // unbound and thus unprotected by the #1608 stale-terminate gate.
+    // Reject the initiate outright instead: no token, no registration.
+    let sfu = fixture_sfu();
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let jid = test_full_jid();
+    let oversized_sid = "s".repeat(300);
+
+    let initiate = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        &oversized_sid,
+    );
+    let handler = JingleHandler::new(Arc::clone(&sfu));
+    let events = handler.handle(&initiate, &ctx(&jid));
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::BadRequest),
+        "unbindable-sid Muji initiate must be rejected with bad-request: {events:?}",
+    );
+    assert!(
+        !sfu.has_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone())),
+        "rejected initiate must not register the participant",
+    );
+    assert!(
+        !has_session_accept_to(&events, TEST_INITIATOR),
+        "rejected initiate must not mint a session-accept",
+    );
+}

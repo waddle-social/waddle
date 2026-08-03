@@ -1,6 +1,6 @@
 use jid::{BareJid, FullJid};
 use thiserror::Error;
-use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid, SfuError};
+use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid, SessionBinding, SfuError};
 use waddle_xmpp::ownership::NodeIdentity;
 
 use crate::db::DatabaseError;
@@ -127,6 +127,14 @@ pub struct CallTeardownIntent {
     /// only by a SID when one is present.
     pub generation: Option<CallGeneration>,
     pub room_sid: Option<RoomSid>,
+    /// The signaling session (Jingle sid) whose terminate produced this
+    /// intent (#1608, PR #1626 review). At drain time a participant
+    /// registration bound to a DIFFERENT session proves the intent was
+    /// superseded by a rejoin — directly, with no clock comparison —
+    /// and the intent is skipped. `None` = the producer had no session
+    /// evidence (webhooks, sweeps, janitors); such intents keep the
+    /// timestamp-fence-only behavior.
+    pub session: Option<SessionBinding>,
 }
 
 impl CallTeardownIntent {

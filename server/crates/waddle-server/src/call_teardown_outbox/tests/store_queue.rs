@@ -333,6 +333,7 @@ async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
         },
         generation: None,
         room_sid: Some(RoomSid::new("RM_muji").unwrap()),
+        session: None,
     };
 
     let intent_id = store.enqueue(intent.clone()).await.unwrap();
@@ -351,6 +352,7 @@ async fn muji_room_sweep_round_trips_with_webhook_room_sid() {
         },
         generation: None,
         room_sid: Some(RoomSid::new("RM_sweep").unwrap()),
+        session: None,
     };
 
     let intent_id = store.enqueue(intent.clone()).await.unwrap();
@@ -370,6 +372,7 @@ async fn muji_presence_clear_dedupe_is_exact_match_on_participant_sid() {
         },
         generation: None,
         room_sid: Some(RoomSid::new("RM_same").unwrap()),
+        session: None,
     };
     let second = first.clone();
     let third = CallTeardownIntent {
@@ -470,6 +473,7 @@ async fn ownership_release_defers_old_row_so_later_work_can_be_claimed() {
             target: TeardownTarget::Room,
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue foreign");
@@ -510,6 +514,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
             },
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue participant");
@@ -523,6 +528,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
             },
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue presence clear");

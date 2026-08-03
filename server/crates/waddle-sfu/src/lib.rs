@@ -36,8 +36,8 @@ mod webhook;
 pub use admin::{ListedRoom, LiveKitAdmin, RoomOccupancy};
 pub use call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SidObservationDirection,
-    SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
+    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SessionScopedTeardown,
+    SidObservationDirection, SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
 };
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
@@ -135,20 +135,28 @@ pub trait SfuService: Send + Sync + 'static {
         None
     }
 
-    /// Bind `identity`'s CURRENT registration in `call_id` to the
-    /// signaling-session identifier that produced it (#1608). Called
-    /// by the Jingle layer right after
-    /// [`Self::register_call_participant`]; a repeat join rebinds to
-    /// the NEW session's identifier. A no-op when the participant is
-    /// not registered. The binding lives and dies with the
-    /// registration entry — webhook-driven removals and
-    /// reconciliation sweeps clear it implicitly.
-    fn bind_participant_session(
+    /// Register `identity` in `call_id` AND bind the registration to
+    /// the signaling-session identifier that produced it, atomically
+    /// with respect to session-scoped teardown (#1608): a concurrent
+    /// [`Self::unregister_call_participant_if_session_matches`] must
+    /// never observe the new registration unbound. A repeat join
+    /// rebinds to the NEW session's identifier in the same operation.
+    /// The binding lives and dies with the registration entry —
+    /// webhook-driven removals and reconciliation sweeps clear it
+    /// implicitly.
+    ///
+    /// The default forwards to [`Self::register_call_participant`]
+    /// and tracks no binding, which pairs with
+    /// [`Self::participant_session_binding`]'s `None` default:
+    /// non-tracking implementations accept any session identifier at
+    /// teardown, the pre-#1608 behavior.
+    fn register_call_participant_with_session(
         &self,
-        _call_id: &CallId,
-        _identity: &Identity,
+        call_id: &CallId,
+        identity: &Identity,
         _session: &SessionBinding,
     ) {
+        self.register_call_participant(call_id, identity);
     }
 
     /// The signaling-session identifier bound to `identity`'s current
@@ -164,6 +172,33 @@ pub trait SfuService: Send + Sync + 'static {
         _identity: &Identity,
     ) -> Option<SessionBinding> {
         None
+    }
+
+    /// Session-scoped teardown (#1608): unregister `identity` from
+    /// `call_id` only when the stored session binding accepts the
+    /// `presented` identifier — an unbound registration accepts any,
+    /// a bound registration requires exact equality (`presented =
+    /// None` models a sid that could not become a binding and can
+    /// therefore never match a bound session). Check and removal are
+    /// atomic in tracking implementations: a terminate that read
+    /// binding A must not unregister a registration a concurrent
+    /// initiate has just rebound to B. On mismatch NOTHING is mutated
+    /// and no SFU-side eviction is scheduled.
+    fn unregister_call_participant_if_session_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        presented: Option<&SessionBinding>,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> SessionScopedTeardown {
+        match self.participant_session_binding(call_id, identity) {
+            Some(bound) if presented != Some(&bound) => SessionScopedTeardown::SessionMismatch,
+            _ => SessionScopedTeardown::Applied(self.unregister_call_participant(
+                call_id,
+                identity,
+                observed_sids,
+            )),
+        }
     }
 
     /// Record that `identity` has left `call_id` and report whether

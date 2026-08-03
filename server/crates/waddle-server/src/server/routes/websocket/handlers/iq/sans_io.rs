@@ -218,6 +218,7 @@ async fn handle_sans_io_iq_with_relay_override(
                         state,
                         &room_jid,
                         full_jid,
+                        super::jingle_muji_gate::muji_session_terminate_session(iq).as_ref(),
                         relay_outcome,
                         IqReplyAddressing {
                             id,
@@ -816,6 +817,7 @@ async fn enqueue_muji_relay_teardown_fallback(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
@@ -828,6 +830,11 @@ async fn enqueue_muji_relay_teardown_fallback(
             return Err(error.into());
         }
     };
+    // Both intents record the terminate's own Jingle session (#1608):
+    // at drain time on the owning side, a registration bound to a
+    // NEWER session proves this fallback was superseded by a rejoin,
+    // which the created-after-the-registration timestamp fence alone
+    // cannot see.
     let intents = [
         crate::call_teardown_outbox::CallTeardownIntent {
             call_id: call_id.clone(),
@@ -838,6 +845,7 @@ async fn enqueue_muji_relay_teardown_fallback(
             },
             generation: None,
             room_sid: None,
+            session: session.cloned(),
         },
         crate::call_teardown_outbox::CallTeardownIntent {
             call_id,
@@ -847,6 +855,7 @@ async fn enqueue_muji_relay_teardown_fallback(
             },
             generation: None,
             room_sid: None,
+            session: session.cloned(),
         },
     ];
     let store = &state.deps.protocol.call_teardown_outbox;
@@ -873,9 +882,10 @@ async fn fallback_muji_terminate_owner_cleanup_ack(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    session: Option<&waddle_sfu::SessionBinding>,
     reply: IqReplyAddressing<'_>,
 ) -> Vec<String> {
-    let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed).await;
+    let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed, session).await;
     let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
         state, room_jid, departed, None,
     )
@@ -904,6 +914,7 @@ async fn resolve_muji_relay_outcome(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    session: Option<&waddle_sfu::SessionBinding>,
     outcome: MujiRelayOutcome,
     reply: IqReplyAddressing<'_>,
 ) -> Option<Vec<String>> {
@@ -914,9 +925,10 @@ async fn resolve_muji_relay_outcome(
         } => None,
         MujiRelayOutcome::ProcessLocally {
             enqueue_owner_cleanup: true,
-        } => {
-            Some(fallback_muji_terminate_owner_cleanup_ack(state, room_jid, departed, reply).await)
-        }
+        } => Some(
+            fallback_muji_terminate_owner_cleanup_ack(state, room_jid, departed, session, reply)
+                .await,
+        ),
     }
 }
 
@@ -1271,7 +1283,8 @@ mod tests {
         let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
 
-        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice)
+        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
+        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice, Some(&session))
             .await
             .expect("persist fallback intents");
 
@@ -1401,6 +1414,7 @@ mod tests {
             &state,
             &room,
             &alice,
+            None,
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
             },
@@ -1464,6 +1478,7 @@ mod tests {
             &state,
             &room,
             &alice,
+            None,
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
             },

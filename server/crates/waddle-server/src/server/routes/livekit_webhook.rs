@@ -430,6 +430,7 @@ async fn enqueue_muji_room_sweep(
         },
         generation: None,
         room_sid: Some(room_sid.clone()),
+        session: None,
     };
     let store = &state.deps.protocol.call_teardown_outbox;
     let persistence = &state.deps.protocol.call_teardown_persistence;
