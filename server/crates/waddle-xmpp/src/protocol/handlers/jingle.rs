@@ -890,10 +890,18 @@ impl JingleHandler {
                 .participant_session_binding(&call_id, &sender_identity)
             {
                 if bound.as_str() != jingle.sid.0.as_str() {
+                    // This branch is deliberately uncharged (stale
+                    // rejections must not starve a legitimate hangup),
+                    // and the sid is client-controlled with no parser
+                    // length cap — log only a bounded prefix so
+                    // repeated junk terminates cannot amplify into the
+                    // log pipeline.
+                    let stale_sid_prefix: String = jingle.sid.0.chars().take(32).collect();
                     tracing::warn!(
                         room = %room_jid,
                         sender = %ctx.full_jid,
-                        stale_sid = %jingle.sid.0,
+                        %stale_sid_prefix,
+                        stale_sid_len = jingle.sid.0.len(),
                         "refusing stale-sid Muji session-terminate for a live session"
                     );
                     return unknown_session_reply(iq);
