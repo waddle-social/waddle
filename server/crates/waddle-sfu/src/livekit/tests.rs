@@ -3421,3 +3421,90 @@ fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
         TeardownTargetLite::Room => panic!("eject convergence must only enqueue eviction"),
     }
 }
+
+// ── Signaling-session binding (#1608) ────────────────────────────────
+
+#[test]
+fn session_binding_round_trips_for_a_registered_participant() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let sid = SessionBinding::new("muji-sid-1").expect("binding");
+
+    sfu.register_call_participant(&call, &alice);
+    sfu.bind_participant_session(&call, &alice, &sid);
+
+    assert_eq!(sfu.participant_session_binding(&call, &alice), Some(sid));
+}
+
+#[test]
+fn rebinding_overwrites_the_previous_session_binding() {
+    // The exact race #1608 closes: a rejoin re-registers and rebinds
+    // with the NEW session's sid while the old registration entry is
+    // still live. The stored binding must follow the newest session.
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let old = SessionBinding::new("muji-sid-old").expect("binding");
+    let new = SessionBinding::new("muji-sid-new").expect("binding");
+
+    sfu.register_call_participant(&call, &alice);
+    sfu.bind_participant_session(&call, &alice, &old);
+    sfu.register_call_participant(&call, &alice);
+    sfu.bind_participant_session(&call, &alice, &new);
+
+    assert_eq!(sfu.participant_session_binding(&call, &alice), Some(new));
+}
+
+#[test]
+fn session_binding_dies_with_the_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let sid = SessionBinding::new("muji-sid-1").expect("binding");
+
+    sfu.register_call_participant(&call, &alice);
+    sfu.bind_participant_session(&call, &alice, &sid);
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+
+    // A later re-registration (fresh session) starts unbound.
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(sfu.participant_session_binding(&call, &alice), None);
+}
+
+#[test]
+fn binding_an_unregistered_participant_is_a_no_op() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let sid = SessionBinding::new("muji-sid-1").expect("binding");
+
+    sfu.bind_participant_session(&call, &alice, &sid);
+
+    assert_eq!(sfu.participant_session_binding(&call, &alice), None);
+    assert_eq!(sfu.participant_count(&call), 0);
+}
+
+#[test]
+fn webhook_restored_registration_has_no_session_binding() {
+    // A registration restored from a `participant_joined` webhook
+    // never saw the Jingle signaling leg, so it carries no binding —
+    // terminate handling must treat that as "accept any sid".
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_x"), Some("PA_x"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(sfu.participant_session_binding(&call, &alice), None);
+}
+
+#[test]
+fn session_binding_rejects_empty_and_oversized_values() {
+    assert!(SessionBinding::new("").is_err());
+    assert!(SessionBinding::new("a".repeat(257)).is_err());
+    assert!(SessionBinding::new("a".repeat(256)).is_ok());
+}

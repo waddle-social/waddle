@@ -22,8 +22,8 @@ use tokio::sync::Semaphore;
 use crate::admin::{admin_base_url_from_ws, ListedRoomName, LiveKitAdmin, ReqwestLiveKitAdmin};
 use crate::call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDirection, SidObservationDisposition,
-    TeardownDisposition, TeardownTargetLite,
+    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SidObservationDirection,
+    SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
 };
 use crate::config::{SfuConfig, WebsocketUrl};
 use crate::error::SfuError;
@@ -112,6 +112,11 @@ struct ParticipantState {
     participant_sid_contested_at: Option<DateTime<Utc>>,
     first_registered_at: DateTime<Utc>,
     registered_without_mint: bool,
+    /// The signaling-session identifier (Jingle sid) that produced
+    /// this registration, when the Jingle layer bound one (#1608).
+    /// `None` for webhook/probe-restored registrations, which never
+    /// saw the signaling leg.
+    session: Option<SessionBinding>,
 }
 
 impl ParticipantState {
@@ -123,6 +128,7 @@ impl ParticipantState {
             participant_sid_contested_at: None,
             first_registered_at,
             registered_without_mint: false,
+            session: None,
         }
     }
 
@@ -137,6 +143,7 @@ impl ParticipantState {
             participant_sid,
             first_registered_at,
             registered_without_mint: true,
+            session: None,
         }
     }
 
@@ -2216,6 +2223,32 @@ impl SfuService for LiveKitSfu {
         self.calls
             .get(call_id)
             .is_some_and(|entry| entry.participants.contains_key(identity))
+    }
+
+    fn bind_participant_session(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        session: &SessionBinding,
+    ) {
+        if let Some(mut entry) = self.calls.get_mut(call_id) {
+            if let Some(participant) = entry.participants.get_mut(identity) {
+                participant.session = Some(session.clone());
+            }
+        }
+    }
+
+    fn participant_session_binding(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> Option<SessionBinding> {
+        self.calls.get(call_id).and_then(|entry| {
+            entry
+                .participants
+                .get(identity)
+                .and_then(|participant| participant.session.clone())
+        })
     }
 
     fn participant_registered_at(

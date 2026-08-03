@@ -22,7 +22,9 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jingle::{Action, Content, Jingle, SessionId, Transport};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use waddle_sfu::{CallCorrelationId, CallId, Identity, MediaCapabilities, SfuError, SfuService};
+use waddle_sfu::{
+    CallCorrelationId, CallId, Identity, MediaCapabilities, SessionBinding, SfuError, SfuService,
+};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::handlers::session_initiate_rate_limit::{
@@ -771,6 +773,19 @@ impl JingleHandler {
             return reason.into_error_reply(iq, &jingle.sid, &mixer_jid);
         }
         self.sfu.register_call_participant(&call_id, &identity);
+        // Bind the registration to this session-initiate's Jingle sid
+        // (#1608): a later terminate carrying a DIFFERENT sid is a
+        // stale leftover from a previous call in the same room and
+        // must not tear this session down. A rejoin re-registers and
+        // rebinds, so the stored binding always names the newest
+        // session. Sid validation happened at Jingle parse time, so
+        // an unbindable sid here is unreachable in practice; falling
+        // through unbound merely preserves the pre-#1608 room-scoped
+        // teardown for this registration.
+        if let Ok(session) = SessionBinding::new(jingle.sid.0.clone()) {
+            self.sfu
+                .bind_participant_session(&call_id, &identity, &session);
+        }
 
         // XEP-0166 §6.3 ack: respond to the session-initiate IQ
         // with an EMPTY IQ result IMMEDIATELY. The session-accept
@@ -850,7 +865,7 @@ impl JingleHandler {
     fn handle_muji_session_terminate(
         &self,
         iq: &Iq,
-        _jingle: Jingle,
+        jingle: Jingle,
         room_jid: BareJid,
         ctx: &StanzaContext<'_>,
     ) -> Vec<OutboundEvent> {
@@ -860,6 +875,28 @@ impl JingleHandler {
             let sender_identity = Identity::from_jid(ctx.full_jid.clone());
             if !self.sfu.has_call_participant(&call_id, &sender_identity) {
                 return unknown_session_reply(iq);
+            }
+            // #1608: the registration is room-scoped, but teardown
+            // must be session-scoped. A terminate whose sid differs
+            // from the binding recorded at session-initiate is a
+            // stale leftover of a PREVIOUS call in this room (e.g. a
+            // deferred client flush landing after a rejoin) and gets
+            // unknown-session instead of ending the live session. An
+            // unbound registration (webhook-restored, or a stub that
+            // does not track bindings) accepts any sid, as before.
+            if let Some(bound) = self
+                .sfu
+                .participant_session_binding(&call_id, &sender_identity)
+            {
+                if bound.as_str() != jingle.sid.0.as_str() {
+                    tracing::warn!(
+                        room = %room_jid,
+                        sender = %ctx.full_jid,
+                        stale_sid = %jingle.sid.0,
+                        "refusing stale-sid Muji session-terminate for a live session"
+                    );
+                    return unknown_session_reply(iq);
+                }
             }
             // Charge only the authorized mutating teardown (#1612
             // review round 10): unknown-session rejections above stay

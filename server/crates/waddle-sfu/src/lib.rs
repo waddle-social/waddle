@@ -36,8 +36,8 @@ mod webhook;
 pub use admin::{ListedRoom, LiveKitAdmin, RoomOccupancy};
 pub use call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SidObservationDirection, SidObservationDisposition,
-    TeardownDisposition, TeardownTargetLite,
+    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SidObservationDirection,
+    SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
 };
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
@@ -132,6 +132,37 @@ pub trait SfuService: Send + Sync + 'static {
         _call_id: &CallId,
         _identity: &Identity,
     ) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+
+    /// Bind `identity`'s CURRENT registration in `call_id` to the
+    /// signaling-session identifier that produced it (#1608). Called
+    /// by the Jingle layer right after
+    /// [`Self::register_call_participant`]; a repeat join rebinds to
+    /// the NEW session's identifier. A no-op when the participant is
+    /// not registered. The binding lives and dies with the
+    /// registration entry — webhook-driven removals and
+    /// reconciliation sweeps clear it implicitly.
+    fn bind_participant_session(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+        _session: &SessionBinding,
+    ) {
+    }
+
+    /// The signaling-session identifier bound to `identity`'s current
+    /// registration in `call_id`, or `None` when unbound (not
+    /// registered, restored from a webhook observation, or the
+    /// implementation does not track bindings). Teardown handling
+    /// treats `None` as "accept any session identifier" — only a
+    /// KNOWN current session may refuse a mismatching stale
+    /// terminate.
+    fn participant_session_binding(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<SessionBinding> {
         None
     }
 

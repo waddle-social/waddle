@@ -1077,3 +1077,109 @@ fn muji_session_initiate_is_rate_limited_per_bare_jid() {
         conditions[0],
     );
 }
+
+// ── Session-terminate sid binding (#1608) ─────────────────────────────
+
+#[tokio::test]
+async fn muji_session_terminate_with_stale_sid_does_not_tear_down_current_session() {
+    // The #1608 race: a late-flushed terminate for an OLD call (old
+    // Jingle sid) arrives after the user rejoined the same room with
+    // a NEW session. The room-scoped teardown used to end the new
+    // call; the sid binding recorded at session-initiate must reject
+    // the stale terminate instead.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let jid = test_full_jid();
+
+    // Join with the CURRENT session's sid via the real initiate path
+    // so the binding is recorded exactly where production records it.
+    let initiate = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-current",
+    );
+    let handler = JingleHandler::new(Arc::clone(&sfu));
+    let events = handler.handle(&initiate, &ctx(&jid));
+    assert!(
+        first_error_condition(&events).is_none(),
+        "fixture initiate must succeed: {events:?}",
+    );
+
+    let stale_terminate = muji_session_terminate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-stale",
+    );
+    let events = handler.handle(&stale_terminate, &ctx(&jid));
+    drain_spawned_admin_tasks().await;
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::ItemNotFound),
+        "stale-sid Muji terminate must get item-not-found/unknown-session: {events:?}",
+    );
+    assert!(
+        first_error_application_condition(&events).is_some_and(|condition| {
+            condition.name() == "unknown-session"
+                && condition.ns() == waddle_xmpp::xep::xep0166::NS_JINGLE_ERRORS
+        }),
+        "stale-sid Muji terminate must carry the XEP-0166 unknown-session condition",
+    );
+    assert!(
+        sfu.has_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone())),
+        "stale-sid terminate must not unregister the current session's participant",
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "stale-sid terminate must not schedule RemoveParticipant",
+    );
+    assert!(
+        admin.delete_snapshot().is_empty(),
+        "stale-sid terminate must not schedule DeleteRoom",
+    );
+}
+
+#[tokio::test]
+async fn muji_session_terminate_with_matching_sid_tears_down_as_today() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let jid = test_full_jid();
+
+    let initiate = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-current",
+    );
+    let handler = JingleHandler::new(Arc::clone(&sfu));
+    let events = handler.handle(&initiate, &ctx(&jid));
+    assert!(
+        first_error_condition(&events).is_none(),
+        "fixture initiate must succeed: {events:?}",
+    );
+
+    let terminate = muji_session_terminate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-current",
+    );
+    let events = handler.handle(&terminate, &ctx(&jid));
+    drain_spawned_admin_tasks().await;
+
+    assert!(
+        first_error_condition(&events).is_none(),
+        "matching-sid Muji terminate must succeed: {events:?}",
+    );
+    assert!(
+        !sfu.has_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone())),
+        "matching-sid terminate must unregister the participant",
+    );
+    assert_eq!(admin.remove_snapshot().len(), 1);
+}

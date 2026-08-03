@@ -53,6 +53,39 @@ impl std::fmt::Display for CallId {
     }
 }
 
+/// Opaque signaling-session identifier bound to one participant
+/// registration (#1608). For Muji group calls this is the Jingle
+/// `sid` the occupant's `session-initiate` carried; a later
+/// `session-terminate` whose sid does not match the stored binding is
+/// stale (it belongs to a previous call incarnation in the same room)
+/// and must not tear the current registration down.
+///
+/// The value is an opaque client-chosen token; the only constraints
+/// are non-emptiness and a length cap so a crafted sid cannot balloon
+/// registry memory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionBinding(String);
+
+impl SessionBinding {
+    pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
+        let value = value.into();
+        if value.is_empty() || value.len() > MAX_SID_LEN {
+            return Err(SfuError::InvalidSessionBinding);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Opaque LiveKit room sid. Distinct from [`CallId`]: LiveKit reuses a
 /// room's human name forever, but each concrete room incarnation gets
 /// a fresh sid.
