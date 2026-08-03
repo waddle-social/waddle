@@ -22,8 +22,10 @@ type livekitHelmRelease struct {
 					UseExternalIP bool `yaml:"use_external_ip"`
 				} `yaml:"rtc"`
 				Turn struct {
-					Enabled bool `yaml:"enabled"`
-					UDPPort int  `yaml:"udp_port"`
+					Enabled                  bool      `yaml:"enabled"`
+					UDPPort                  int       `yaml:"udp_port"`
+					TTL                      *int      `yaml:"ttl_seconds"`
+					AllowRestrictedPeerCIDRs *[]string `yaml:"allow_restricted_peer_cidrs"`
 				} `yaml:"turn"`
 			} `yaml:"livekit"`
 			NodePorts struct {

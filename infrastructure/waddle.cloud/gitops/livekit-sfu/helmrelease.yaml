@@ -50,6 +50,11 @@ spec:
         tls_port: 443
         relay_range_start: 30000
         relay_range_end: 40000
+        # See charts/livekit-sfu/values.yaml for the rationale of both
+        # keys; stated explicitly here because the restricted-peer relay
+        # policy is a deliberate per-deployment security decision.
+        ttl_seconds: 3600
+        allow_restricted_peer_cidrs: []
     nodePorts:
       rtc:
         enabled: true

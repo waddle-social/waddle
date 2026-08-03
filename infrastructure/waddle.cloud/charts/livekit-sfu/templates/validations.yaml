@@ -85,6 +85,12 @@
 {{- if and .Values.livekit.turn.enabled (not (or .Values.livekit.turn.tls_port .Values.livekit.turn.udp_port)) -}}
 {{- fail "livekit.turn requires at least one of tls_port or udp_port when enabled" -}}
 {{- end -}}
+{{- if and .Values.livekit.turn.enabled (not .Values.livekit.turn.ttl_seconds) -}}
+{{- fail "livekit.turn.ttl_seconds is required when turn.enabled=true: livekit-server v1.12+ enforces it as the validity window of the TURN credentials it mints itself (upstream default 300), and a short window breaks mid-call allocations such as an ICE restart more than 5 minutes into a call; set 3600 (see values.yaml)" -}}
+{{- end -}}
+{{- if and .Values.livekit.turn.enabled (not (hasKey .Values.livekit.turn "allow_restricted_peer_cidrs")) -}}
+{{- fail "livekit.turn.allow_restricted_peer_cidrs must be set explicitly (an empty list is valid) when turn.enabled=true: livekit-server v1.12+ denies relay to restricted peers by default, and this policy must be a deliberate choice for the relay topology" -}}
+{{- end -}}
 {{- if and .Values.livekit.turn.enabled .Values.livekit.turn.tls_port (not .Values.livekit.turn.external_tls) (not .Values.turn.secretName) -}}
 {{- fail "turn.secretName is required when livekit.turn.tls_port is set and livekit.turn.external_tls=false" -}}
 {{- end -}}

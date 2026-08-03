@@ -51,14 +51,42 @@ livekit:
     use_external_ip: true
     tcp_port: 30881
     udp_port: 30882
+  # Defaults state the production posture (TURN live at turn.waddle.social
+  # over TLS/443 + UDP/30478): the previous `enabled: false` default,
+  # while production ran TURN-on via the Flux HelmRelease override, already
+  # misled one investigation.
   turn:
-    enabled: false
-    domain: ""
+    enabled: true
+    domain: turn.waddle.social
     udp_port: 30478
     tls_port: 443
     external_tls: false
     relay_range_start: 30000
     relay_range_end: 40000
+    # Validity window of the TURN credentials livekit-server itself mints
+    # and hands to clients in the join response; v1.12+ embeds the expiry
+    # in the username and enforces it on new allocations (upstream default
+    # 300). 3600 keeps mid-call allocations working (e.g. an ICE restart
+    # more than 5 minutes into a call must still be able to Allocate) and
+    # matches the 3600s window waddle-server uses for the credentials it
+    # mints (`LIVEKIT_TURN_TTL_SECONDS`). Note the embedded TURN cannot
+    # validate waddle's coturn-REST-style credentials at all — that scheme
+    # mismatch is #1447, and this key does not affect it.
+    ttl_seconds: 3600
+    # livekit-server v1.12+ denies TURN relay to restricted peers
+    # (loopback, link-local, private, multicast, unspecified) unless
+    # allowed here. Explicitly empty for our topology: with
+    # rtc.use_external_ip=true the co-located SFU advertises only the
+    # node's public IP in ICE candidates, so relayed clients never request
+    # a restricted peer. Extend only if the SFU ever advertises private
+    # candidates — and mind that every CIDR added here is a range any
+    # TURN-authenticated client can relay UDP into.
+    allow_restricted_peer_cidrs: []
+    # Both keys above were introduced in livekit-server v1.12.0. The
+    # deployed v1.11.0 tolerates them because the container runs
+    # `--disable-strict-config`
+    # (templates/deployment.yaml); the upgrade (#1531) picks them up with
+    # nothing but an image bump.
 
 nodePorts:
   rtc:
@@ -68,7 +96,7 @@ nodePorts:
     tcp: 30881
     udp: 30882
   turnUdp:
-    enabled: false
+    enabled: true
     annotations: {}
     externalTrafficPolicy: Cluster
     udp: 30478

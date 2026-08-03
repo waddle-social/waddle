@@ -2,7 +2,7 @@ apiVersion: v2
 name: livekit-sfu
 description: Minimal LiveKit SFU chart for Waddle infrastructure.
 type: application
-version: 0.1.7
+version: 0.1.8
 appVersion: v1.11.0
 
 sources:
