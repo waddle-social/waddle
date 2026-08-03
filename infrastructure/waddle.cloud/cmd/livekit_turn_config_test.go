@@ -114,7 +114,7 @@ func TestChartRejectsTurnWithoutCredentialTTL(t *testing.T) {
 	}
 }
 
-// livekit-server v1.13 denies TURN relay to restricted peers (loopback,
+// livekit-server v1.12+ denies TURN relay to restricted peers (loopback,
 // link-local, private, multicast, unspecified) unless allowed. The chart
 // must force that policy to be an explicit decision rather than an
 // inherited default.
@@ -193,7 +193,7 @@ func TestChartDefaultsMatchProductionTurnPosture(t *testing.T) {
 		t.Fatalf("values.yaml livekit.turn.domain = %q, want turn.waddle.social", turn.Domain)
 	}
 	if turn.TTL == nil || *turn.TTL != turnCredentialTTLSeconds {
-		t.Fatalf("values.yaml livekit.turn.ttl_seconds = %v, want %d (lockstep with LIVEKIT_TURN_TTL_SECONDS)", turn.TTL, turnCredentialTTLSeconds)
+		t.Fatalf("values.yaml livekit.turn.ttl_seconds = %v, want %d (see turnCredentialTTLSeconds)", turn.TTL, turnCredentialTTLSeconds)
 	}
 	if turn.UDPPort != turnUDPPort {
 		t.Fatalf("values.yaml livekit.turn.udp_port = %d, want %d", turn.UDPPort, turnUDPPort)

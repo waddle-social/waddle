@@ -73,7 +73,7 @@ livekit:
     # validate waddle's coturn-REST-style credentials at all — that scheme
     # mismatch is #1447, and this key does not affect it.
     ttl_seconds: 3600
-    # livekit-server v1.13+ denies TURN relay to restricted peers
+    # livekit-server v1.12+ denies TURN relay to restricted peers
     # (loopback, link-local, private, multicast, unspecified) unless
     # allowed here. Explicitly empty for our topology: with
     # rtc.use_external_ip=true the co-located SFU advertises only the
@@ -82,8 +82,9 @@ livekit:
     # candidates — and mind that every CIDR added here is a range any
     # TURN-authenticated client can relay UDP into.
     allow_restricted_peer_cidrs: []
-    # Both keys above predate livekit-server v1.12.0. The deployed v1.11.0
-    # tolerates them because the container runs `--disable-strict-config`
+    # Both keys above were introduced in livekit-server v1.12.0. The
+    # deployed v1.11.0 tolerates them because the container runs
+    # `--disable-strict-config`
     # (templates/deployment.yaml); the upgrade (#1531) picks them up with
     # nothing but an image bump.
 
