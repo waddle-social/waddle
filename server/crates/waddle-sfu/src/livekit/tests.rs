@@ -3643,3 +3643,46 @@ async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
     );
     assert_eq!(admin.remove_calls.lock().expect("lock").len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin() {
+    // #1608 (PR #1626 review round 4): terminate(A) removes the
+    // registration and SPAWNS the LiveKit eject; a rejoin can
+    // re-register the same identity under session B before that spawn
+    // runs. The scheduled removal carries A's binding, so the
+    // executor's rebind check refuses it instead of ejecting B.
+    // current_thread flavor: the spawn cannot run before the rejoin
+    // below because there is no await between them.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+    let session_a = SessionBinding::new("muji-session-a").expect("binding");
+    let session_b = SessionBinding::new("muji-session-b").expect("binding");
+
+    // Bob keeps the call non-empty so no DeleteRoom fires.
+    sfu.register_call_participant(&call, &bob);
+    sfu.register_call_participant_with_session(&call, &alice, &session_a);
+    match sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&session_a), None)
+    {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("matching terminate must apply, got {other:?}"),
+    }
+    // The rejoin lands before the spawned eject runs.
+    sfu.register_call_participant_with_session(&call, &alice, &session_b);
+
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        admin
+            .remove_calls
+            .lock()
+            .expect("recording lock")
+            .is_empty(),
+        "the spawned eject must be refused after the rejoin rebound the identity"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+}

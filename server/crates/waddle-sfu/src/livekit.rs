@@ -257,8 +257,28 @@ struct ClearOutcome {
     generation: CallGeneration,
     room_sid: Option<RoomSid>,
     participant_sid: Option<ParticipantSid>,
+    /// The signaling-session binding the removed registration carried
+    /// (#1608). Travels with the scheduled remote teardown so a rejoin
+    /// that re-registers the same identity under a NEW session before
+    /// the spawned/durable removal executes is refused by the
+    /// executor's rebind check instead of being ejected.
+    removed_session: Option<SessionBinding>,
     /// Participants still registered after the clear.
     remaining: usize,
+}
+
+/// The fence evidence a scheduled remote teardown carries (#1608):
+/// everything the executor may check before the destructive admin
+/// call. Bundled so the schedule call sites stay reviewable.
+struct RemoteTeardownEvidence {
+    generation: Option<CallGeneration>,
+    room_sid: Option<RoomSid>,
+    participant_sid: Option<ParticipantSid>,
+    /// The signaling-session binding the removed registration carried:
+    /// a rejoin that re-registers the same identity under a NEW
+    /// session before the spawned/durable removal executes is refused
+    /// by the executor's rebind check instead of being ejected.
+    session: Option<SessionBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,25 +420,6 @@ impl LiveKitTeardownExecutor {
         participant_sid: Option<&ParticipantSid>,
         session: Option<&SessionBinding>,
     ) -> Result<TeardownExecution, SfuError> {
-        // #1608: a session-bearing intent must not eject a registration
-        // that has been rebound to a NEWER session since the drain's
-        // fence read it. Checked as late as possible (only the admin
-        // HTTP call itself remains after); a registration with no
-        // binding — or none at all — proves nothing and falls through
-        // to the generation/SID fences below.
-        if let Some(intent_session) = session {
-            let rebound = self.calls.get(call_id).is_some_and(|entry| {
-                entry.participants.get(identity).is_some_and(|state| {
-                    state
-                        .session
-                        .as_ref()
-                        .is_some_and(|bound| bound != intent_session)
-                })
-            });
-            if rebound {
-                return Ok(TeardownExecution::StaleGeneration);
-            }
-        }
         let entry_missing = self.calls.get(call_id).is_none();
         // A participant-sid fence is locally decidable only when the
         // registry tracks this identity in this call. A missing entry
@@ -465,6 +466,27 @@ impl LiveKitTeardownExecutor {
                         return Ok(TeardownExecution::StaleGeneration);
                     }
                 }
+            }
+        }
+        // #1608: a session-bearing removal must not eject a
+        // registration rebound to a NEWER session. Checked HERE — after
+        // every await above (guard resolution, occupancy probes) — so
+        // only the identity-keyed admin request itself remains outside
+        // the check; that residue is irreducible for a remote effect
+        // and converges via the participant_joined re-assertion and
+        // reconciliation paths. A registration with no binding — or
+        // none at all — proves nothing and does not block.
+        if let Some(intent_session) = session {
+            let rebound = self.calls.get(call_id).is_some_and(|entry| {
+                entry.participants.get(identity).is_some_and(|state| {
+                    state
+                        .session
+                        .as_ref()
+                        .is_some_and(|bound| bound != intent_session)
+                })
+            });
+            if rebound {
+                return Ok(TeardownExecution::StaleGeneration);
             }
         }
         self.admin.remove_participant(call_id, identity).await?;
@@ -1119,9 +1141,16 @@ impl LiveKitSfu {
             call_id.clone(),
             identity.clone(),
             false,
-            generation,
-            room_sid,
-            participant_sid,
+            RemoteTeardownEvidence {
+                generation,
+                room_sid,
+                participant_sid,
+                // Revocation authority is token state, not a signaling
+                // terminate: rejoin protection here is the
+                // registration's own clear_pending_revocation_eject,
+                // so no session evidence is attached.
+                session: None,
+            },
         );
     }
 
@@ -1432,13 +1461,22 @@ impl LiveKitSfu {
         session_gate: SessionGate<'_>,
     ) -> SessionScopedTeardown {
         let clear = self.clear_local_state(call_id, identity, observed_sids, session_gate);
-        let (was_present, emptied, generation, room_sid, participant_sid, remaining) = match clear {
+        let (
+            was_present,
+            emptied,
+            generation,
+            room_sid,
+            participant_sid,
+            removed_session,
+            remaining,
+        ) = match clear {
             ClearDisposition::Cleared(ClearOutcome {
                 was_present,
                 emptied,
                 generation,
                 room_sid,
                 participant_sid,
+                removed_session,
                 remaining,
             }) => (
                 was_present,
@@ -1446,6 +1484,7 @@ impl LiveKitSfu {
                 Some(generation),
                 room_sid,
                 participant_sid,
+                removed_session,
                 remaining,
             ),
             ClearDisposition::SessionMismatch => return SessionScopedTeardown::SessionMismatch,
@@ -1486,9 +1525,12 @@ impl LiveKitSfu {
             call_id.clone(),
             identity.clone(),
             we_just_emptied,
-            generation,
-            room_sid,
-            participant_sid,
+            RemoteTeardownEvidence {
+                generation,
+                room_sid,
+                participant_sid,
+                session: removed_session,
+            },
         );
 
         SessionScopedTeardown::Applied(TeardownDisposition::Applied(state))
@@ -1539,6 +1581,10 @@ impl LiveKitSfu {
             .participants
             .get(identity)
             .and_then(|participant| participant.participant_sid.clone());
+        let removed_session = entry
+            .participants
+            .get(identity)
+            .and_then(|participant| participant.session.clone());
         let room_sid = entry.room_sid.clone();
         let was_present = entry.participants.remove(identity).is_some();
         let generation = entry.generation;
@@ -1657,6 +1703,7 @@ impl LiveKitSfu {
             generation,
             room_sid,
             participant_sid,
+            removed_session,
             remaining,
         })
     }
@@ -1690,10 +1737,14 @@ impl LiveKitSfu {
         call_id: CallId,
         identity: Identity,
         we_just_emptied: bool,
-        generation: Option<CallGeneration>,
-        room_sid: Option<RoomSid>,
-        participant_sid: Option<ParticipantSid>,
+        evidence: RemoteTeardownEvidence,
     ) {
+        let RemoteTeardownEvidence {
+            generation,
+            room_sid,
+            participant_sid,
+            session,
+        } = evidence;
         let participant_intent = CallTeardownIntentLite {
             call_id: call_id.clone(),
             target: TeardownTargetLite::Participant {
@@ -1702,10 +1753,7 @@ impl LiveKitSfu {
             },
             generation,
             room_sid: room_sid.clone(),
-            // The inline path already removed the registration (and its
-            // binding) atomically under the session gate; the durable
-            // retry carries no session evidence.
-            session: None,
+            session,
         };
         let room_intent = we_just_emptied.then(|| CallTeardownIntentLite {
             call_id: call_id.clone(),
@@ -1753,10 +1801,7 @@ impl LiveKitSfu {
                         } => participant_sid.as_ref(),
                         TeardownTargetLite::Room => None,
                     },
-                    // Inline teardown already removed the registration
-                    // atomically under the session gate; there is no
-                    // binding left to re-check against.
-                    None,
+                    participant_intent.session.as_ref(),
                 )
                 .await;
             if we_just_emptied {

@@ -56,6 +56,26 @@ pub(crate) async fn clear_muji_presence_for_departure(
         return WebhookEffectOutcome::Stale;
     }
 
+    // #1608 (PR #1626 review round 4): when the departure came from a
+    // signaling terminate, a live registration bound to a DIFFERENT
+    // session proves this cleanup was superseded by a rejoin — the
+    // actor-side advertisement clear, the SFU bookkeeping, and the
+    // leave broadcast below all belong to the OLD session and must not
+    // touch the new one. Webhook-driven callers pass no session and
+    // keep their membership-scoped semantics.
+    if let (Some(session), Some(sfu)) = (session, state.deps.protocol.sfu.as_ref()) {
+        if let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) {
+            let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
+            if sfu
+                .participant_session_binding(&call_id, &identity)
+                .is_some_and(|bound| &bound != session)
+            {
+                increment_call_teardown_stale_dropped();
+                return WebhookEffectOutcome::Stale;
+            }
+        }
+    }
+
     let actor = match get_room_actor_result(state, room_jid).await {
         Ok(Some(actor)) => actor,
         Ok(None) => {
