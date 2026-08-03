@@ -24,6 +24,8 @@ import {
 } from "./muc-call-live-participants";
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 import { clearDmCallActivity } from "./dm-call-activity";
+import { $callMicEnabled } from "./call-mic-state";
+import { $callCamEnabled } from "./call-cam-state";
 import { forgetDmCallJoin } from "./dm-call-join-cache";
 import {
   enumerateCallDevices,
@@ -330,6 +332,10 @@ async function reconcileRemovedActiveDevices(
       await engine.setMicDevice("default");
     } catch (err) {
       recordMediaIssue("mic", err instanceof Error ? err : missingCallDeviceError("mic"));
+      // Capture is confirmed lost: reflect it in the toggle so the
+      // notice's "Enable mic" action requests a re-enable instead of
+      // negating the stale on-state into a disable (#1621 round 6).
+      $callMicEnabled.set(false);
     }
     if (generation !== callDeviceChangeGeneration) return;
   }
@@ -344,6 +350,7 @@ async function reconcileRemovedActiveDevices(
       await engine.setCameraDevice("default");
     } catch (err) {
       recordMediaIssue("cam", err instanceof Error ? err : missingCallDeviceError("cam"));
+      $callCamEnabled.set(false);
     }
   }
 }

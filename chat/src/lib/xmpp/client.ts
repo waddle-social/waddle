@@ -5,7 +5,7 @@ import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filter
 import type { BroadcastShow } from "@/presence/effective-show";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
-import { $callState, applyCallEvent, clearPendingDmCallTerminate, flushPendingDmCallTerminate, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
+import { $callState, applyCallEvent, clearPendingDmCallTerminate, flushPendingDmCallTerminate, reportCallError, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
 import { readvertiseMucCallPresence, setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
 import {
   applyDmCallEvent,
@@ -2965,12 +2965,20 @@ export class BrowserXmppClient {
    * active DM call retains its pending terminate.
    */
   private async endCallAndClearProjections(sender: CallWireSender | null): Promise<void> {
-    await tearDownActiveCall(sender, "gone");
+    // Media first, protocol second (#1446): the wire teardown's bounded
+    // sends can wait tens of seconds, and the microphone/camera must not
+    // stay live invisibly behind an already-idle UI. The engine
+    // disconnect starts immediately and the XMPP teardown runs
+    // concurrently, mirroring the normal hangup path.
+    const engineDisconnected = useCallEngine()
+      .engine.disconnect()
+      .catch((err) => reportCallError(err));
+    await tearDownActiveCall(sender, "gone").catch((err) => reportCallError(err));
     clearMucCallParticipants();
     clearAllRaisedHands();
     clearAllMuted();
     clearAllLiveCallParticipants();
-    void useCallEngine().engine.disconnect();
+    await engineDisconnected;
   }
 
   private teardownCallAfterTransportLoss(): void {
@@ -2979,7 +2987,7 @@ export class BrowserXmppClient {
     // terminate for the next session-ready — otherwise the peer dangles
     // active and the local reconnect offer survives for 24h (#1621
     // review round 4). Synchronous through the null-sender path.
-    void this.endCallAndClearProjections(null);
+    void this.endCallAndClearProjections(null).catch((err) => reportCallError(err));
   }
 
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {

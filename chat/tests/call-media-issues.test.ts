@@ -11,6 +11,7 @@ import {
 import { __setFaroForTesting } from "../src/lib/telemetry";
 import { useCallEngine } from "../src/lib/calls/use-call-engine";
 import { $devicePrefs, setMicDevice } from "../src/lib/calls/device-prefs";
+import { $callMicEnabled } from "../src/lib/calls/call-mic-state";
 
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 
@@ -175,6 +176,57 @@ describe("$callMediaIssues store", () => {
     });
 
     expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: "in-use" });
+  });
+
+  test("a failed unplug fallback records the issue and turns the mic toggle off", async () => {
+    let onDeviceChange: (() => void) | null = null;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          enumerateDevices: async () => [],
+          addEventListener: (_event: string, handler: () => void) => {
+            onDeviceChange = handler;
+          },
+          removeEventListener: () => undefined,
+        },
+      },
+    });
+    const engine = useCallEngine().engine as unknown as {
+      activeDeviceId: (kind: MediaDeviceKind) => string | null;
+      emit: (event: string, ...args: unknown[]) => void;
+      setMicDevice: (deviceId: string) => Promise<void>;
+    };
+    const originalActiveDeviceId = engine.activeDeviceId;
+    const originalSetMicDevice = engine.setMicDevice;
+    $callMicEnabled.set(true);
+    try {
+      engine.activeDeviceId = (kind: MediaDeviceKind) =>
+        kind === "audioinput" ? "gone-mic" : null;
+      engine.setMicDevice = async () => {
+        throw domError("NotFoundError");
+      };
+
+      engine.emit("connected", {
+        localIdentity: "alice@waddle.test/web",
+        remoteIdentities: [],
+        roomName: "room@muc.waddle.test::call",
+      });
+      onDeviceChange?.();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect($callMediaIssues.get().mic).toBe("missing");
+      // Capture is confirmed lost: the toggle must read OFF so the
+      // notice's "Enable mic" action requests a re-enable, not a
+      // disable of a stale on-state.
+      expect($callMicEnabled.get()).toBe(false);
+
+      engine.emit("disconnected", { origin: "local" });
+    } finally {
+      $callMicEnabled.set(true);
+      engine.activeDeviceId = originalActiveDeviceId;
+      engine.setMicDevice = originalSetMicDevice;
+    }
   });
 
   test("devicechange falling out from under the active mic falls back without a false notice", async () => {

@@ -8,13 +8,25 @@ import { reportError } from "@/lib/telemetry";
  * review round 5). The scan is a handful of keys on rare call-cache
  * touches.
  */
+const reportedPurgeFailures = new Set<string>();
+
 export function purgeLegacyStoragePrefixFromLocalStorage(prefix: string): void {
   const storage = legacyLocalStorage();
   if (!storage) return;
   try {
     for (const key of keysWithPrefix(storage, prefix)) storage.removeItem(key);
-  } catch {
-    // Retried on the next cache access when storage access recovers.
+  } catch (err) {
+    // The purge retries on the next cache access, but a persistent
+    // failure means bearer tokens may be SURVIVING in localStorage —
+    // that must be visible. Once per prefix per tab session, since this
+    // runs on every cache touch.
+    if (!reportedPurgeFailures.has(prefix)) {
+      reportedPurgeFailures.add(prefix);
+      reportError("storage.write", err, {
+        recoverable: true,
+        detail: `legacy call cache purge failed: ${prefix}`,
+      });
+    }
   }
 }
 

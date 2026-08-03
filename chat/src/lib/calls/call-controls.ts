@@ -8,6 +8,7 @@ import {
 } from "./call-store";
 import { broadcastMucCallSelfMute } from "./muc-call-actions";
 import { $callMicEnabled } from "./call-mic-state";
+import { $callCamEnabled } from "./call-cam-state";
 import type { CallWireSender } from "./outbound";
 import { connectionStore } from "@/lib/connection-store";
 import { useCallEngine } from "./use-call-engine";
@@ -40,7 +41,7 @@ import {
  * control-bar consumers that import it from `call-controls`.
  */
 export const $callConnecting = atom<boolean>(false);
-export const $callCamEnabled = atom<boolean>(true);
+export { $callCamEnabled };
 export { $callMicEnabled };
 export { $callScreenShareEnabled, $callScreenShareSupported, refreshScreenShareSupported };
 

@@ -34,7 +34,7 @@ import {
   clearAllMuted,
 } from "../src/lib/calls/call-mute";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
-import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
+import { canResumeMucCallActivity, leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
 import {
   $mucCallTerminatePendingSessions,
   clearAllMucCallSessionCacheForTests,
@@ -3274,6 +3274,43 @@ describe("LiveKit transport loss on an active DM call", () => {
   });
 });
 
+describe("sender-less MUC teardown", () => {
+  afterEach(() => {
+    clearCallState();
+    clearAllMucCallSessionCacheForTests();
+  });
+
+  test("marks the cached session terminate-pending so it cannot be resumed", async () => {
+    rememberMucCallSession({
+      roomJid: "chan@muc.test",
+      sid: "muc-outage",
+      selfFullJid: "alice@waddle.test/web",
+      media: audioVideo,
+      join,
+    });
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "muc-outage",
+      media: audioVideo,
+      join,
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+
+    // Grace expiry / terminal disconnect: no sender to carry the leave.
+    await tearDownActiveCall(null, "gone");
+
+    expect(
+      canResumeMucCallActivity({
+        roomJid: "chan@muc.test",
+        selfFullJid: "alice@waddle.test/web",
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("sender-less DM teardown retention", () => {
   afterEach(() => {
     clearPendingDmCallTerminate();
@@ -3345,6 +3382,60 @@ describe("sender-less DM teardown retention", () => {
       "gone",
     );
     await client.disconnect();
+  });
+
+  test("a pending terminate queued during an in-flight flush is drained by the same flush", async () => {
+    // Call A's terminate is mid-send when call B's teardown replaces the
+    // pending atom; B's own session-ready flush bounces off the in-flight
+    // guard, so A's drain loop must deliver B.
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-first",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(null, "gone");
+
+    let releaseFirstSend: () => void = () => undefined;
+    const firstSendGate = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    const sender = mockSender();
+    let terminateCalls = 0;
+    (sender.send_call_session_terminate as unknown as {
+      mockImplementation: (fn: () => Promise<void>) => void;
+    }).mockImplementation(async () => {
+      terminateCalls += 1;
+      if (terminateCalls === 1) await firstSendGate;
+    });
+
+    const flushing = flushPendingDmCallTerminate(sender);
+    await Promise.resolve();
+    // Call B tears down during another outage while A's send is in flight.
+    $callState.set({
+      phase: "active",
+      peer: "carol@waddle.test/desktop",
+      sid: "dm-second",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(null, "gone");
+    // B's session-ready flush hits the in-flight guard and returns.
+    await flushPendingDmCallTerminate(sender);
+
+    releaseFirstSend();
+    await flushing;
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "carol@waddle.test/desktop",
+      "dm-second",
+      "gone",
+    );
   });
 
   test("a failed flush retains the pending terminate for the next session-ready", async () => {
