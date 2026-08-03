@@ -778,10 +778,11 @@ impl JingleHandler {
         // stale leftover from a previous call in the same room and
         // must not tear this session down. A rejoin re-registers and
         // rebinds, so the stored binding always names the newest
-        // session. Sid validation happened at Jingle parse time, so
-        // an unbindable sid here is unreachable in practice; falling
-        // through unbound merely preserves the pre-#1608 room-scoped
-        // teardown for this registration.
+        // session. `xmpp_parsers` puts no length cap on a Jingle sid,
+        // so a pathological over-cap sid fails to bind; the
+        // registration then stays unbound and keeps the room-scoped
+        // pre-#1608 teardown — the exposure is confined to that
+        // client's own session.
         if let Ok(session) = SessionBinding::new(jingle.sid.0.clone()) {
             self.sfu
                 .bind_participant_session(&call_id, &identity, &session);

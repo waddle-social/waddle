@@ -2109,6 +2109,13 @@ impl SfuService for LiveKitSfu {
                 entry
                     .participants
                     .entry(identity.clone())
+                    // A re-registration belongs to a NEW signaling
+                    // session: drop the previous session's binding so
+                    // it starts unbound until the caller rebinds with
+                    // the new sid. Keeping the old binding would let a
+                    // stale same-room terminate match it forever
+                    // (#1608).
+                    .and_modify(|participant| participant.session = None)
                     .or_insert_with(|| ParticipantState::new(now));
             }
             dashmap::Entry::Vacant(entry) => {

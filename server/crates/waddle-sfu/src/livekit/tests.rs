@@ -3508,3 +3508,23 @@ fn session_binding_rejects_empty_and_oversized_values() {
     assert!(SessionBinding::new("a".repeat(257)).is_err());
     assert!(SessionBinding::new("a".repeat(256)).is_ok());
 }
+
+#[test]
+fn re_registration_starts_unbound_until_the_new_session_rebinds() {
+    // A rejoin re-registers first and rebinds second. If the rebind
+    // never happens (e.g. the new initiate's sid failed validation),
+    // the registration must NOT keep the previous session's binding:
+    // a stale terminate carrying the OLD sid would then match and
+    // tear down the new session — the exact #1608 shape, made
+    // permanent.
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let old = SessionBinding::new("muji-sid-old").expect("binding");
+
+    sfu.register_call_participant(&call, &alice);
+    sfu.bind_participant_session(&call, &alice, &old);
+    sfu.register_call_participant(&call, &alice);
+
+    assert_eq!(sfu.participant_session_binding(&call, &alice), None);
+}
