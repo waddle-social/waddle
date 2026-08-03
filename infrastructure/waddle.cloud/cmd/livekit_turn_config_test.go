@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -68,6 +71,32 @@ func turnConfig(t *testing.T, config map[string]any) map[string]any {
 	return turn
 }
 
+// renderLivekitChartWithValuesFile renders the chart with the baseline
+// values plus a caller-supplied values file, returning combined output.
+// Unlike --set overrides, a values file can carry an explicit `null`
+// while keeping the key present — a distinct shape the guards must
+// also reject.
+func renderLivekitChartWithValuesFile(t *testing.T, valuesYAML string) (string, error) {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not on PATH; skipping chart-render test")
+	}
+
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(valuesPath, []byte(valuesYAML), 0o600); err != nil {
+		t.Fatalf("write values file: %v", err)
+	}
+
+	args := []string{"template", "livekit-sfu", livekitChartPath, "--values", valuesPath}
+	for _, v := range livekitBaselineValues {
+		args = append(args, "--set", v)
+	}
+
+	out, err := exec.Command(helm, args...).CombinedOutput()
+	return string(out), err
+}
+
 // livekit-server v1.12+ authenticates TURN with time-limited credentials
 // whose lifetime is `turn.ttl_seconds` (default 300). waddle-server mints
 // credentials with a 3600s TTL, so the chart must carry the matching value
@@ -90,6 +119,20 @@ func TestChartRejectsTurnWithoutRestrictedPeerCIDRPolicy(t *testing.T) {
 	out, err := renderLivekitChart(t, "livekit.turn.allow_restricted_peer_cidrs=null")
 	if err == nil {
 		t.Fatalf("chart rendered TURN without allow_restricted_peer_cidrs; expected failure.\n%s", out)
+	}
+	if !strings.Contains(out, "allow_restricted_peer_cidrs") {
+		t.Fatalf("failure message should name allow_restricted_peer_cidrs; got:\n%s", out)
+	}
+}
+
+// A values file can null the policy while keeping the key present
+// (`allow_restricted_peer_cidrs: null`), which a bare hasKey guard would
+// wave through and render as a literal `null`. That shape must be
+// rejected the same as an absent key.
+func TestChartRejectsTurnWithNullRestrictedPeerCIDRPolicy(t *testing.T) {
+	out, err := renderLivekitChartWithValuesFile(t, "livekit:\n  turn:\n    allow_restricted_peer_cidrs: null\n")
+	if err == nil {
+		t.Fatalf("chart rendered TURN with a null allow_restricted_peer_cidrs; expected failure.\n%s", out)
 	}
 	if !strings.Contains(out, "allow_restricted_peer_cidrs") {
 		t.Fatalf("failure message should name allow_restricted_peer_cidrs; got:\n%s", out)
