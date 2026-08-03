@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,6 +22,32 @@ import (
 // the embedded TURN cannot validate those at all (#1447) — this key does
 // not affect that.
 const turnCredentialTTLSeconds = 3600
+
+// The chart TTL and the waddle-server minting default are deliberately
+// aligned but mechanically independent (two disjoint credential systems,
+// see #1447 and turnCredentialTTLSeconds), so nothing at runtime detects
+// drift between them. Extract the Rust default from its source so a
+// server-side change breaks this test instead of silently diverging.
+func TestTurnCredentialTTLMatchesWaddleServerMintingDefault(t *testing.T) {
+	const configRS = "../../../server/crates/waddle-sfu/src/config.rs"
+	src, err := os.ReadFile(configRS)
+	if err != nil {
+		t.Fatalf("read %s: %v", configRS, err)
+	}
+
+	m := regexp.MustCompile(`parse_seconds_env\("LIVEKIT_TURN_TTL_SECONDS",\s*(\d+)\)`).FindSubmatch(src)
+	if m == nil {
+		t.Fatalf("%s no longer contains the LIVEKIT_TURN_TTL_SECONDS default; update this test's extraction", configRS)
+	}
+	serverDefault, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		t.Fatalf("parse server TTL default %q: %v", m[1], err)
+	}
+
+	if serverDefault != turnCredentialTTLSeconds {
+		t.Fatalf("waddle-server LIVEKIT_TURN_TTL_SECONDS default = %d, chart turn.ttl_seconds = %d: change both together (or record why they now differ)", serverDefault, turnCredentialTTLSeconds)
+	}
+}
 
 // k8sConfigMap is the rendered ConfigMap shape we assert on.
 type k8sConfigMap struct {
