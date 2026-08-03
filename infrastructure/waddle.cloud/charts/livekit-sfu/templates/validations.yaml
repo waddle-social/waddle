@@ -86,7 +86,7 @@
 {{- fail "livekit.turn requires at least one of tls_port or udp_port when enabled" -}}
 {{- end -}}
 {{- if and .Values.livekit.turn.enabled (not .Values.livekit.turn.ttl_seconds) -}}
-{{- fail "livekit.turn.ttl_seconds is required when turn.enabled=true: livekit-server v1.12+ enforces it as the TURN credential lifetime (upstream default 300), and it must match the waddle-server minting TTL (LIVEKIT_TURN_TTL_SECONDS, default 3600) or calls outliving the shorter window lose relay" -}}
+{{- fail "livekit.turn.ttl_seconds is required when turn.enabled=true: livekit-server v1.12+ enforces it as the validity window of the TURN credentials it mints itself (upstream default 300), and a short window breaks mid-call allocations such as an ICE restart more than 5 minutes into a call; set 3600 (see values.yaml)" -}}
 {{- end -}}
 {{- if and .Values.livekit.turn.enabled (not (hasKey .Values.livekit.turn "allow_restricted_peer_cidrs")) -}}
 {{- fail "livekit.turn.allow_restricted_peer_cidrs must be set explicitly (an empty list is valid) when turn.enabled=true: livekit-server v1.13+ denies relay to restricted peers by default, and this policy must be a deliberate choice for the relay topology" -}}

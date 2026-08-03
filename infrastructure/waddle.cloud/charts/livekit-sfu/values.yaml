@@ -63,11 +63,15 @@ livekit:
     external_tls: false
     relay_range_start: 30000
     relay_range_end: 40000
-    # livekit-server v1.12+ enforces this credential lifetime against the
-    # timestamp in TURN usernames (upstream default 300). waddle-server
-    # mints TURN credentials with a 3600s TTL (`LIVEKIT_TURN_TTL_SECONDS`,
-    # server/crates/waddle-sfu/src/config.rs), so anything shorter drops
-    # relay for calls outliving that window. Keep the two in lockstep.
+    # Validity window of the TURN credentials livekit-server itself mints
+    # and hands to clients in the join response; v1.12+ embeds the expiry
+    # in the username and enforces it on new allocations (upstream default
+    # 300). 3600 keeps mid-call allocations working (e.g. an ICE restart
+    # more than 5 minutes into a call must still be able to Allocate) and
+    # matches the 3600s window waddle-server uses for the credentials it
+    # mints (`LIVEKIT_TURN_TTL_SECONDS`). Note the embedded TURN cannot
+    # validate waddle's coturn-REST-style credentials at all — that scheme
+    # mismatch is #1447, and this key does not affect it.
     ttl_seconds: 3600
     # livekit-server v1.13+ denies TURN relay to restricted peers
     # (loopback, link-local, private, multicast, unspecified) unless
