@@ -9,7 +9,10 @@ import {
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { adoptCallCorrelationId, clearCallCorrelationId } from "@/lib/calls/call-correlation";
-import { iceServersFromExternalServices } from "@/lib/calls/ice-servers";
+import {
+  iceServerBundleFromExternalServices,
+  type IceServerBundle,
+} from "@/lib/calls/ice-servers";
 import { connectionStore } from "@/lib/connection-store";
 import {
   $callConnecting,
@@ -39,18 +42,17 @@ const state = useStore($callState);
 const { engine } = useCallEngine();
 
 function getSender(): CallWireSender | null {
-  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
-  return (client?.xmpp as CallWireSender | undefined) ?? null;
+  return connectionStore.client?.callWireSender() ?? null;
 }
 
 // XEP-0215: ask our own server for its advertised TURN/STUN before connecting
 // so LiveKit negotiates ICE over the XMPP-native, client-controlled path.
-// Resolves to `[]` on any failure (the wrapper never throws) — the engine then
-// connects with LiveKit's default servers instead of an empty list.
-async function resolveIceServers(): Promise<RTCIceServer[]> {
+// Resolves to an empty bundle on any failure (the wrapper never throws) — the
+// engine then connects with LiveKit's default servers instead of an empty list.
+async function resolveIceServers(): Promise<IceServerBundle> {
   const client = connectionStore.client;
-  if (!client) return [];
-  return iceServersFromExternalServices(await client.fetchExternalServices());
+  if (!client) return { servers: [], earliestExpiryMs: null };
+  return iceServerBundleFromExternalServices(await client.fetchExternalServices());
 }
 
 // Connect to LiveKit when a fresh `active` phase appears with a new
@@ -74,7 +76,7 @@ watch(
     // a previous call's Speaker view or pin must not leak across.
     resetCallViewState();
     try {
-      const iceServers = await resolveIceServers();
+      const iceServerBundle = await resolveIceServers();
       // The ICE fetch can block for up to 10s. Re-confirm this is still the
       // same active call before connecting — a hang-up + redial during the
       // fetch would otherwise open a LiveKit session against a stale join/sid.
@@ -86,7 +88,12 @@ watch(
       // is kept so the failure path can await the adoption — a fast
       // connect failure must not emit its telemetry before the id lands.
       const correlationAdopted = adoptCallCorrelationId(current.join.room);
-      await engine.connect(current.join, { ...current.media, iceServers });
+      await engine.connect(current.join, {
+        ...current.media,
+        iceServers: iceServerBundle.servers,
+        iceServersExpiryMs: iceServerBundle.earliestExpiryMs,
+        refreshIceServers: resolveIceServers,
+      });
       // Capture is best-effort inside connect(): a missing device or a
       // denied mic/cam permission no longer throws — the user joins as a
       // receive-only participant and the engine emits `mediaDevicesError`

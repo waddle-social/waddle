@@ -23,6 +23,14 @@ import {
   markCallAttemptAccepted,
 } from "../src/lib/calls/call-lifecycle-telemetry";
 import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
+import { useCallEngine } from "../src/lib/calls/use-call-engine";
+import { DisconnectReason, type Room } from "livekit-client";
+import {
+  $mucCallLeavingRooms,
+  $mucCallLiveParticipants,
+  clearAllLiveCallParticipants,
+  setLiveCallParticipants,
+} from "../src/lib/calls/muc-call-live-participants";
 
 const audioVideo: CallMedia = { audio: true, video: true };
 const join: LiveKitJoin = {
@@ -35,6 +43,7 @@ const join: LiveKitJoin = {
 afterEach(() => {
   clearCallState();
   clearDmCallActivities();
+  clearAllLiveCallParticipants();
   __resetCallLifecycleTelemetryForTesting();
   __setFaroForTesting(null);
 });
@@ -611,5 +620,77 @@ describe("clearLastCallError", () => {
       context: expect.objectContaining({ recoverable: "true", detail: "call-operation" }),
     });
     __setFaroForTesting(null);
+  });
+});
+
+describe("terminal LiveKit disconnect", () => {
+  test("clears an active call and reports the transport reason", async () => {
+    const engine = useCallEngine().engine;
+    const room = {
+      off() {
+        return room;
+      },
+      localParticipant: {
+        getTrackPublication() {
+          return undefined;
+        },
+      },
+    };
+    (engine as unknown as { room: Room | null }).room = room as unknown as Room;
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "transport-lost",
+      media: audioVideo,
+      join,
+      kind: "dm",
+    });
+
+    await (
+      engine as unknown as {
+        handleDisconnected: (reason?: DisconnectReason) => Promise<void>;
+      }
+    ).handleDisconnected(DisconnectReason.DUPLICATE_IDENTITY);
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect($lastCallError.get()).toBe(
+      "This call ended because the same account joined from another device.",
+    );
+  });
+
+  test("preserves MUC leave cleanup after the call store becomes idle", async () => {
+    const engine = useCallEngine().engine;
+    const room = {
+      off() {
+        return room;
+      },
+      localParticipant: {
+        getTrackPublication() {
+          return undefined;
+        },
+      },
+    };
+    (engine as unknown as { room: Room | null }).room = room as unknown as Room;
+    setLiveCallParticipants("room@conference.waddle.test", ["alice@waddle.test/web"]);
+    $callState.set({
+      phase: "active",
+      peer: "room@conference.waddle.test",
+      sid: "muc-transport-lost",
+      media: audioVideo,
+      join,
+      kind: "muc",
+      selfNick: "alice",
+    });
+
+    await (
+      engine as unknown as {
+        handleDisconnected: (reason?: DisconnectReason) => Promise<void>;
+      }
+    ).handleDisconnected(DisconnectReason.ROOM_DELETED);
+
+    expect($mucCallLiveParticipants.get()).toEqual({});
+    expect($mucCallLeavingRooms.get()).toEqual({
+      "room@conference.waddle.test": "alice",
+    });
   });
 });

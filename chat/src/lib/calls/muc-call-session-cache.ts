@@ -3,9 +3,20 @@ import { normalizeMucCallRoomJid } from "./muc-call-presence";
 import { reportError } from "@/lib/telemetry";
 import { map } from "nanostores";
 import type { CallMedia, LiveKitJoin } from "./types";
+import {
+  callCacheSessionStorage,
+  clearCallCacheKeysWithPrefix,
+  localStorageForLegacyPurge,
+  purgeLegacyStoragePrefixFromLocalStorage,
+} from "./call-token-storage-migration";
 
 const CACHE_PREFIX = "waddle.chat.muc-call-sessions";
 const CACHE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// Remove bearer tokens written by pre-#1450 builds as soon as this cache is
+// initialized. `storage()` repeats the one-shot call so SSR-first imports can
+// retry after hydration makes browser storage available.
+purgeLegacyStoragePrefixFromLocalStorage(CACHE_PREFIX);
 const MAX_CACHE_ENTRIES = 64;
 
 type CachedMucCallSession = {
@@ -159,23 +170,27 @@ export function forgetMucCallSession(options: {
   syncPendingEntries(next.filter((entry) => entry.terminatePending));
 }
 
+export function clearMucCallSessionCacheForAccount(selfBareJid: string): void {
+  const selfBare = normalizedBare(selfBareJid);
+  if (!selfBare) return;
+  removeKey(cacheKey(selfBare));
+  const current = $mucCallTerminatePendingSessions.get();
+  const next = Object.fromEntries(
+    Object.entries(current).filter(([, entry]) => normalizedBare(entry.selfFullJid) !== selfBare),
+  );
+  if (Object.keys(next).length !== Object.keys(current).length) {
+    $mucCallTerminatePendingSessions.set(next);
+  }
+}
+
 export function clearAllMucCallSessionCacheForTests(): void {
   $mucCallTerminatePendingSessions.set({});
-  const s = storage();
-  if (!s) return;
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < s.length; index += 1) {
-      const key = s.key(index);
-      if (key?.startsWith(`${CACHE_PREFIX}.`)) keys.push(key);
-    }
-    for (const key of keys) s.removeItem(key);
-  } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "muc call session cache clear failed",
-    });
-  }
+  clearCallCacheKeysWithPrefix(storage(), CACHE_PREFIX, "muc call session cache clear failed");
+  clearCallCacheKeysWithPrefix(
+    localStorageForLegacyPurge(),
+    CACHE_PREFIX,
+    "muc call session cache clear failed",
+  );
 }
 
 function normalizeEntry(entry: CachedMucCallSession): CachedMucCallSession | null {
@@ -239,6 +254,20 @@ function writeEntries(selfBareJid: string, entries: CachedMucCallSession[]): voi
     reportError("storage.write", err, {
       recoverable: true,
       detail: "muc call session cache write failed",
+      storage_area: "muc-call-session-cache",
+    });
+  }
+}
+
+function removeKey(key: string): void {
+  const s = storage();
+  if (!s) return;
+  try {
+    s.removeItem(key);
+  } catch (err) {
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "muc call session cache clear failed",
       storage_area: "muc-call-session-cache",
     });
   }
@@ -344,10 +373,5 @@ function isLiveKitJoin(value: unknown): value is LiveKitJoin {
 }
 
 function storage(): Storage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
+  return callCacheSessionStorage(CACHE_PREFIX);
 }

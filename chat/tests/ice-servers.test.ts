@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   coerceExternalServices,
+  iceServerBundleFromExternalServices,
   iceServersFromExternalServices,
 } from "../src/lib/calls/ice-servers";
 import type { ExternalService } from "../src/lib/calls/types";
@@ -93,6 +94,38 @@ describe("iceServersFromExternalServices", () => {
     expect(stunServer.urls).toBe("stun:turn.waddle.social");
     const [turnsServer] = iceServersFromExternalServices([turns({ port: undefined })]);
     expect(turnsServer.urls).toBe("turns:turn.waddle.social?transport=tcp");
+  });
+});
+
+describe("iceServerBundleFromExternalServices", () => {
+  test("parses XEP-0215 xs:dateTime expiries and chooses the earliest TURN credential", () => {
+    const bundle = iceServerBundleFromExternalServices([
+      stun({ expires: "2025-01-01T00:00:00Z" }),
+      turns({ expires: "2026-06-17T12:05:00Z" }),
+      turns({ expires: "2026-06-17T12:00:00Z", host: "turn-two.waddle.test" }),
+    ]);
+
+    expect(bundle.servers).toHaveLength(3);
+    expect(bundle.earliestExpiryMs).toBe(Date.parse("2026-06-17T12:00:00Z"));
+  });
+
+  test("a discarded credential-less TURN entry contributes no expiry", () => {
+    // An already-past deadline on an unusable (credential-less) entry must
+    // not poison the bundle: the refresher would treat every refresh as
+    // instantly expired and spin without ever applying the valid relay.
+    const bundle = iceServerBundleFromExternalServices([
+      turns({ expires: "2020-01-01T00:00:00Z", username: undefined, password: undefined }),
+      turns({ expires: "2026-06-17T12:00:00Z" }),
+    ]);
+
+    expect(bundle.servers).toHaveLength(1);
+    expect(bundle.earliestExpiryMs).toBe(Date.parse("2026-06-17T12:00:00Z"));
+  });
+
+  test("ignores malformed optional expiries", () => {
+    expect(iceServerBundleFromExternalServices([
+      turns({ expires: "not-a-date" }),
+    ]).earliestExpiryMs).toBeNull();
   });
 });
 

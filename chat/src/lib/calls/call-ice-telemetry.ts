@@ -48,6 +48,9 @@ type TurnReachability = "gathered" | "not-gathered" | "unknown";
 /** Coarse, low-cardinality bucket over the ICE restart count. */
 export type IceRestartBucket = "none" | "once" | "few" | "many";
 
+/** Lifecycle signal for expiring XEP-0215 TURN credentials. */
+export type IceCredentialEvent = "refreshed" | "expired";
+
 /**
  * One observed ICE state for a call. Every field is a closed enum or a
  * bucket, so the beacon stays low-cardinality and de-dupes usefully.
@@ -234,6 +237,8 @@ export function iceStatsEntries(report: { forEach(fn: (value: unknown) => void):
 export type CallIceBeacon = {
   /** Record an ICE restart; the next observation carries the new bucket. */
   noteIceRestart(): void;
+  /** Beacon a TURN credential lifecycle transition for this call. */
+  noteCredentials(event: IceCredentialEvent): void;
   /** The restart count observed so far this call. */
   restartCount(): number;
   /** Reduce `report` and beacon it unless an equal state already beaconed. */
@@ -263,12 +268,16 @@ function sameIceSnapshot(a: CallIceSnapshot, b: CallIceSnapshot): boolean {
  */
 export function createCallIceBeacon(
   report: (snapshot: CallIceSnapshot) => void,
+  reportCredentials: (event: IceCredentialEvent) => void = () => undefined,
 ): CallIceBeacon {
   let seen: CallIceSnapshot[] = [];
   let restarts = 0;
   return {
     noteIceRestart() {
       restarts += 1;
+    },
+    noteCredentials(event) {
+      reportCredentials(event);
     },
     restartCount() {
       return restarts;

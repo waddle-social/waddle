@@ -20,6 +20,7 @@ import {
   seedCallControlsFromEngine,
   setPushToTalkActive,
   suspendCallForPageHide,
+  toggleCam,
   toggleScreenShare,
   toggleMic,
 } from "../src/lib/calls/call-controls";
@@ -178,7 +179,7 @@ describe("call page lifecycle controls", () => {
       send_raw_iq: mock(async () => "<iq type='result'/>"),
     };
     connectionStore.client = {
-      xmpp: sender,
+      callWireSender: () => sender,
     } as unknown as typeof connectionStore.client;
     $callState.set({
       phase: "active",
@@ -261,7 +262,7 @@ describe("hangupActiveCall media-first ordering (#1446)", () => {
         return new Promise<void>(() => undefined); // server never replies
       }),
     };
-    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    connectionStore.client = { callWireSender: () => sender } as unknown as typeof connectionStore.client;
     const { engine } = useCallEngine();
     (engine as unknown as { room: unknown }).room = {
       off: () => undefined,
@@ -296,7 +297,7 @@ describe("hangupActiveCall media-first ordering (#1446)", () => {
     const sender = {
       send_call_session_terminate: mock(async () => undefined),
     };
-    connectionStore.client = { xmpp: sender } as unknown as typeof connectionStore.client;
+    connectionStore.client = { callWireSender: () => sender } as unknown as typeof connectionStore.client;
     const { engine } = useCallEngine();
     (engine as unknown as { room: unknown }).room = {
       off: () => undefined,
@@ -526,6 +527,68 @@ describe("device-less call controls", () => {
     await toggleScreenShare();
     expect($callScreenShareEnabled.get()).toBe(false);
     expect($callMediaIssues.get().screen).toBe("in-use");
+  });
+
+  test("a stale camera failure cannot roll back the newest toggle", async () => {
+    const { engine } = useCallEngine();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setCameraEnabled: async () => {
+          calls += 1;
+          if (calls !== 1) return;
+          await gate;
+          throw deviceError("NotReadableError");
+        },
+      },
+    };
+    $callCamEnabled.set(false);
+
+    const first = toggleCam();
+    await Promise.resolve();
+    const superseded = toggleCam();
+    const latest = toggleCam();
+    release();
+    await Promise.all([first, superseded, latest]);
+
+    expect(calls).toBe(2);
+    expect($callCamEnabled.get()).toBe(true);
+    expect($callMediaIssues.get().cam).toBeNull();
+  });
+
+  test("a stale screen-share failure cannot roll back the newest toggle", async () => {
+    const { engine } = useCallEngine();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setScreenShareEnabled: async () => {
+          calls += 1;
+          if (calls !== 1) return;
+          await gate;
+          throw deviceError("NotReadableError");
+        },
+      },
+    };
+    $callScreenShareEnabled.set(false);
+
+    const first = toggleScreenShare();
+    await Promise.resolve();
+    const superseded = toggleScreenShare();
+    const latest = toggleScreenShare();
+    release();
+    await Promise.all([first, superseded, latest]);
+
+    expect(calls).toBe(2);
+    expect($callScreenShareEnabled.get()).toBe(true);
+    expect($callMediaIssues.get().screen).toBeNull();
   });
 
   test("native browser stop syncs the screenshare toggle off through local track unpublish", () => {

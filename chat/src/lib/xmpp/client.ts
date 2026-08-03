@@ -5,8 +5,8 @@ import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filter
 import type { BroadcastShow } from "@/presence/effective-show";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
-import { $callState, applyCallEvent, clearCallState, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
-import { setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
+import { $callState, applyCallEvent, clearPendingDmCallTerminate, flushPendingDmCallTerminate, reportCallError, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
+import { readvertiseMucCallPresence, setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
 import {
   applyDmCallEvent,
   clearDmCallActivities,
@@ -23,6 +23,7 @@ import {
 import { applyMutePresence, clearAllMuted } from "@/lib/calls/call-mute";
 import { clearAllLiveCallParticipants } from "@/lib/calls/muc-call-live-participants";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
+import { createCallTransportRecovery } from "@/lib/calls/call-transport-recovery";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent, ExternalService } from "@/lib/calls/types";
 import { coerceExternalServices } from "@/lib/calls/ice-servers";
@@ -130,6 +131,7 @@ import {
   type RoomAutoJoinBlock,
 } from "./room-auto-join-policy";
 import { clearDmCallJoinCacheForAccount } from "@/lib/calls/dm-call-join-cache";
+import { clearMucCallSessionCacheForAccount } from "@/lib/calls/muc-call-session-cache";
 import {
   discoverExtensionCommands,
   discoverExtensionRoutes,
@@ -452,6 +454,26 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
+  private readonly callTransportRecovery = createCallTransportRecovery({
+    isCallMediaActive: () => $callState.get().phase === "active",
+    teardown: () => this.teardownCallAfterTransportLoss(),
+  });
+
+  /**
+   * The call-signalling surface of the live WASM handle, or null when
+   * disconnected. The single sanctioned way for call code to reach the
+   * wire — no peeking at the private handle through casts.
+   */
+  callWireSender(): CallWireSender | null {
+    // A half-open handle (assigned during connect, before session-ready)
+    // defers application IQs and may be doomed: handing it out would
+    // route a DM teardown into the sender-present branch, burn the
+    // terminate on a dead stream, and skip the pending-teardown
+    // retention that the null-sender path provides (#1621 review
+    // round 3). Only a session-ready stream is a usable sender.
+    if (!this.connected) return null;
+    return (this.xmpp as unknown as CallWireSender | null) ?? null;
+  }
   /** Terminal lifecycle latch. A disposed client is never reconnectable. */
   private disposed = false;
   private disposePromise: Promise<void> | null = null;
@@ -1210,6 +1232,8 @@ export class BrowserXmppClient {
 
   private async disconnectInternal(): Promise<void> {
     this.destroying = true;
+    this.callTransportRecovery.dispose();
+    clearPendingDmCallTerminate();
     this.outboundQueue.dispose();
     this.roomDiscoveryGeneration += 1;
     this.currentRoomCatalogFingerprintEvidence.clear();
@@ -1263,6 +1287,7 @@ export class BrowserXmppClient {
     this.resumedSessionRoomKeys.clear();
     this.sessionReadyHandledXmpp = null;
     clearDmCallJoinCacheForAccount(this.session.jid);
+    clearMucCallSessionCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
     clearAllRaisedHands();
@@ -2668,6 +2693,10 @@ export class BrowserXmppClient {
 
   private async runSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
     if (this.xmpp !== xmpp) return;
+    this.callTransportRecovery.onTransportReady();
+    // A sender-less teardown during the outage deferred its wire
+    // terminate; deliver it now that a stream exists.
+    void flushPendingDmCallTerminate(xmpp as unknown as CallWireSender);
     this.connected = true; this.reconnect.resetAttempts();
     this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
     // Coalesce duplicate triggers. Three event hooks call
@@ -2699,6 +2728,10 @@ export class BrowserXmppClient {
       // Single-flight per epoch (`fanOutAutoJoin`) keeps this to one
       // join per room across the three fan-out triggers (#1221).
       this.fanOutJoinableRooms();
+      // The fresh bind's rejoin presence recreates our occupant WITHOUT
+      // the XEP-0272 advertisement the server wiped — re-emit it for a
+      // still-active MUC call once the call room's join confirms.
+      void this.readvertiseActiveMucCallPresence(xmpp);
     } else {
       // Resumed: occupancy survived the SM detach-for-resume server-side
       // (no MUC leave was broadcast). Re-seed readiness for the
@@ -2880,6 +2913,83 @@ export class BrowserXmppClient {
       try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
     }
   }
+  private async readvertiseActiveMucCallPresence(xmpp: XmppClientInstance): Promise<void> {
+    const state = $callState.get();
+    if (state.phase !== "active" || state.kind !== "muc") return;
+    // Fence every await on the CAPTURED call identity: the slot can be
+    // replaced mid-flight (hang up + new call), and a stale restoration
+    // attempt must neither tear down nor advertise the replacement
+    // (#1621 review round 5).
+    const sid = state.sid;
+    const stillThisCall = (): boolean => {
+      const current = $callState.get();
+      return current.phase === "active" && current.kind === "muc" && current.sid === sid;
+    };
+    // Resolves immediately when the rejoin already confirmed; joins
+    // (single-flight) and waits otherwise. The advertisement must land
+    // on the FRESH occupant, not race the join presence. One retry
+    // covers a self-presence timeout whose scheduled rejoin succeeds;
+    // after that a call whose room cannot be restored is a zombie —
+    // no occupancy, no XEP-0272 advertisement, no control plane — so
+    // it is ended cleanly instead of preserved indefinitely (#1621
+    // review round 4).
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.ensureJoined(state.peer);
+        break;
+      } catch {
+        if (this.xmpp !== xmpp || !stillThisCall()) return;
+        if (attempt === 1) {
+          await this.endCallAndClearProjections(this.callWireSender());
+          return;
+        }
+      }
+    }
+    if (this.xmpp !== xmpp || !this.connected) return;
+    if (!stillThisCall()) return;
+    const advertised = await readvertiseMucCallPresence(xmpp as unknown as RawIqSender);
+    if (!advertised && stillThisCall() && this.xmpp === xmpp) {
+      // The rejoin worked but the <muji/> advertisement did not (send
+      // rejected, or a stale wasm bundle without the FFI): the fresh
+      // occupant would stay unadvertised for the call's remainder with
+      // nothing left to retry it — same zombie as an unrestorable room.
+      await this.endCallAndClearProjections(this.callWireSender());
+    }
+  }
+
+  /**
+   * End the current call and clear every MUC projection store. The
+   * single teardown shape shared by transport-loss expiry and failed
+   * call restoration, so the two paths cannot drift (#1621 review
+   * rounds 4-5). With a null sender the wire steps are skipped and an
+   * active DM call retains its pending terminate.
+   */
+  private async endCallAndClearProjections(sender: CallWireSender | null): Promise<void> {
+    // Media first, protocol second (#1446): the wire teardown's bounded
+    // sends can wait tens of seconds, and the microphone/camera must not
+    // stay live invisibly behind an already-idle UI. The engine
+    // disconnect starts immediately and the XMPP teardown runs
+    // concurrently, mirroring the normal hangup path.
+    const engineDisconnected = useCallEngine()
+      .engine.disconnect()
+      .catch((err) => reportCallError(err));
+    await tearDownActiveCall(sender, "gone").catch((err) => reportCallError(err));
+    clearMucCallParticipants();
+    clearAllRaisedHands();
+    clearAllMuted();
+    clearAllLiveCallParticipants();
+    await engineDisconnected;
+  }
+
+  private teardownCallAfterTransportLoss(): void {
+    // Sender-less teardown, not a bare clearCallState: an active DM call
+    // gets its activity/cached-join cleanup AND retains the pending wire
+    // terminate for the next session-ready — otherwise the peer dangles
+    // active and the local reconnect offer survives for 24h (#1621
+    // review round 4). Synchronous through the null-sender path.
+    void this.endCallAndClearProjections(null).catch((err) => reportCallError(err));
+  }
+
   private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     this.roomJoinRetry.cancelAll();
@@ -2889,25 +2999,18 @@ export class BrowserXmppClient {
     // readiness without re-sending join presence (#1221).
     this.resumedSessionRoomKeys = new Set(this.joinedMucReady);
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
-    // The wire is gone — no point trying to send session-terminate.
-    // Clear the local call slot so the UI doesn't strand on a stale
-    // active overlay across reconnect; the reconnect path doesn't
-    // re-establish call state (XEP-0353 has no resume semantics for
-    // an in-flight call once the responder's connection drops).
-    //
-    // We MUST also drop the LiveKit room. The CallOverlay's
-    // `onBeforeUnmount` is the usual route, but it won't fire when the
-    // overlay re-renders to `phase: idle` and stays mounted (the parent
-    // tree owns it) — the engine would keep an open SFU socket
-    // pumping bytes until the next call replaced it. Tearing the
-    // singleton engine down here is idempotent (no-op when nothing's
-    // connected).
-    clearCallState({ endReason: "error" });
-    clearMucCallParticipants();
-    clearAllRaisedHands();
-    clearAllMuted();
-    clearAllLiveCallParticipants();
-    void useCallEngine().engine.disconnect();
+    // Established media is independent of the transient XMPP transport.
+    // Preserve its UI projections while stream recovery has a bounded
+    // chance to restore the signalling plane; setup phases still fail fast.
+    // A TERMINAL classification (auth rejection, resource conflict — the
+    // branch below that schedules no reconnect) or an already-latched
+    // terminal state makes recovery impossible: tear down now instead of
+    // leaving the room and capture alive for the full grace window.
+    const callTeardownDeferred = !this.destroying
+      && this.terminalDisconnectDetail === null
+      && !this.inTerminalErrorState
+      && this.callTransportRecovery.onTransportLost() === "deferred";
+    if (!callTeardownDeferred) this.teardownCallAfterTransportLoss();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     // `joinedMucs` keys are already canonical `roomJoinKey`s (#1221).
     this.retainedJoinedRoomJids = new Set([

@@ -211,6 +211,8 @@ type EnumeratedDevice = {
   label: string;
 };
 
+export type CallDevicePreferenceKind = "mic" | "cam" | "speaker";
+
 /**
  * Categorized list of devices for the settings popover. Empty arrays
  * when the user hasn't granted permission yet — the popover renders
@@ -221,6 +223,85 @@ export type EnumeratedDevices = {
   cams: EnumeratedDevice[];
   speakers: EnumeratedDevice[];
 };
+
+export type ResolvedCallDevicePreference = {
+  activeDeviceId: string;
+  preferenceId: string | null;
+  captureDeviceId: string | undefined;
+  missing: boolean;
+};
+
+function enumeratedDevicesForKind(
+  devices: EnumeratedDevices,
+  kind: CallDevicePreferenceKind,
+): readonly EnumeratedDevice[] {
+  if (kind === "mic") return devices.mics;
+  if (kind === "cam") return devices.cams;
+  return devices.speakers;
+}
+
+/**
+ * The one NotFoundError shape every missing-device path emits, so
+ * `recordMediaIssue`'s classifier sees a single canonical name.
+ */
+export function missingCallDeviceError(kind: "mic" | "cam"): Error {
+  const error = new Error(`${kind} device is no longer available`);
+  error.name = "NotFoundError";
+  return error;
+}
+
+export function hasEnumeratedCallDeviceId(
+  devices: EnumeratedDevices,
+  kind: CallDevicePreferenceKind,
+  deviceId: string,
+): boolean {
+  return enumeratedDevicesForKind(devices, kind).some((device) => device.deviceId === deviceId);
+}
+
+export async function resolveCallDevicePreference(
+  kind: CallDevicePreferenceKind,
+  deviceId: string | null,
+): Promise<ResolvedCallDevicePreference> {
+  if (deviceId === null) {
+    return {
+      activeDeviceId: "default",
+      preferenceId: null,
+      captureDeviceId: undefined,
+      missing: false,
+    };
+  }
+  let devices: EnumeratedDevices;
+  try {
+    devices = await enumerateCallDevices();
+  } catch {
+    // Enumeration is only a pre-check; failing must neither fail the
+    // JOIN (capture is best-effort) nor silently swap an EXPLICIT pick
+    // for the default. Attempt the requested device as-is: a genuinely
+    // unavailable id rejects at switch/capture time, and callers then
+    // keep the previous active device and saved preference (#1621
+    // review rounds 2 and 5).
+    return {
+      activeDeviceId: deviceId,
+      preferenceId: deviceId,
+      captureDeviceId: deviceId,
+      missing: false,
+    };
+  }
+  if (hasEnumeratedCallDeviceId(devices, kind, deviceId)) {
+    return {
+      activeDeviceId: deviceId,
+      preferenceId: deviceId,
+      captureDeviceId: deviceId,
+      missing: false,
+    };
+  }
+  return {
+    activeDeviceId: "default",
+    preferenceId: null,
+    captureDeviceId: undefined,
+    missing: true,
+  };
+}
 
 export async function enumerateCallDevices(): Promise<EnumeratedDevices> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {

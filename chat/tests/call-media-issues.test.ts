@@ -9,6 +9,11 @@ import {
   recordMediaIssue,
 } from "../src/lib/calls/call-media-issues";
 import { __setFaroForTesting } from "../src/lib/telemetry";
+import { useCallEngine } from "../src/lib/calls/use-call-engine";
+import { $devicePrefs, setMicDevice } from "../src/lib/calls/device-prefs";
+import { $callMicEnabled } from "../src/lib/calls/call-mic-state";
+
+const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 
 function domError(name: string): Error {
   const err = new Error(`${name} message`);
@@ -19,6 +24,12 @@ function domError(name: string): Error {
 afterEach(() => {
   clearAllMediaIssues();
   __setFaroForTesting(null);
+  const engine = useCallEngine().engine as unknown as {
+    emit: (event: string, ...args: unknown[]) => void;
+  };
+  engine.emit("disconnected", { origin: "local" });
+  if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+  else Reflect.deleteProperty(globalThis, "navigator");
 });
 
 describe("classifyMediaError", () => {
@@ -137,5 +148,158 @@ describe("$callMediaIssues store", () => {
     recordMediaIssue("screen", domError("AbortError"));
     clearAllMediaIssues();
     expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: null });
+  });
+
+  test("the engine mediaDevicesError event records a mid-call issue", () => {
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    engine.emit("mediaDevicesError", {
+      source: "audio",
+      error: domError("NotFoundError"),
+    });
+
+    expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });
+  });
+
+  test("an engine media error without a device kind surfaces as a screen issue", () => {
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    // livekit maps ScreenShare/Unknown sources to an undefined kind; the
+    // engine routes those to source "screen" instead of dropping them.
+    engine.emit("mediaDevicesError", {
+      source: "screen",
+      error: domError("NotReadableError"),
+    });
+
+    expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: "in-use" });
+  });
+
+  test("a failed unplug fallback records the issue and turns the mic toggle off", async () => {
+    let onDeviceChange: (() => void) | null = null;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          enumerateDevices: async () => [],
+          addEventListener: (_event: string, handler: () => void) => {
+            onDeviceChange = handler;
+          },
+          removeEventListener: () => undefined,
+        },
+      },
+    });
+    const engine = useCallEngine().engine as unknown as {
+      activeDeviceId: (kind: MediaDeviceKind) => string | null;
+      emit: (event: string, ...args: unknown[]) => void;
+      setMicDevice: (deviceId: string) => Promise<void>;
+    };
+    const originalActiveDeviceId = engine.activeDeviceId;
+    const originalSetMicDevice = engine.setMicDevice;
+    $callMicEnabled.set(true);
+    try {
+      engine.activeDeviceId = (kind: MediaDeviceKind) =>
+        kind === "audioinput" ? "gone-mic" : null;
+      engine.setMicDevice = async () => {
+        throw domError("NotFoundError");
+      };
+
+      engine.emit("connected", {
+        localIdentity: "alice@waddle.test/web",
+        remoteIdentities: [],
+        roomName: "room@muc.waddle.test::call",
+      });
+      onDeviceChange?.();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect($callMediaIssues.get().mic).toBe("missing");
+      // Capture is confirmed lost: the toggle must read OFF so the
+      // notice's "Enable mic" action requests a re-enable, not a
+      // disable of a stale on-state.
+      expect($callMicEnabled.get()).toBe(false);
+
+      engine.emit("disconnected", { origin: "local" });
+    } finally {
+      $callMicEnabled.set(true);
+      engine.activeDeviceId = originalActiveDeviceId;
+      engine.setMicDevice = originalSetMicDevice;
+    }
+  });
+
+  test("devicechange falling out from under the active mic falls back without a false notice", async () => {
+    let onDeviceChange: (() => void) | null = null;
+    let removedHandler: (() => void) | null = null;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          enumerateDevices: async () => [
+            { deviceId: "replacement-mic", kind: "audioinput", label: "Replacement" },
+          ],
+          addEventListener: (_event: string, handler: () => void) => {
+            onDeviceChange = handler;
+          },
+          removeEventListener: (_event: string, handler: () => void) => {
+            removedHandler = handler;
+          },
+        },
+      },
+    });
+
+    const engine = useCallEngine().engine as unknown as {
+      activeDeviceId: (kind: MediaDeviceKind) => string | null;
+      emit: (event: string, ...args: unknown[]) => void;
+      setMicDevice: (deviceId: string) => Promise<void>;
+      setCameraDevice: (deviceId: string) => Promise<void>;
+      setSpeakerDevice: (deviceId: string) => Promise<void>;
+    };
+    const originalActiveDeviceId = engine.activeDeviceId;
+    const originalSetMicDevice = engine.setMicDevice;
+    const originalSetCameraDevice = engine.setCameraDevice;
+    const originalSetSpeakerDevice = engine.setSpeakerDevice;
+    const micCalls: string[] = [];
+    let activeMicId = "gone-mic";
+    setMicDevice("gone-mic");
+    try {
+      engine.activeDeviceId = (kind: MediaDeviceKind) =>
+        kind === "audioinput" ? activeMicId : null;
+      engine.setMicDevice = async (deviceId: string) => {
+        micCalls.push(deviceId);
+      };
+      engine.setCameraDevice = async () => undefined;
+      engine.setSpeakerDevice = async () => undefined;
+
+      engine.emit("connected", {
+        localIdentity: "alice@waddle.test/web",
+        remoteIdentities: [],
+        roomName: "room@muc.waddle.test::call",
+      });
+      onDeviceChange?.();
+      // LiveKit's own listener auto-selects the first remaining device before
+      // our debounced reconciliation runs. We must still remember that the
+      // device active at event time was the one removed.
+      activeMicId = "replacement-mic";
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      // The fallback SUCCEEDED: capture is live on the default, so no
+      // "missing" notice is recorded (its enable action would disable
+      // the working device — #1621 round 4), and the SAVED preference
+      // survives so replugging restores the user's choice.
+      expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: null });
+      expect(micCalls).toEqual(["default"]);
+      expect($devicePrefs.get().mic).toBe("gone-mic");
+
+      engine.emit("disconnected", { origin: "local" });
+      expect(removedHandler).toBe(onDeviceChange);
+    } finally {
+      setMicDevice(null);
+      engine.activeDeviceId = originalActiveDeviceId;
+      engine.setMicDevice = originalSetMicDevice;
+      engine.setCameraDevice = originalSetCameraDevice;
+      engine.setSpeakerDevice = originalSetSpeakerDevice;
+    }
   });
 });

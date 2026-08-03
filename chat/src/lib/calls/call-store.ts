@@ -12,8 +12,10 @@ import {
   applyDmCallEvent,
   clearDmCallActivity,
 } from "./dm-call-activity";
+import { forgetDmCallJoin } from "./dm-call-join-cache";
 import {
   forgetMucCallSession,
+  markMucCallSessionTerminatePending,
   rememberMucCallSession,
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
@@ -1055,7 +1057,124 @@ export async function tearDownActiveCall(
     } catch (err) {
       reportWireError(err);
     }
+  } else {
+    // No sender: XMPP died before (or with) the media. The wire steps
+    // are impossible right now, but the LOCAL halves of each phase's
+    // teardown must still run (#1621 review rounds 2 and 4).
+    switch (s.phase) {
+      case "active":
+        if (s.kind === "dm") {
+          // The accepted activity and cached join must stop offering a
+          // reconnect into a dead call, and the peer still deserves the
+          // XEP-0166 terminate + XEP-0353 finish — retained for the
+          // next session-ready to flush.
+          clearDmCallActivity(s.peer, s.sid);
+          forgetDmCallJoin({
+            selfBareJid: barePeerJid(s.join.identity),
+            peerJid: s.peer,
+            sid: s.sid,
+          });
+          $pendingDmCallTerminate.set({ peer: s.peer, sid: s.sid, reason });
+        } else {
+          // The cached MUC session must stop offering a resume into the
+          // supposedly-ended LiveKit room. Terminate-pending both blocks
+          // canResumeMucCallActivity and queues the mixer terminate for
+          // the next session's hydrate pass (#1621 review round 6).
+          markMucCallSessionTerminatePending({
+            roomJid: s.peer,
+            sid: s.sid,
+            selfFullJid: s.selfFullJid,
+            media: s.media,
+          });
+        }
+        break;
+      case "incoming":
+        incomingCallAlerts?.stop(s.sid);
+        clearDmCallActivity(s.from, s.sid);
+        break;
+      case "outgoing":
+        clearDmCallActivity(s.to, s.sid);
+        break;
+      case "muc-pending":
+        rejectPendingMujiAccept(
+          s.sid,
+          new Error("Muji session-accept wait cancelled while clearing call state"),
+          s.attemptId,
+        );
+        cancelMucCallPreparationWaiters(
+          s.peer,
+          s.selfNick,
+          new Error("Muji preparing wait cancelled while clearing call state"),
+        );
+        break;
+      default:
+        break;
+    }
   }
+}
+
+type PendingDmCallTerminate = {
+  peer: string;
+  sid: string;
+  reason: "success" | "gone";
+};
+
+/**
+ * The deferred wire teardown of a sender-less [`tearDownActiveCall`] —
+ * store-idiomatic (an atom like the call slot itself) so the state is
+ * observable and testable rather than hidden module mutation.
+ */
+const $pendingDmCallTerminate = atom<PendingDmCallTerminate | null>(null);
+let pendingDmTerminateFlushInFlight = false;
+
+/**
+ * Deliver the wire teardown a sender-less [`tearDownActiveCall`] had to
+ * defer. Called from the XMPP session-ready path; sid-scoped, so a
+ * terminate for a call the peer already abandoned is a harmless no-op
+ * on their side. The pending row is cleared only AFTER the terminate
+ * succeeds (or classifies orphaned) — a failed or interrupted send
+ * keeps it retained for the NEXT session-ready instead of silently
+ * dropping the peer's only end-of-call signal (#1621 review round 3).
+ */
+export async function flushPendingDmCallTerminate(sender: CallWireSender): Promise<void> {
+  if (pendingDmTerminateFlushInFlight) return;
+  pendingDmTerminateFlushInFlight = true;
+  try {
+    // Drain-loop rather than single-shot: a NEWER call's teardown can
+    // replace the pending atom while a previous flush's bounded send is
+    // still in flight — its own session-ready flush call bounced off the
+    // in-flight guard, so this loop is what delivers it (#1621 review
+    // round 6). A send failure exits and retains for the next session.
+    for (;;) {
+      const pending = $pendingDmCallTerminate.get();
+      if (!pending) return;
+      const outcome = await boundedTeardownSend(
+        () => outboundCalls.sessionTerminateWithOutcome(sender, pending.peer, pending.sid, pending.reason),
+        { attempts: TERMINATE_SEND_ATTEMPTS },
+      );
+      if (outcome !== "ok" && outcome !== "orphaned") return;
+      if ($pendingDmCallTerminate.get() === pending) {
+        $pendingDmCallTerminate.set(null);
+      }
+      try {
+        // The XEP-0353 finish bookend is best-effort: the terminate above
+        // already ended the call for the peer.
+        await boundedTeardownSend(() => outboundCalls.finish(sender, pending.peer, pending.sid), {});
+      } catch (err) {
+        reportCallError(err);
+      }
+    }
+  } catch (err) {
+    // Retained: the next session-ready retries with its fresh stream.
+    reportCallError(err);
+  } finally {
+    pendingDmTerminateFlushInFlight = false;
+  }
+}
+
+/** Logout must not leak a terminate into the next account's session. */
+export function clearPendingDmCallTerminate(): void {
+  $pendingDmCallTerminate.set(null);
 }
 
 /**

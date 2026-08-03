@@ -1,5 +1,8 @@
 import { ref, type Ref } from "vue";
-import { $callState } from "./call-store";
+import { $callState, clearCallState, reportCallError, tearDownActiveCall } from "./call-store";
+import type { CallWireSender } from "./outbound";
+import { connectionStore } from "@/lib/connection-store";
+import { DisconnectReason } from "livekit-client";
 import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engine";
 import {
   advanceActiveSpeakers,
@@ -20,6 +23,15 @@ import {
   setLiveCallParticipants,
 } from "./muc-call-live-participants";
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
+import { clearDmCallActivity } from "./dm-call-activity";
+import { $callMicEnabled } from "./call-mic-state";
+import { $callCamEnabled } from "./call-cam-state";
+import { forgetDmCallJoin } from "./dm-call-join-cache";
+import {
+  enumerateCallDevices,
+  hasEnumeratedCallDeviceId,
+  missingCallDeviceError,
+} from "./device-prefs";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
 import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
@@ -48,12 +60,16 @@ import {
   type CallStatDirection,
   type CallStatSample,
 } from "./call-stats";
-import { reportCallAudioProcessing, reportCallIce, reportCallMediaPath } from "../telemetry";
+import {
+  reportCallAudioProcessing,
+  reportCallIce,
+  reportCallIceCredentials,
+  reportCallMediaPath,
+} from "../telemetry";
 import {
   resetCallConnectionQuality,
   setCallConnectionPhase,
   setCallConnectionQuality,
-  type CallConnectionPhase,
 } from "./connection-quality";
 import { resetCallActiveSince, setCallActiveSince } from "./call-duration";
 import {
@@ -63,6 +79,58 @@ import {
   finishCallAttemptForTransportDisconnect,
   type CallKind,
 } from "./call-lifecycle-telemetry";
+
+/**
+ * Reasons where the LiveKit loss is OURS alone — the peer's media may
+ * still be up and neither the SFU nor the server will tell them we're
+ * gone, so the XMPP wire teardown must. Server-initiated ends
+ * (room deleted/closed, participant removed, duplicate identity, …)
+ * are excluded: the authority that ended us also informs the peer, and
+ * a duplicate-identity takeover must not terminate the succeeding
+ * device's call.
+ */
+function peerUnawareOfTransportLoss(reason?: DisconnectReason): boolean {
+  switch (reason) {
+    case DisconnectReason.CONNECTION_TIMEOUT:
+    case DisconnectReason.MEDIA_FAILURE:
+    case DisconnectReason.JOIN_FAILURE:
+    case DisconnectReason.SIGNAL_CLOSE:
+    case DisconnectReason.UNKNOWN_REASON:
+    case undefined:
+      return true;
+    default:
+      return false;
+  }
+}
+
+function currentCallWireSender(): CallWireSender | null {
+  return connectionStore.client?.callWireSender() ?? null;
+}
+
+function transportDisconnectMessage(reason?: DisconnectReason): string {
+  switch (reason) {
+    case DisconnectReason.DUPLICATE_IDENTITY:
+      return "This call ended because the same account joined from another device.";
+    case DisconnectReason.PARTICIPANT_REMOVED:
+      return "You were removed from the call.";
+    case DisconnectReason.ROOM_DELETED:
+    case DisconnectReason.ROOM_CLOSED:
+      return "The call room was closed.";
+    case DisconnectReason.SERVER_SHUTDOWN:
+      return "The call service shut down unexpectedly.";
+    case DisconnectReason.USER_UNAVAILABLE:
+    case DisconnectReason.USER_REJECTED:
+      return "The other participant is no longer available for this call.";
+    case DisconnectReason.CONNECTION_TIMEOUT:
+      return "The call connection timed out.";
+    case DisconnectReason.MEDIA_FAILURE:
+      return "The call ended because the media connection failed.";
+    case DisconnectReason.JOIN_FAILURE:
+      return "The call ended because the room connection failed.";
+    default:
+      return "The call connection was lost.";
+  }
+}
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -214,6 +282,9 @@ const callMediaPathBeacon = createCallMediaPathBeacon((snapshot) => {
 const callIceBeacon = createCallIceBeacon((snapshot) => {
   const callKind = currentCallKind();
   if (callKind) reportCallIce(snapshot, callKind);
+}, (event) => {
+  const callKind = currentCallKind();
+  if (callKind) reportCallIceCredentials(event, callKind);
 });
 
 /** Cadence of the observational media-path poll. Codec/ICE settle within the
@@ -229,6 +300,104 @@ let mediaPathSampling = false;
 // just-reset beacon — which would otherwise suppress the next call's first
 // event when both calls share a codec/ICE path.
 let mediaPathGeneration = 0;
+
+const CALL_DEVICE_CHANGE_DEBOUNCE_MS = 200;
+let unsubscribeCallDeviceChange: (() => void) | null = null;
+let callDeviceChangeTimer: ReturnType<typeof setTimeout> | null = null;
+let callDeviceChangeGeneration = 0;
+let pendingCallDeviceChange: { micId: string | null; camId: string | null } | null = null;
+
+async function reconcileRemovedActiveDevices(
+  engine: CallEngine,
+  generation: number,
+  activeBeforeChange: { micId: string | null; camId: string | null },
+): Promise<void> {
+  const devices = await enumerateCallDevices();
+  if (generation !== callDeviceChangeGeneration) return;
+
+  const activeMicId = activeBeforeChange.micId;
+  // Fall back on the ENGINE only — the saved preference survives, so
+  // replugging the device restores the user's choice on the next call
+  // (or the next explicit selection) instead of silently forgetting it.
+  // A notice is recorded ONLY when the fallback itself fails: after a
+  // successful switch capture is live on the default, and a "missing"
+  // notice would mislabel the call as listener-only with an enable
+  // action that disables the working device (#1621 review round 4).
+  if (
+    activeMicId &&
+    activeMicId !== "default" &&
+    !hasEnumeratedCallDeviceId(devices, "mic", activeMicId)
+  ) {
+    try {
+      await engine.setMicDevice("default");
+    } catch (err) {
+      recordMediaIssue("mic", err instanceof Error ? err : missingCallDeviceError("mic"));
+      // Capture is confirmed lost: reflect it in the toggle so the
+      // notice's "Enable mic" action requests a re-enable instead of
+      // negating the stale on-state into a disable (#1621 round 6).
+      $callMicEnabled.set(false);
+    }
+    if (generation !== callDeviceChangeGeneration) return;
+  }
+
+  const activeCamId = activeBeforeChange.camId;
+  if (
+    activeCamId &&
+    activeCamId !== "default" &&
+    !hasEnumeratedCallDeviceId(devices, "cam", activeCamId)
+  ) {
+    try {
+      await engine.setCameraDevice("default");
+    } catch (err) {
+      recordMediaIssue("cam", err instanceof Error ? err : missingCallDeviceError("cam"));
+      $callCamEnabled.set(false);
+    }
+  }
+}
+
+function stopCallDeviceChangeListener(): void {
+  callDeviceChangeGeneration += 1;
+  if (callDeviceChangeTimer) {
+    clearTimeout(callDeviceChangeTimer);
+    callDeviceChangeTimer = null;
+  }
+  pendingCallDeviceChange = null;
+  unsubscribeCallDeviceChange?.();
+  unsubscribeCallDeviceChange = null;
+}
+
+function startCallDeviceChangeListener(engine: CallEngine): void {
+  stopCallDeviceChangeListener();
+  const generation = callDeviceChangeGeneration;
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.addEventListener) return;
+  const handler = () => {
+    // Capture BEFORE the debounce. LiveKit registers its own devicechange
+    // listener when the Room is built and may auto-switch activeDeviceMap to
+    // the first remaining device before our async enumeration finishes. A
+    // later read would then hide that the in-use device was removed.
+    const snapshot = {
+      micId: engine.activeDeviceId("audioinput"),
+      camId: engine.activeDeviceId("videoinput"),
+    };
+    pendingCallDeviceChange = {
+      micId: pendingCallDeviceChange?.micId ?? snapshot.micId,
+      camId: pendingCallDeviceChange?.camId ?? snapshot.camId,
+    };
+    if (callDeviceChangeTimer) clearTimeout(callDeviceChangeTimer);
+    callDeviceChangeTimer = setTimeout(() => {
+      callDeviceChangeTimer = null;
+      const activeBeforeChange = pendingCallDeviceChange;
+      pendingCallDeviceChange = null;
+      if (!activeBeforeChange) return;
+      void reconcileRemovedActiveDevices(engine, generation, activeBeforeChange)
+        .catch(reportCallError);
+    }, CALL_DEVICE_CHANGE_DEBOUNCE_MS);
+  };
+  navigator.mediaDevices.addEventListener("devicechange", handler);
+  unsubscribeCallDeviceChange = () => {
+    navigator.mediaDevices.removeEventListener("devicechange", handler);
+  };
+}
 // Previous byte/timestamp sample per audio track, so the media-path poll can
 // derive the send/recv bitrate (a rate needs two samples) and band it. Keyed by
 // the same track key used in the diagnostics dialog; cleared between calls in
@@ -483,13 +652,20 @@ export function useCallEngine(): {
       // connection-quality lifecycle.
       setCallActiveSince(Date.now());
     });
+    const engineForDeviceChanges = singletonEngine;
+    singletonEngine.on("connected", () => {
+      // Keep a call-lifetime `devicechange` listener active even when the
+      // settings dialog is closed, so a hot-unplugged in-use mic/camera can
+      // surface a notice and fall back to the browser default immediately.
+      startCallDeviceChangeListener(engineForDeviceChanges);
+    });
     singletonEngine.on("mediaDevicesError", ({ source, error }) => {
       // A best-effort mic/cam capture failed (no device / denied
       // permission). The call stays connected as receive-only; record
       // the issue so the non-blocking notice can explain it and offer
       // a retry. NOT routed through reportCallError — the persistent
       // notice is the single channel, avoiding a double-surfaced error.
-      recordMediaIssue(source === "audio" ? "mic" : "cam", error);
+      recordMediaIssue(source === "audio" ? "mic" : source === "video" ? "cam" : "screen", error);
     });
     singletonEngine.on("audioPlaybackStatusChanged", (canPlaybackAudio) => {
       setCallAudioPlaybackBlocked(!canPlaybackAudio);
@@ -548,6 +724,12 @@ export function useCallEngine(): {
       // so signaling blips never inflate the ICE-restart SLI.
       callIceBeacon.noteIceRestart();
     });
+    singletonEngine.on("iceCredentialsRefreshed", () => {
+      callIceBeacon.noteCredentials("refreshed");
+    });
+    singletonEngine.on("iceCredentialsExpired", () => {
+      callIceBeacon.noteCredentials("expired");
+    });
     singletonEngine.on("activeSpeakersChanged", (identities) => {
       // LiveKit re-derived who is speaking. Feed it through the brief hold so
       // the Gallery highlight does not flicker on transient sounds.
@@ -567,10 +749,35 @@ export function useCallEngine(): {
       if (!roomJid) return;
       removeLiveCallParticipant(roomJid, identity);
     });
-    singletonEngine.on("disconnected", (reason) => {
+    singletonEngine.on("disconnected", ({ origin, reason }) => {
       const disconnectedCall = $callState.get();
-      if (reason !== "local" && disconnectedCall.phase === "active") {
-        finishCallAttemptForTransportDisconnect(disconnectedCall.sid);
+      const disconnectedMucSlot = activeMucCallSlot();
+      if (origin !== "local" && disconnectedCall.phase === "active") {
+        const terminal = finishCallAttemptForTransportDisconnect(disconnectedCall.sid);
+        if (disconnectedCall.kind === "dm" && peerUnawareOfTransportLoss(reason)) {
+          // A local-transport death leaves the peer in a dangling active
+          // call unless we tell them: run the bounded wire teardown
+          // (XEP-0166 terminate + XEP-0353 finish + activity cleanup),
+          // which snapshots $callState itself — so it runs INSTEAD of
+          // clearCallState, not after it.
+          void tearDownActiveCall(currentCallWireSender(), "gone").catch(reportCallError);
+        } else {
+          clearCallState({ endReason: terminal?.endReason ?? "error" });
+          if (disconnectedCall.kind === "dm" && reason !== DisconnectReason.DUPLICATE_IDENTITY) {
+            // The call is authoritatively over (room deleted/closed, we
+            // were removed, server shut down): the accepted activity and
+            // cached join must stop offering a reconnect into it.
+            // DUPLICATE_IDENTITY keeps both — the succeeding device owns
+            // the still-live call.
+            clearDmCallActivity(disconnectedCall.peer, disconnectedCall.sid);
+            forgetDmCallJoin({
+              selfBareJid: disconnectedCall.join.identity,
+              peerJid: disconnectedCall.peer,
+              sid: disconnectedCall.sid,
+            });
+          }
+        }
+        reportCallError(new Error(transportDisconnectMessage(reason)));
       }
       remoteTracks.value = [];
       localTracks.value = [];
@@ -596,6 +803,7 @@ export function useCallEngine(): {
       micAudioProcessingBeacon.reset();
       // Stop the media-path poll and re-arm its beacon for the next call.
       stopMediaPathPolling();
+      stopCallDeviceChangeListener();
       callMediaPathBeacon.reset();
       // Same for the ICE beacon: drop this call's seen-set and restart
       // count so the next call measures its own connectivity.
@@ -613,7 +821,7 @@ export function useCallEngine(): {
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook
       // bridge keeps honest within seconds.
-      const slot = activeMucCallSlot();
+      const slot = disconnectedMucSlot;
       if (!slot) return;
       // Suppress our own stale Muji nick for one render cycle: the
       // server-authoritative `<muji/>` absence broadcast arrives ~1

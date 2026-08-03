@@ -1,16 +1,38 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   $devicePrefs,
   audioProcessingConstraints,
   defaultAudioProcessingPrefs,
+  hasEnumeratedCallDeviceId,
   isSpeakerOutputSelectionSupported,
   normalizeAudioProcessingPrefs,
   parseDevicePrefsStorage,
+  resolveCallDevicePreference,
   serializeDevicePrefsStorage,
   setAiNoiseModel,
   setBackgroundEffectPref,
 } from "../src/lib/calls/device-prefs";
 import { BACKGROUND_OFF } from "../src/lib/calls/background-effect/effect-id";
+
+const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+
+function setEnumeratedDevices(
+  devices: Array<{ deviceId: string; kind: MediaDeviceKind; label: string }>,
+): void {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        enumerateDevices: async () => devices,
+      },
+    },
+  });
+}
+
+afterEach(() => {
+  if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+  else Reflect.deleteProperty(globalThis, "navigator");
+});
 
 describe("call speaker output support", () => {
   test("is disabled during SSR or when media elements cannot switch sinks", () => {
@@ -131,6 +153,71 @@ describe("call audio processing preferences", () => {
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
       backgroundEffect: BACKGROUND_OFF,
+    });
+  });
+});
+
+describe("call device preference resolution", () => {
+  test("detects an enumerated device id for its picker kind", () => {
+    const devices = {
+      mics: [{ deviceId: "headset-mic", kind: "audioinput", label: "Headset" }],
+      cams: [{ deviceId: "desk-cam", kind: "videoinput", label: "Desk cam" }],
+      speakers: [{ deviceId: "usb-speaker", kind: "audiooutput", label: "USB speaker" }],
+    };
+
+    expect(hasEnumeratedCallDeviceId(devices, "mic", "headset-mic")).toBe(true);
+    expect(hasEnumeratedCallDeviceId(devices, "cam", "headset-mic")).toBe(false);
+  });
+
+  test("keeps an available saved device id for capture and active switching", async () => {
+    setEnumeratedDevices([
+      { deviceId: "headset-mic", kind: "audioinput", label: "Headset" },
+      { deviceId: "desk-cam", kind: "videoinput", label: "Desk cam" },
+    ]);
+
+    await expect(resolveCallDevicePreference("mic", "headset-mic")).resolves.toEqual({
+      activeDeviceId: "headset-mic",
+      preferenceId: "headset-mic",
+      captureDeviceId: "headset-mic",
+      missing: false,
+    });
+  });
+
+  test("enumeration failure keeps the requested device instead of failing or defaulting", async () => {
+    // Enumeration is only a pre-check: a rejecting enumerateDevices()
+    // must neither propagate (the join would die before the Room is
+    // built) nor silently swap an explicit pick for the default — the
+    // requested id is attempted as-is and a genuinely unavailable
+    // device rejects at switch/capture time instead.
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          enumerateDevices: async () => {
+            throw new Error("enumeration unavailable");
+          },
+        },
+      },
+    });
+
+    await expect(resolveCallDevicePreference("mic", "headset-mic")).resolves.toEqual({
+      activeDeviceId: "headset-mic",
+      preferenceId: "headset-mic",
+      captureDeviceId: "headset-mic",
+      missing: false,
+    });
+  });
+
+  test("falls back to the browser default when a saved device id is gone", async () => {
+    setEnumeratedDevices([
+      { deviceId: "desk-cam", kind: "videoinput", label: "Desk cam" },
+    ]);
+
+    await expect(resolveCallDevicePreference("mic", "stale-mic")).resolves.toEqual({
+      activeDeviceId: "default",
+      preferenceId: null,
+      captureDeviceId: undefined,
+      missing: true,
     });
   });
 });

@@ -1,9 +1,20 @@
 import type { CallMedia, LiveKitJoin } from "./types";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { reportError } from "@/lib/telemetry";
+import {
+  callCacheSessionStorage,
+  clearCallCacheKeysWithPrefix,
+  localStorageForLegacyPurge,
+  purgeLegacyStoragePrefixFromLocalStorage,
+} from "./call-token-storage-migration";
 
 const CACHE_PREFIX = "waddle.chat.dm-call-joins";
 const MAX_CACHE_ENTRIES = 32;
+
+// Remove bearer tokens written by pre-#1450 builds as soon as this cache is
+// initialized. `storage()` repeats the one-shot call so SSR-first imports can
+// retry after hydration makes browser storage available.
+purgeLegacyStoragePrefixFromLocalStorage(CACHE_PREFIX);
 const CACHE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type CachedDmCallJoin = {
@@ -85,21 +96,12 @@ export function clearDmCallJoinCacheForAccount(selfBareJid: string): void {
 }
 
 export function clearAllDmCallJoinCacheForTests(): void {
-  const s = storage();
-  if (!s) return;
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < s.length; index += 1) {
-      const key = s.key(index);
-      if (key?.startsWith(`${CACHE_PREFIX}.`)) keys.push(key);
-    }
-    for (const key of keys) s.removeItem(key);
-  } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "dm call join cache clear failed",
-    });
-  }
+  clearCallCacheKeysWithPrefix(storage(), CACHE_PREFIX, "dm call join cache clear failed");
+  clearCallCacheKeysWithPrefix(
+    localStorageForLegacyPurge(),
+    CACHE_PREFIX,
+    "dm call join cache clear failed",
+  );
 }
 
 function normalizeEntry(entry: CachedDmCallJoin): CachedDmCallJoin | null {
@@ -222,10 +224,5 @@ function isLiveKitJoin(value: unknown): value is LiveKitJoin {
 }
 
 function storage(): Storage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
+  return callCacheSessionStorage(CACHE_PREFIX);
 }

@@ -1,5 +1,11 @@
 import type { ExternalService } from "./types";
 
+export type IceServerBundle = {
+  servers: RTCIceServer[];
+  /** Earliest valid XEP-0215 TURN/TURNS credential expiry, as epoch ms. */
+  earliestExpiryMs: number | null;
+};
+
 const SERVICE_TYPES = new Set<ExternalService["serviceType"]>(["stun", "turn", "turns"]);
 const TRANSPORTS = new Set<NonNullable<ExternalService["transport"]>>(["udp", "tcp"]);
 
@@ -62,7 +68,20 @@ export function coerceExternalServices(raw: unknown): ExternalService[] {
 export function iceServersFromExternalServices(
   services: ReadonlyArray<ExternalService>,
 ): RTCIceServer[] {
+  return iceServerBundleFromExternalServices(services).servers;
+}
+
+/**
+ * Map XEP-0215 services and retain the earliest TURN credential deadline.
+ * `expires` is `xs:dateTime` in XEP-0215, so `Date.parse` converts the
+ * already-coerced string at this boundary; malformed optional values are
+ * ignored rather than invalidating otherwise usable ICE servers.
+ */
+export function iceServerBundleFromExternalServices(
+  services: ReadonlyArray<ExternalService>,
+): IceServerBundle {
   const iceServers: RTCIceServer[] = [];
+  let earliestExpiryMs: number | null = null;
   for (const service of services) {
     const hostPort = formatHostPort(service.host, service.port);
     if (service.serviceType === "stun") {
@@ -75,12 +94,22 @@ export function iceServersFromExternalServices(
     if (service.username === undefined || service.password === undefined) {
       continue;
     }
+    // Only services that actually joined the bundle contribute a deadline:
+    // a discarded credential-less entry's (possibly already-past) expires
+    // must not make the refresher treat every otherwise-valid bundle as
+    // expired and spin on retries.
+    const expiryMs = service.expires === undefined ? Number.NaN : Date.parse(service.expires);
+    if (Number.isFinite(expiryMs)) {
+      earliestExpiryMs = earliestExpiryMs === null
+        ? expiryMs
+        : Math.min(earliestExpiryMs, expiryMs);
+    }
     // The `?transport` parameter is turn-specific (RFC 7065).
     const transportQuery = service.transport ? `?transport=${service.transport}` : "";
     const urls = `${service.serviceType}:${hostPort}${transportQuery}`;
     iceServers.push({ urls, username: service.username, credential: service.password });
   }
-  return iceServers;
+  return { servers: iceServers, earliestExpiryMs };
 }
 
 /**

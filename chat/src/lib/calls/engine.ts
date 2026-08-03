@@ -1,6 +1,7 @@
 import {
   ConnectionQuality,
   ConnectionState,
+  DisconnectReason,
   Room,
   RoomEvent,
   Track,
@@ -15,6 +16,7 @@ import {
   type AudioCaptureOptions,
   type RoomConnectOptions,
   type RoomOptions,
+  type RoomEventCallbacks,
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from "livekit-client";
@@ -33,6 +35,8 @@ import {
   audioProcessingConstraints,
   type AudioProcessingConstraints,
   type AudioProcessingPrefs,
+  type ResolvedCallDevicePreference,
+  resolveCallDevicePreference,
 } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
 import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
@@ -56,6 +60,12 @@ import {
 import type { CameraBackgroundState } from "./background-effect/camera-background";
 import type { CameraBackgroundOps, VideoBackgroundProcessor } from "./background-effect/ops";
 import { cameraBackgroundOps } from "./background-effect/registry";
+import type { IceServerBundle } from "./ice-servers";
+import {
+  createIceCredentialRefresher,
+  type IceCredentialRefresher,
+} from "./ice-credential-refresh";
+import type { TimerClock } from "./timer-clock";
 
 /**
  * The local mic track surface the AI-noise reconciler drives — the subset of
@@ -162,6 +172,15 @@ export type ParticipantAudioVolumeIdentity = {
   source: CallAudioTrackSource;
 };
 
+function defaultCallDevicePreference(): ResolvedCallDevicePreference {
+  return {
+    activeDeviceId: "default",
+    preferenceId: null,
+    captureDeviceId: undefined,
+    missing: false,
+  };
+}
+
 type VolumeAdjustableTrack = {
   setVolume(volume: number): unknown;
 };
@@ -219,7 +238,10 @@ export type CallEngineEvents = {
      */
     roomName: string;
   }) => void;
-  disconnected: (reason: "local" | "transport") => void;
+  disconnected: (info: {
+    origin: "local" | "transport";
+    reason?: DisconnectReason;
+  }) => void;
   /**
    * Fires when LiveKit reports whether remote audio can currently
    * play. Browser autoplay policy can suspend Web Audio playback until
@@ -235,7 +257,7 @@ export type CallEngineEvents = {
    * rather than ending the call. Mirrors LiveKit's
    * `RoomEvent.MediaDevicesError` but carries which capture failed.
    */
-  mediaDevicesError: (info: { source: "audio" | "video"; error: unknown }) => void;
+  mediaDevicesError: (info: { source: "audio" | "video" | "screen"; error: unknown }) => void;
   /**
    * Fires when the *applied* browser-native audio processing of the
    * local mic changes — on mic publish, unpublish, or a mid-call mic
@@ -303,6 +325,10 @@ export type CallEngineEvents = {
    * recovering while media keeps flowing (#1452 ICE-restart SLI).
    */
   transportReconnecting: () => void;
+  /** XEP-0215 credentials were refreshed for a future full reconnect. */
+  iceCredentialsRefreshed: () => void;
+  /** The current XEP-0215 TURN credentials reached their expiry mid-call. */
+  iceCredentialsExpired: () => void;
   /**
    * Fires when LiveKit re-derives which participants are actively speaking
    * (from audio levels). Carries the full speaking set — including the local
@@ -363,6 +389,8 @@ export class CallEngine {
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
     transportReconnecting: new Set(),
+    iceCredentialsRefreshed: new Set(),
+    iceCredentialsExpired: new Set(),
     activeSpeakersChanged: new Set(),
   };
 
@@ -419,17 +447,27 @@ export class CallEngine {
    * `RTCPeerConnection`, which `new Room()` reaches for at construction.
    */
   private readonly makeRoom: (options: RoomOptions) => Room;
+  private readonly iceRefreshClock: TimerClock | undefined;
+  private iceCredentialRefresher: IceCredentialRefresher | null = null;
+  private readonly scopedRoomListeners = new WeakMap<Room, {
+    activeDeviceChanged: RoomEventCallbacks[RoomEvent.ActiveDeviceChanged];
+    connectionStateChanged: RoomEventCallbacks[RoomEvent.ConnectionStateChanged];
+    mediaDevicesChanged: RoomEventCallbacks[RoomEvent.MediaDevicesChanged];
+    mediaDevicesError: RoomEventCallbacks[RoomEvent.MediaDevicesError];
+  }>();
 
   constructor(opts?: {
     makeAiNoiseProcessor?: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
     backgroundOps?: CameraBackgroundOps;
     videoCodecSupport?: VideoCodecSupport;
     makeRoom?: (options: RoomOptions) => Room;
+    iceRefreshClock?: TimerClock;
   }) {
     this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
     this.backgroundOps = opts?.backgroundOps ?? cameraBackgroundOps;
     this.codecSupport = opts?.videoCodecSupport ?? videoCodecSupport(currentVideoCodecSupportEnv());
     this.makeRoom = opts?.makeRoom ?? ((options) => new Room(options));
+    this.iceRefreshClock = opts?.iceRefreshClock;
   }
 
   /** LiveKit identity of the local participant, populated once
@@ -462,9 +500,19 @@ export class CallEngine {
     return this.room?.canPlaybackAudio ?? true;
   }
 
+  activeDeviceId(kind: MediaDeviceKind): string | null {
+    return this.room?.getActiveDevice(kind) ?? null;
+  }
+
   async connect(
     join: LiveKitJoin,
-    opts: { audio: boolean; video: boolean; iceServers?: RTCIceServer[] },
+    opts: {
+      audio: boolean;
+      video: boolean;
+      iceServers?: RTCIceServer[];
+      iceServersExpiryMs?: number | null;
+      refreshIceServers?: () => Promise<IceServerBundle>;
+    },
   ): Promise<void> {
     if (this.room || this.connecting) throw new Error("CallEngine already connected");
     // Defensive pre-flight: confirm the JWT actually carries a usable
@@ -481,123 +529,192 @@ export class CallEngine {
     // call's mic publish; start each call with a clean failure guard and
     // capture-NS state (initial capture uses the user's stored constraints).
     this.desiredAiNoiseModel = prefs.aiNoiseModel;
-    this.aiNoiseFailedModels.clear();
+    this.aiNoiseFailedModels = new Set();
     this.appliedModelActiveForCapture = false;
     // Seed the desired background effect from prefs so it re-applies on this
     // call's camera publish; start each call with a clean failure guard.
     this.desiredBackgroundEffect = prefs.backgroundEffect;
-    this.backgroundFailedEffects.clear();
+    this.backgroundFailedEffects = new Set();
     this.appliedBackgroundEffect = BACKGROUND_OFF;
-    const room = this.makeRoom(callRoomOptionsForPrefs(prefs));
-    room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
-    room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
-    room.on(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
-    room.on(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
-    room.on(RoomEvent.ParticipantConnected, this.handleParticipantConnected);
-    room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
-    room.on(RoomEvent.Disconnected, this.handleDisconnected);
-    room.on(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
-    room.on(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
-    room.on(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
-    room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
-    room.on(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
-    room.on(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
-    room.on(RoomEvent.ActiveSpeakersChanged, this.handleActiveSpeakersChanged);
-    // XEP-0215 ICE injection: when the server advertised external services,
-    // make them the authoritative ICE list via `rtcConfig`. An empty/absent
-    // list means "no advertisement" — pass no `rtcConfig` so LiveKit keeps its
-    // own signalling-provided servers rather than connecting with none.
-    const connectOptions: RoomConnectOptions | undefined =
-      opts.iceServers && opts.iceServers.length > 0
-        ? { rtcConfig: { iceServers: opts.iceServers } }
-        : undefined;
-    // Reserve the engine now — AFTER the synchronous setup above, which can
-    // throw (`makeRoom`/`callRoomOptionsForPrefs` reach for WebRTC globals).
-    // There is no `await` between here and the guard at the top, so this still
-    // closes the concurrent-connect window without risking a stuck flag.
     this.connecting = true;
     const generation = ++this.connectGeneration;
     try {
-      await room.connect(join.url, join.token, connectOptions);
-    } catch (err) {
-      // Connect itself failed; the listeners we bound above would
-      // otherwise dangle on a `Room` that nothing references but the
-      // closure inside the listener — strip them so a future GC has
-      // a clean path. `this.room` was never set so the caller stays
-      // on the well-defined "not connected" path.
-      room.removeAllListeners();
-      // Only release the reservation if it's still ours — a disconnect() or
-      // newer connect() during the await owns `connecting` now.
-      if (this.connectGeneration === generation) this.connecting = false;
-      throw err;
-    }
-    // A disconnect() (or a newer connect()) during the await bumped the
-    // generation: this connect was cancelled. Tear our own Room down rather
-    // than publishing it as an orphan that nothing will ever disconnect.
-    if (this.connectGeneration !== generation) {
-      room.removeAllListeners();
-      await room.disconnect().catch(() => undefined);
-      return;
-    }
-    this.room = room;
-    this.connecting = false;
-    // Emit the initial participant snapshot so subscribers can seed
-    // their projection without missing peers that connected before
-    // our listeners attached.
-    this.emit("connected", {
-      localIdentity: room.localParticipant.identity,
-      remoteIdentities: Array.from(room.remoteParticipants.values()).map((p) => p.identity),
-      roomName: room.name || join.room,
-    });
-    // Publishing is BEST-EFFORT and decoupled from joining. `room.connect`
-    // above already succeeded, so the user is a fully working receive-only
-    // (listen/watch) participant — a missing device or a denied
-    // `getUserMedia` permission MUST NOT eject them from the call. Each
-    // track is enabled independently (a broken camera can't suppress a
-    // working mic) and failures are surfaced via `mediaDevicesError` so the
-    // UI can show a non-blocking "joined without mic/camera" notice and
-    // offer a retry, instead of tearing the half-joined call down.
-    await enableRequestedCapture(
-      room.localParticipant,
-      { audio: opts.audio, video: opts.video },
-      (source, error) => this.emit("mediaDevicesError", { source, error }),
-      {
-        audio: audioPublishOptions(),
-        camera: videoPublishPlan({ source: "camera", capability: this.codecSupport }),
-      },
-    );
-    // Re-apply the speaker preference now that the room has remote
-    // audio elements to retarget; the engine ignores it on connect
-    // because no `<audio>` exists yet, but every subsequent
-    // RoomEvent.TrackSubscribed wires through this.applySpeaker.
-    if (prefs.speaker) {
-      await this.applySpeakerDevice(prefs.speaker).catch(() => undefined);
+      // Preserve the synchronous all-default path: only an actual saved id
+      // needs enumeration. This keeps disconnect-during-connect semantics from
+      // acquiring an extra microtask window before the Room is constructed.
+      let resolvedMic = defaultCallDevicePreference();
+      let resolvedCam = defaultCallDevicePreference();
+      let resolvedSpeaker = defaultCallDevicePreference();
+      if (prefs.mic !== null || prefs.cam !== null || prefs.speaker !== null) {
+        [resolvedMic, resolvedCam, resolvedSpeaker] = await Promise.all([
+          resolveCallDevicePreference("mic", prefs.mic),
+          resolveCallDevicePreference("cam", prefs.cam),
+          resolveCallDevicePreference("speaker", prefs.speaker),
+        ]);
+      }
+      if (this.connectGeneration !== generation) return;
+      const room = this.makeRoom(
+        callRoomOptionsForPrefs({
+          mic: resolvedMic.captureDeviceId ?? null,
+          cam: resolvedCam.captureDeviceId ?? null,
+          audioProcessing: prefs.audioProcessing,
+        }),
+      );
+      this.updateRoomListeners(room, "on");
+      // XEP-0215 ICE injection: when the server advertised external services,
+      // make them the authoritative ICE list via `rtcConfig`. An empty/absent
+      // list means "no advertisement" — pass no `rtcConfig` so LiveKit keeps its
+      // own signalling-provided servers rather than connecting with none.
+      // livekit-client 2.19.1 exposes rtcConfig only at connect time: Room has
+      // no public setConfiguration/restartIce API. Keep this exact mutable
+      // object alive because the SDK retains it as RTCEngine.rtcConfig and
+      // reads it whenever it (re)builds a PeerConnection: a resume
+      // (ReconnectResponse -> makeRTCConfiguration -> pc.setConfiguration +
+      // ICE restart) and a full reconnect both consume the refreshed list.
+      // That is the designed recovery contract for a relay allocation that
+      // outlives its time-limited TURN REST credential: the allocation's
+      // refresh fails, ICE degrades, and the SDK's own reconnect comes back
+      // through THIS object with valid credentials — a brief automatic
+      // blip instead of a permanently dead relay path. Proactively
+      // restarting ICE ourselves is not possible against the SDK's private
+      // PeerConnections without reaching into internals.
+      // No advertisement (or a failed fetch) = no rtcConfig at all — and no
+      // refresher either: with nothing to hand LiveKit at connect time there
+      // is no retained config object for a refresh to update, and the call
+      // never had a client-controlled relay to lose.
+      const rtcConfig: RTCConfiguration | undefined =
+        opts.iceServers && opts.iceServers.length > 0
+          ? { iceServers: opts.iceServers }
+          : undefined;
+      const connectOptions: RoomConnectOptions | undefined = rtcConfig ? { rtcConfig } : undefined;
+      try {
+        await room.connect(join.url, join.token, connectOptions);
+      } catch (err) {
+        // Connect itself failed; the listeners we bound above would
+        // otherwise dangle on a `Room` that nothing references but the
+        // closure inside the listener — strip them so a future GC has
+        // a clean path. `this.room` was never set so the caller stays
+        // on the well-defined "not connected" path.
+        room.removeAllListeners();
+        throw err;
+      }
+      // A disconnect() (or a newer connect()) during the await bumped the
+      // generation: this connect was cancelled. Tear our own Room down rather
+      // than publishing it as an orphan that nothing will ever disconnect.
+      if (this.connectGeneration !== generation) {
+        room.removeAllListeners();
+        await room.disconnect().catch(() => undefined);
+        return;
+      }
+      this.room = room;
+      this.connecting = false;
+      if (opts.refreshIceServers && rtcConfig) {
+        const refresher = createIceCredentialRefresher({
+          refresh: opts.refreshIceServers,
+          apply: (bundle) => {
+            rtcConfig.iceServers = bundle.servers;
+          },
+          isCurrent: () => this.isCurrentRoom(room, generation),
+          onRefreshed: () => this.emit("iceCredentialsRefreshed"),
+          onExpired: () => this.emit("iceCredentialsExpired"),
+          clock: this.iceRefreshClock,
+        });
+        this.iceCredentialRefresher = refresher;
+        refresher.start(opts.iceServersExpiryMs ?? null);
+      }
+      // Emit the initial participant snapshot so subscribers can seed
+      // their projection without missing peers that connected before
+      // our listeners attached.
+      this.emit("connected", {
+        localIdentity: room.localParticipant.identity,
+        remoteIdentities: Array.from(room.remoteParticipants.values()).map((p) => p.identity),
+        roomName: room.name || join.room,
+      });
+      // A stale saved device resolved to the browser default is NOT a
+      // capture issue: the default may publish perfectly well, and a
+      // "missing" notice here would mislabel a working call as
+      // listener-only (its "Enable mic" action would then DISABLE the
+      // live mic). Real capture failures surface from the best-effort
+      // publication below (#1621 review round 3).
+      // Publishing is BEST-EFFORT and decoupled from joining. `room.connect`
+      // above already succeeded, so the user is a fully working receive-only
+      // (listen/watch) participant — a missing device or a denied
+      // `getUserMedia` permission MUST NOT eject them from the call. Each
+      // track is enabled independently (a broken camera can't suppress a
+      // working mic) and failures are surfaced via `mediaDevicesError` so the
+      // UI can show a non-blocking "joined without mic/camera" notice and
+      // offer a retry, instead of tearing the half-joined call down.
+      await enableRequestedCapture(
+        room.localParticipant,
+        { audio: opts.audio, video: opts.video },
+        (source, error) => {
+          if (this.isCurrentRoom(room, generation)) {
+            this.emit("mediaDevicesError", { source, error });
+          }
+        },
+        {
+          audio: audioPublishOptions(),
+          camera: videoPublishPlan({ source: "camera", capability: this.codecSupport }),
+        },
+        () => this.isCurrentRoom(room, generation),
+      );
+      if (!this.isCurrentRoom(room, generation)) return;
+      // Re-apply the speaker preference now that the room has remote
+      // audio elements to retarget; the engine ignores it on connect
+      // because no `<audio>` exists yet, but every subsequent
+      // RoomEvent.TrackSubscribed wires through this.applySpeaker.
+      if (resolvedSpeaker.preferenceId !== null) {
+        await this.applySpeakerDevice(resolvedSpeaker.activeDeviceId).catch(() => undefined);
+        if (!this.isCurrentRoom(room, generation)) return;
+      }
+    } finally {
+      if (this.connectGeneration === generation && this.connecting) {
+        this.connecting = false;
+      }
     }
   }
 
   async setMicEnabled(enabled: boolean): Promise<void> {
-    if (!this.room) return;
+    const room = this.room;
+    if (!room) return;
+    const generation = this.connectGeneration;
     // Forward the Opus voice-clarity profile (~64k mono, RED + DTX) so a mic
     // (re)enabled mid-call publishes at the same default as the initial join,
     // not LiveKit's lower `AudioPresets.music`. Scoped to the mic on purpose —
     // screen-share system audio keeps the SDK defaults. Inert on disable (mute).
-    await this.room.localParticipant.setMicrophoneEnabled(enabled, undefined, audioPublishOptions());
+    try {
+      await room.localParticipant.setMicrophoneEnabled(enabled, undefined, audioPublishOptions());
+    } catch (error) {
+      if (!this.isCurrentRoom(room, generation)) return;
+      throw error;
+    }
+    if (!this.isCurrentRoom(room, generation)) return;
   }
 
   async setCameraEnabled(enabled: boolean): Promise<void> {
-    if (!this.room) return;
+    const room = this.room;
+    if (!room) return;
+    const generation = this.connectGeneration;
     // Forward the VP9+L3T3 / 720p camera plan — including the per-publish capture
     // cap — so a camera (re)enabled mid-call publishes at the same default as the
     // initial join, not LiveKit's 1080p/VP8 default.
     const { capture, publish } = videoPublishPlan({ source: "camera", capability: this.codecSupport });
-    await this.room.localParticipant.setCameraEnabled(enabled, capture, publish);
+    try {
+      await room.localParticipant.setCameraEnabled(enabled, capture, publish);
+    } catch (error) {
+      if (!this.isCurrentRoom(room, generation)) return;
+      throw error;
+    }
+    if (!this.isCurrentRoom(room, generation)) return;
   }
 
   async setScreenShareEnabled(
     enabled: boolean,
     opts: { audio: boolean },
   ): Promise<void> {
-    if (!this.room) return;
+    const room = this.room;
+    if (!room) return;
+    const generation = this.connectGeneration;
     const { capture, publish } = videoPublishPlan({
       source: "screen",
       capability: this.codecSupport,
@@ -605,14 +722,22 @@ export class CallEngine {
     });
     const captureOptions = { ...capture, audio: opts.audio };
     try {
-      await this.room.localParticipant.setScreenShareEnabled(enabled, captureOptions, publish);
+      await room.localParticipant.setScreenShareEnabled(enabled, captureOptions, publish);
+      if (!this.isCurrentRoom(room, generation)) return;
     } catch (error) {
+      if (!this.isCurrentRoom(room, generation)) return;
       if (!enabled || !opts.audio || !isUnsupportedScreenAudioError(error)) throw error;
-      await this.room.localParticipant.setScreenShareEnabled(
-        true,
-        { ...captureOptions, audio: false },
-        publish,
-      );
+      try {
+        await room.localParticipant.setScreenShareEnabled(
+          true,
+          { ...captureOptions, audio: false },
+          publish,
+        );
+      } catch (fallbackError) {
+        if (!this.isCurrentRoom(room, generation)) return;
+        throw fallbackError;
+      }
+      if (!this.isCurrentRoom(room, generation)) return;
     }
   }
 
@@ -622,9 +747,28 @@ export class CallEngine {
    * publication in place — no re-publish, no Jingle round-trip — so
    * the change is invisible to the peer.
    */
-  async setMicDevice(deviceId: string): Promise<void> {
-    if (!this.room) return;
-    await this.room.switchActiveDevice("audioinput", deviceId);
+  async setMicDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null> {
+    const room = this.room;
+    if (!room) return null;
+    const generation = this.connectGeneration;
+    const resolved = await resolveCallDevicePreference(
+      "mic",
+      deviceId === "default" ? null : deviceId,
+    );
+    if (!this.isCurrentRoom(room, generation)) return null;
+    try {
+      await room.switchActiveDevice("audioinput", resolved.activeDeviceId);
+    } catch (error) {
+      if (!this.isCurrentRoom(room, generation)) return null;
+      throw error;
+    }
+    if (!this.isCurrentRoom(room, generation)) return null;
+    // A missing requested device fell back to the browser default and the
+    // switch SUCCEEDED — capture is live, so no capture issue is recorded
+    // (#1621 review round 3). The single authoritative resolution: callers
+    // persist THIS, so the saved preference can never claim a device the
+    // live call is not actually capturing from (#1621 review round 2).
+    return resolved;
   }
 
   /**
@@ -635,28 +779,42 @@ export class CallEngine {
    * model superseding the browser `noiseSuppression`.
    */
   async setAudioProcessing(prefs: AudioProcessingPrefs): Promise<void> {
-    await this.restartMicCapture(prefs);
+    const room = this.room;
+    if (!room) return;
+    const generation = this.connectGeneration;
+    await this.restartMicCapture(prefs, room, generation);
+    if (!this.isCurrentRoom(room, generation)) return;
     this.settleVerifiedMicProcessing();
   }
 
-  private async restartMicCapture(prefs: AudioProcessingPrefs): Promise<void> {
-    const publication = this.room?.localParticipant.getTrackPublication(Track.Source.Microphone);
+  private async restartMicCapture(
+    prefs: AudioProcessingPrefs,
+    room: Room,
+    generation: number,
+  ): Promise<void> {
+    const publication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
     if (!publication || publication.isMuted) return;
     const track = publication.track;
     if (!track) return;
     const restartTrack = track?.restartTrack;
     if (typeof restartTrack !== "function") return;
     const settings = track.mediaStreamTrack?.getSettings();
-    await restartTrack.call(
-      track,
-      audioCaptureDefaultsForPrefs({
-        mic: settings?.deviceId ?? $devicePrefs.get().mic,
-        // Keyed on the VERIFIED attached model, not the desired one: if a
-        // selection failed to attach, the browser NS is left exactly as the
-        // user set it — never force-disabled with no filter to replace it.
-        audioProcessing: effectiveAudioProcessing(prefs, this.verifiedAiNoiseModel()),
-      }),
-    );
+    try {
+      await restartTrack.call(
+        track,
+        audioCaptureDefaultsForPrefs({
+          mic: settings?.deviceId ?? $devicePrefs.get().mic,
+          // Keyed on the VERIFIED attached model, not the desired one: if a
+          // selection failed to attach, the browser NS is left exactly as the
+          // user set it — never force-disabled with no filter to replace it.
+          audioProcessing: effectiveAudioProcessing(prefs, this.verifiedAiNoiseModel()),
+        }),
+      );
+    } catch (error) {
+      if (!this.isCurrentRoom(room, generation)) return;
+      throw error;
+    }
+    if (!this.isCurrentRoom(room, generation)) return;
     this.emitMicAudioProcessing();
   }
 
@@ -669,7 +827,7 @@ export class CallEngine {
    */
   async setAiNoiseModel(model: NoiseModelId | null): Promise<void> {
     this.desiredAiNoiseModel = model;
-    this.aiNoiseFailedModels.clear();
+    this.aiNoiseFailedModels = new Set();
     await this.ensureAiNoiseFilter();
   }
 
@@ -688,10 +846,14 @@ export class CallEngine {
    * a model changed while muted, which only takes effect once the mic is live.
    */
   private async syncEffectiveCaptureConstraints(): Promise<void> {
+    const room = this.room;
+    if (!room) return;
+    const generation = this.connectGeneration;
     const modelActive = this.verifiedAiNoiseModel() !== null;
     if (modelActive === this.appliedModelActiveForCapture) return;
     this.appliedModelActiveForCapture = modelActive;
-    await this.restartMicCapture($devicePrefs.get().audioProcessing);
+    await this.restartMicCapture($devicePrefs.get().audioProcessing, room, generation);
+    if (!this.isCurrentRoom(room, generation)) return;
   }
 
   /**
@@ -711,13 +873,18 @@ export class CallEngine {
    * publish). Fails open on attach error and emits a typed `aiNoiseFilterError`.
    */
   private ensureAiNoiseFilter(): Promise<void> {
+    const room = this.room;
+    const generation = this.connectGeneration;
     this.aiReconcileChain = this.aiReconcileChain
-      .then(() => this.runEnsureAiNoiseFilter())
+      .then(() => {
+        if (!room || !this.isCurrentRoom(room, generation)) return;
+        return this.runEnsureAiNoiseFilter(room, generation);
+      })
       .catch(() => undefined);
     return this.aiReconcileChain;
   }
 
-  private async runEnsureAiNoiseFilter(): Promise<void> {
+  private async runEnsureAiNoiseFilter(room: Room, generation: number): Promise<void> {
     const track = this.micProcessorTrack();
     if (!track) {
       // No live mic to attach to (none published, or muted) — surface the
@@ -728,8 +895,20 @@ export class CallEngine {
     }
     const target: ProcessorTarget<AudioNoiseProcessor> = {
       currentProcessorName: () => track.getProcessor()?.name,
-      attach: (processor) => track.setProcessor(processor),
-      clear: () => track.stopProcessor(),
+      attach: async (processor) => {
+        if (!this.isCurrentRoom(room, generation)) {
+          await processor.destroy().catch(() => undefined);
+          return;
+        }
+        await track.setProcessor(processor);
+        if (!this.isCurrentRoom(room, generation)) {
+          await track.stopProcessor().catch(() => undefined);
+        }
+      },
+      clear: async () => {
+        if (!this.isCurrentRoom(room, generation)) return;
+        await track.stopProcessor();
+      },
     };
     const outcome = await runAiNoiseFilterReconcile({
       target,
@@ -737,12 +916,14 @@ export class CallEngine {
       makeProcessor: this.makeAiNoiseProcessor,
       failedModels: this.aiNoiseFailedModels,
     });
+    if (!this.isCurrentRoom(room, generation)) return;
     if (outcome.action === "failed") {
       this.emit("aiNoiseFilterError", { model: outcome.model, error: outcome.error });
     }
     // Flip browser NS to match what actually attached, then surface the
     // settled verified state for the UI and the fleet beacon.
     await this.syncEffectiveCaptureConstraints();
+    if (!this.isCurrentRoom(room, generation)) return;
     this.emitAiNoiseFilter();
     this.settleVerifiedMicProcessing();
   }
@@ -780,7 +961,7 @@ export class CallEngine {
    */
   async setBackgroundEffect(effect: BackgroundEffect): Promise<void> {
     this.desiredBackgroundEffect = effect;
-    this.backgroundFailedEffects.clear();
+    this.backgroundFailedEffects = new Set();
     await this.ensureBackgroundEffect();
   }
 
@@ -802,13 +983,18 @@ export class CallEngine {
    * `backgroundEffectError`.
    */
   private ensureBackgroundEffect(): Promise<void> {
+    const room = this.room;
+    const generation = this.connectGeneration;
     this.backgroundReconcileChain = this.backgroundReconcileChain
-      .then(() => this.runEnsureBackgroundEffect())
+      .then(() => {
+        if (!room || !this.isCurrentRoom(room, generation)) return;
+        return this.runEnsureBackgroundEffect(room, generation);
+      })
       .catch(() => undefined);
     return this.backgroundReconcileChain;
   }
 
-  private async runEnsureBackgroundEffect(): Promise<void> {
+  private async runEnsureBackgroundEffect(room: Room, generation: number): Promise<void> {
     const track = this.cameraProcessorTrack();
     if (!track) {
       // No live camera to attach to — surface the honest `no-camera` state; the
@@ -823,10 +1009,19 @@ export class CallEngine {
           : BACKGROUND_OFF,
       attach: async (effect) => {
         const processor = await this.backgroundOps.create(effect);
+        if (!this.isCurrentRoom(room, generation)) {
+          await processor.destroy().catch(() => undefined);
+          return;
+        }
         await track.setProcessor(processor);
+        if (!this.isCurrentRoom(room, generation)) {
+          await track.stopProcessor().catch(() => undefined);
+          return;
+        }
         this.appliedBackgroundEffect = effect;
       },
       switch: async (effect) => {
+        if (!this.isCurrentRoom(room, generation)) return;
         const processor = track.getProcessor() as unknown as VideoBackgroundProcessor | undefined;
         // The reconciler only decides `switch` when a processor was verifiably
         // present (its name was just read), so this is effectively always set.
@@ -836,10 +1031,13 @@ export class CallEngine {
         // effect, so the next reconcile retries the switch honestly.
         if (!processor) return;
         await this.backgroundOps.switch(processor, effect);
+        if (!this.isCurrentRoom(room, generation)) return;
         this.appliedBackgroundEffect = effect;
       },
       clear: async () => {
+        if (!this.isCurrentRoom(room, generation)) return;
         await track.stopProcessor();
+        if (!this.isCurrentRoom(room, generation)) return;
         this.appliedBackgroundEffect = BACKGROUND_OFF;
       },
     };
@@ -848,6 +1046,7 @@ export class CallEngine {
       desired: this.desiredBackgroundEffect,
       failed: this.backgroundFailedEffects,
     });
+    if (!this.isCurrentRoom(room, generation)) return;
     if (outcome.action === "failed") {
       this.emit("backgroundEffectError", { effect: outcome.effect, error: outcome.error });
     }
@@ -869,9 +1068,23 @@ export class CallEngine {
   /**
    * Same shape as `setMicDevice` but for the camera device.
    */
-  async setCameraDevice(deviceId: string): Promise<void> {
-    if (!this.room) return;
-    await this.room.switchActiveDevice("videoinput", deviceId);
+  async setCameraDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null> {
+    const room = this.room;
+    if (!room) return null;
+    const generation = this.connectGeneration;
+    const resolved = await resolveCallDevicePreference(
+      "cam",
+      deviceId === "default" ? null : deviceId,
+    );
+    if (!this.isCurrentRoom(room, generation)) return null;
+    try {
+      await room.switchActiveDevice("videoinput", resolved.activeDeviceId);
+    } catch (error) {
+      if (!this.isCurrentRoom(room, generation)) return null;
+      throw error;
+    }
+    if (!this.isCurrentRoom(room, generation)) return null;
+    return resolved;
   }
 
   /**
@@ -880,12 +1093,21 @@ export class CallEngine {
    * route Web Audio output sinks; falls back to a no-op on unsupported
    * browsers.
    */
-  async setSpeakerDevice(deviceId: string): Promise<void> {
-    await this.applySpeakerDevice(deviceId);
+  async setSpeakerDevice(deviceId: string): Promise<ResolvedCallDevicePreference | null> {
+    return this.applySpeakerDevice(deviceId);
   }
 
   async startAudio(): Promise<void> {
-    await this.room?.startAudio();
+    const room = this.room;
+    if (!room) return;
+    const generation = this.connectGeneration;
+    try {
+      await room.startAudio();
+    } catch (error) {
+      if (!this.isCurrentRoom(room, generation)) return;
+      throw error;
+    }
+    if (!this.isCurrentRoom(room, generation)) return;
   }
 
   setParticipantAudioVolume(
@@ -899,15 +1121,31 @@ export class CallEngine {
     }
   }
 
-  private async applySpeakerDevice(deviceId: string): Promise<void> {
-    if (!this.room) return;
-    if (typeof this.room.switchActiveDevice !== "function") return;
+  private async applySpeakerDevice(
+    deviceId: string,
+  ): Promise<ResolvedCallDevicePreference | null> {
+    const room = this.room;
+    if (!room) return null;
+    const generation = this.connectGeneration;
+    if (typeof room.switchActiveDevice !== "function") return null;
+    const resolved = await resolveCallDevicePreference(
+      "speaker",
+      deviceId === "default" ? null : deviceId,
+    );
+    if (!this.isCurrentRoom(room, generation)) return null;
     try {
-      await this.room.switchActiveDevice("audiooutput", deviceId);
-    } catch {
-      // Browser doesn't support sinkId; the user already saw the
-      // disabled chip in the picker. Swallow silently here.
+      await room.switchActiveDevice("audiooutput", resolved.activeDeviceId);
+      if (!this.isCurrentRoom(room, generation)) return null;
+    } catch (error) {
+      // Mirror mic/cam: a failed sink switch must NOT hand back a
+      // resolution the caller would persist as applied. Unsupported
+      // browsers never reach here from the picker (the speaker section
+      // is disabled via isSpeakerOutputSelectionSupported); the connect
+      // path catches this rethrow itself.
+      if (!this.isCurrentRoom(room, generation)) return null;
+      throw error;
     }
+    return resolved;
   }
 
   async disconnect(): Promise<void> {
@@ -916,6 +1154,7 @@ export class CallEngine {
     // and release the reservation so the engine can never wedge "connecting".
     this.connectGeneration++;
     this.connecting = false;
+    this.stopIceCredentialRefresh();
     const room = this.room;
     this.room = null;
     if (!room) return;
@@ -926,32 +1165,89 @@ export class CallEngine {
     // us — without this synthetic emit, `useCallEngine` would carry the
     // last call's tracks into the next session and the overlay would
     // render duplicate tiles.
-    this.emit("disconnected", "local");
-    room.off(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
-    room.off(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
-    room.off(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
-    room.off(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
-    room.off(RoomEvent.ParticipantConnected, this.handleParticipantConnected);
-    room.off(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
-    room.off(RoomEvent.Disconnected, this.handleDisconnected);
-    room.off(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
-    room.off(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
-    room.off(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
-    room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
-    room.off(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
-    room.off(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
-    room.off(RoomEvent.ActiveSpeakersChanged, this.handleActiveSpeakersChanged);
-    // Tear the mic noise processor down explicitly first: its destroy() stops a
-    // private clone of the capture track that holds the input device open. A
-    // normal room.disconnect() stops local tracks (which destroys the processor)
-    // for us, but doing it here means an erroring/partial disconnect can't leave
-    // the device — and its indicator — live until GC.
-    const micTrack = room.localParticipant?.getTrackPublication?.(Track.Source.Microphone)
-      ?.track as unknown as ProcessorCapableTrack | undefined;
-    if (micTrack && typeof micTrack.getProcessor === "function" && micTrack.getProcessor()) {
-      await micTrack.stopProcessor().catch(() => undefined);
+    this.emit("disconnected", { origin: "local" });
+    this.updateRoomListeners(room, "off");
+    const processorsStopped = this.stopRoomProcessors(room);
+    const roomDisconnected = room.disconnect();
+    await processorsStopped;
+    await roomDisconnected;
+  }
+
+  private isCurrentRoom(room: Room, generation: number): boolean {
+    return this.connectGeneration === generation && this.room === room;
+  }
+
+  private stopIceCredentialRefresh(): void {
+    this.iceCredentialRefresher?.stop();
+    this.iceCredentialRefresher = null;
+  }
+
+  private updateRoomListeners(room: Room, operation: "on" | "off"): void {
+    const update = <K extends keyof RoomEventCallbacks>(
+      event: K,
+      listener: RoomEventCallbacks[K],
+    ): void => {
+      if (operation === "on") room.on(event, listener);
+      else room.off(event, listener);
+    };
+    let scoped = this.scopedRoomListeners.get(room);
+    if (operation === "on") {
+      const generation = this.connectGeneration;
+      scoped = {
+        activeDeviceChanged: (kind) => {
+          if (this.isCurrentRoom(room, generation)) this.handleActiveDeviceChanged(kind);
+        },
+        connectionStateChanged: (state) => {
+          if (this.isCurrentRoom(room, generation)) this.handleConnectionStateChanged(state);
+        },
+        mediaDevicesChanged: () => {
+          if (this.isCurrentRoom(room, generation)) this.handleMediaDevicesChanged();
+        },
+        mediaDevicesError: (error, kind) => {
+          if (this.isCurrentRoom(room, generation)) this.handleMediaDevicesError(error, kind);
+        },
+      };
+      this.scopedRoomListeners.set(room, scoped);
     }
-    await room.disconnect();
+    update(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
+    update(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
+    update(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
+    update(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
+    update(RoomEvent.ParticipantConnected, this.handleParticipantConnected);
+    update(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
+    update(RoomEvent.Disconnected, this.handleDisconnected);
+    update(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
+    if (scoped) {
+      update(RoomEvent.ActiveDeviceChanged, scoped.activeDeviceChanged);
+      update(RoomEvent.MediaDevicesChanged, scoped.mediaDevicesChanged);
+      update(RoomEvent.MediaDevicesError, scoped.mediaDevicesError);
+    }
+    update(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
+    update(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
+    update(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
+    if (scoped) update(RoomEvent.ConnectionStateChanged, scoped.connectionStateChanged);
+    update(RoomEvent.ActiveSpeakersChanged, this.handleActiveSpeakersChanged);
+    if (operation === "off") this.scopedRoomListeners.delete(room);
+  }
+
+  private stopRoomProcessors(room: Room): Promise<void> {
+    const stops: Array<Promise<unknown>> = [];
+    const seen = new Set<ProcessorCapableTrack | CameraProcessorTrack>();
+    const sources = [Track.Source.Microphone, Track.Source.Camera] as const;
+    for (const source of sources) {
+      const track = room.localParticipant?.getTrackPublication?.(source)
+        ?.track as unknown as ProcessorCapableTrack | CameraProcessorTrack | undefined;
+      if (
+        track &&
+        !seen.has(track) &&
+        typeof track.getProcessor === "function" &&
+        track.getProcessor()
+      ) {
+        seen.add(track);
+        stops.push(track.stopProcessor().catch(() => undefined));
+      }
+    }
+    return Promise.all(stops).then(() => undefined);
   }
 
   on<K extends keyof CallEngineEvents>(event: K, cb: CallEngineEvents[K]): () => void {
@@ -1100,35 +1396,33 @@ export class CallEngine {
     this.emit("participantDisconnected", participant.identity);
   };
 
-  private handleDisconnected = (_reason?: unknown) => {
+  private handleDisconnected = async (reason?: DisconnectReason) => {
+    const room = this.room;
+    if (!room) return;
+    this.connectGeneration++;
+    this.connecting = false;
+    this.stopIceCredentialRefresh();
+    this.room = null;
+    this.updateRoomListeners(room, "off");
     this.clearParticipantAudioVolumes();
     // LiveKit destroys the processor when the track stops; just reset our
     // per-track failure guard + capture-NS state so the next call starts clean.
-    this.aiNoiseFailedModels.clear();
+    this.aiNoiseFailedModels = new Set();
     this.appliedModelActiveForCapture = false;
     // LiveKit destroys the camera processor with the track on disconnect; reset
     // our per-track guard + applied effect so the next call starts clean.
-    this.backgroundFailedEffects.clear();
+    this.backgroundFailedEffects = new Set();
     this.appliedBackgroundEffect = BACKGROUND_OFF;
-    // LiveKit exposes a numeric SDK enum here. Keep that unstable detail at
-    // the boundary; lifecycle telemetry combines this terminal transport loss
-    // with the independently observed reconnect phase before classifying it.
-    this.emit("disconnected", "transport");
+    const processorsStopped = this.stopRoomProcessors(room);
+    this.emit("disconnected", { origin: "transport", reason });
+    await processorsStopped;
   };
 
   private handleAudioPlaybackStatusChanged = (canPlaybackAudio: boolean) => {
     this.emit("audioPlaybackStatusChanged", canPlaybackAudio);
   };
 
-  /**
-   * A mid-call device switch swaps the underlying capture track in
-   * place via `switchActiveDevice` — it does NOT re-fire
-   * `LocalTrackPublished`, so this is the only signal that the applied
-   * audio processing may have changed (a new mic can support a
-   * different set of constraints). Only `audioinput` matters; speaker /
-   * camera changes can't alter mic processing.
-   */
-  private handleActiveDeviceChanged = (kind: MediaDeviceKind) => {
+  private reconcileActiveDevice(kind: MediaDeviceKind): void {
     if (kind === "videoinput") {
       // A camera swap rewrites the publication's capture track in place. LiveKit
       // re-runs the processor across it, but reconcile is idempotent and
@@ -1141,7 +1435,45 @@ export class CallEngine {
     // Defensive: LiveKit re-runs the processor across a device switch, but
     // reconcile is idempotent and re-attaches if the new track came up bare.
     void this.ensureAiNoiseFilter();
+  }
+
+  /**
+   * A mid-call device switch swaps the underlying capture track in
+   * place via `switchActiveDevice` — it does NOT re-fire
+   * `LocalTrackPublished`, so this is the only signal that the applied
+   * audio processing may have changed (a new mic can support a
+   * different set of constraints). Only `audioinput` matters; speaker /
+   * camera changes can't alter mic processing.
+   */
+  private handleActiveDeviceChanged = (kind: MediaDeviceKind) => {
+    this.reconcileActiveDevice(kind);
   };
+
+  private handleMediaDevicesChanged(): void {
+    this.reconcileActiveDevice("audioinput");
+    this.reconcileActiveDevice("videoinput");
+  }
+
+  private handleMediaDevicesError(
+    error: Error,
+    kind?: MediaDeviceKind,
+  ): void {
+    if (kind === "audioinput") {
+      this.emit("mediaDevicesError", { source: "audio", error });
+      return;
+    }
+    if (kind === "videoinput") {
+      this.emit("mediaDevicesError", { source: "video", error });
+      return;
+    }
+    // Playback-sink failures already surface via audioPlaybackStatusChanged.
+    if (kind === "audiooutput") return;
+    // livekit-client's sourceToKind maps ScreenShare (and Unknown) to an
+    // undefined kind. Screen capture is the only remaining local source, so
+    // an SDK-initiated screen failure (e.g. a track restart) surfaces there
+    // instead of being dropped without any actionable UI.
+    this.emit("mediaDevicesError", { source: "screen", error });
+  }
 
   /**
    * Recompute when the local mic is muted or unmuted. Muting is the most
@@ -1209,8 +1541,12 @@ export class CallEngine {
     this.emit("connectionQualityChanged", mapLiveKitConnectionQuality(quality));
   };
 
-  private handleConnectionStateChanged = (state: ConnectionState) => {
+  private handleConnectionStateChanged = (state: ConnectionState): void => {
     if (state === ConnectionState.Reconnecting) {
+      // No public live-update API exists in livekit-client 2.19. Refresh now
+      // so the retained rtcConfig is ready if this reconnect becomes a full
+      // PeerConnection rebuild; the active PC itself is not reconfigured.
+      void this.iceCredentialRefresher?.refreshNow();
       this.emit("transportReconnecting");
     }
     this.emit("connectionPhaseChanged", mapLiveKitConnectionState(state));
@@ -1376,6 +1712,7 @@ export async function enableRequestedCapture(
   opts: { audio: boolean; video: boolean },
   onError: (source: "audio" | "video", error: unknown) => void,
   publish: { audio: TrackPublishOptions; camera: CameraPublishPlan },
+  isCurrent: () => boolean = () => true,
 ): Promise<void> {
   if (opts.audio) {
     try {
@@ -1383,6 +1720,7 @@ export async function enableRequestedCapture(
     } catch (error) {
       onError("audio", error);
     }
+    if (!isCurrent()) return;
   }
   if (opts.video) {
     try {
@@ -1392,5 +1730,6 @@ export async function enableRequestedCapture(
     } catch (error) {
       onError("video", error);
     }
+    if (!isCurrent()) return;
   }
 }

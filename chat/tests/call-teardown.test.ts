@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import {
   $callState,
+  clearPendingDmCallTerminate,
+  flushPendingDmCallTerminate,
   $lastCallError,
   beginOutgoingCall,
   clearCallState,
@@ -20,10 +22,19 @@ import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../
 
 import {
   $mucCallLiveParticipants,
+  clearAllLiveCallParticipants,
   setLiveCallParticipants,
 } from "../src/lib/calls/muc-call-live-participants";
+import {
+  $mucRaisedHands,
+  clearAllRaisedHands,
+} from "../src/lib/calls/call-raised-hand";
+import {
+  $mucMutedParticipants,
+  clearAllMuted,
+} from "../src/lib/calls/call-mute";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
-import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
+import { canResumeMucCallActivity, leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
 import {
   $mucCallTerminatePendingSessions,
   clearAllMucCallSessionCacheForTests,
@@ -35,6 +46,9 @@ import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import { createIncomingCallAlertController } from "../src/shell/audio-alerts";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import { useCallEngine } from "../src/lib/calls/use-call-engine";
+import { connectionStore } from "../src/lib/connection-store";
+import { DisconnectReason } from "livekit-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
 import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
@@ -55,6 +69,8 @@ function wireClientEvents(sender: Partial<CallWireSender> = {}) {
     presence_type?: string;
     muc_jid?: string | null;
     muji?: { preparing: boolean; active: boolean };
+    hand_raised?: boolean;
+    muted?: boolean;
   }) => void) | null = null;
   let onCall: ((event: CallEvent) => void) | null = null;
   let onDisconnected: (() => void) | null = null;
@@ -211,22 +227,15 @@ function mockSender(): CallWireSender {
 
 const WINDOW_SENTINEL = Symbol("call-teardown-window");
 type ShimmedGlobal = typeof globalThis & {
-  window?: { localStorage: Storage } & { [WINDOW_SENTINEL]?: true };
+  window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
 
 beforeAll(() => {
   const g = globalThis as ShimmedGlobal;
   if (typeof g.window !== "undefined") return;
-  const store = new Map<string, string>();
-  const storage: Storage = {
-    get length() { return store.size; },
-    clear: () => store.clear(),
-    getItem: (key) => store.get(key) ?? null,
-    key: (index) => Array.from(store.keys())[index] ?? null,
-    removeItem: (key) => { store.delete(key); },
-    setItem: (key, value) => { store.set(key, String(value)); },
-  };
-  g.window = Object.assign({ localStorage: storage }, { [WINDOW_SENTINEL]: true as const });
+  const storage = createStorage();
+  const sessionStorage = createStorage();
+  g.window = Object.assign({ localStorage: storage, sessionStorage }, { [WINDOW_SENTINEL]: true as const });
 });
 
 afterAll(() => {
@@ -235,6 +244,18 @@ afterAll(() => {
     delete (g as { window?: unknown }).window;
   }
 });
+
+function createStorage(): Storage {
+  const store = new Map<string, string>();
+  return {
+    get length() { return store.size; },
+    clear: () => store.clear(),
+    getItem: (key) => store.get(key) ?? null,
+    key: (index) => Array.from(store.keys())[index] ?? null,
+    removeItem: (key) => { store.delete(key); },
+    setItem: (key, value) => { store.set(key, String(value)); },
+  };
+}
 
 afterEach(() => {
   clearCallState();
@@ -247,6 +268,9 @@ afterEach(() => {
   // keeps that state from leaking into other test files (e.g.
   // `muc-call-presence.test.ts`) that expect an empty store.
   clearMucCallParticipants();
+  clearAllRaisedHands();
+  clearAllMuted();
+  clearAllLiveCallParticipants();
   clearAllMucCallSessionCacheForTests();
   __resetCallLifecycleTelemetryForTesting();
   __setFaroForTesting(null);
@@ -1959,6 +1983,124 @@ describe("MUC group call", () => {
     expect($mucCallParticipants.get()).toEqual({});
   });
 
+  test("terminal disconnect classification bypasses the call recovery grace", async () => {
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      terminalDisconnectDetail: string | null;
+      disconnect: () => Promise<void>;
+    };
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "terminal-during-call",
+      media: audioVideo,
+      join: {
+        url: "wss://livekit.test",
+        room: "chan@muc.test",
+        identity: "alice@waddle.test/web",
+        token: "jwt.payload.sig",
+      },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+    // The WASM error callback classified this cycle as terminal (auth
+    // rejection / resource conflict) BEFORE the disconnect callback fired.
+    // Recovery is impossible — the grace window must not keep the room,
+    // capture, and call UI alive for a minute.
+    client.terminalDisconnectDetail = "Signed out: resource conflict";
+
+    events.emitDisconnected();
+
+    expect($callState.get().phase).not.toBe("active");
+    await client.disconnect();
+  });
+
+  test("transient XMPP disconnect preserves an active media call and its projections", async () => {
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      disconnect: () => Promise<void>;
+    };
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "active-during-reconnect",
+      media: audioVideo,
+      join: {
+        url: "wss://livekit.test",
+        room: "chan@muc.test",
+        identity: "alice@waddle.test/web",
+        token: "jwt.payload.sig",
+      },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+    events.emitPresence({
+      from: "chan@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+      hand_raised: true,
+      muted: true,
+    });
+    setLiveCallParticipants("chan@muc.test", [
+      "alice@waddle.test/web",
+      "bob@waddle.test/phone",
+    ]);
+
+    events.emitDisconnected();
+
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      sid: "active-during-reconnect",
+    });
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+    expect($mucRaisedHands.get()).toEqual({
+      "chan@muc.test": ["alice@waddle.test/web"],
+    });
+    expect($mucMutedParticipants.get()).toEqual({
+      "chan@muc.test": ["alice@waddle.test/web"],
+    });
+    expect($mucCallLiveParticipants.get()).toEqual({
+      "chan@muc.test": [
+        "alice@waddle.test/web",
+        "bob@waddle.test/phone",
+      ],
+    });
+
+    await client.disconnect();
+  });
+
+  test("session-ready cancels call recovery before duplicate-ready coalescing", async () => {
+    const events = wireClientEvents();
+    const onTransportReady = mock(() => undefined);
+    const client = events.client as unknown as {
+      callTransportRecovery: {
+        dispose(): void;
+        onTransportLost(): "deferred" | "not-deferred";
+        onTransportReady(): void;
+      };
+      runSessionReady(
+        xmpp: typeof events.xmpp,
+        lifecycle: { type: "fresh" | "resumed" },
+      ): Promise<void>;
+    };
+    client.callTransportRecovery = {
+      dispose: () => undefined,
+      onTransportLost: () => "not-deferred",
+      onTransportReady,
+    };
+
+    await client.runSessionReady(events.xmpp, { type: "fresh" });
+    await client.runSessionReady(events.xmpp, { type: "fresh" });
+
+    expect(onTransportReady).toHaveBeenCalledTimes(2);
+    await client.disconnect();
+  });
+
   test("BrowserXmppClient ignores stale call and presence events after disconnect", async () => {
     const disconnect = mock(async () => undefined);
     const events = wireClientEvents({ disconnect } as unknown as Partial<CallWireSender>);
@@ -3061,5 +3203,321 @@ describe("scheduleOutgoingTimeout", () => {
     beginOutgoingCall("carol@waddle.test", "c-new", audioVideo);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(sender.send_call_retract).not.toHaveBeenCalled();
+  });
+});
+
+describe("LiveKit transport loss on an active DM call", () => {
+  afterEach(() => {
+    connectionStore.client = null;
+    clearCallState();
+  });
+
+  function activeDmCall(): void {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-media-loss",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+  }
+
+  test("a peer-unaware media failure sends the bounded wire teardown", async () => {
+    const sender = mockSender();
+    connectionStore.client = {
+      callWireSender: () => sender,
+    } as unknown as typeof connectionStore.client;
+    activeDmCall();
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    // The SFU died on OUR side only: nobody else tells the peer, so the
+    // XEP-0166 terminate (+ XEP-0353 finish) must go out before the
+    // active-call snapshot is cleared.
+    engine.emit("disconnected", {
+      origin: "transport",
+      reason: DisconnectReason.MEDIA_FAILURE,
+    });
+    await flushCallSideEffects();
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-media-loss",
+      "gone",
+    );
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("a server-initiated end sends no wire teardown", async () => {
+    const sender = mockSender();
+    connectionStore.client = {
+      callWireSender: () => sender,
+    } as unknown as typeof connectionStore.client;
+    activeDmCall();
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    // A duplicate-identity takeover means ANOTHER device of ours now owns
+    // the call — terminating would kill the succeeding device's session.
+    engine.emit("disconnected", {
+      origin: "transport",
+      reason: DisconnectReason.DUPLICATE_IDENTITY,
+    });
+    await flushCallSideEffects();
+
+    expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
+    expect($callState.get().phase).not.toBe("active");
+  });
+});
+
+describe("sender-less MUC teardown", () => {
+  afterEach(() => {
+    clearCallState();
+    clearAllMucCallSessionCacheForTests();
+  });
+
+  test("marks the cached session terminate-pending so it cannot be resumed", async () => {
+    rememberMucCallSession({
+      roomJid: "chan@muc.test",
+      sid: "muc-outage",
+      selfFullJid: "alice@waddle.test/web",
+      media: audioVideo,
+      join,
+    });
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "muc-outage",
+      media: audioVideo,
+      join,
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+
+    // Grace expiry / terminal disconnect: no sender to carry the leave.
+    await tearDownActiveCall(null, "gone");
+
+    expect(
+      canResumeMucCallActivity({
+        roomJid: "chan@muc.test",
+        selfFullJid: "alice@waddle.test/web",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("sender-less DM teardown retention", () => {
+  afterEach(() => {
+    clearPendingDmCallTerminate();
+    clearCallState();
+    clearDmCallActivities();
+  });
+
+  test("a null-sender teardown clears local surfaces and defers the wire terminate", async () => {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-outage",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+
+    // XMPP died first: nothing can carry the terminate right now.
+    await tearDownActiveCall(null, "gone");
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(readDmCallActivity("bob@waddle.test/desktop")).toBeNull();
+
+    // The next session-ready delivers the retained teardown so the peer
+    // does not dangle in an active call.
+    const sender = mockSender();
+    await flushPendingDmCallTerminate(sender);
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-outage",
+      "gone",
+    );
+    expect(sender.send_call_finish).toHaveBeenCalledTimes(1);
+
+    // One-shot: a second flush must not re-send.
+    await flushPendingDmCallTerminate(sender);
+    expect(sender.send_call_session_terminate).toHaveBeenCalledTimes(1);
+  });
+
+  test("transport-loss teardown of an active DM call retains the wire terminate", async () => {
+    // The 60s grace expiring (or a terminal disconnect classification)
+    // routes through the sender-less teardown: local surfaces clear NOW,
+    // and the peer's XEP-0166/0353 signal survives for the next session.
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      terminalDisconnectDetail: string | null;
+      disconnect: () => Promise<void>;
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-grace-expiry",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    client.terminalDisconnectDetail = "Signed out: resource conflict";
+
+    events.emitDisconnected();
+    await flushCallSideEffects();
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    const sender = mockSender();
+    await flushPendingDmCallTerminate(sender);
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-grace-expiry",
+      "gone",
+    );
+    await client.disconnect();
+  });
+
+  test("a pending terminate queued during an in-flight flush is drained by the same flush", async () => {
+    // Call A's terminate is mid-send when call B's teardown replaces the
+    // pending atom; B's own session-ready flush bounces off the in-flight
+    // guard, so A's drain loop must deliver B.
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-first",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(null, "gone");
+
+    let releaseFirstSend: () => void = () => undefined;
+    const firstSendGate = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    const sender = mockSender();
+    let terminateCalls = 0;
+    (sender.send_call_session_terminate as unknown as {
+      mockImplementation: (fn: () => Promise<void>) => void;
+    }).mockImplementation(async () => {
+      terminateCalls += 1;
+      if (terminateCalls === 1) await firstSendGate;
+    });
+
+    const flushing = flushPendingDmCallTerminate(sender);
+    await Promise.resolve();
+    // Call B tears down during another outage while A's send is in flight.
+    $callState.set({
+      phase: "active",
+      peer: "carol@waddle.test/desktop",
+      sid: "dm-second",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(null, "gone");
+    // B's session-ready flush hits the in-flight guard and returns.
+    await flushPendingDmCallTerminate(sender);
+
+    releaseFirstSend();
+    await flushing;
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "carol@waddle.test/desktop",
+      "dm-second",
+      "gone",
+    );
+  });
+
+  test("a failed flush retains the pending terminate for the next session-ready", async () => {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-retained",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(null, "gone");
+
+    // The first recovered stream dies mid-send: the peer's only
+    // end-of-call signal must survive for the NEXT session-ready.
+    const doomed = mockSender();
+    (doomed.send_call_session_terminate as unknown as { mockImplementation: (fn: () => Promise<void>) => void })
+      .mockImplementation(async () => {
+        throw new Error("stream died mid-send");
+      });
+    await flushPendingDmCallTerminate(doomed);
+
+    const healthy = mockSender();
+    await flushPendingDmCallTerminate(healthy);
+    expect(healthy.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "dm-retained",
+      "gone",
+    );
+  });
+
+  test("callWireSender is null until the session is ready", () => {
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      callWireSender: () => unknown;
+      connected: boolean;
+    };
+
+    // The handle exists (wireEvents bound it) but no session-ready ran:
+    // handing it out would burn a teardown on a doomed half-open stream
+    // instead of retaining it for the next session.
+    expect(client.callWireSender()).toBeNull();
+
+    client.connected = true;
+    expect(client.callWireSender()).not.toBeNull();
+  });
+
+  test("terminal server disconnect reasons clear the DM activity", async () => {
+    connectionStore.client = null;
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-room-deleted",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: new Date().toISOString(),
+      now: new Date(),
+      event: {
+        kind: "proceed",
+        from: "bob@waddle.test/desktop",
+        to: "alice@waddle.test/web",
+        sid: "dm-room-deleted",
+      },
+    });
+    const engine = useCallEngine().engine as unknown as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    engine.emit("disconnected", {
+      origin: "transport",
+      reason: DisconnectReason.ROOM_DELETED,
+    });
+    await flushCallSideEffects();
+
+    expect($callState.get().phase).not.toBe("active");
+    expect(readDmCallActivity("bob@waddle.test/desktop")).toBeNull();
   });
 });
