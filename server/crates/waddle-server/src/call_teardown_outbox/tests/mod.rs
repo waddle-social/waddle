@@ -165,4 +165,5 @@ async fn state_with_executor(
 mod drain_basics;
 mod muji;
 mod retention_fences;
+mod session_fence;
 mod store_queue;

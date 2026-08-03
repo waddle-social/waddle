@@ -695,7 +695,8 @@ async fn process_participant_left_for_identity(
     };
     if let Ok(room_jid) = room_name.parse::<BareJid>() {
         let outcome =
-            clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids).await;
+            clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids, None)
+                .await;
         if outcome == WebhookEffectOutcome::Stale {
             increment_call_teardown_stale_dropped();
         }

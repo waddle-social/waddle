@@ -1450,6 +1450,7 @@ async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
         },
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
+        session: None,
     };
 
     assert_eq!(
@@ -1477,6 +1478,7 @@ async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids
         },
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
+        session: None,
     };
 
     assert_eq!(
@@ -1503,6 +1505,7 @@ async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_
         },
         generation: Some(CallGeneration::new(1)),
         room_sid: Some(fixture_room_sid("RM_restart")),
+        session: None,
     };
 
     assert_eq!(
@@ -1557,6 +1560,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         },
         generation: None,
         room_sid: None,
+        session: None,
     };
     assert_eq!(
         sfu.teardown_executor()
@@ -1580,6 +1584,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         },
         generation: None,
         room_sid: None,
+        session: None,
     };
     assert_eq!(
         sfu.teardown_executor()
@@ -3212,6 +3217,7 @@ async fn adopted_participant_sid_makes_fenced_removal_decidable() {
         },
         generation: stored_generation(&sfu, &call),
         room_sid: Some(room_sid),
+        session: None,
     };
     assert_eq!(
         sfu.teardown_executor()
@@ -3572,4 +3578,68 @@ fn session_scoped_unregister_refuses_an_unparseable_sid_against_a_bound_registra
         SessionScopedTeardown::SessionMismatch
     );
     assert!(sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn executor_refuses_a_session_bearing_intent_after_a_rebind() {
+    // #1608 (PR #1626 review round 3): the drain-loop fence and the
+    // executor run at different times; a rebind in between must be
+    // caught by the executor's own late re-check, not just the fence.
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let rebound = SessionBinding::new("muji-rebound").expect("binding");
+    let stale = SessionBinding::new("muji-stale").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &rebound);
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+        session: Some(stale),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed refusal"),
+        TeardownExecution::StaleGeneration,
+        "a rebound registration must refuse the stale-session intent"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = SessionBinding::new("muji-current").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &current);
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+        session: Some(current),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("executed"),
+        TeardownExecution::Executed
+    );
+    assert_eq!(admin.remove_calls.lock().expect("lock").len(), 1);
 }

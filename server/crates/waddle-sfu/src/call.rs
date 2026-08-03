@@ -217,6 +217,13 @@ pub struct CallTeardownIntentLite {
     pub target: TeardownTargetLite,
     pub generation: Option<CallGeneration>,
     pub room_sid: Option<RoomSid>,
+    /// The signaling session whose terminate produced this intent
+    /// (#1608): the executor re-checks it against the live
+    /// registration's binding immediately before the destructive
+    /// admin call, so a drain racing a rebind cannot eject a newer
+    /// session the earlier fence read missed. `None` = no session
+    /// evidence; only the generation/SID fences apply.
+    pub session: Option<SessionBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

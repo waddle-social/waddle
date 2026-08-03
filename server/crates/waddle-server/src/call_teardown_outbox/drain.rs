@@ -241,6 +241,39 @@ pub(super) async fn drain_due_at(
     Ok(summary)
 }
 
+/// Late session re-check shared by the destructive execution arms
+/// (#1608): `true` when the intent carries session evidence and the
+/// participant's live registration is bound to a DIFFERENT session —
+/// i.e. a rebind superseded this intent after the drain-loop fence
+/// read the binding. Unbound or absent registrations prove nothing
+/// and return `false`.
+fn session_superseded_by_rebind(
+    state: &WebSocketState,
+    intent: &CallTeardownIntent,
+    participant: &jid::FullJid,
+) -> bool {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return false;
+    };
+    session_binding_mismatch(sfu.as_ref(), intent, participant)
+}
+
+/// `true` when the intent carries session evidence and `participant`'s
+/// live registration is bound to a DIFFERENT session. Unbound or
+/// absent registrations prove nothing and return `false`.
+fn session_binding_mismatch(
+    sfu: &dyn SfuService,
+    intent: &CallTeardownIntent,
+    participant: &jid::FullJid,
+) -> bool {
+    let Some(intent_session) = &intent.session else {
+        return false;
+    };
+    let identity = Identity::from_jid(participant.clone());
+    sfu.participant_session_binding(&intent.call_id, &identity)
+        .is_some_and(|bound| &bound != intent_session)
+}
+
 /// A live registration alone does NOT prove a rejoin: on the room-claim
 /// owner the registration legitimately survives exactly because the
 /// departure this intent represents was never applied there (that is
@@ -270,7 +303,6 @@ fn stale_superseded_by_live_participant(
         | TeardownTarget::MujiRoomSweep { .. }
         | TeardownTarget::CallThreadEndRetry { .. } => return false,
     };
-    let identity = Identity::from_jid(participant.clone());
     // #1608 (PR #1626 review): when the intent records the signaling
     // session whose terminate produced it, a live registration bound
     // to a DIFFERENT session proves supersession directly — no clock
@@ -279,13 +311,10 @@ fn stale_superseded_by_live_participant(
     // registration and the timestamp fence alone would execute it.
     // An unbound live registration proves nothing either way and
     // falls through to the timestamp fence.
-    if let Some(intent_session) = &intent.session {
-        if let Some(bound) = sfu.participant_session_binding(&intent.call_id, &identity) {
-            if &bound != intent_session {
-                return true;
-            }
-        }
+    if session_binding_mismatch(sfu, intent, participant) {
+        return true;
     }
+    let identity = Identity::from_jid(participant.clone());
     [
         sfu.participant_registered_at(&intent.call_id, &identity),
         sfu.participant_last_minted_at(&intent.call_id, &identity),
@@ -439,6 +468,13 @@ async fn execute_intent(
         participant_sid,
     } = &intent.target
     {
+        // #1608: re-check the session binding as late as possible — a
+        // rebind can land between the drain-loop fence and this
+        // execution, and the destructive presence clear must not
+        // remove a NEWER session's advertisement.
+        if session_superseded_by_rebind(state, intent, departed) {
+            return IntentExecution::Stale;
+        }
         let observed_sids = ObservedCallSids::new(intent.room_sid.clone(), participant_sid.clone());
         let observed_sids = (observed_sids.room_sid.is_some()
             || observed_sids.participant_sid.is_some())
@@ -450,6 +486,7 @@ async fn execute_intent(
                 room_jid,
                 departed,
                 observed_sids.as_ref(),
+                intent.session.as_ref(),
             ),
         )
         .await
@@ -567,6 +604,7 @@ async fn execute_intent(
                     room_jid,
                     &departed_jid,
                     Some(&observed_sids),
+                    None,
                 ),
             )
             .await
@@ -605,11 +643,15 @@ async fn execute_intent(
             return IntentExecution::Done;
         }
     };
+    // The executor re-checks `session` against the live binding
+    // immediately before the destructive admin call (#1608), so a
+    // rebind racing this drain cannot eject the newer session.
     let lite = CallTeardownIntentLite {
         call_id: intent.call_id.clone(),
         target,
         generation: intent.generation,
         room_sid: intent.room_sid.clone(),
+        session: intent.session.clone(),
     };
     match executor.execute(&lite).await {
         Ok(TeardownExecution::Executed) => IntentExecution::Done,

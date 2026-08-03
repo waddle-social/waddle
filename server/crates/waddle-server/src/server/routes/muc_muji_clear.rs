@@ -41,6 +41,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) -> WebhookEffectOutcome {
     debug!(
         room = %room_jid,
@@ -63,7 +64,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "MUC room actor is absent during LiveKit departure cleanup; queueing owner-gated Muji clear"
             );
-            if enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids)
+            if enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids, session)
                 .await
                 .is_err()
             {
@@ -120,6 +121,7 @@ async fn enqueue_muji_presence_clear(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
@@ -142,7 +144,10 @@ async fn enqueue_muji_presence_clear(
         },
         generation: None,
         room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
-        session: None,
+        // Carried through from the producer when the departure came
+        // from a signaling terminate (#1608); webhook-driven callers
+        // have no session evidence and pass None.
+        session: session.cloned(),
     };
     let store = &state.deps.protocol.call_teardown_outbox;
     let persistence = &state.deps.protocol.call_teardown_persistence;
@@ -265,7 +270,8 @@ mod tests {
         let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
 
         let outcome =
-            clear_muji_presence_for_departure(state.as_ref(), &room_jid, &full_jid, None).await;
+            clear_muji_presence_for_departure(state.as_ref(), &room_jid, &full_jid, None, None)
+                .await;
 
         assert_eq!(
             outcome,

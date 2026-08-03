@@ -398,7 +398,27 @@ impl LiveKitTeardownExecutor {
         generation: Option<CallGeneration>,
         room_sid: Option<&RoomSid>,
         participant_sid: Option<&ParticipantSid>,
+        session: Option<&SessionBinding>,
     ) -> Result<TeardownExecution, SfuError> {
+        // #1608: a session-bearing intent must not eject a registration
+        // that has been rebound to a NEWER session since the drain's
+        // fence read it. Checked as late as possible (only the admin
+        // HTTP call itself remains after); a registration with no
+        // binding — or none at all — proves nothing and falls through
+        // to the generation/SID fences below.
+        if let Some(intent_session) = session {
+            let rebound = self.calls.get(call_id).is_some_and(|entry| {
+                entry.participants.get(identity).is_some_and(|state| {
+                    state
+                        .session
+                        .as_ref()
+                        .is_some_and(|bound| bound != intent_session)
+                })
+            });
+            if rebound {
+                return Ok(TeardownExecution::StaleGeneration);
+            }
+        }
         let entry_missing = self.calls.get(call_id).is_none();
         // A participant-sid fence is locally decidable only when the
         // registry tracks this identity in this call. A missing entry
@@ -523,6 +543,7 @@ impl LiveKitTeardownExecutor {
                     intent.generation,
                     intent.room_sid.as_ref(),
                     participant_sid.as_ref(),
+                    intent.session.as_ref(),
                 )
                 .await
             }
@@ -1681,12 +1702,17 @@ impl LiveKitSfu {
             },
             generation,
             room_sid: room_sid.clone(),
+            // The inline path already removed the registration (and its
+            // binding) atomically under the session gate; the durable
+            // retry carries no session evidence.
+            session: None,
         };
         let room_intent = we_just_emptied.then(|| CallTeardownIntentLite {
             call_id: call_id.clone(),
             target: TeardownTargetLite::Room,
             generation,
             room_sid,
+            session: None,
         });
         let report_all = || {
             self.teardown_reporter
@@ -1727,6 +1753,10 @@ impl LiveKitSfu {
                         } => participant_sid.as_ref(),
                         TeardownTargetLite::Room => None,
                     },
+                    // Inline teardown already removed the registration
+                    // atomically under the session gate; there is no
+                    // binding left to re-check against.
+                    None,
                 )
                 .await;
             if we_just_emptied {

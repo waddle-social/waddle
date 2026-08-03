@@ -260,8 +260,13 @@ async fn handle_sans_io_iq_with_relay_override(
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
+            let terminate_session = super::jingle_muji_gate::muji_session_terminate_session(iq);
             crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-                state, &room_jid, full_jid, None,
+                state,
+                &room_jid,
+                full_jid,
+                None,
+                terminate_session.as_ref(),
             )
             .await;
         }
@@ -887,7 +892,7 @@ async fn fallback_muji_terminate_owner_cleanup_ack(
 ) -> Vec<String> {
     let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed, session).await;
     let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-        state, room_jid, departed, None,
+        state, room_jid, departed, None, session,
     )
     .await;
     if persisted.is_err() {
@@ -925,10 +930,30 @@ async fn resolve_muji_relay_outcome(
         } => None,
         MujiRelayOutcome::ProcessLocally {
             enqueue_owner_cleanup: true,
-        } => Some(
-            fallback_muji_terminate_owner_cleanup_ack(state, room_jid, departed, session, reply)
+        } => {
+            // #1608 (PR #1626 review round 3): a terminate whose sid
+            // cannot become a binding (blank / over-cap) must not be
+            // ACKed into session-less durable intents — those would
+            // pass the drain's accept-any path and clear a normally
+            // bound current registration the local handler would have
+            // refused. Mirror the initiate-side policy instead.
+            if session.is_none() {
+                return Some(vec![build_iq_error_xml_typed(
+                    reply.id,
+                    reply.response_from,
+                    reply.response_to,
+                    super::errors::bad_request_iq_error(
+                        "Muji session-terminate sid must be non-blank and at most 256 bytes",
+                    ),
+                )]);
+            }
+            Some(
+                fallback_muji_terminate_owner_cleanup_ack(
+                    state, room_jid, departed, session, reply,
+                )
                 .await,
-        ),
+            )
+        }
     }
 }
 
@@ -1410,11 +1435,12 @@ mod tests {
             .expect("muji update")
             .expect("occupant update");
 
+        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
         let frames = super::resolve_muji_relay_outcome(
             &state,
             &room,
             &alice,
-            None,
+            Some(&session),
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
             },
@@ -1474,11 +1500,12 @@ mod tests {
             .await
             .expect("drop outbox table");
 
+        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
         let frames = super::resolve_muji_relay_outcome(
             &state,
             &room,
             &alice,
-            None,
+            Some(&session),
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
             },
@@ -1989,6 +2016,52 @@ mod tests {
             ),
             Some(1),
             "the websocket pre-gate limiter must report the Muji-action drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_rejects_an_unbindable_sid_without_persisting_intents() {
+        // #1608 (PR #1626 review round 3): a relay-failed terminate
+        // whose sid cannot become a binding must be answered with
+        // bad-request, never ACKed into session-less durable intents
+        // that the drain's accept-any path could later execute against
+        // a bound current registration.
+        let state = create_test_websocket_state_with_calls().await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+
+        let frames = super::resolve_muji_relay_outcome(
+            &state,
+            &room,
+            &alice,
+            None,
+            super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            },
+            super::IqReplyAddressing {
+                id: "term-unbindable",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await
+        .expect("terminal frames");
+
+        assert_eq!(frames.len(), 1);
+        assert!(
+            frames[0].contains("bad-request"),
+            "unbindable-sid fallback must answer bad-request: {frames:?}"
+        );
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim");
+        assert!(
+            jobs.is_empty(),
+            "no session-less fallback intents may be persisted"
         );
     }
 }

@@ -548,3 +548,30 @@ async fn participant_waits_for_pending_muji_presence_clear() {
         .await
         .expect("dependency query"));
 }
+
+#[tokio::test]
+async fn differing_session_binding_inserts_a_second_queued_row() {
+    // #1626 review: a queued intent for an OLDER Jingle session must
+    // not suppress a newer session's intent — the drain skips/executes
+    // them by their recorded session, so collapsing them onto the old
+    // row would either skip a legitimate teardown or run a stale one.
+    let store = store("call-teardown-dedupe-session").await;
+    let old_session = waddle_sfu::SessionBinding::new("muji-old").unwrap();
+    let new_session = waddle_sfu::SessionBinding::new("muji-new").unwrap();
+    let first = CallTeardownIntent {
+        session: Some(old_session),
+        ..participant_intent()
+    };
+    let second = CallTeardownIntent {
+        session: Some(new_session.clone()),
+        ..participant_intent()
+    };
+
+    let first_id = store.enqueue(first).await.unwrap();
+    let second_id = store.enqueue(second.clone()).await.unwrap();
+    assert_ne!(second_id, first_id);
+
+    // Same session still dedupes onto the existing row.
+    let third_id = store.enqueue(second).await.unwrap();
+    assert_eq!(third_id, second_id);
+}

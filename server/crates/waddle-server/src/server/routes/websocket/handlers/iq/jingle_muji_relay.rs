@@ -116,8 +116,13 @@ pub(crate) async fn handle_relayed_muji_initiate(
     // actor and the SFU registration both live — running it on the
     // client's replica would find neither.
     if let Some(room_jid) = clear_after {
+        let terminate_session = jingle_muji_gate::muji_session_terminate_session(iq);
         crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-            state, &room_jid, &sender, None,
+            state,
+            &room_jid,
+            &sender,
+            None,
+            terminate_session.as_ref(),
         )
         .await;
     }

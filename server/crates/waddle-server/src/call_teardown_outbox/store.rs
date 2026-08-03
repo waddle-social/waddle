@@ -163,6 +163,7 @@ impl CallTeardownOutboxStore {
                        AND thread_started_at_ms {ns} ? \
                        AND thread_ended_at_ms {ns} ? \
                        AND producing_node {ns} ? \
+                       AND session_binding {ns} ? \
                      LIMIT 1"
                 ),
                 crate::db_params![
@@ -179,6 +180,7 @@ impl CallTeardownOutboxStore {
                     encoded.thread_started_at_ms,
                     encoded.thread_ended_at_ms,
                     producing_node.clone(),
+                    intent.session.as_ref().map(SessionBinding::as_str),
                 ],
             )
             .await?;
