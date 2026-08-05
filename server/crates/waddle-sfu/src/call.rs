@@ -53,6 +53,40 @@ impl std::fmt::Display for CallId {
     }
 }
 
+/// Opaque signaling-session identifier bound to one participant
+/// registration (#1608). For Muji group calls this is the Jingle
+/// `sid` the occupant's `session-initiate` carried; a later
+/// `session-terminate` whose sid does not match the stored binding is
+/// stale (it belongs to a previous call incarnation in the same room)
+/// and must not tear the current registration down.
+///
+/// The value is an opaque client-chosen token; the only constraints
+/// are non-blankness (a whitespace-only sid is semantically empty and
+/// must not become an authoritative binding) and a length cap so a
+/// crafted sid cannot balloon registry memory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionBinding(String);
+
+impl SessionBinding {
+    pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
+        let value = value.into();
+        if value.trim().is_empty() || value.len() > MAX_SID_LEN {
+            return Err(SfuError::InvalidSessionBinding);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Opaque LiveKit room sid. Distinct from [`CallId`]: LiveKit reuses a
 /// room's human name forever, but each concrete room incarnation gets
 /// a fresh sid.
@@ -183,6 +217,13 @@ pub struct CallTeardownIntentLite {
     pub target: TeardownTargetLite,
     pub generation: Option<CallGeneration>,
     pub room_sid: Option<RoomSid>,
+    /// The signaling session whose terminate produced this intent
+    /// (#1608): the executor re-checks it against the live
+    /// registration's binding immediately before the destructive
+    /// admin call, so a drain racing a rebind cannot eject a newer
+    /// session the earlier fence read missed. `None` = no session
+    /// evidence; only the generation/SID fences apply.
+    pub session: Option<SessionBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -311,6 +352,17 @@ impl MediaCapabilities {
 pub enum CallState {
     Active { remaining: usize },
     Ended,
+}
+
+/// Result of a session-scoped teardown (#1608): either the teardown
+/// ran (with its ordinary [`TeardownDisposition`]) or the presented
+/// signaling-session identifier did not match the stored binding and
+/// NOTHING was mutated — no registry removal, no JWT revocation, no
+/// SFU-side eviction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScopedTeardown {
+    Applied(TeardownDisposition),
+    SessionMismatch,
 }
 
 /// Result of a teardown path guarded by observed LiveKit sids.

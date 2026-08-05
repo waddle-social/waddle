@@ -1,5 +1,5 @@
 use jid::FullJid;
-use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid};
+use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid, SessionBinding};
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, NodeIdentity, SharedNodeIdentity};
 
 use super::store_rows::decode_job;
@@ -96,8 +96,8 @@ impl CallTeardownOutboxStore {
                     "INSERT INTO call_teardown_outbox (\
                         intent_id, call_id, identity, room_jid, action, generation, \
                         room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, thread_ended_at_ms, producing_node, status, attempt_count, last_error, \
-                        next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                        next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, session_binding\
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)",
                     crate::db_params![
                         intent_id.as_str(),
                         intent.call_id.as_str(),
@@ -116,6 +116,7 @@ impl CallTeardownOutboxStore {
                         now_ms,
                         now_ms,
                         now_ms,
+                        intent.session.as_ref().map(SessionBinding::as_str),
                     ],
                 )
                 .await?;
@@ -162,6 +163,7 @@ impl CallTeardownOutboxStore {
                        AND thread_started_at_ms {ns} ? \
                        AND thread_ended_at_ms {ns} ? \
                        AND producing_node {ns} ? \
+                       AND session_binding {ns} ? \
                      LIMIT 1"
                 ),
                 crate::db_params![
@@ -178,6 +180,7 @@ impl CallTeardownOutboxStore {
                     encoded.thread_started_at_ms,
                     encoded.thread_ended_at_ms,
                     producing_node.clone(),
+                    intent.session.as_ref().map(SessionBinding::as_str),
                 ],
             )
             .await?;
@@ -190,8 +193,8 @@ impl CallTeardownOutboxStore {
                 "INSERT INTO call_teardown_outbox (\
                     intent_id, call_id, identity, room_jid, action, generation, \
                     room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, thread_ended_at_ms, producing_node, status, attempt_count, last_error, \
-                    next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms\
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?)",
+                    next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, session_binding\
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)",
                 crate::db_params![
                     intent_id.as_str(),
                     intent.call_id.as_str(),
@@ -210,6 +213,7 @@ impl CallTeardownOutboxStore {
                     now_ms,
                     now_ms,
                     now_ms,
+                    intent.session.as_ref().map(SessionBinding::as_str),
                 ],
             )
             .await?;
@@ -356,7 +360,7 @@ pub(super) fn select_columns() -> &'static str {
     "SELECT intent_id, call_id, identity, room_jid, action, generation, \
             room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
             next_attempt_at_ms, claim_token, created_at_ms, thread_id, anchor_origin_id, \
-            thread_started_at_ms, thread_ended_at_ms \
+            thread_started_at_ms, thread_ended_at_ms, session_binding \
      FROM call_teardown_outbox"
 }
 

@@ -430,6 +430,7 @@ async fn enqueue_muji_room_sweep(
         },
         generation: None,
         room_sid: Some(room_sid.clone()),
+        session: None,
     };
     let store = &state.deps.protocol.call_teardown_outbox;
     let persistence = &state.deps.protocol.call_teardown_persistence;
@@ -694,7 +695,8 @@ async fn process_participant_left_for_identity(
     };
     if let Ok(room_jid) = room_name.parse::<BareJid>() {
         let outcome =
-            clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids).await;
+            clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids, None)
+                .await;
         if outcome == WebhookEffectOutcome::Stale {
             increment_call_teardown_stale_dropped();
         }

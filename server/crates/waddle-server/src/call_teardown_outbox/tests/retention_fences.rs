@@ -15,6 +15,7 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
                 target: TeardownTarget::Room,
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             now_ms - FAILED_RETENTION_MS - 10_000,
         )
@@ -27,6 +28,7 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
                 target: TeardownTarget::Room,
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             now_ms,
         )
@@ -248,6 +250,7 @@ async fn unowned_room_scoped_intent_older_than_a_day_dead_letters() {
                 target: TeardownTarget::Room,
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             now_ms - (24 * 60 * 60 * 1_000) - 1,
         )
@@ -288,6 +291,7 @@ async fn old_room_scoped_intent_survives_transient_registry_unavailability() {
                 target: TeardownTarget::Room,
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             now_ms - (24 * 60 * 60 * 1_000) - 1,
         )
@@ -343,6 +347,7 @@ async fn old_room_scoped_intent_survives_a_live_foreign_owner_claim() {
                 target: TeardownTarget::Room,
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             now_ms - (24 * 60 * 60 * 1_000) - 1,
         )
@@ -406,6 +411,7 @@ async fn live_registration_predating_the_intent_still_executes_removal() {
             },
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue");
@@ -462,6 +468,7 @@ async fn existing_participant_reobservation_does_not_reopen_the_swallow_window()
                 },
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             intent_created_at_ms,
         )
@@ -506,6 +513,7 @@ async fn later_local_token_mint_skips_an_older_queued_participant_eject() {
                 },
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             intent_created_at_ms,
         )
@@ -571,6 +579,7 @@ async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
                 },
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             intent_created_at_ms,
         )
@@ -612,6 +621,7 @@ async fn sid_fenced_room_scoped_intent_executes_when_room_has_no_claim() {
                 },
                 generation: None,
                 room_sid: Some(RoomSid::new("RM_orphaned").expect("room sid")),
+                session: None,
             },
             now_ms - 1,
         )
@@ -659,6 +669,7 @@ async fn unfenced_room_scoped_intent_stays_gated_without_a_claim() {
                 },
                 generation: None,
                 room_sid: Some(RoomSid::new("RM_orphaned_unfenced").expect("room sid")),
+                session: None,
             },
             now_ms - 1,
         )

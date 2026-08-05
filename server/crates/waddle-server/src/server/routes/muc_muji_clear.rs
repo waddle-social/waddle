@@ -41,6 +41,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) -> WebhookEffectOutcome {
     debug!(
         room = %room_jid,
@@ -55,6 +56,20 @@ pub(crate) async fn clear_muji_presence_for_departure(
         return WebhookEffectOutcome::Stale;
     }
 
+    // #1608 (PR #1626 review round 4): when the departure came from a
+    // signaling terminate, a live registration bound to a DIFFERENT
+    // session proves this cleanup was superseded by a rejoin — the
+    // actor-side advertisement clear, the SFU bookkeeping, and the
+    // leave broadcast below all belong to the OLD session and must not
+    // touch the new one. Webhook-driven callers pass no session and
+    // keep their membership-scoped semantics.
+    if session_superseded(state, room_jid, full_jid, session) {
+        // No metric here: callers already account for `Stale` outcomes
+        // (the outbox drain counts stale_dropped itself), and counting
+        // at both layers double-counts one skipped cleanup.
+        return WebhookEffectOutcome::Stale;
+    }
+
     let actor = match get_room_actor_result(state, room_jid).await {
         Ok(Some(actor)) => actor,
         Ok(None) => {
@@ -63,13 +78,13 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "MUC room actor is absent during LiveKit departure cleanup; queueing owner-gated Muji clear"
             );
-            if enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids)
+            if enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids, session)
                 .await
                 .is_err()
             {
                 return WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed");
             }
-            record_participant_left(state, room_jid, full_jid, observed_sids);
+            record_participant_left(state, room_jid, full_jid, observed_sids, session);
             return WebhookEffectOutcome::Completed;
         }
         Err(error) => {
@@ -82,6 +97,16 @@ pub(crate) async fn clear_muji_presence_for_departure(
             return WebhookEffectOutcome::Retryable("room_registry_lookup_failed");
         }
     };
+    // Re-checked after the awaited actor lookup, immediately before
+    // the destructive ask (#1608): the actor mailbox itself is the
+    // remaining residue — closing it would require the room actor to
+    // learn Jingle session bindings; the authoritative SFU registry
+    // leg below is fully atomic instead, and a wrongly-cleared
+    // advertisement is re-asserted by the client's next Muji presence
+    // update.
+    if session_superseded(state, room_jid, full_jid, session) {
+        return WebhookEffectOutcome::Stale;
+    }
     let outcome = match actor
         .ask(ClearMujiPresence {
             sender_jid: full_jid.clone(),
@@ -95,7 +120,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "Participant not in MUC actor; SFU registry cleanup only"
             );
-            record_participant_left(state, room_jid, full_jid, observed_sids);
+            record_participant_left(state, room_jid, full_jid, observed_sids, session);
             return super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid)
                 .await;
         }
@@ -111,7 +136,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
     };
 
     broadcast_muji_clear(state, room_jid, full_jid, &outcome);
-    record_participant_left(state, room_jid, full_jid, observed_sids);
+    record_participant_left(state, room_jid, full_jid, observed_sids, session);
     super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid).await
 }
 
@@ -120,6 +145,7 @@ async fn enqueue_muji_presence_clear(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
@@ -142,6 +168,10 @@ async fn enqueue_muji_presence_clear(
         },
         generation: None,
         room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
+        // Carried through from the producer when the departure came
+        // from a signaling terminate (#1608); webhook-driven callers
+        // have no session evidence and pass None.
+        session: session.cloned(),
     };
     let store = &state.deps.protocol.call_teardown_outbox;
     let persistence = &state.deps.protocol.call_teardown_persistence;
@@ -163,13 +193,54 @@ fn record_participant_left(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) {
-    if matches!(
-        note_participant_left_from_webhook(state, room_jid, full_jid, observed_sids),
-        Some(TeardownDisposition::StaleSid)
-    ) {
-        increment_call_teardown_stale_dropped();
+    match session {
+        // #1608: the signaling-driven cleanup removes the registration
+        // only when its binding still accepts the producing session —
+        // check and removal are one atomic registry operation, so a
+        // rebind racing the awaits above cannot lose the NEW session's
+        // bookkeeping. A mismatch is silent here: the presence-side
+        // outcome was already decided by the actor, and the metric
+        // accounting belongs to the callers.
+        Some(_) => {
+            let _ = super::websocket::muc_call_sfu::note_participant_left_for_session(
+                state,
+                room_jid,
+                full_jid,
+                observed_sids,
+                session,
+            );
+        }
+        None => {
+            if matches!(
+                note_participant_left_from_webhook(state, room_jid, full_jid, observed_sids),
+                Some(TeardownDisposition::StaleSid)
+            ) {
+                increment_call_teardown_stale_dropped();
+            }
+        }
     }
+}
+
+/// `true` when a signaling session was supplied and `full_jid`'s live
+/// registration is bound to a DIFFERENT session — the cleanup was
+/// superseded by a rejoin (#1608).
+fn session_superseded(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+    session: Option<&waddle_sfu::SessionBinding>,
+) -> bool {
+    let (Some(session), Some(sfu)) = (session, state.deps.protocol.sfu.as_ref()) else {
+        return false;
+    };
+    let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) else {
+        return false;
+    };
+    let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
+    sfu.participant_session_binding(&call_id, &identity)
+        .is_some_and(|bound| &bound != session)
 }
 
 /// Broadcast a server-originated Muji-presence clear to every remaining
@@ -264,7 +335,8 @@ mod tests {
         let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
 
         let outcome =
-            clear_muji_presence_for_departure(state.as_ref(), &room_jid, &full_jid, None).await;
+            clear_muji_presence_for_departure(state.as_ref(), &room_jid, &full_jid, None, None)
+                .await;
 
         assert_eq!(
             outcome,

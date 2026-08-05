@@ -218,6 +218,7 @@ async fn handle_sans_io_iq_with_relay_override(
                         state,
                         &room_jid,
                         full_jid,
+                        super::jingle_muji_gate::muji_session_terminate_session(iq).as_ref(),
                         relay_outcome,
                         IqReplyAddressing {
                             id,
@@ -259,8 +260,13 @@ async fn handle_sans_io_iq_with_relay_override(
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
+            let terminate_session = super::jingle_muji_gate::muji_session_terminate_session(iq);
             crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-                state, &room_jid, full_jid, None,
+                state,
+                &room_jid,
+                full_jid,
+                None,
+                terminate_session.as_ref(),
             )
             .await;
         }
@@ -816,6 +822,7 @@ async fn enqueue_muji_relay_teardown_fallback(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
         Ok(call_id) => call_id,
@@ -828,6 +835,11 @@ async fn enqueue_muji_relay_teardown_fallback(
             return Err(error.into());
         }
     };
+    // Both intents record the terminate's own Jingle session (#1608):
+    // at drain time on the owning side, a registration bound to a
+    // NEWER session proves this fallback was superseded by a rejoin,
+    // which the created-after-the-registration timestamp fence alone
+    // cannot see.
     let intents = [
         crate::call_teardown_outbox::CallTeardownIntent {
             call_id: call_id.clone(),
@@ -838,6 +850,7 @@ async fn enqueue_muji_relay_teardown_fallback(
             },
             generation: None,
             room_sid: None,
+            session: session.cloned(),
         },
         crate::call_teardown_outbox::CallTeardownIntent {
             call_id,
@@ -847,6 +860,7 @@ async fn enqueue_muji_relay_teardown_fallback(
             },
             generation: None,
             room_sid: None,
+            session: session.cloned(),
         },
     ];
     let store = &state.deps.protocol.call_teardown_outbox;
@@ -873,11 +887,12 @@ async fn fallback_muji_terminate_owner_cleanup_ack(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    session: Option<&waddle_sfu::SessionBinding>,
     reply: IqReplyAddressing<'_>,
 ) -> Vec<String> {
-    let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed).await;
+    let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed, session).await;
     let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-        state, room_jid, departed, None,
+        state, room_jid, departed, None, session,
     )
     .await;
     if persisted.is_err() {
@@ -904,6 +919,7 @@ async fn resolve_muji_relay_outcome(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    session: Option<&waddle_sfu::SessionBinding>,
     outcome: MujiRelayOutcome,
     reply: IqReplyAddressing<'_>,
 ) -> Option<Vec<String>> {
@@ -915,7 +931,28 @@ async fn resolve_muji_relay_outcome(
         MujiRelayOutcome::ProcessLocally {
             enqueue_owner_cleanup: true,
         } => {
-            Some(fallback_muji_terminate_owner_cleanup_ack(state, room_jid, departed, reply).await)
+            // #1608 (PR #1626 review round 3): a terminate whose sid
+            // cannot become a binding (blank / over-cap) must not be
+            // ACKed into session-less durable intents — those would
+            // pass the drain's accept-any path and clear a normally
+            // bound current registration the local handler would have
+            // refused. Mirror the initiate-side policy instead.
+            if session.is_none() {
+                return Some(vec![build_iq_error_xml_typed(
+                    reply.id,
+                    reply.response_from,
+                    reply.response_to,
+                    super::errors::bad_request_iq_error(
+                        "Muji session-terminate sid must be non-blank and at most 256 bytes",
+                    ),
+                )]);
+            }
+            Some(
+                fallback_muji_terminate_owner_cleanup_ack(
+                    state, room_jid, departed, session, reply,
+                )
+                .await,
+            )
         }
     }
 }
@@ -1271,7 +1308,8 @@ mod tests {
         let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
 
-        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice)
+        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
+        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice, Some(&session))
             .await
             .expect("persist fallback intents");
 
@@ -1397,10 +1435,12 @@ mod tests {
             .expect("muji update")
             .expect("occupant update");
 
+        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
         let frames = super::resolve_muji_relay_outcome(
             &state,
             &room,
             &alice,
+            Some(&session),
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
             },
@@ -1460,10 +1500,12 @@ mod tests {
             .await
             .expect("drop outbox table");
 
+        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
         let frames = super::resolve_muji_relay_outcome(
             &state,
             &room,
             &alice,
+            Some(&session),
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
             },
@@ -1974,6 +2016,52 @@ mod tests {
             ),
             Some(1),
             "the websocket pre-gate limiter must report the Muji-action drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_fallback_rejects_an_unbindable_sid_without_persisting_intents() {
+        // #1608 (PR #1626 review round 3): a relay-failed terminate
+        // whose sid cannot become a binding must be answered with
+        // bad-request, never ACKed into session-less durable intents
+        // that the drain's accept-any path could later execute against
+        // a bound current registration.
+        let state = create_test_websocket_state_with_calls().await;
+        let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+
+        let frames = super::resolve_muji_relay_outcome(
+            &state,
+            &room,
+            &alice,
+            None,
+            super::MujiRelayOutcome::ProcessLocally {
+                enqueue_owner_cleanup: true,
+            },
+            super::IqReplyAddressing {
+                id: "term-unbindable",
+                response_from: Some("calls.example.com"),
+                response_to: Some("alice@example.com/web"),
+            },
+        )
+        .await
+        .expect("terminal frames");
+
+        assert_eq!(frames.len(), 1);
+        assert!(
+            frames[0].contains("bad-request"),
+            "unbindable-sid fallback must answer bad-request: {frames:?}"
+        );
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("claim");
+        assert!(
+            jobs.is_empty(),
+            "no session-less fallback intents may be persisted"
         );
     }
 }

@@ -228,6 +228,7 @@ async fn drain_marks_higher_generation_stale_without_admin_call() {
         },
         generation: Some(CallGeneration::try_from_u64(1).expect("generation")),
         room_sid: None,
+        session: None,
     };
     let intent_id = state
         .deps
@@ -275,6 +276,7 @@ async fn room_not_owned_by_this_node_remains_queued() {
         },
         generation: None,
         room_sid: None,
+        session: None,
     };
     let intent_id = state
         .deps
@@ -330,6 +332,7 @@ async fn occupied_room_intent_is_requeued_not_consumed() {
             target: TeardownTarget::Room,
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue");
@@ -380,6 +383,7 @@ async fn unfenced_participant_rejoin_is_skipped_without_admin_call() {
                 },
                 generation: None,
                 room_sid: None,
+                session: None,
             },
             crate::time::now_ms() - 60_000,
         )
@@ -429,6 +433,7 @@ async fn unfenced_participant_without_live_registration_still_removes_participan
             },
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue");

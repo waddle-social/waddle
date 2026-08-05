@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use jid::{BareJid, FullJid};
-use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid};
+use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid, SessionBinding};
 
 use super::{
     CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownLastError,
@@ -42,6 +42,10 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
             room_sid: row
                 .get::<Option<String>>(6)?
                 .map(RoomSid::new)
+                .transpose()?,
+            session: row
+                .get::<Option<String>>(19)?
+                .map(SessionBinding::new)
                 .transpose()?,
         },
         producing_node: row

@@ -267,6 +267,26 @@ pub(super) fn muji_session_terminate_room(iq: &Iq) -> Option<BareJid> {
     Some(room_jid)
 }
 
+/// The Muji `session-terminate`'s Jingle sid as a typed
+/// [`waddle_sfu::SessionBinding`], when the stanza is such a terminate
+/// and its sid can be one (#1608). `None` for non-terminates and for
+/// pathological sids — the durable relay fallback then persists no
+/// session evidence and keeps its timestamp-fence-only guard.
+pub(super) fn muji_session_terminate_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding> {
+    let Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != NS_JINGLE || payload.name() != "jingle" {
+        return None;
+    }
+    find_muji(payload)?;
+    let jingle = Jingle::try_from(payload.clone()).ok()?;
+    if !matches!(jingle.action, Action::SessionTerminate) {
+        return None;
+    }
+    waddle_sfu::SessionBinding::new(jingle.sid.0).ok()
+}
+
 async fn verify_room_membership(
     state: &WebSocketState,
     full_jid: &FullJid,

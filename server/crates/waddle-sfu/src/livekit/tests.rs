@@ -1450,6 +1450,7 @@ async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
         },
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
+        session: None,
     };
 
     assert_eq!(
@@ -1477,6 +1478,7 @@ async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids
         },
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
+        session: None,
     };
 
     assert_eq!(
@@ -1503,6 +1505,7 @@ async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_
         },
         generation: Some(CallGeneration::new(1)),
         room_sid: Some(fixture_room_sid("RM_restart")),
+        session: None,
     };
 
     assert_eq!(
@@ -1557,6 +1560,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         },
         generation: None,
         room_sid: None,
+        session: None,
     };
     assert_eq!(
         sfu.teardown_executor()
@@ -1580,6 +1584,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         },
         generation: None,
         room_sid: None,
+        session: None,
     };
     assert_eq!(
         sfu.teardown_executor()
@@ -3212,6 +3217,7 @@ async fn adopted_participant_sid_makes_fenced_removal_decidable() {
         },
         generation: stored_generation(&sfu, &call),
         room_sid: Some(room_sid),
+        session: None,
     };
     assert_eq!(
         sfu.teardown_executor()
@@ -3420,4 +3426,318 @@ fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
         TeardownTargetLite::Participant { identity, .. } => assert_eq!(identity, &alice),
         TeardownTargetLite::Room => panic!("eject convergence must only enqueue eviction"),
     }
+}
+
+// ── Signaling-session binding (#1608) ────────────────────────────────
+
+#[test]
+fn session_binding_dies_with_the_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let sid = SessionBinding::new("muji-sid-1").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &sid);
+    let _ = sfu.unregister_call_participant(&call, &alice, None);
+
+    // A later re-registration (fresh session) starts unbound.
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(sfu.participant_session_binding(&call, &alice), None);
+}
+
+#[test]
+fn webhook_restored_registration_has_no_session_binding() {
+    // A registration restored from a `participant_joined` webhook
+    // never saw the Jingle signaling leg, so it carries no binding —
+    // terminate handling must treat that as "accept any sid".
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_x"), Some("PA_x"));
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &observed),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(sfu.participant_session_binding(&call, &alice), None);
+}
+
+#[test]
+fn session_binding_rejects_empty_and_oversized_values() {
+    assert!(SessionBinding::new("").is_err());
+    assert!(
+        SessionBinding::new("   ").is_err(),
+        "whitespace-only sid is semantically blank and must be rejected"
+    );
+    assert!(SessionBinding::new("a".repeat(257)).is_err());
+    assert!(SessionBinding::new("a".repeat(256)).is_ok());
+}
+
+#[test]
+fn plain_re_registration_clears_the_previous_session_binding() {
+    // A registration without a session (webhook-less non-signaling
+    // callers, 1:1 paths) belongs to a NEW session the registry has no
+    // identifier for. It must NOT keep the previous session's binding:
+    // a stale terminate carrying the OLD sid would then match and tear
+    // down the new session — the exact #1608 shape, made permanent.
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let old = SessionBinding::new("muji-sid-old").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &old);
+    sfu.register_call_participant(&call, &alice);
+
+    assert_eq!(sfu.participant_session_binding(&call, &alice), None);
+}
+
+#[test]
+fn register_with_session_binds_atomically_and_rebinds_on_rejoin() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let old = SessionBinding::new("muji-sid-old").expect("binding");
+    let new = SessionBinding::new("muji-sid-new").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &old);
+    assert_eq!(
+        sfu.participant_session_binding(&call, &alice),
+        Some(old.clone())
+    );
+
+    sfu.register_call_participant_with_session(&call, &alice, &new);
+    assert_eq!(sfu.participant_session_binding(&call, &alice), Some(new));
+    assert_eq!(sfu.participant_count(&call), 1);
+}
+
+#[test]
+fn session_scoped_unregister_refuses_a_mismatching_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let live = SessionBinding::new("muji-live").expect("binding");
+    let stale = SessionBinding::new("muji-stale").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &live);
+    assert_eq!(
+        sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&stale), None),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(
+        sfu.has_call_participant(&call, &alice),
+        "mismatching-sid unregister must leave the registration intact"
+    );
+}
+
+#[test]
+fn session_scoped_unregister_applies_on_a_matching_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let live = SessionBinding::new("muji-live").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &live);
+    match sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&live), None) {
+        SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended)) => {}
+        other => panic!("matching-sid unregister must apply and end the call, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[test]
+fn session_scoped_unregister_accepts_any_sid_for_an_unbound_registration() {
+    // Webhook-restored registrations never saw the signaling leg and
+    // carry no binding — they keep the pre-#1608 accept-any teardown.
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let presented = SessionBinding::new("any-sid").expect("binding");
+
+    sfu.register_call_participant(&call, &alice);
+    match sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&presented), None)
+    {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("unbound registration must accept any sid, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[test]
+fn session_scoped_unregister_refuses_an_unparseable_sid_against_a_bound_registration() {
+    // `None` models a presented sid that could not become a binding
+    // (blank / over-cap): it can never match a bound session, and must
+    // not tear one down.
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let live = SessionBinding::new("muji-live").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &live);
+    assert_eq!(
+        sfu.unregister_call_participant_if_session_matches(&call, &alice, None, None),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn executor_refuses_a_session_bearing_intent_after_a_rebind() {
+    // #1608 (PR #1626 review round 3): the drain-loop fence and the
+    // executor run at different times; a rebind in between must be
+    // caught by the executor's own late re-check, not just the fence.
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let rebound = SessionBinding::new("muji-rebound").expect("binding");
+    let stale = SessionBinding::new("muji-stale").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &rebound);
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+        session: Some(stale),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed refusal"),
+        TeardownExecution::StaleGeneration,
+        "a rebound registration must refuse the stale-session intent"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+}
+
+#[tokio::test]
+async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let current = SessionBinding::new("muji-current").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &current);
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+        session: Some(current),
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("executed"),
+        TeardownExecution::Executed
+    );
+    assert_eq!(admin.remove_calls.lock().expect("lock").len(), 1);
+}
+
+/// Deterministically wait for every spawned admin task to finish.
+/// Each spawn in [`LiveKitSfu::schedule_remote_teardown`] holds an
+/// owned `admin_permits` permit for its whole lifetime, so
+/// re-acquiring the full `ADMIN_CONCURRENCY` budget proves the spawn
+/// queue is drained — no yield counting (#1626 review round 6).
+async fn drain_spawned_admin_tasks(sfu: &LiveKitSfu) {
+    let all_permits = sfu
+        .admin_permits
+        .acquire_many(u32::try_from(ADMIN_CONCURRENCY).expect("permit budget fits u32"))
+        .await
+        .expect("admin permit semaphore closed");
+    drop(all_permits);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin() {
+    // #1608 (PR #1626 review round 4): terminate(A) removes the
+    // registration and SPAWNS the LiveKit eject; a rejoin can
+    // re-register the same identity under session B before that spawn
+    // runs. The scheduled removal carries A's binding, so the
+    // executor's rebind check refuses it instead of ejecting B.
+    // current_thread flavor: the spawn cannot run before the rejoin
+    // below because there is no await between them.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+    let session_a = SessionBinding::new("muji-session-a").expect("binding");
+    let session_b = SessionBinding::new("muji-session-b").expect("binding");
+
+    // Bob keeps the call non-empty so no DeleteRoom fires.
+    sfu.register_call_participant(&call, &bob);
+    sfu.register_call_participant_with_session(&call, &alice, &session_a);
+    match sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&session_a), None)
+    {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("matching terminate must apply, got {other:?}"),
+    }
+    // The rejoin lands before the spawned eject runs.
+    sfu.register_call_participant_with_session(&call, &alice, &session_b);
+
+    drain_spawned_admin_tasks(&sfu).await;
+
+    assert!(
+        admin
+            .remove_calls
+            .lock()
+            .expect("recording lock")
+            .is_empty(),
+        "the spawned eject must be refused after the rejoin rebound the identity"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    // Control: a teardown WITHOUT a racing rejoin must surface its
+    // RemoveParticipant under the identical await structure, so the
+    // empty assertion above cannot pass vacuously (i.e. it proves the
+    // eject spawn actually ran and was refused, rather than never
+    // having been scheduled at all).
+    let session_bob = SessionBinding::new("muji-session-bob").expect("binding");
+    sfu.register_call_participant_with_session(&call, &bob, &session_bob);
+    match sfu.unregister_call_participant_if_session_matches(&call, &bob, Some(&session_bob), None)
+    {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("control terminate must apply, got {other:?}"),
+    }
+    drain_spawned_admin_tasks(&sfu).await;
+    let removes = admin.remove_calls.lock().expect("recording lock");
+    assert_eq!(
+        removes.len(),
+        1,
+        "the control teardown proves spawned ejects reach the recording admin"
+    );
+    assert_eq!(removes[0].1, bob);
+}
+
+#[test]
+fn session_scoped_note_left_refuses_a_rebound_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let rebound = SessionBinding::new("muji-rebound").expect("binding");
+    let stale = SessionBinding::new("muji-stale").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &rebound);
+    assert_eq!(
+        sfu.note_participant_left_if_session_matches(&call, &alice, None, Some(&stale)),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    match sfu.note_participant_left_if_session_matches(&call, &alice, None, Some(&rebound)) {
+        SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended)) => {}
+        other => panic!("matching note-left must apply, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
 }

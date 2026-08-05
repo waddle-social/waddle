@@ -373,6 +373,26 @@ pub(crate) fn note_participant_left_from_webhook(
     note_participant_left_by_call_id(state, &call_id, jid, observed_sids)
 }
 
+/// Session-scoped variant (#1608): the local bookkeeping applies only
+/// when the registration's binding accepts `session` — atomic in the
+/// registry, so a signaling-driven cleanup racing a same-identity
+/// rebind cannot remove the NEW session. `session = None` keeps the
+/// membership-scoped semantics.
+pub(crate) fn note_participant_left_for_session(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
+    session: Option<&waddle_sfu::SessionBinding>,
+) -> Option<waddle_sfu::SessionScopedTeardown> {
+    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+        return None;
+    };
+    let sfu = state.deps.protocol.sfu.as_ref()?;
+    let identity = Identity::from_jid(jid.clone());
+    Some(sfu.note_participant_left_if_session_matches(&call_id, &identity, observed_sids, session))
+}
+
 /// Non-destructively validate and learn webhook SIDs before an async
 /// MUC actor cleanup. Keeping membership intact until the actor step
 /// succeeds preserves `room_finished`'s survivor recovery path when a

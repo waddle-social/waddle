@@ -333,6 +333,7 @@ async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
         },
         generation: None,
         room_sid: Some(RoomSid::new("RM_muji").unwrap()),
+        session: None,
     };
 
     let intent_id = store.enqueue(intent.clone()).await.unwrap();
@@ -351,6 +352,7 @@ async fn muji_room_sweep_round_trips_with_webhook_room_sid() {
         },
         generation: None,
         room_sid: Some(RoomSid::new("RM_sweep").unwrap()),
+        session: None,
     };
 
     let intent_id = store.enqueue(intent.clone()).await.unwrap();
@@ -370,6 +372,7 @@ async fn muji_presence_clear_dedupe_is_exact_match_on_participant_sid() {
         },
         generation: None,
         room_sid: Some(RoomSid::new("RM_same").unwrap()),
+        session: None,
     };
     let second = first.clone();
     let third = CallTeardownIntent {
@@ -470,6 +473,7 @@ async fn ownership_release_defers_old_row_so_later_work_can_be_claimed() {
             target: TeardownTarget::Room,
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue foreign");
@@ -510,6 +514,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
             },
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue participant");
@@ -523,6 +528,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
             },
             generation: None,
             room_sid: None,
+            session: None,
         })
         .await
         .expect("enqueue presence clear");
@@ -541,4 +547,31 @@ async fn participant_waits_for_pending_muji_presence_clear() {
         .has_pending_muji_presence_clear(&call_id, &departed)
         .await
         .expect("dependency query"));
+}
+
+#[tokio::test]
+async fn differing_session_binding_inserts_a_second_queued_row() {
+    // #1626 review: a queued intent for an OLDER Jingle session must
+    // not suppress a newer session's intent — the drain skips/executes
+    // them by their recorded session, so collapsing them onto the old
+    // row would either skip a legitimate teardown or run a stale one.
+    let store = store("call-teardown-dedupe-session").await;
+    let old_session = waddle_sfu::SessionBinding::new("muji-old").unwrap();
+    let new_session = waddle_sfu::SessionBinding::new("muji-new").unwrap();
+    let first = CallTeardownIntent {
+        session: Some(old_session),
+        ..participant_intent()
+    };
+    let second = CallTeardownIntent {
+        session: Some(new_session.clone()),
+        ..participant_intent()
+    };
+
+    let first_id = store.enqueue(first).await.unwrap();
+    let second_id = store.enqueue(second.clone()).await.unwrap();
+    assert_ne!(second_id, first_id);
+
+    // Same session still dedupes onto the existing row.
+    let third_id = store.enqueue(second).await.unwrap();
+    assert_eq!(third_id, second_id);
 }

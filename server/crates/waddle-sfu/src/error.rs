@@ -13,6 +13,9 @@ pub enum SfuError {
     #[error("invalid LiveKit participant sid")]
     InvalidParticipantSid,
 
+    #[error("invalid signaling-session binding")]
+    InvalidSessionBinding,
+
     #[error("call generation must be greater than zero")]
     InvalidCallGeneration,
 
