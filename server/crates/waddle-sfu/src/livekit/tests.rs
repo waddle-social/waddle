@@ -3644,6 +3644,20 @@ async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
     assert_eq!(admin.remove_calls.lock().expect("lock").len(), 1);
 }
 
+/// Deterministically wait for every spawned admin task to finish.
+/// Each spawn in [`LiveKitSfu::schedule_remote_teardown`] holds an
+/// owned `admin_permits` permit for its whole lifetime, so
+/// re-acquiring the full `ADMIN_CONCURRENCY` budget proves the spawn
+/// queue is drained — no yield counting (#1626 review round 6).
+async fn drain_spawned_admin_tasks(sfu: &LiveKitSfu) {
+    let all_permits = sfu
+        .admin_permits
+        .acquire_many(u32::try_from(ADMIN_CONCURRENCY).expect("permit budget fits u32"))
+        .await
+        .expect("admin permit semaphore closed");
+    drop(all_permits);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin() {
     // #1608 (PR #1626 review round 4): terminate(A) removes the
@@ -3672,9 +3686,7 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
     // The rejoin lands before the spawned eject runs.
     sfu.register_call_participant_with_session(&call, &alice, &session_b);
 
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
+    drain_spawned_admin_tasks(&sfu).await;
 
     assert!(
         admin
@@ -3686,11 +3698,11 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
     );
     assert!(sfu.has_call_participant(&call, &alice));
 
-    // Control: prove the yield budget above is sufficient for a
-    // spawned eject to reach the recording admin on this runtime — a
-    // teardown WITHOUT a racing rejoin must surface its
+    // Control: a teardown WITHOUT a racing rejoin must surface its
     // RemoveParticipant under the identical await structure, so the
-    // empty assertion above cannot pass vacuously.
+    // empty assertion above cannot pass vacuously (i.e. it proves the
+    // eject spawn actually ran and was refused, rather than never
+    // having been scheduled at all).
     let session_bob = SessionBinding::new("muji-session-bob").expect("binding");
     sfu.register_call_participant_with_session(&call, &bob, &session_bob);
     match sfu.unregister_call_participant_if_session_matches(&call, &bob, Some(&session_bob), None)
@@ -3698,14 +3710,12 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
         SessionScopedTeardown::Applied(_) => {}
         other => panic!("control terminate must apply, got {other:?}"),
     }
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
+    drain_spawned_admin_tasks(&sfu).await;
     let removes = admin.remove_calls.lock().expect("recording lock");
     assert_eq!(
         removes.len(),
         1,
-        "the control teardown proves the yield budget executes spawned ejects"
+        "the control teardown proves spawned ejects reach the recording admin"
     );
     assert_eq!(removes[0].1, bob);
 }

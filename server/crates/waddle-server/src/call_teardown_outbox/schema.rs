@@ -44,34 +44,8 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
             (),
         )
         .await?;
-    let add_producing_node = match driver {
-        crate::db::DatabaseDriver::Postgres => {
-            "ALTER TABLE call_teardown_outbox ADD COLUMN IF NOT EXISTS producing_node TEXT NULL CHECK (producing_node IS NULL OR producing_node <> '')"
-        }
-        crate::db::DatabaseDriver::Sqlite => {
-            "ALTER TABLE call_teardown_outbox ADD COLUMN producing_node TEXT NULL CHECK (producing_node IS NULL OR producing_node <> '')"
-        }
-    };
-    if let Err(error) = connection.execute(add_producing_node, ()).await {
-        let message = error.to_string().to_lowercase();
-        if !message.contains("duplicate column") && !message.contains("already exists") {
-            return Err(error.into());
-        }
-    }
-    let add_session_binding = match driver {
-        crate::db::DatabaseDriver::Postgres => {
-            "ALTER TABLE call_teardown_outbox ADD COLUMN IF NOT EXISTS session_binding TEXT NULL CHECK (session_binding IS NULL OR session_binding <> '')"
-        }
-        crate::db::DatabaseDriver::Sqlite => {
-            "ALTER TABLE call_teardown_outbox ADD COLUMN session_binding TEXT NULL CHECK (session_binding IS NULL OR session_binding <> '')"
-        }
-    };
-    if let Err(error) = connection.execute(add_session_binding, ()).await {
-        let message = error.to_string().to_lowercase();
-        if !message.contains("duplicate column") && !message.contains("already exists") {
-            return Err(error.into());
-        }
-    }
+    add_non_blank_text_column_if_missing(&connection, driver, "producing_node").await?;
+    add_non_blank_text_column_if_missing(&connection, driver, "session_binding").await?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_status_due \
@@ -91,4 +65,67 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
         )
         .await?;
     Ok(())
+}
+
+/// Adds a `TEXT NULL CHECK (<column> IS NULL OR <column> <> '')` column
+/// to `call_teardown_outbox` when it is missing. Postgres delegates to
+/// `ADD COLUMN IF NOT EXISTS`; SQLite has no such clause, so the column
+/// is probed via `PRAGMA table_info` first. Either way every DDL
+/// failure surfaces as the typed `DatabaseError` — no substring
+/// matching on `error.to_string()`.
+///
+/// `column` MUST be a compile-time identifier constant: DDL cannot bind
+/// parameters, so it is interpolated into the statement.
+async fn add_non_blank_text_column_if_missing(
+    connection: &crate::db::ConnectionGuard,
+    driver: crate::db::DatabaseDriver,
+    column: &'static str,
+) -> Result<(), CallTeardownOutboxError> {
+    match driver {
+        crate::db::DatabaseDriver::Postgres => {
+            connection
+                .execute(
+                    &format!(
+                        "ALTER TABLE call_teardown_outbox ADD COLUMN IF NOT EXISTS \
+                         {column} TEXT NULL CHECK ({column} IS NULL OR {column} <> '')"
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        crate::db::DatabaseDriver::Sqlite => {
+            if sqlite_column_present(connection, column).await? {
+                return Ok(());
+            }
+            connection
+                .execute(
+                    &format!(
+                        "ALTER TABLE call_teardown_outbox ADD COLUMN \
+                         {column} TEXT NULL CHECK ({column} IS NULL OR {column} <> '')"
+                    ),
+                    (),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// SQLite-only: returns `true` when `column` already exists on
+/// `call_teardown_outbox`. `PRAGMA table_info` reports the column name
+/// at index 1.
+async fn sqlite_column_present(
+    connection: &crate::db::ConnectionGuard,
+    column: &str,
+) -> Result<bool, CallTeardownOutboxError> {
+    let mut rows = connection
+        .query("PRAGMA table_info(call_teardown_outbox)", ())
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
