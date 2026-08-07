@@ -76,7 +76,6 @@
 //!   removal is driven by the live teardown paths (which hold the session's
 //!   ownership token), not by the token-less state machine. See the arm.
 
-use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use jid::{BareJid, FullJid, Jid};

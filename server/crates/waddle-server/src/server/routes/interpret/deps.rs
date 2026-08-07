@@ -139,15 +139,15 @@ pub struct Deps<'a> {
     /// in production via
     /// [`super::super::websocket::build_interpret_deps`].
     pub web_socket_state: Option<&'a WebSocketState>,
-    /// The authenticated `Session` of the connection that emitted the
-    /// outbound events being interpreted, when one is available.
+    /// The resolved authenticated principal of the connection that emitted
+    /// the outbound events being interpreted, when one is available.
     ///
     /// Threaded through so the
     /// [`OutboundEvent::DispatchToRoom`] arm can perform the
     /// managed-room owner check (announcements room admits server
     /// owners only) without re-querying. `None` for unauthenticated
     /// flows (early connection lifecycle, unit tests).
-    pub authenticated_session: Option<&'a Session>,
+    pub authenticated_principal: Option<crate::server::routes::websocket::ResolvedPrincipal<'a>>,
     /// Authoritative local XMPP domain. Used by the
     /// [`OutboundEvent::RouteToConnection`] arm to gate the
     /// headless offline-recipient pass (#229 PR15) to local-domain
@@ -205,7 +205,7 @@ impl<'a> Deps<'a> {
             extension_manager: None,
             room_registry: None,
             web_socket_state: None,
-            authenticated_session: None,
+            authenticated_principal: None,
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
@@ -235,7 +235,7 @@ impl<'a> Deps<'a> {
             extension_manager: None,
             room_registry: None,
             web_socket_state: None,
-            authenticated_session: None,
+            authenticated_principal: None,
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
@@ -263,7 +263,7 @@ impl<'a> Deps<'a> {
             extension_manager: None,
             room_registry: None,
             web_socket_state: None,
-            authenticated_session: None,
+            authenticated_principal: None,
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
@@ -289,7 +289,7 @@ impl<'a> Deps<'a> {
             extension_manager: Some(extension_manager),
             room_registry: None,
             web_socket_state: None,
-            authenticated_session: None,
+            authenticated_principal: None,
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,

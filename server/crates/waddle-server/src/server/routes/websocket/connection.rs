@@ -607,13 +607,17 @@ async fn handle_xmpp_websocket(
             // detach-for-resume when negotiated, full cleanup
             // otherwise.
             timer_id = timers.next_expired() => {
+                let session = conn.authenticated_session.clone();
+                let principal = session
+                    .as_ref()
+                    .map(super::ResolvedPrincipal::from_authenticated_session);
                 let Some(sm) = conn.state_machine.as_mut() else {
                     warn!(timer_id = timer_id.0, "Timer fired without a state machine; disarming");
                     continue;
                 };
                 let events = sm.handle(InboundEvent::Tick(timer_id));
                 let interpret_deps =
-                    build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref());
+                    build_interpret_deps(state.as_ref(), principal);
                 let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
                 timers.apply(drive.timer_commands);
                 if !drive.frames.is_empty() {

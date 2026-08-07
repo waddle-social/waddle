@@ -1,5 +1,6 @@
 use super::extension_forms::CommandBoundary;
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) struct CommandTargets<'a> {
     pub(super) domain: &'a str,
@@ -12,7 +13,7 @@ pub(super) async fn handle_command_iq(
     request_iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     targets: CommandTargets<'_>,
-    authenticated_session: &Option<Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
     bound_jid: Option<&FullJid>,
 ) -> Vec<String> {
     let sender_jid: Jid = match bound_jid.cloned().map(Jid::from) {
@@ -77,9 +78,7 @@ pub(super) async fn handle_command_iq(
     let session_id = command.session_id.clone();
     let ctx = CommandContext {
         from: sender_jid,
-        authenticated_user_id: authenticated_session
-            .as_ref()
-            .map(|session| session.user_jid.clone()),
+        authenticated_user_id: principal.map(|principal| principal.user_jid.clone()),
         iq: request_iq.clone(),
         command,
     };

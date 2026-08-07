@@ -182,7 +182,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         extension_manager: None,
         room_registry: None,
         web_socket_state: None,
-        authenticated_session: None,
+        authenticated_principal: None,
         local_domain: "example.com",
         blocking_storage: None,
         message_dispatcher: None,

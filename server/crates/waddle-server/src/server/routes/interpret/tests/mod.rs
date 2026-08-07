@@ -215,7 +215,7 @@ fn offline_pass_deps<'a>(
         extension_manager: None,
         room_registry: None,
         web_socket_state: None,
-        authenticated_session: None,
+        authenticated_principal: None,
         local_domain: "example.com",
         blocking_storage: Some(blocking),
         message_dispatcher: Some(dispatcher),

@@ -1,6 +1,7 @@
 use super::pubsub_admin::handle_pubsub_admin_request;
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) async fn handle_pubsub_iq(
     ctx: IqHandlerContext<'_>,
@@ -68,7 +69,9 @@ pub(super) async fn handle_pubsub_iq(
                         spaces_domain,
                         &node,
                         item,
-                        authenticated_session.as_ref(),
+                        authenticated_session
+                            .as_ref()
+                            .map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }
@@ -79,7 +82,9 @@ pub(super) async fn handle_pubsub_iq(
                         community_domain,
                         &node,
                         item,
-                        authenticated_session.as_ref(),
+                        authenticated_session
+                            .as_ref()
+                            .map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }
@@ -296,7 +301,9 @@ pub(super) async fn handle_pubsub_iq(
                         iq,
                         state,
                         muc_domain,
-                        authenticated_session.as_ref(),
+                        authenticated_session
+                            .as_ref()
+                            .map(ResolvedPrincipal::from_authenticated_session),
                         request,
                     )
                     .await;
@@ -400,7 +407,9 @@ pub(super) async fn handle_pubsub_iq(
                         spaces_domain,
                         &node,
                         &item_id,
-                        authenticated_session.as_ref(),
+                        authenticated_session
+                            .as_ref()
+                            .map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }
@@ -412,7 +421,9 @@ pub(super) async fn handle_pubsub_iq(
                         community_domain,
                         &node,
                         &item_id,
-                        authenticated_session.as_ref(),
+                        authenticated_session
+                            .as_ref()
+                            .map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }

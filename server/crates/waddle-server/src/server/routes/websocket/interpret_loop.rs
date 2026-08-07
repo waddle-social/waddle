@@ -5,7 +5,7 @@ use super::*;
 /// events. Centralized so the deps shape stays in sync with the IQ
 /// flow's callsite — both go through the same `interpret()`.
 ///
-/// `authenticated_session` is threaded through so the
+/// `authenticated_principal` is threaded through so the
 /// [`OutboundEvent::DispatchToRoom`] bridge arm can preserve the
 /// legacy managed-room owner check (announcements room admits server
 /// owners only). Without it the dispatcher path's owner override
@@ -13,7 +13,7 @@ use super::*;
 /// passes the connection's own session here.
 pub(crate) fn build_interpret_deps<'a>(
     state: &'a WebSocketState,
-    authenticated_session: Option<&'a crate::auth::Session>,
+    authenticated_principal: Option<super::ResolvedPrincipal<'a>>,
 ) -> crate::server::routes::interpret::Deps<'a> {
     crate::server::routes::interpret::Deps {
         connection_registry: &state.deps.protocol.connection_registry,
@@ -24,7 +24,7 @@ pub(crate) fn build_interpret_deps<'a>(
         extension_manager: Some(&state.deps.protocol.extension_manager),
         room_registry: Some(&state.deps.protocol.room_registry),
         web_socket_state: Some(state),
-        authenticated_session,
+        authenticated_principal,
         local_domain: state.deps.auth_state.xmpp_domain.as_str(),
         blocking_storage: Some(&state.deps.protocol.blocking_storage),
         message_dispatcher: Some(&state.deps.protocol.dispatcher),

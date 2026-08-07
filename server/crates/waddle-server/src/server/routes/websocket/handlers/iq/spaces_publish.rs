@@ -4,6 +4,7 @@ use super::permissions::{
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
+use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
 
 pub(super) async fn handle_spaces_publish(
@@ -13,9 +14,9 @@ pub(super) async fn handle_spaces_publish(
     spaces_domain: &str,
     node: &str,
     item: PubSubItem,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> Vec<String> {
-    match spaces_node_mutation_allowed(state, session, node).await {
+    match spaces_node_mutation_allowed(state, principal, node).await {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {

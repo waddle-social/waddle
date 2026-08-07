@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> bool {
     use waddle_xmpp::protocol::OutboundEvent;
@@ -250,7 +251,9 @@ async fn handle_sans_io_iq_with_relay_override(
             extension_manager: Some(&state.deps.protocol.extension_manager),
             room_registry: Some(&state.deps.protocol.room_registry),
             web_socket_state: Some(state),
-            authenticated_session: authenticated_session.as_ref(),
+            authenticated_principal: authenticated_session
+                .as_ref()
+                .map(ResolvedPrincipal::from_authenticated_session),
             local_domain: state.deps.auth_state.xmpp_domain.as_str(),
             blocking_storage: Some(&state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&state.deps.protocol.dispatcher),

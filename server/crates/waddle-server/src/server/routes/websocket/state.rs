@@ -1414,6 +1414,37 @@ pub(super) enum StreamOpenWireState {
     Committed,
 }
 
+/// A borrowed capability proving that a session came from this WebSocket
+/// connection's authenticated state.
+///
+/// The wrapped [`Session`] remains owned by [`WsConnState`].  Protocol
+/// dispatch can borrow it, but cannot manufacture this capability from a
+/// standalone session value.  `WsConnState::authenticated_session` is only
+/// populated at the successful SASL and durable XEP-0198 resume boundaries.
+#[derive(Clone, Copy)]
+pub(crate) struct ResolvedPrincipal<'a>(&'a Session);
+
+impl<'a> ResolvedPrincipal<'a> {
+    /// Convert an identity already accepted by an authenticated transport
+    /// boundary into the dispatch capability. This is crate-visible for the
+    /// non-WebSocket interpreter adapters that share the same dispatch path.
+    pub(crate) fn from_authenticated_session(session: &'a Session) -> Self {
+        Self(session)
+    }
+
+    pub(crate) fn session(self) -> &'a Session {
+        self.0
+    }
+}
+
+impl std::ops::Deref for ResolvedPrincipal<'_> {
+    type Target = Session;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
 pub(super) struct WsConnState {
     pub(super) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current

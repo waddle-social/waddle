@@ -416,10 +416,10 @@ async fn check_channel_permission(
 
 pub(super) async fn server_permission_allowed(
     state: &WebSocketState,
-    session: Option<&Session>,
+    principal: Option<crate::server::routes::websocket::ResolvedPrincipal<'_>>,
     permission: Permission,
 ) -> Result<bool, ()> {
-    let Some(session) = session else {
+    let Some(principal) = principal else {
         return Ok(false);
     };
     state
@@ -427,7 +427,7 @@ pub(super) async fn server_permission_allowed(
         .app_state
         .permission_actor
         .ask(CheckPermission {
-            subject: Subject::user(&session.user_jid),
+            subject: Subject::user(&principal.user_jid),
             permission,
             object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
         })

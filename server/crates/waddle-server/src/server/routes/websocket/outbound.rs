@@ -161,6 +161,10 @@ where
             // effects stay identical to the in-loop path.
             let ordered_relay_origin =
                 ordered_relay_origin_from_sm(&conn.sm_state, conn.phase.bound_jid());
+            let session = conn.authenticated_session.clone();
+            let principal = session
+                .as_ref()
+                .map(super::ResolvedPrincipal::from_authenticated_session);
             let Some(sm) = conn.state_machine.as_mut() else {
                 warn!(
                     "PeerStanza arrived before per-connection state machine was initialized; \
@@ -171,9 +175,8 @@ where
             let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(
                 outbound_stanza.stanza,
             )));
-            let interpret_deps =
-                build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref())
-                    .with_ordered_relay_origin(ordered_relay_origin);
+            let interpret_deps = build_interpret_deps(state.as_ref(), principal)
+                .with_ordered_relay_origin(ordered_relay_origin);
             let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
             if !authoritative() {
                 return false;

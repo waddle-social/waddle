@@ -1,5 +1,9 @@
 use super::*;
 
+fn resolved(session: &Session) -> ResolvedPrincipal<'_> {
+    ResolvedPrincipal::from_authenticated_session(session)
+}
+
 // #757: the MUC disco#info router compares a target's domain against
 // `service_domains.muc`, so that value MUST equal the domain the MUC room
 // registry is built from — the deployment-authoritative `WADDLE_MUC_DOMAIN`
@@ -26,7 +30,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         !managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&session),
+            Some(resolved(&session)),
             "chat",
             Permission::View,
         )
@@ -67,7 +71,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&session),
+            Some(resolved(&session)),
             "chat",
             Permission::View,
         )
@@ -78,7 +82,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&session),
+            Some(resolved(&session)),
             "announcements",
             Permission::View,
         )
@@ -89,7 +93,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&owner_session),
+            Some(resolved(&owner_session)),
             "chat",
             Permission::View,
         )
@@ -100,7 +104,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&owner_session),
+            Some(resolved(&owner_session)),
             "announcements",
             Permission::SendMessage,
         )
@@ -111,7 +115,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         !managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&session),
+            Some(resolved(&session)),
             "announcements",
             Permission::SendMessage,
         )
@@ -135,7 +139,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         !managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&session),
+            Some(resolved(&session)),
             "announcements",
             Permission::SendMessage,
         )
@@ -146,7 +150,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
     assert!(
         !managed_channel_permission_allowed(
             state.as_ref(),
-            Some(&session),
+            Some(resolved(&session)),
             "random",
             Permission::View,
         )

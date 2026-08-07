@@ -234,6 +234,7 @@ use crate::server::managed_channel_policy::{
     server_policy_for_managed_channel, ManagedChannelServerPolicy,
     DEPLOYMENT_MEMBERSHIP_PERMISSIONS,
 };
+use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
 
@@ -460,7 +461,9 @@ pub async fn handle_iq_with_conn_state(
                 extensions_domain: &extensions_domain,
                 push_domain: &push_domain,
             },
-            authenticated_session,
+            authenticated_session
+                .as_ref()
+                .map(ResolvedPrincipal::from_authenticated_session),
             phase.bound_jid(),
         )
         .await;

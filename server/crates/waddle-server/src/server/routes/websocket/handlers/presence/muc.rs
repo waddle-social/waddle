@@ -1095,7 +1095,9 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     && !room_preparation_pending
                     && !server_permission_allowed(
                         state,
-                        authenticated_session.as_ref(),
+                        authenticated_session.as_ref().map(
+                            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session,
+                        ),
                         Permission::CreateMuc,
                     )
                     .await

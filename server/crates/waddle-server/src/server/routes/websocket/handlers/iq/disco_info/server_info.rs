@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) async fn handle_command_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -39,7 +40,7 @@ pub(super) async fn handle_command_disco_info<'a>(
 pub(super) async fn handle_server_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
-    authenticated_session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> DiscoInfoResponse<'a> {
     // Disco info on server. Source the canonical feature catalogue
     // from `waddle-xmpp-core::disco::info::server_features()` so the
@@ -66,7 +67,7 @@ pub(super) async fn handle_server_disco_info<'a>(
     {
         features.extend(waddle_xmpp::disco::info::call_features());
     }
-    let response = match server_affiliation_for_requester(state, authenticated_session).await {
+    let response = match server_affiliation_for_requester(state, principal).await {
         Some(role) => build_disco_info_response_with_extensions(
             req.request_iq,
             &identities,

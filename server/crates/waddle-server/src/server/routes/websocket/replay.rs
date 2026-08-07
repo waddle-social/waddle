@@ -29,7 +29,8 @@ pub(super) async fn drain_outbound_into_replay(
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     detached_stream_id: Option<&str>,
 ) {
-    let deps = build_interpret_deps(state, authenticated_session);
+    let principal = authenticated_session.map(super::ResolvedPrincipal::from_authenticated_session);
+    let deps = build_interpret_deps(state, principal);
     let mut sm_borrow: Option<&mut XmppStateMachine> = state_machine;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
         // Codex P2 review on PR #361: when this is a pending_delivery

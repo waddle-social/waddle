@@ -6,6 +6,7 @@ use super::story_attachments::{
 };
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 /// Publish to a community pubsub node — XEP-0472 social feed at
 /// `urn:xmpp:pubsub-social-feed:1` or XEP-0501 stories at
@@ -21,8 +22,9 @@ pub(super) async fn handle_community_publish(
     community_domain: &str,
     node: &str,
     item: PubSubItem,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> Vec<String> {
+    let session = principal.map(ResolvedPrincipal::session);
     if is_story_attachment_node(node, community_domain) {
         return handle_story_attachment_publish(iq, state, community_domain, node, item, session)
             .await;
@@ -142,7 +144,13 @@ async fn handle_community_non_bookmark_publish(
             }
         }
     } else {
-        match spaces_node_mutation_allowed(state, session, node).await {
+        match spaces_node_mutation_allowed(
+            state,
+            session.map(ResolvedPrincipal::from_authenticated_session),
+            node,
+        )
+        .await
+        {
             Ok(true) => None,
             Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
             Err(error) => {

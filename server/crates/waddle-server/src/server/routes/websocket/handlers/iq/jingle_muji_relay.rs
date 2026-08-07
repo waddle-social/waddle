@@ -109,7 +109,14 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
     let clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
     let session = synthetic_session(&sender);
-    let deps = build_interpret_deps(state, Some(&session));
+    let deps = build_interpret_deps(
+        state,
+        Some(
+            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session(
+                &session,
+            ),
+        ),
+    );
     let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
     // Mirror the local adapter's post-terminate Muji-presence clear. It
     // has to run HERE, on the owner, because that is where the room

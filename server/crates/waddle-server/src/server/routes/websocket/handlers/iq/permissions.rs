@@ -1,6 +1,7 @@
 use super::*;
 use crate::permissions::DeleteTuple;
 use crate::server::routes::websocket::cleanup::get_room_actor_result;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) fn build_xmpp_error_response(
     request_iq: &xmpp_parsers::iq::Iq,
@@ -79,11 +80,11 @@ pub(super) async fn global_database(
 
 pub(super) async fn permission_allowed(
     state: &WebSocketState,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
     object: Object,
     permission: Permission,
 ) -> Result<bool, String> {
-    let Some(session) = session else {
+    let Some(principal) = principal else {
         return Ok(false);
     };
     let response = state
@@ -91,7 +92,7 @@ pub(super) async fn permission_allowed(
         .app_state
         .permission_actor
         .ask(CheckPermission {
-            subject: Subject::user(&session.user_jid),
+            subject: Subject::user(&principal.user_jid),
             permission,
             object,
         })
@@ -102,12 +103,12 @@ pub(super) async fn permission_allowed(
 
 pub(super) async fn server_permission_allowed(
     state: &WebSocketState,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
     permission: Permission,
 ) -> Result<bool, String> {
     permission_allowed(
         state,
-        session,
+        principal,
         Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
         permission,
     )
@@ -116,18 +117,18 @@ pub(super) async fn server_permission_allowed(
 
 pub(crate) async fn managed_channel_permission_allowed(
     state: &WebSocketState,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
     channel_id: &str,
     permission: Permission,
 ) -> Result<bool, String> {
     let policy = server_policy_for_managed_channel(channel_id, &permission);
     if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
-        return server_permission_allowed(state, session, Permission::Owner).await;
+        return server_permission_allowed(state, principal, Permission::Owner).await;
     }
 
     if permission_allowed(
         state,
-        session,
+        principal,
         Object::new(ObjectType::Channel, channel_id),
         permission.clone(),
     )
@@ -141,7 +142,7 @@ pub(crate) async fn managed_channel_permission_allowed(
         // schema makes `member` inherit owner/admin, but the SpiceDB schema uses
         // server relations directly for compatibility.
         for server_permission in DEPLOYMENT_MEMBERSHIP_PERMISSIONS {
-            if server_permission_allowed(state, session, server_permission).await? {
+            if server_permission_allowed(state, principal, server_permission).await? {
                 return Ok(true);
             }
         }
@@ -180,10 +181,10 @@ pub(crate) async fn managed_channel_permission_allowed(
 /// [`is_community_owner`]: crate::admin::is_community_owner
 pub(super) async fn server_affiliation_for_requester(
     state: &WebSocketState,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> Option<SpaceAffiliation> {
-    let session = session?;
-    let bare_jid = session_bare_jid(state, session)?;
+    let principal = principal?;
+    let bare_jid = session_bare_jid(state, principal)?;
     if crate::admin::is_community_owner(&state.deps.app_state, &bare_jid).await {
         Some(SpaceAffiliation::Owner)
     } else {
@@ -196,20 +197,20 @@ pub(super) async fn server_affiliation_for_requester(
 /// or the combination fails to parse as a [`BareJid`] — both cases are
 /// treated as "no derivable identity" rather than panicking, because
 /// this helper feeds disco#info responses on a hot path.
-fn session_bare_jid(state: &WebSocketState, session: &Session) -> Option<BareJid> {
+fn session_bare_jid(state: &WebSocketState, principal: ResolvedPrincipal<'_>) -> Option<BareJid> {
     let raw = format!(
         "{}@{}",
-        session.xmpp_localpart, state.deps.auth_state.xmpp_domain
+        principal.xmpp_localpart, state.deps.auth_state.xmpp_domain
     );
     raw.parse().ok()
 }
 
 pub(super) async fn space_affiliation_for_requester(
     state: &WebSocketState,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
     node: &str,
 ) -> Option<SpaceAffiliation> {
-    if server_permission_allowed(state, session, Permission::Owner)
+    if server_permission_allowed(state, principal, Permission::Owner)
         .await
         .unwrap_or(false)
     {
@@ -217,7 +218,7 @@ pub(super) async fn space_affiliation_for_requester(
     }
     if permission_allowed(
         state,
-        session,
+        principal,
         Object::new(ObjectType::Space, node),
         Permission::Owner,
     )
@@ -228,7 +229,7 @@ pub(super) async fn space_affiliation_for_requester(
     }
     if permission_allowed(
         state,
-        session,
+        principal,
         Object::new(ObjectType::Space, node),
         Permission::Admin,
     )
@@ -239,7 +240,7 @@ pub(super) async fn space_affiliation_for_requester(
     }
     if permission_allowed(
         state,
-        session,
+        principal,
         Object::new(ObjectType::Space, node),
         Permission::Member,
     )
@@ -279,15 +280,15 @@ pub(super) async fn write_tuple_if_absent(
 
 pub(super) async fn spaces_node_mutation_allowed(
     state: &WebSocketState,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
     node: &str,
 ) -> Result<bool, String> {
-    if server_permission_allowed(state, session, Permission::CreateSpace).await? {
+    if server_permission_allowed(state, principal, Permission::CreateSpace).await? {
         return Ok(true);
     }
     permission_allowed(
         state,
-        session,
+        principal,
         Object::new(ObjectType::Space, node),
         Permission::Owner,
     )
