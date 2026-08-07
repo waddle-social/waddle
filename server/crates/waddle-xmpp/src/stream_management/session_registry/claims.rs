@@ -171,10 +171,13 @@ impl InMemorySmSessionRegistry {
                     sessions.insert(stream_id.to_string(), session);
                     true
                 }
-                Some(session) => {
-                    claimed.insert(stream_id.to_string(), session);
-                    false
-                }
+                // Expired while claimed: mirror `release_claim_locked` —
+                // drop it from memory (re-inserting would strand it in
+                // `claimed_sessions` forever, since expiry sweeps only walk
+                // `sessions`), keep the durable rows for the janitor's
+                // promotion chain, and fall through so the exact fence moves
+                // into terminal-release inventory.
+                Some(_expired) => false,
                 None => false,
             },
             _ => false,

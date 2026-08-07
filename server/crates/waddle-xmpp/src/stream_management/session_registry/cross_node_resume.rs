@@ -242,6 +242,13 @@ pub enum CrossNodeResumeOutcome {
     /// plan's XEP fact-check note: "our chosen condition," not an
     /// XEP-0198-named one).
     OwnerUnreachable,
+    /// Won the steal but a post-win hydrate/claim step failed transiently
+    /// (storage error or timeout) and the just-won claim was released for a
+    /// clean client retry. The durable session may well still exist, so this
+    /// MUST NOT surface as `item-not-found` — storage loss never masquerades
+    /// as absence; callers map it to an `internal-server-error`-class
+    /// rejection instead.
+    StorageUnavailable,
 }
 
 /// A pre-write decision produced by
@@ -888,7 +895,10 @@ impl InMemorySmSessionRegistry {
                          by releasing the just-won claim (FIX B) — a client retry can now \
                          succeed via the unclaimed-but-persisted resume branch (FIX C)"
                     );
-                    return Ok(CrossNodeResumeOutcome::NotFound);
+                    return Ok(match missing_source {
+                        MissingRepairSource::NotFound => CrossNodeResumeOutcome::NotFound,
+                        MissingRepairSource::Error => CrossNodeResumeOutcome::StorageUnavailable,
+                    });
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -1665,7 +1675,13 @@ mod tests {
             .attempt_cross_node_resume(&entity.id, &jid.to_bare(), Duration::from_secs(2))
             .await
             .expect("poison quarantine must repair rather than strand its fresh claim");
-        assert!(matches!(outcome, CrossNodeResumeOutcome::NotFound));
+        // Corrupt session data is a storage-class failure: the durable row
+        // exists, so the repair must NOT masquerade as absence
+        // (`item-not-found`); it surfaces as retryable StorageUnavailable.
+        assert!(matches!(
+            outcome,
+            CrossNodeResumeOutcome::StorageUnavailable
+        ));
         assert!(claim_store
             .current_claim(&entity)
             .await
@@ -2042,8 +2058,9 @@ mod tests {
             .await
             .expect("attempt_cross_node_resume must not error: FIX B repairs, it does not fail");
         assert!(
-            matches!(outcome, CrossNodeResumeOutcome::NotFound),
-            "post-win hydrate failure must repair to a clean NotFound, not an error; got \
+            matches!(outcome, CrossNodeResumeOutcome::StorageUnavailable),
+            "post-win hydrate failure must repair to a retryable StorageUnavailable — the \
+             durable session still exists, so it must not masquerade as item-not-found; got \
              {outcome:?}"
         );
 

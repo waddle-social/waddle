@@ -219,10 +219,10 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 presence_priority = excluded.presence_priority,
                 replay_gap_through = excluded.replay_gap_through,
                 presence_payloads = excluded.presence_payloads,
-                bare_jid = excluded.bare_jid,
-                auth_context_id = excluded.auth_context_id,
-                auth_context_version = excluded.auth_context_version,
-                principal_auth_epoch = excluded.principal_auth_epoch
+                bare_jid = COALESCE(excluded.bare_jid, sm_sessions.bare_jid),
+                auth_context_id = COALESCE(excluded.auth_context_id, sm_sessions.auth_context_id),
+                auth_context_version = COALESCE(excluded.auth_context_version, sm_sessions.auth_context_version),
+                principal_auth_epoch = COALESCE(excluded.principal_auth_epoch, sm_sessions.principal_auth_epoch)
             "#,
             crate::db_params![
                 session.stream_id.as_str().to_string(),

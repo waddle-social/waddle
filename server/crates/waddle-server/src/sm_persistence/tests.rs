@@ -445,18 +445,22 @@ async fn store_session_atomic_with_principal_round_trips_principal() {
 }
 
 #[tokio::test]
-async fn plain_store_session_atomic_clears_an_existing_principal() {
+async fn plain_store_session_atomic_preserves_an_existing_principal() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
-    let stream_id = SmSessionId::new("atomic-principal-cleared");
+    let stream_id = SmSessionId::new("atomic-principal-preserved");
+    let principal = fixture_principal();
 
     storage
         .store_session_atomic_with_principal(
-            &fixture_principal(),
+            &principal,
             fixture_session(stream_id.as_str()),
             Vec::new(),
         )
         .await
         .expect("persist principal snapshot");
+    // Detached-session snapshot refreshes (stanzas recorded while detached)
+    // go through the plain atomic store; they must never strip the durable
+    // resume authority written at the detach boundary.
     storage
         .store_session_atomic(fixture_session(stream_id.as_str()), Vec::new())
         .await
@@ -466,8 +470,60 @@ async fn plain_store_session_atomic_clears_an_existing_principal() {
         storage
             .get_session_principal(&stream_id)
             .await
-            .expect("load absent principal"),
-        None
+            .expect("load preserved principal"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn detached_snapshot_refresh_preserves_principal_through_registry() {
+    use waddle_xmpp::stream_management::{DetachedSession, InMemorySmSessionRegistry};
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(std::sync::Arc::new(storage)),
+    );
+    let principal = fixture_principal();
+    let session = DetachedSession {
+        stream_id: "refresh-keeps-principal".to_string(),
+        user_id: "u1".to_string(),
+        jid: full("alice@example.com/phone"),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: true,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    registry
+        .store_session_with_principal(session, principal.clone())
+        .await
+        .expect("store with principal");
+    let recorded = registry
+        .record_outbound_for_detached_stream(
+            "refresh-keeps-principal",
+            "<message xmlns='jabber:client' to='alice@example.com/phone'/>".to_string(),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("record stanza into detached session");
+    assert!(recorded, "stanza recorded for detached stream");
+    assert_eq!(
+        registry
+            .session_principal("refresh-keeps-principal")
+            .await
+            .expect("load principal after snapshot refresh"),
+        Some(principal),
+        "principal must survive a detached-fanout snapshot refresh"
     );
 }
 

@@ -765,6 +765,16 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                     );
                     return vec![SmFailed::with_condition("resource-constraint").to_xml()];
                 }
+                Some(CrossNodeAttemptOutcome::Completed(Ok(
+                    CrossNodeResumeOutcome::StorageUnavailable,
+                ))) => {
+                    warn!(
+                        stream_id = %resume.previd,
+                        "SM resume rejected: transient storage failure after winning the \
+                         cross-node claim; claim released for retry"
+                    );
+                    return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+                }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
                 | None => {
                     info!(
@@ -930,6 +940,19 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             return vec![SmFailed::with_condition("internal-server-error").to_xml()];
         }
     };
+
+    // The snapshot and its principal are written in one atomic statement, so
+    // they cannot diverge today; this gate turns that invariant into an
+    // enforced precondition of the commit below rather than an assumption.
+    if detached.jid.to_bare() != *principal.bare_jid() {
+        warn!(
+            stream_id = %resume.previd,
+            detached_jid = %detached.jid,
+            "SM resume rejected: detached snapshot JID diverged from durable principal"
+        );
+        claim_guard.release().await;
+        return vec![SmFailed::with_condition("not-authorized").to_xml()];
+    }
 
     // Commit the staged snapshot only after the durable recheck succeeds.
     sm_state.restore_from_session(&detached);
