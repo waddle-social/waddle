@@ -1,5 +1,11 @@
 # ADR-0017 Phase 3 Plan — Postgres-Authoritative Ownership Claims
 
+> **Superseded (2026-08-07):** The ISR (XEP-0397) design and
+> `clustering_isr_tokens` store described below have been removed outright — see
+> issue #1631 and
+> [ADR-011](../../../docs/adr/011-remove-isr-sasl2-inline-future.md). This
+> historical plan is retained as a record only.
+
 Companion execution note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md), the
 [Phase 1 completion note](./0017-phase1-completion-authoritative-registration.md), and the
 [Phase 2 plan](./0017-phase2-plan-libp2p-swarm.md). Status: **planned, not yet implemented**.

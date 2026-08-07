@@ -247,7 +247,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
 #[tokio::test]
 async fn sm_features_advertise_sm_namespace() {
     // Stream features after successful auth must include <sm/>.
-    let features = build_stream_features_xml(true, false);
+    let features = build_stream_features_xml(true);
     let el = Element::from_str(&features).expect("features xml");
     assert!(
         el.children()
@@ -3814,7 +3814,6 @@ mod fix3_shutdown_race {
             room_local_claims: None,
             user_local_claims: None,
             muc_durable_store: None,
-            isr_token_store: None,
             node_lease: None,
             lease_ttl: None,
             pod_template_hash: None,
@@ -4146,7 +4145,6 @@ mod fix_a_post_cas_shutdown {
             room_local_claims: None,
             user_local_claims: None,
             muc_durable_store: None,
-            isr_token_store: None,
             node_lease: None,
             lease_ttl: None,
             pod_template_hash: None,

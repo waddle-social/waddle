@@ -847,9 +847,6 @@ async fn create_websocket_state(
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),
-            transport_security: routes::websocket::TransportSecurity::from_public_websocket_url(
-                &xmpp_config.public_websocket_url,
-            ),
             service_domains,
             protocol: ProtocolServices {
                 connection_registry,

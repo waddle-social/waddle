@@ -241,7 +241,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![4, 5, 6, 7, 8, 9, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![4, 5, 6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     // Column exists.
@@ -355,7 +355,7 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let applied_again = runner.run(&db).await.unwrap();
@@ -409,7 +409,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let conn = db.guard().await.unwrap();
@@ -630,7 +630,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![6, 7, 8, 9, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
@@ -698,7 +698,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     let applied = MigrationRunner::global().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![7, 8, 9, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let conn = db.guard().await.unwrap();
@@ -811,7 +811,7 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![8, 9]);
+    assert_eq!(applied, vec![8, 9, 10]);
 
     let conn = db.guard().await.unwrap();
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -845,6 +845,50 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
     assert_provider_delivery_conflict_target(&conn).await;
     assert_link_preview_constraints_and_cascade(&conn).await;
+}
+
+#[tokio::test]
+async fn sqlite_v0010_drops_retired_isr_token_store() {
+    let db = Database::in_memory("test-global-v0010-drop-isr-token-store")
+        .await
+        .unwrap();
+    let conn = db.guard().await.unwrap();
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 10)).await;
+    seed_applied_migrations(&conn, waddle::all()).await;
+    for statement in [
+        "CREATE TABLE clustering_isr_tokens (sm_id TEXT PRIMARY KEY)",
+        "CREATE INDEX clustering_isr_tokens_created_at_sm_id ON clustering_isr_tokens (sm_id)",
+        "CREATE TABLE clustering_isr_revocation_fences (sm_id TEXT PRIMARY KEY)",
+        "CREATE INDEX clustering_isr_revocation_fences_created_at_identity ON clustering_isr_revocation_fences (sm_id)",
+        "CREATE TABLE clustering_isr_sweep_state (singleton INTEGER PRIMARY KEY)",
+    ] {
+        conn.execute(statement, ()).await.unwrap();
+    }
+    drop(conn);
+
+    let applied = MigrationRunner::global().run(&db).await.unwrap();
+    assert_eq!(applied, vec![10]);
+
+    let conn = db.guard().await.unwrap();
+    for table in [
+        "clustering_isr_tokens",
+        "clustering_isr_revocation_fences",
+        "clustering_isr_sweep_state",
+    ] {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+                crate::db_params![table],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let count: i64 = row.get(0).unwrap();
+        assert_eq!(count, 0, "V0010 must drop {table}");
+    }
 }
 
 #[tokio::test]
@@ -891,7 +935,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![7, 8, 9, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1029,7 +1073,7 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![8, 9]);
+    assert_eq!(applied, vec![8, 9, 10]);
 
     let conn = db.guard().await.expect("postgres guard");
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {

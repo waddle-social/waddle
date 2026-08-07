@@ -193,7 +193,7 @@ pub struct InMemorySmSessionRegistry {
     /// durable row, preventing stale pre-tombstone queues from being
     /// republished directly from `Drop`.
     pub(super) pending_promotion_retries: RwLock<HashMap<String, DetachedSession>>,
-    /// Claimed ISR sessions whose follow-up epoch lookup failed before the
+    /// Claimed sessions whose follow-up epoch lookup failed before the
     /// route could prove that the recorded exact fence still owns the backend
     /// row. Kept out of `sessions` until a read-only reconciliation proves
     /// the same owner+epoch or terminalizes the stale local lifecycle.

@@ -381,15 +381,6 @@ fn test_xmpp_config_rejects_sensitive_or_ambiguous_websocket_urls() {
 }
 
 #[test]
-fn transport_security_uses_the_public_websocket_scheme() {
-    let secure = url::Url::parse("wss://xmpp.example.com/ws").expect("secure URL");
-    let unsecured = url::Url::parse("ws://xmpp.example.com/ws").expect("plain URL");
-
-    assert!(routes::websocket::TransportSecurity::from_public_websocket_url(&secure).is_tls());
-    assert!(!routes::websocket::TransportSecurity::from_public_websocket_url(&unsecured).is_tls());
-}
-
-#[test]
 fn test_xmpp_config_defaults_spaces_and_muc_from_xmpp_domain() {
     let _guard = env_lock();
     reset_xmpp_config_env();

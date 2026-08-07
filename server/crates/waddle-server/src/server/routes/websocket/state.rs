@@ -1163,38 +1163,11 @@ pub struct WebSocketState {
     pub deps: WebSocketDeps,
 }
 
-/// Whether the externally configured XMPP WebSocket endpoint is protected by
-/// TLS. This is derived once from the trusted deployment RFC 7395 endpoint;
-/// the unrelated application base URL and request headers are deliberately not
-/// consulted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportSecurity {
-    Unsecured,
-    Tls,
-}
-
-impl TransportSecurity {
-    pub fn from_public_websocket_url(public_websocket_url: &url::Url) -> Self {
-        if public_websocket_url.scheme() == "wss" {
-            Self::Tls
-        } else {
-            Self::Unsecured
-        }
-    }
-
-    pub const fn is_tls(self) -> bool {
-        matches!(self, Self::Tls)
-    }
-}
-
 pub struct WebSocketDeps {
     /// Core app state for accessing the global and per-waddle databases.
     pub app_state: Arc<AppState>,
     /// Authentication state for session validation.
     pub auth_state: Arc<AuthState>,
-    /// Trusted deployment-level transport security used to enforce the
-    /// XEP-0397 TLS-only advertisement and token-issuance requirements.
-    pub transport_security: TransportSecurity,
     /// Authoritative XMPP component/service JIDs used by this deployment.
     pub service_domains: XmppServiceDomains,
     /// Protocol/runtime services used by the WebSocket C2S path.
@@ -1222,15 +1195,6 @@ pub struct WebSocketDeps {
     /// observes the stop token to close live sessions with
     /// `<stream:error><system-shutdown/>`.
     pub shutdown: waddle_ecdysis::ShutdownHandle,
-}
-
-impl WebSocketDeps {
-    /// XEP-0397 is available only when both its durable backend exists and
-    /// the externally configured WebSocket endpoint is TLS protected.
-    pub fn isr_available(&self) -> bool {
-        self.transport_security.is_tls()
-            && self.app_state.clustering_claims.isr_token_store().is_some()
-    }
 }
 
 pub struct ProtocolServices {
@@ -1527,10 +1491,6 @@ pub(super) struct WsConnState {
     /// remains guarded and SM stays locally disabled; dropping the
     /// connection or failing the write terminalizes the exact claim.
     pub(super) pending_sm_enable_commit: Option<super::stream_management::SmEnableCommit>,
-    /// Exact provisional ISR cleanup retained only when `<enabled/>` was
-    /// written but the connection lost the owner-gated publication race.
-    /// Terminal cleanup drops the armed reservation and activates revocation.
-    pub(super) unpublished_isr_cleanup: Option<waddle_xmpp::isr::IsrRevocationReservation>,
     /// Inbound text frames pulled off the socket by the mid-batch ack
     /// drain (issue #1089) that were NOT `<a/>` acks. The batch writer
     /// may only consume acks out of order; everything else must reach
@@ -1608,7 +1568,6 @@ impl WsConnState {
             registry_owner: None,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
-            unpublished_isr_cleanup: None,
             deferred_inbound: std::collections::VecDeque::new(),
             send_window_pause_deadline: None,
             send_window_last_request_acked: 0,
@@ -1659,7 +1618,7 @@ impl WsConnState {
             return;
         };
         let bound_jid = self.phase.bound_jid().cloned();
-        self.unpublished_isr_cleanup = commit.publish(
+        commit.publish(
             state,
             &mut self.sm_state,
             bound_jid.as_ref(),

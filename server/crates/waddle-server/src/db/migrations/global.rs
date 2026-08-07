@@ -663,6 +663,22 @@ CREATE TABLE IF NOT EXISTS xmpp_auth_codes (
 CREATE INDEX IF NOT EXISTS idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
 "#;
 
+/// Retire the XEP-0397 Instant Stream Resumption token store. These tables
+/// were created outside the migration runner by the Postgres clustering store,
+/// so every statement is intentionally idempotent for fresh and repaired
+/// databases.
+pub const V0010_DROP_ISR_TOKEN_STORE: &str = r#"
+DROP TABLE IF EXISTS clustering_isr_tokens;
+DROP TABLE IF EXISTS clustering_isr_revocation_fences;
+DROP TABLE IF EXISTS clustering_isr_sweep_state;
+"#;
+
+pub const V0010_DROP_ISR_TOKEN_STORE_POSTGRES: &str = r#"
+DROP TABLE IF EXISTS clustering_isr_tokens;
+DROP TABLE IF EXISTS clustering_isr_revocation_fences;
+DROP TABLE IF EXISTS clustering_isr_sweep_state;
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -722,6 +738,12 @@ pub fn all() -> Vec<Migration> {
             description: "Durable OIDC/OAuth handshake state shared across replicas".to_string(),
             sql_sqlite: V0009_AUTH_HANDSHAKE_STATE,
             sql_postgres: V0009_AUTH_HANDSHAKE_STATE_POSTGRES,
+        },
+        Migration {
+            version: 10,
+            description: "Drop retired XEP-0397 ISR token store".to_string(),
+            sql_sqlite: V0010_DROP_ISR_TOKEN_STORE,
+            sql_postgres: V0010_DROP_ISR_TOKEN_STORE_POSTGRES,
         },
     ]
 }

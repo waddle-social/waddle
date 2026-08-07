@@ -1237,8 +1237,8 @@ async fn close_if_frame_authority_revoked(
 
 async fn cleanup_frame_authority_revocation(state: &WebSocketState, conn: &mut WsConnState) {
     // `<enable/>` has not reached its wire commit point yet. Dropping this
-    // typed guard inventories exact claim release and provisional ISR token
-    // revocation; a stale generation must never send `<enabled/>`.
+    // typed guard inventories exact claim release; a stale generation must
+    // never send `<enabled/>`.
     drop(conn.pending_sm_enable_commit.take());
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         conn.pending_resume_h = None;
