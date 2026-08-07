@@ -508,6 +508,41 @@ mod tests {
             PrincipalResolution::Mismatched
         ));
 
+        actor
+            .ask(DbExecute {
+                sql: "UPDATE sessions SET auth_context_version = ?, principal_auth_epoch = ? \
+                      WHERE id = ?"
+                    .to_string(),
+                params: vec![
+                    Value::from(1_i64),
+                    Value::from(2_i64),
+                    Value::from(session.id.clone()),
+                ],
+            })
+            .await
+            .expect("revoke principal auth epoch");
+        assert!(matches!(
+            manager.resolve_principal(&principal).await,
+            PrincipalResolution::Mismatched
+        ));
+
+        actor
+            .ask(DbExecute {
+                sql: "UPDATE sessions SET principal_auth_epoch = ?, expires_at = ? WHERE id = ?"
+                    .to_string(),
+                params: vec![
+                    Value::from(1_i64),
+                    Value::from((chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339()),
+                    Value::from(session.id.clone()),
+                ],
+            })
+            .await
+            .expect("expire session");
+        assert!(matches!(
+            manager.resolve_principal(&principal).await,
+            PrincipalResolution::Missing
+        ));
+
         manager
             .delete_session(&session.id)
             .await
