@@ -6,6 +6,9 @@ use chrono::Utc;
 use jid::FullJid;
 use xmpp_parsers::presence::Show;
 
+use crate::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 use crate::Stanza;
 
 fn make_test_jid() -> FullJid {
@@ -3144,6 +3147,50 @@ async fn store_session_mirrors_to_persistence_when_attached() {
 }
 
 #[tokio::test]
+async fn store_session_with_principal_binds_the_claimed_snapshot_envelope() {
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let principal = AuthenticatedPrincipalRef::new(
+        bare("user@example.com"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    );
+
+    registry
+        .store_session_with_principal(
+            realistic_test_session("principal-claimed"),
+            principal.clone(),
+        )
+        .await
+        .expect("persist detached session with its principal");
+
+    let stream_id = crate::pending_delivery::SmSessionId::new("principal-claimed");
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load persisted principal"),
+        Some(principal.clone())
+    );
+    assert_eq!(
+        registry
+            .session_principal("principal-claimed")
+            .await
+            .expect("load principal through registry"),
+        Some(principal)
+    );
+    assert!(
+        registry
+            .claim_fences
+            .read()
+            .expect("claim fence lock")
+            .contains_key("principal-claimed"),
+        "the persisted principal snapshot must flow through the normal exact-claim lifecycle"
+    );
+}
+
+#[tokio::test]
 async fn take_session_deletes_from_persistence() {
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
@@ -4064,6 +4111,27 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
             ));
         }
         self.inner.store_session_atomic(session, unacked).await
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<crate::auth::AuthenticatedPrincipalRef>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
     }
 }
 
@@ -5509,6 +5577,27 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         }
         self.inner.store_session_atomic(session, unacked).await
     }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<crate::auth::AuthenticatedPrincipalRef>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
+    }
 }
 
 async fn assert_cross_shard_displacement_preserves_claim(snapshot_fails: bool) {
@@ -6121,6 +6210,27 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         super::super::persistence::SmPersistenceError,
     > {
         self.inner.list_all_sessions().await
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<crate::auth::AuthenticatedPrincipalRef>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
     }
 }
 

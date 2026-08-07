@@ -81,11 +81,11 @@ impl Drop for DisplacedPromotionGuard<'_> {
     }
 }
 
-#[async_trait]
-impl SmSessionRegistry for InMemorySmSessionRegistry {
-    async fn store_session(
+impl InMemorySmSessionRegistry {
+    pub(super) async fn store_session_with_principal_inner(
         &self,
         session: DetachedSession,
+        principal: Option<&crate::auth::AuthenticatedPrincipalRef>,
     ) -> Result<Vec<DetachedSession>, SmRegistryError> {
         let stream_id = session.stream_id.clone();
         let jid = session.jid.clone();
@@ -251,7 +251,10 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // this stream's shard lock, and two crossed store_session
         // calls re-inserting each other's displaced sessions would
         // otherwise deadlock.
-        if let Err(error) = self.persist_detached_session_snapshot(&session).await {
+        if let Err(error) = self
+            .persist_detached_session_snapshot(&session, principal)
+            .await
+        {
             detach_reservation.cancel_if_owned(self, &stream_id);
             return Err(error);
         }
@@ -268,6 +271,16 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
         Ok(displaced_guard.transfer())
+    }
+}
+
+#[async_trait]
+impl SmSessionRegistry for InMemorySmSessionRegistry {
+    async fn store_session(
+        &self,
+        session: DetachedSession,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        self.store_session_with_principal_inner(session, None).await
     }
 
     async fn take_session(
