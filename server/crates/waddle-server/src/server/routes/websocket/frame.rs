@@ -238,8 +238,15 @@ async fn handle_xmpp_frame_impl(
             let scram = phase
                 .take_scram_pending()
                 .expect("SASL response must have pending SCRAM state");
-            let responses =
-                handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase);
+            let responses = handle_sasl_scram_response(
+                &data,
+                domain,
+                state,
+                scram,
+                authenticated_session,
+                phase,
+            )
+            .await;
             // Same stream-restart rule as the <auth/> arm above: after
             // SCRAM success no response header exists for the new
             // stream until the next <open/> is answered.
