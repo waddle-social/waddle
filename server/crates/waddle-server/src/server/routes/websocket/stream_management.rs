@@ -968,7 +968,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                 if let Err(error) = actor
                     .ask(crate::db::actor::DbExecute {
                         sql: format!(
-                            "DELETE FROM sessions WHERE id = ? AND token_hash = '{}'",
+                            "DELETE FROM sessions WHERE id = ? AND token_hash LIKE '{}:%'",
                             crate::auth::session::NATIVE_RESUME_TOKEN_SENTINEL
                         ),
                         params: vec![crate::db::Value::from(superseded.id.clone())],

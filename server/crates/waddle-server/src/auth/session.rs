@@ -21,11 +21,21 @@ use crate::db::{row_value, ValueExt};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Stored in `sessions.token_hash` for native-SCRAM resume rows instead of a
-/// real token hash. Contains `-`, which no hex digest can, so a bearer
-/// presentation can never hash-match it: the row backs SM resume identity
-/// only and is unusable as an OAUTHBEARER/HTTP credential.
+/// Prefix stored in `sessions.token_hash` for native-SCRAM resume rows
+/// instead of a real token hash. The full stored value is
+/// `native-resume:<uuid>` — per-row unique (the column carries a unique
+/// index) while the `:` guarantees no hex digest can ever match it, so a
+/// bearer presentation can never hash-match the row: it backs SM resume
+/// identity only and is unusable as an OAUTHBEARER/HTTP credential.
 pub const NATIVE_RESUME_TOKEN_SENTINEL: &str = "native-resume";
+
+fn native_resume_token_hash() -> String {
+    format!("{NATIVE_RESUME_TOKEN_SENTINEL}:{}", Uuid::new_v4())
+}
+
+pub(crate) fn is_native_resume_token_hash(token_hash: &str) -> bool {
+    token_hash.starts_with(NATIVE_RESUME_TOKEN_SENTINEL)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -167,7 +177,7 @@ impl SessionManager {
     #[instrument(skip(self, session))]
     pub async fn create_session(&self, session: &Session) -> Result<(), AuthError> {
         let token_hash = if session.native_resume_only {
-            NATIVE_RESUME_TOKEN_SENTINEL.to_string()
+            native_resume_token_hash()
         } else {
             self.token_hash(&session.id)
         };
@@ -222,7 +232,7 @@ impl SessionManager {
             .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get token hash: {}", e)))?;
 
-        let native_resume_only = token_hash == NATIVE_RESUME_TOKEN_SENTINEL;
+        let native_resume_only = is_native_resume_token_hash(&token_hash);
         if !native_resume_only && token_hash != self.token_hash(&id) {
             return Err(AuthError::SessionNotFound(id));
         }

@@ -1009,7 +1009,10 @@ async fn postgres_v0011_adds_auth_context_reference_to_existing_sessions() {
     drop(conn);
 
     assert_eq!(MigrationRunner::global().run(&db).await.unwrap(), vec![11]);
-    assert_postgres_column_type(&db, "sessions", "auth_context_id", "uuid").await;
+    // TEXT (not UUID) on Postgres: matches the sm_sessions principal columns
+    // and keeps principal resolution index-served with one shared SQL string
+    // (no CAST on the indexed column — Codex PR review on #1666).
+    assert_postgres_column_type(&db, "sessions", "auth_context_id", "text").await;
     assert_postgres_column_type(&db, "sessions", "auth_context_version", "bigint").await;
     assert_postgres_column_type(&db, "sessions", "principal_auth_epoch", "bigint").await;
 
