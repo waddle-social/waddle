@@ -44,8 +44,9 @@ additional reconnect round trips for cross-node resume are knowingly accepted;
 no interim mitigation is introduced.
 
 The future fast-reconnect path is a deferred roadmap item: XEP-0198 (Stream
-Management) v1.6.3's "SASL2 And BIND2 Interaction" section (anchor
-`inline-resume`): an inline `<resume/>` inside a XEP-0388 (Extensible
+Management) v1.6.3's "Inline Stream Resumption" (anchor `inline-resume`,
+under "SASL2 And BIND2 Interaction"): an inline `<resume/>` inside a
+XEP-0388 (Extensible
 SASL Profile / SASL2) `<authenticate/>` element. It is tracked as P3.4 under
 umbrella issue #1662. This ADR does not implement that path. The codebase does
 not currently implement XEP-0388 at all; advertising and implementing SASL2
@@ -61,8 +62,10 @@ is a separate future activation issue.
   `clustering_isr_tokens` is absent. Migration v10 runs once, so a
   pre-removal image started afterwards (in-place restart during a rolling
   update, or a rollback) would re-create the tables via its runtime
-  `ensure_schema` with no sweeper left; the shipped chart's default
-  `Recreate`/single-replica shape cannot hit this.
+  `ensure_schema` with no sweeper left. The shipped chart's default shape
+  cannot hit this because `clustering.enabled: false` means the ISR store's
+  `ensure_schema` never ran at all; only clustered deployments need the
+  check.
 - Cluster-node-independent session resumption remains available through the
   Postgres-backed claims and ownership control plane.
 - Cross-node resume loses ISR's roughly one-round-trip optimization and uses
