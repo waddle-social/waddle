@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
+use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     InMemorySmPersistence, PersistedSession, PersistedUnackedStanza, SmPersistenceError,
@@ -159,6 +160,28 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
         }
         Ok(())
     }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        if !self.first_store_seen.swap(true, Ordering::SeqCst) {
+            self.first_store_started.notify_waiters();
+            self.allow_first_store.notified().await;
+        }
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+        self.inner.get_session_principal(stream_id).await
+    }
 }
 
 /// Storage double that mislabels rows: its
@@ -243,6 +266,24 @@ impl SmPersistenceStorage for MislabelingStore {
             });
         }
         Ok(groups)
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+        self.inner.get_session_principal(stream_id).await
     }
 }
 

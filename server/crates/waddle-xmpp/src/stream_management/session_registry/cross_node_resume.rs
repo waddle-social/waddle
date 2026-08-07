@@ -1347,6 +1347,24 @@ mod tests {
         async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
             self.inner.list_all_sessions().await
         }
+
+        async fn store_session_atomic_with_principal(
+            &self,
+            principal: &crate::auth::AuthenticatedPrincipalRef,
+            session: PersistedSession,
+            unacked: Vec<PersistedUnackedStanza>,
+        ) -> Result<(), SmPersistenceError> {
+            self.inner
+                .store_session_atomic_with_principal(principal, session, unacked)
+                .await
+        }
+
+        async fn get_session_principal(
+            &self,
+            stream_id: &crate::pending_delivery::SmSessionId,
+        ) -> Result<Option<crate::auth::AuthenticatedPrincipalRef>, SmPersistenceError> {
+            self.inner.get_session_principal(stream_id).await
+        }
     }
 
     fn make_persisted_session(stream_id: &str, jid: &jid::FullJid) -> PersistedSession {
