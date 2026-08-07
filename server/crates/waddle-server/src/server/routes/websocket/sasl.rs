@@ -205,9 +205,10 @@ pub(super) async fn handle_sasl_scram_client_first(
 ///
 /// Verifies the client proof against stored keys and returns `<success>` or
 /// `<failure>`.
-pub(super) fn handle_sasl_scram_response(
+pub(super) async fn handle_sasl_scram_response(
     b64_data: &str,
     domain: &str,
+    state: &WebSocketState,
     mut scram: ScramPendingState,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
@@ -268,7 +269,30 @@ pub(super) fn handle_sasl_scram_response(
     waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", true);
     record_auth_success(AuthStage::Scram);
 
-    let session = Session::new(&bare_jid.to_string(), scram.username(), scram.username());
+    // Native-resume row: backs the durable SM resume fence only. Its id is
+    // never issued to the client and the row is rejected by every bearer
+    // path (OAUTHBEARER, HTTP session auth) via the non-bearer sentinel.
+    let session =
+        Session::new_native_resume(&bare_jid.to_string(), scram.username(), scram.username());
+
+    // Persist the session row: the XEP-0198 resume fence authorizes resume
+    // exclusively against the durable principal, so an unpersisted SCRAM
+    // session would detach with a principal ref that resolves Missing and
+    // every resume would fail not-authorized. Authentication itself still
+    // succeeds if the write fails — the session is just not resumable.
+    if let Err(error) = state
+        .deps
+        .auth_state
+        .session_manager
+        .create_session(&session)
+        .await
+    {
+        warn!(
+            jid = %bare_jid_str,
+            %error,
+            "SCRAM session not persisted; SM resume will be unavailable for this session"
+        );
+    }
 
     *authenticated_session = Some(session);
     *phase = ConnectionPhase::authenticated(&full_jid);

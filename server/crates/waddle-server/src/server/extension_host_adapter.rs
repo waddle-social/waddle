@@ -266,7 +266,9 @@ impl ExtensionHostAdapter {
             extension_manager: Some(&self.state.deps.protocol.extension_manager),
             room_registry: Some(&self.state.deps.protocol.room_registry),
             web_socket_state: Some(&self.state),
-            authenticated_session: session,
+            authenticated_principal: session.map(
+                crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session,
+            ),
             local_domain: self.state.deps.auth_state.xmpp_domain.as_str(),
             blocking_storage: Some(&self.state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&self.state.deps.protocol.dispatcher),

@@ -336,7 +336,7 @@ pub(super) async fn dispatch_to_room(
     //    `managed_room_forbidden` without an async permission call.
     let managed_room_forbidden =
         if parse_managed_room_jid(&room_jid).as_deref() == Some("announcements") {
-            !session_is_server_owner(state, deps.authenticated_session).await
+            !session_is_server_owner(state, deps.authenticated_principal).await
         } else {
             false
         };
@@ -684,8 +684,11 @@ pub(super) fn normalize_thread_create_source(message: &mut Message) -> Option<St
 /// `session_is_server_owner` helper that lived on the legacy MUC
 /// bridge — kept here so the room handler chain can stay synchronous
 /// and the async permission-actor call lands in the interpreter.
-async fn session_is_server_owner(state: &WebSocketState, session: Option<&Session>) -> bool {
-    let Some(session) = session else {
+async fn session_is_server_owner(
+    state: &WebSocketState,
+    principal: Option<crate::server::routes::websocket::ResolvedPrincipal<'_>>,
+) -> bool {
+    let Some(principal) = principal else {
         return false;
     };
     state
@@ -694,7 +697,7 @@ async fn session_is_server_owner(state: &WebSocketState, session: Option<&Sessio
         .permission_actor
         .ask(CheckPermission {
             object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
-            subject: Subject::user(&session.user_jid),
+            subject: Subject::user(&principal.user_jid),
             permission: Permission::Owner,
         })
         .await

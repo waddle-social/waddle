@@ -27,6 +27,9 @@ use crate::clustering::claims::{NodeLeaseStore as _, PostgresClaimStore};
 use crate::db::DatabaseConfig;
 use chrono::TimeZone;
 use std::time::Duration as StdDuration;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity, StalePredicate};
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use xmpp_parsers::presence::Show;
@@ -76,6 +79,15 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
         original_receipt_at: stale_caller_supplied_time(),
     }
+}
+
+fn fixture_principal() -> AuthenticatedPrincipalRef {
+    AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("valid bare JID"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    )
 }
 
 fn node_identity() -> NodeIdentity {
@@ -290,10 +302,11 @@ async fn store_session_atomic_also_applies_divergence_a() {
         fixture_unacked("stream-atomic", 1),
         fixture_unacked("stream-atomic", 2),
     ];
+    let principal = fixture_principal();
     f.fenced
-        .store_session_atomic(session.clone(), unacked)
+        .store_session_atomic_with_principal(&principal, session.clone(), unacked)
         .await
-        .expect("store_session_atomic");
+        .expect("store_session_atomic_with_principal");
 
     let loaded = f
         .fenced
@@ -312,6 +325,13 @@ async fn store_session_atomic_also_applies_divergence_a() {
     assert_eq!(queue.len(), 2);
     assert_eq!(queue[0].sequence, 1);
     assert_eq!(queue[1].sequence, 2);
+    assert_eq!(
+        f.fenced
+            .get_session_principal(&SmSessionId::new("stream-atomic"))
+            .await
+            .expect("get stored principal"),
+        Some(principal)
+    );
 }
 
 #[tokio::test]
@@ -869,14 +889,15 @@ async fn concurrent_steal_vs_delete_session_never_produces_torn_state() {
 async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen() {
     let Some(f) = fixture().await else { return };
     let stream_id = SmSessionId::new("stream-atomic-stolen");
+    let original_principal = fixture_principal();
     f.fenced
-        .upsert_session(fixture_session("stream-atomic-stolen"))
+        .store_session_atomic_with_principal(
+            &original_principal,
+            fixture_session("stream-atomic-stolen"),
+            vec![fixture_unacked("stream-atomic-stolen", 1)],
+        )
         .await
-        .expect("upsert_session establishes the claim");
-    f.fenced
-        .append_unacked(fixture_unacked("stream-atomic-stolen", 1))
-        .await
-        .expect("append_unacked establishes an original unacked row");
+        .expect("principal snapshot establishes the claim");
 
     seed_node(&f.claims_db, &f.identity, true).await;
     let entity = Entity::new(EntityType::SmSession, "stream-atomic-stolen".to_string());
@@ -890,9 +911,10 @@ async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen()
     let mut new_session = fixture_session("stream-atomic-stolen");
     new_session.inbound_count = 999;
     let new_unacked = vec![fixture_unacked("stream-atomic-stolen", 2)];
+    let replacement_principal = fixture_principal();
     let result = f
         .fenced
-        .store_session_atomic(new_session, new_unacked)
+        .store_session_atomic_with_principal(&replacement_principal, new_session, new_unacked)
         .await;
     assert!(
         matches!(result, Err(SmPersistenceError::NotOwner { .. })),
@@ -918,6 +940,14 @@ async fn store_session_atomic_aborts_before_any_write_once_the_claim_is_stolen()
         .expect("list_unacked");
     assert_eq!(queue.len(), 1);
     assert_eq!(queue[0].sequence, 1);
+    assert_eq!(
+        f.fenced
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load principal after rejected fenced write"),
+        Some(original_principal),
+        "a fence miss must leave the existing principal columns untouched"
+    );
 }
 
 /// FIX 6: the same steal-vs-write race as

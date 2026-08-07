@@ -65,7 +65,7 @@ pub(crate) async fn seed_local_account(state: &WebSocketState, localpart: &str) 
         .db_pool
         .global_actor()
         .ask(DbExecute {
-            sql: "INSERT INTO users \
+                sql: "INSERT OR IGNORE INTO users \
                   (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 .to_string(),
@@ -739,11 +739,13 @@ async fn create_test_websocket_state_with_extension_manager(
                     dnd_projection,
                     dnd_reader,
                     notification_activity,
-                    sm_session_registry: sm_session_registry_override
-                        .unwrap_or_else(|| Arc::new(InMemorySmSessionRegistry::new())),
+                    sm_session_registry: sm_session_registry_override.unwrap_or_else(|| {
+                        Arc::new(InMemorySmSessionRegistry::new().with_persistence(Arc::new(
+                            waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+                        )))
+                    }),
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),
-                    resumable_sessions: Arc::new(dashmap::DashMap::new()),
                     caps_resolver: Arc::new(
                         crate::server::caps_resolution::CapsResolver::default(),
                     ),
@@ -780,7 +782,12 @@ async fn create_test_websocket_state_with_extension_manager(
 }
 
 async fn create_test_session(state: &WebSocketState, username: &str) -> Session {
-    let session = Session::new(&uuid::Uuid::new_v4().to_string(), username, username);
+    seed_local_account(state, username).await;
+    let session = Session::new(
+        &format!("{username}@{}", state.deps.auth_state.xmpp_domain),
+        username,
+        username,
+    );
     state
         .deps
         .auth_state
@@ -789,6 +796,23 @@ async fn create_test_session(state: &WebSocketState, username: &str) -> Session 
         .await
         .expect("session");
     session
+}
+
+pub(crate) async fn store_resumable_detached_session(
+    state: &WebSocketState,
+    session: &Session,
+    detached: waddle_xmpp::stream_management::DetachedSession,
+) {
+    let principal = session
+        .authenticated_principal_ref()
+        .expect("test session carries an auth context");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session_with_principal(detached, principal)
+        .await
+        .expect("store detached session with principal");
 }
 
 pub(crate) async fn create_test_server_owner_session(

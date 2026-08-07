@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 mod account;
 mod calls_mixer;
@@ -148,8 +149,14 @@ pub(super) async fn handle_disco_info_iq(
         return disco_info_xml(response);
     }
 
-    if let Some(response) =
-        spaces::handle_spaces_disco_info(&request, state, authenticated_session.as_ref()).await
+    if let Some(response) = spaces::handle_spaces_disco_info(
+        &request,
+        state,
+        authenticated_session
+            .as_ref()
+            .map(ResolvedPrincipal::from_authenticated_session),
+    )
+    .await
     {
         info!(id = %ctx.id, target = %target, handler = "spaces", "disco#info answered");
         return disco_info_xml(response);
@@ -177,7 +184,13 @@ pub(super) async fn handle_disco_info_iq(
 
     info!(id = %ctx.id, target = %target, handler = "server_fallback", "disco#info answered");
     disco_info_xml(
-        server_info::handle_server_disco_info(&request, state, authenticated_session.as_ref())
-            .await,
+        server_info::handle_server_disco_info(
+            &request,
+            state,
+            authenticated_session
+                .as_ref()
+                .map(ResolvedPrincipal::from_authenticated_session),
+        )
+        .await,
     )
 }

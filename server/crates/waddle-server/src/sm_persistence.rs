@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use jid::FullJid;
 use tracing::{debug, info, instrument};
+use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
@@ -36,8 +37,8 @@ mod joined_sessions;
 mod schema;
 
 use codec::{
-    decode_session, decode_unacked, decode_unacked_join_row, serialize_presence_payloads,
-    serialize_stanza, show_wire_str,
+    decode_session, decode_session_principal, decode_unacked, decode_unacked_join_row,
+    serialize_presence_payloads, serialize_stanza, show_wire_str,
 };
 
 /// Per-stream insert/update mutex map. Serializes writes for the same
@@ -197,8 +198,9 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
                 presence_show, presence_status, presence_priority, replay_gap_through,
-                presence_payloads
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                presence_payloads, bare_jid, auth_context_id, auth_context_version,
+                principal_auth_epoch
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -216,7 +218,11 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 presence_status = excluded.presence_status,
                 presence_priority = excluded.presence_priority,
                 replay_gap_through = excluded.replay_gap_through,
-                presence_payloads = excluded.presence_payloads
+                presence_payloads = excluded.presence_payloads,
+                bare_jid = COALESCE(excluded.bare_jid, sm_sessions.bare_jid),
+                auth_context_id = COALESCE(excluded.auth_context_id, sm_sessions.auth_context_id),
+                auth_context_version = COALESCE(excluded.auth_context_version, sm_sessions.auth_context_version),
+                principal_auth_epoch = COALESCE(excluded.principal_auth_epoch, sm_sessions.principal_auth_epoch)
             "#,
             crate::db_params![
                 session.stream_id.as_str().to_string(),
@@ -237,6 +243,10 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 i64::from(session.presence_priority),
                 session.replay_gap_through.map(i64::from),
                 presence_payloads_xml,
+                None::<String>,
+                None::<String>,
+                None::<i64>,
+                None::<i64>,
             ],
         )
         .await?;
@@ -272,6 +282,28 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         } else {
             Ok(None)
         }
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+        let mut rows = self
+            .query(
+                "SELECT bare_jid, auth_context_id, auth_context_version, \
+                        principal_auth_epoch \
+                 FROM sm_sessions WHERE stream_id = ?",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        decode_session_principal(&row)
     }
 
     #[instrument(skip(self), fields(stream_id = %stream_id))]
@@ -492,6 +524,15 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
         atomic_store::store_session_atomic(self, session, unacked).await
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        atomic_store::store_session_atomic_with_principal(self, principal, session, unacked).await
     }
 }
 

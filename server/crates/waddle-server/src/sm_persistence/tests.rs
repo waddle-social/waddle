@@ -1,6 +1,9 @@
 use super::*;
 use chrono::TimeZone;
 use std::time::Duration;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 
 fn full(s: &str) -> FullJid {
     s.parse().unwrap()
@@ -44,6 +47,15 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         stanza: Box::new(Stanza::Message(message)),
         original_receipt_at: fixed_time(),
     }
+}
+
+fn fixture_principal() -> AuthenticatedPrincipalRef {
+    AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("valid bare JID"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    )
 }
 
 #[cfg(feature = "clustering")]
@@ -406,6 +418,140 @@ async fn store_session_atomic_round_trips_via_transaction() {
     assert_eq!(listed.len(), 3);
     assert_eq!(listed[0].sequence, 1);
     assert_eq!(listed[2].sequence, 3);
+}
+
+#[tokio::test]
+async fn store_session_atomic_with_principal_round_trips_principal() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("atomic-principal");
+    let principal = fixture_principal();
+
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked(stream_id.as_str(), 1)],
+        )
+        .await
+        .expect("atomically persist principal with snapshot and queue");
+
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load stored principal"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn plain_store_session_atomic_preserves_an_existing_principal() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("atomic-principal-preserved");
+    let principal = fixture_principal();
+
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            fixture_session(stream_id.as_str()),
+            Vec::new(),
+        )
+        .await
+        .expect("persist principal snapshot");
+    // Detached-session snapshot refreshes (stanzas recorded while detached)
+    // go through the plain atomic store; they must never strip the durable
+    // resume authority written at the detach boundary.
+    storage
+        .store_session_atomic(fixture_session(stream_id.as_str()), Vec::new())
+        .await
+        .expect("persist plain snapshot");
+
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load preserved principal"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn detached_snapshot_refresh_preserves_principal_through_registry() {
+    use waddle_xmpp::stream_management::{DetachedSession, InMemorySmSessionRegistry};
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(std::sync::Arc::new(storage)),
+    );
+    let principal = fixture_principal();
+    let session = DetachedSession {
+        stream_id: "refresh-keeps-principal".to_string(),
+        user_id: "u1".to_string(),
+        jid: full("alice@example.com/phone"),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: true,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    registry
+        .store_session_with_principal(session, principal.clone())
+        .await
+        .expect("store with principal");
+    let recorded = registry
+        .record_outbound_for_detached_stream(
+            "refresh-keeps-principal",
+            "<message xmlns='jabber:client' to='alice@example.com/phone'/>".to_string(),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("record stanza into detached session");
+    assert!(recorded, "stanza recorded for detached stream");
+    assert_eq!(
+        registry
+            .session_principal("refresh-keeps-principal")
+            .await
+            .expect("load principal after snapshot refresh"),
+        Some(principal),
+        "principal must survive a detached-fanout snapshot refresh"
+    );
+}
+
+#[tokio::test]
+async fn delete_session_removes_principal() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("deleted-principal");
+    storage
+        .store_session_atomic_with_principal(
+            &fixture_principal(),
+            fixture_session(stream_id.as_str()),
+            Vec::new(),
+        )
+        .await
+        .expect("persist principal snapshot");
+
+    storage
+        .delete_session(&stream_id)
+        .await
+        .expect("delete session");
+
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load removed principal"),
+        None
+    );
 }
 
 /// #1206: the production store path is `store_session` → the OVERRIDDEN
@@ -785,6 +931,43 @@ async fn postgres_handles_i32_overflow_session_and_unacked_timestamps_ms() {
         .delete_session(&SmSessionId::new(&stream_id))
         .await
         .expect("cleanup postgres sm rows");
+}
+
+#[tokio::test]
+async fn postgres_store_session_atomic_with_principal_round_trips() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed SM principal persistence)"
+        );
+        return;
+    };
+
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    let stream_id = SmSessionId::new(format!("postgres-principal-{}", uuid::Uuid::new_v4()));
+    let principal = fixture_principal();
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            fixture_session(stream_id.as_str()),
+            Vec::new(),
+        )
+        .await
+        .expect("persist postgres principal snapshot");
+
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load postgres principal"),
+        Some(principal)
+    );
+    storage
+        .delete_session(&stream_id)
+        .await
+        .expect("clean up postgres principal snapshot");
 }
 
 #[tokio::test]

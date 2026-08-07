@@ -242,6 +242,13 @@ pub enum CrossNodeResumeOutcome {
     /// plan's XEP fact-check note: "our chosen condition," not an
     /// XEP-0198-named one).
     OwnerUnreachable,
+    /// Won the steal but a post-win hydrate/claim step failed transiently
+    /// (storage error or timeout) and the just-won claim was released for a
+    /// clean client retry. The durable session may well still exist, so this
+    /// MUST NOT surface as `item-not-found` — storage loss never masquerades
+    /// as absence; callers map it to an `internal-server-error`-class
+    /// rejection instead.
+    StorageUnavailable,
 }
 
 /// A pre-write decision produced by
@@ -888,7 +895,10 @@ impl InMemorySmSessionRegistry {
                          by releasing the just-won claim (FIX B) — a client retry can now \
                          succeed via the unclaimed-but-persisted resume branch (FIX C)"
                     );
-                    return Ok(CrossNodeResumeOutcome::NotFound);
+                    return Ok(match missing_source {
+                        MissingRepairSource::NotFound => CrossNodeResumeOutcome::NotFound,
+                        MissingRepairSource::Error => CrossNodeResumeOutcome::StorageUnavailable,
+                    });
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -1347,6 +1357,24 @@ mod tests {
         async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
             self.inner.list_all_sessions().await
         }
+
+        async fn store_session_atomic_with_principal(
+            &self,
+            principal: &crate::auth::AuthenticatedPrincipalRef,
+            session: PersistedSession,
+            unacked: Vec<PersistedUnackedStanza>,
+        ) -> Result<(), SmPersistenceError> {
+            self.inner
+                .store_session_atomic_with_principal(principal, session, unacked)
+                .await
+        }
+
+        async fn get_session_principal(
+            &self,
+            stream_id: &crate::pending_delivery::SmSessionId,
+        ) -> Result<Option<crate::auth::AuthenticatedPrincipalRef>, SmPersistenceError> {
+            self.inner.get_session_principal(stream_id).await
+        }
     }
 
     fn make_persisted_session(stream_id: &str, jid: &jid::FullJid) -> PersistedSession {
@@ -1647,7 +1675,13 @@ mod tests {
             .attempt_cross_node_resume(&entity.id, &jid.to_bare(), Duration::from_secs(2))
             .await
             .expect("poison quarantine must repair rather than strand its fresh claim");
-        assert!(matches!(outcome, CrossNodeResumeOutcome::NotFound));
+        // Corrupt session data is a storage-class failure: the durable row
+        // exists, so the repair must NOT masquerade as absence
+        // (`item-not-found`); it surfaces as retryable StorageUnavailable.
+        assert!(matches!(
+            outcome,
+            CrossNodeResumeOutcome::StorageUnavailable
+        ));
         assert!(claim_store
             .current_claim(&entity)
             .await
@@ -2024,8 +2058,9 @@ mod tests {
             .await
             .expect("attempt_cross_node_resume must not error: FIX B repairs, it does not fail");
         assert!(
-            matches!(outcome, CrossNodeResumeOutcome::NotFound),
-            "post-win hydrate failure must repair to a clean NotFound, not an error; got \
+            matches!(outcome, CrossNodeResumeOutcome::StorageUnavailable),
+            "post-win hydrate failure must repair to a retryable StorageUnavailable — the \
+             durable session still exists, so it must not masquerade as item-not-found; got \
              {outcome:?}"
         );
 

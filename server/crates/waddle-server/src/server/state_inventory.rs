@@ -53,7 +53,10 @@ pub struct SessionInventory {
     /// it nullable here rather than collapsing to `0` so the gap is
     /// visually distinct from "zero sessions live".
     pub sm_live_sessions: Option<usize>,
-    pub resumable_sessions: usize,
+    /// Durable detached XEP-0198 snapshots, including a resume claim that is
+    /// temporarily frozen in the registry. This is not an authorization
+    /// sidecar; every resumable snapshot carries its principal in persistence.
+    pub resumable_sessions: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,7 +158,10 @@ pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
         },
         sessions: SessionInventory {
             sm_live_sessions,
-            resumable_sessions: protocol.resumable_sessions.len(),
+            resumable_sessions: protocol
+                .sm_session_registry
+                .live_session_ids()
+                .map(|ids| ids.len()),
         },
         caps: CapsInventory {
             caps_cache: protocol.caps_resolver.cache().len(),

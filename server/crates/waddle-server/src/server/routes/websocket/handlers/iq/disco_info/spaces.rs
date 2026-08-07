@@ -1,9 +1,10 @@
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) async fn handle_spaces_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
-    authenticated_session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> Option<DiscoInfoResponse<'a>> {
     if req.target_to != Some(req.spaces_domain) {
         return None;
@@ -74,8 +75,7 @@ pub(super) async fn handle_spaces_disco_info<'a>(
                 space.created_at = created_at.to_rfc3339();
             }
         }
-        let requester_affiliation =
-            space_affiliation_for_requester(state, authenticated_session, node).await;
+        let requester_affiliation = space_affiliation_for_requester(state, principal, node).await;
         let owner_jids = state
             .deps
             .protocol

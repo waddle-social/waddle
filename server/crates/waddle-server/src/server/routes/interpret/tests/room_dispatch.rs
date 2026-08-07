@@ -107,7 +107,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         extension_manager: Some(&state.deps.protocol.extension_manager),
         room_registry: Some(&state.deps.protocol.room_registry),
         web_socket_state: Some(state.as_ref()),
-        authenticated_session: None,
+        authenticated_principal: None,
         local_domain: state.deps.auth_state.xmpp_domain.as_str(),
         blocking_storage: Some(&state.deps.protocol.blocking_storage),
         message_dispatcher: Some(&state.deps.protocol.dispatcher),

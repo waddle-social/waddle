@@ -1,4 +1,91 @@
 use super::*;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
+
+pub(crate) struct EncodedSessionPrincipal {
+    pub(crate) bare_jid: String,
+    pub(crate) auth_context_id: String,
+    pub(crate) auth_context_version: i64,
+    pub(crate) principal_auth_epoch: i64,
+}
+
+pub(crate) fn encode_session_principal(
+    principal: &AuthenticatedPrincipalRef,
+) -> Result<EncodedSessionPrincipal, SmPersistenceError> {
+    Ok(EncodedSessionPrincipal {
+        bare_jid: principal.bare_jid().to_string(),
+        auth_context_id: principal.auth_context_id().as_uuid().to_string(),
+        auth_context_version: i64::try_from(principal.auth_context_version().get()).map_err(
+            |_| SmPersistenceError::Other("auth context version overflows i64".to_string()),
+        )?,
+        principal_auth_epoch: i64::try_from(principal.auth_epoch().get()).map_err(|_| {
+            SmPersistenceError::Other("principal auth epoch overflows i64".to_string())
+        })?,
+    })
+}
+
+pub(crate) fn decode_session_principal(
+    row: &crate::db::Row,
+) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+    let bare_jid: Option<String> = row
+        .get(0)
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    let auth_context_id: Option<String> = row
+        .get(1)
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    let auth_context_version: Option<i64> = row
+        .get(2)
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    let principal_auth_epoch: Option<i64> = row
+        .get(3)
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+
+    let (bare_jid, auth_context_id, auth_context_version, principal_auth_epoch) = match (
+        bare_jid,
+        auth_context_id,
+        auth_context_version,
+        principal_auth_epoch,
+    ) {
+        (None, None, None, None) => return Ok(None),
+        (
+            Some(bare_jid),
+            Some(auth_context_id),
+            Some(auth_context_version),
+            Some(principal_auth_epoch),
+        ) => (
+            bare_jid,
+            auth_context_id,
+            auth_context_version,
+            principal_auth_epoch,
+        ),
+        _ => {
+            return Err(SmPersistenceError::Other(
+                "incomplete SM principal columns".to_string(),
+            ));
+        }
+    };
+
+    let bare_jid = bare_jid.parse().map_err(|error| {
+        SmPersistenceError::Other(format!("invalid SM principal bare JID: {error}"))
+    })?;
+    let auth_context_id = auth_context_id.parse().map_err(|error| {
+        SmPersistenceError::Other(format!("invalid SM principal auth_context_id: {error}"))
+    })?;
+    let auth_context_version = u64::try_from(auth_context_version).map_err(|_| {
+        SmPersistenceError::Other("invalid SM principal auth_context_version".to_string())
+    })?;
+    let principal_auth_epoch = u64::try_from(principal_auth_epoch).map_err(|_| {
+        SmPersistenceError::Other("invalid SM principal principal_auth_epoch".to_string())
+    })?;
+
+    Ok(Some(AuthenticatedPrincipalRef::new(
+        bare_jid,
+        AuthContextId::new(auth_context_id),
+        AuthContextVersion::new(auth_context_version),
+        PrincipalAuthEpoch::new(principal_auth_epoch),
+    )))
+}
 
 pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, SmPersistenceError> {
     let stream_id: String = row

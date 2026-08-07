@@ -1,6 +1,10 @@
 use super::*;
 use chrono::Utc;
 
+use crate::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
+
 fn full(s: &str) -> FullJid {
     s.parse().unwrap()
 }
@@ -48,6 +52,69 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         stanza: Box::new(Stanza::Message(message)),
         original_receipt_at: Utc::now(),
     }
+}
+
+fn fixture_principal() -> AuthenticatedPrincipalRef {
+    AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("valid bare JID"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    )
+}
+
+#[tokio::test]
+async fn atomic_snapshot_with_principal_round_trips_complete_envelope() {
+    let store = InMemorySmPersistence::new();
+    let principal = fixture_principal();
+    let session = fixture_session("principal-envelope");
+    let unacked = vec![fixture_unacked("principal-envelope", 1)];
+
+    store
+        .store_session_atomic_with_principal(&principal, session, unacked)
+        .await
+        .expect("atomically persist snapshot envelope");
+
+    let stream_id = sid("principal-envelope");
+    assert!(store
+        .get_session(&stream_id)
+        .await
+        .expect("load snapshot")
+        .is_some());
+    assert_eq!(
+        store
+            .list_unacked(&stream_id)
+            .await
+            .expect("load queue")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load principal"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn principal_is_absent_for_a_session_never_stored_with_one() {
+    let store = InMemorySmPersistence::new();
+    let stream_id = sid("principal-absent");
+
+    store
+        .store_session_atomic(fixture_session("principal-absent"), Vec::new())
+        .await
+        .expect("persist ordinary snapshot");
+
+    assert_eq!(
+        store
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load absent principal"),
+        None
+    );
 }
 
 #[tokio::test]

@@ -155,6 +155,39 @@ impl Drop for DrainedSessionBatch<'_> {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Return an in-flight resume claim to the detached pool from a
+    /// cancellation guard.  This is synchronous specifically so a dropped
+    /// WebSocket resume future cannot strand the claimed snapshot between
+    /// awaits.  The durable ownership fence is intentionally retained: an
+    /// unexpired detached session remains owned by this node, exactly as in
+    /// [`Self::release_claim`].
+    ///
+    /// If bookkeeping cannot be acquired, the exact fence is transferred to
+    /// the existing terminal-release inventory rather than being forgotten.
+    pub fn defer_claimed_resume_release(&self, stream_id: &str) -> bool {
+        let reinserted = match (self.sessions.write(), self.claimed_sessions.write()) {
+            (Ok(mut sessions), Ok(mut claimed)) => match claimed.remove(stream_id) {
+                Some(session) if !session.is_expired() => {
+                    sessions.insert(stream_id.to_string(), session);
+                    true
+                }
+                // Expired while claimed: mirror `release_claim_locked` —
+                // drop it from memory (re-inserting would strand it in
+                // `claimed_sessions` forever, since expiry sweeps only walk
+                // `sessions`), keep the durable rows for the janitor's
+                // promotion chain, and fall through so the exact fence moves
+                // into terminal-release inventory.
+                Some(_expired) => false,
+                None => false,
+            },
+            _ => false,
+        };
+        if reinserted {
+            return true;
+        }
+        self.defer_enabled_claim_release(stream_id)
+    }
+
     /// Atomically move a claim acquired for `<enable/>` out of the active
     /// live-authority map and into terminal exact-release inventory. This is
     /// synchronous so a cancellation guard can call it from `Drop` when the
@@ -762,10 +795,17 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         preserve_terminal_release: Option<&super::super::persistence::SmClaimFence>,
     ) {
-        if let Ok(mut sessions) = self.sessions.write() {
+        // Both maps must clear in ONE critical section, in the same
+        // sessions-then-claimed order as `defer_claimed_resume_release`'s
+        // tuple lock: that handback runs from a sync `Drop` with no shard
+        // lock, and if it interleaved between two separate removals here it
+        // could move the snapshot from `claimed_sessions` back into
+        // `sessions` AFTER this demotion already swept `sessions` —
+        // republishing a detached session whose claim Postgres reassigned.
+        if let (Ok(mut sessions), Ok(mut claimed)) =
+            (self.sessions.write(), self.claimed_sessions.write())
+        {
             sessions.remove(stream_id);
-        }
-        if let Ok(mut claimed) = self.claimed_sessions.write() {
             claimed.remove(stream_id);
         }
         // A reservation/acquisition/lookup represents an ownership CAS that

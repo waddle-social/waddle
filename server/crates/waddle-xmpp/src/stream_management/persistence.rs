@@ -34,6 +34,7 @@ use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
+use crate::auth::AuthenticatedPrincipalRef;
 use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
 use crate::Stanza;
@@ -369,6 +370,28 @@ pub trait SmPersistenceStorage: Send + Sync {
         Ok(())
     }
 
+    /// Atomically persist a detached SM snapshot, complete unacked queue, and
+    /// the authenticated principal reference that authorizes its later resume.
+    ///
+    /// Clustered implementations must bind this write to the same exact SM
+    /// claim fence as the snapshot write. The principal is intentionally an
+    /// explicit argument rather than registry state so cancellation cannot
+    /// leave a separately staged authority reference behind.
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError>;
+
+    /// Return the authenticated principal reference durably paired with a
+    /// detached session snapshot. Callers must resolve it against the auth
+    /// authority before resuming; absence is not a local-state fallback.
+    async fn get_session_principal(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError>;
+
     /// Atomically increment the persistent promotion-failure counter
     /// for `stream_id` and return the new value. Used by the SM-
     /// expiry janitor (issue #209 finding #14) to break runaway retry
@@ -424,6 +447,8 @@ struct InMemoryState {
     sessions: std::collections::HashMap<SmSessionId, PersistedSession>,
     // Per-session unacked queue keyed by stream_id.
     unacked: std::collections::HashMap<SmSessionId, Vec<PersistedUnackedStanza>>,
+    // Non-secret authorization reference paired with the detached snapshot.
+    principals: std::collections::HashMap<SmSessionId, AuthenticatedPrincipalRef>,
 }
 
 impl InMemorySmPersistence {
@@ -461,6 +486,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         guard.sessions.remove(stream_id);
         guard.unacked.remove(stream_id);
+        guard.principals.remove(stream_id);
         Ok(())
     }
 
@@ -555,6 +581,49 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .lock()
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         Ok(guard.sessions.values().cloned().collect())
+    }
+
+    async fn store_session_atomic(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        let stream_id = session.stream_id.clone();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        guard.sessions.insert(stream_id.clone(), session);
+        guard.unacked.insert(stream_id, unacked);
+        Ok(())
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        let stream_id = session.stream_id.clone();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        guard.sessions.insert(stream_id.clone(), session);
+        guard.unacked.insert(stream_id.clone(), unacked);
+        guard.principals.insert(stream_id, principal.clone());
+        Ok(())
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard.principals.get(stream_id).cloned())
     }
 }
 

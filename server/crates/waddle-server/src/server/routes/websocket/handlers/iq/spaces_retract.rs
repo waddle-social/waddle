@@ -1,5 +1,6 @@
 use super::permissions::{delete_channel_parent_tuple, write_channel_parent_tuple};
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) async fn handle_spaces_retract(
     iq: &xmpp_parsers::iq::Iq,
@@ -8,9 +9,9 @@ pub(super) async fn handle_spaces_retract(
     spaces_domain: &str,
     node: &str,
     item_id: &str,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> Vec<String> {
-    match spaces_node_mutation_allowed(state, session, node).await {
+    match spaces_node_mutation_allowed(state, principal, node).await {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {

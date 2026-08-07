@@ -2,6 +2,7 @@ use super::permissions::{
     seed_spaces_node_owners, server_permission_allowed, write_space_owner_tuple,
 };
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
 
 fn is_pubsub_attachment_or_summary_node(node: &str) -> bool {
@@ -31,7 +32,9 @@ pub(super) async fn handle_pubsub_admin_request(
             if target_jid.to_string() == spaces_domain {
                 if server_permission_allowed(
                     state,
-                    authenticated_session.as_ref(),
+                    authenticated_session
+                        .as_ref()
+                        .map(ResolvedPrincipal::from_authenticated_session),
                     Permission::CreateSpace,
                 )
                 .await

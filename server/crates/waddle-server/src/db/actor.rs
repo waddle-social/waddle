@@ -78,6 +78,9 @@ pub struct CreateAuthSession {
     pub username: String,
     pub xmpp_localpart: String,
     pub token_hash: String,
+    pub auth_context_id: Option<uuid::Uuid>,
+    pub auth_context_version: u64,
+    pub principal_auth_epoch: u64,
     pub expires_at: Option<String>,
     pub created_at: String,
     pub last_used_at: String,
@@ -114,13 +117,22 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO sessions (id, user_jid, token_hash, expires_at, created_at, last_used_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO sessions (
+                        id, user_jid, token_hash, auth_context_id, auth_context_version,
+                        principal_auth_epoch, expires_at, created_at, last_used_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
                 )
                 .bind(&msg.session_id)
                 .bind(&msg.user_jid)
                 .bind(&msg.token_hash)
+                .bind(msg.auth_context_id.map(|id| id.to_string()))
+                .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
+                    DatabaseError::QueryFailed("auth context version overflow".to_string())
+                })?)
+                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| {
+                    DatabaseError::QueryFailed("principal auth epoch overflow".to_string())
+                })?)
                 .bind(&msg.expires_at)
                 .bind(&msg.created_at)
                 .bind(&msg.last_used_at)
@@ -149,13 +161,25 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO sessions (id, user_jid, token_hash, expires_at, created_at, last_used_at)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    INSERT INTO sessions (
+                        id, user_jid, token_hash, auth_context_id, auth_context_version,
+                        principal_auth_epoch, expires_at, created_at, last_used_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     "#,
                 )
                 .bind(&msg.session_id)
                 .bind(&msg.user_jid)
                 .bind(&msg.token_hash)
+                // The column is TEXT on both engines (index-served principal
+                // resolution with one shared SQL string); bind the string
+                // form — Postgres will not assignment-cast a uuid parameter.
+                .bind(msg.auth_context_id.map(|id| id.to_string()))
+                .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
+                    DatabaseError::QueryFailed("auth context version overflow".to_string())
+                })?)
+                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| {
+                    DatabaseError::QueryFailed("principal auth epoch overflow".to_string())
+                })?)
                 .bind(&msg.expires_at)
                 .bind(&msg.created_at)
                 .bind(&msg.last_used_at)

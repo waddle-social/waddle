@@ -607,13 +607,17 @@ async fn handle_xmpp_websocket(
             // detach-for-resume when negotiated, full cleanup
             // otherwise.
             timer_id = timers.next_expired() => {
+                let session = conn.authenticated_session.clone();
+                let principal = session
+                    .as_ref()
+                    .map(super::ResolvedPrincipal::from_authenticated_session);
                 let Some(sm) = conn.state_machine.as_mut() else {
                     warn!(timer_id = timer_id.0, "Timer fired without a state machine; disarming");
                     continue;
                 };
                 let events = sm.handle(InboundEvent::Tick(timer_id));
                 let interpret_deps =
-                    build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref());
+                    build_interpret_deps(state.as_ref(), principal);
                 let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
                 timers.apply(drive.timer_commands);
                 if !drive.frames.is_empty() {
@@ -1235,23 +1239,15 @@ async fn close_if_frame_authority_revoked(
     true
 }
 
-async fn cleanup_frame_authority_revocation(state: &WebSocketState, conn: &mut WsConnState) {
+async fn cleanup_frame_authority_revocation(_state: &WebSocketState, conn: &mut WsConnState) {
     // `<enable/>` has not reached its wire commit point yet. Dropping this
     // typed guard inventories exact claim release; a stale generation must
     // never send `<enabled/>`.
     drop(conn.pending_sm_enable_commit.take());
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         conn.pending_resume_h = None;
-        if let Err(error) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .release_claim(&stream_id)
-            .await
-        {
-            warn!(%stream_id, %error, "Failed to release SM resume claim after authority revocation");
-        }
-        state.deps.protocol.resumable_sessions.remove(&stream_id);
+        drop(conn.pending_resume_claim.take());
+        debug!(%stream_id, "Released SM resume claim after authority revocation");
     }
 }
 

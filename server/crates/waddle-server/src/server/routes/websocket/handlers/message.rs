@@ -16,6 +16,7 @@ use super::super::{
     WebSocketState,
 };
 use crate::auth::Session;
+use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::protocol::ConnectionPhase;
 
 mod dm_pin;
@@ -148,8 +149,9 @@ pub async fn handle_message(
     let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
         Stanza::Message(incoming),
     ))));
-    let deps = build_interpret_deps(state, authenticated_session)
-        .with_ordered_relay_origin(ordered_relay_origin);
+    let principal = authenticated_session.map(ResolvedPrincipal::from_authenticated_session);
+    let deps =
+        build_interpret_deps(state, principal).with_ordered_relay_origin(ordered_relay_origin);
     // Stanza dispatch never emits keepalive/timer effects (those come
     // only from TransportReady/Tick in the connection loop), and
     // `close` was already ignored on this path — only frames matter.

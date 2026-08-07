@@ -60,7 +60,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         extension_manager: None,
         room_registry: None,
         web_socket_state: None,
-        authenticated_session: None,
+        authenticated_principal: None,
         local_domain: "example.com",
         blocking_storage: Some(&blocking),
         message_dispatcher: Some(&dispatcher),

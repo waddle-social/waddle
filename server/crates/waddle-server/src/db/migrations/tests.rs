@@ -14,6 +14,22 @@ async fn test_migration_runner_global() {
     let applied_again = runner.run(&db).await.unwrap();
     assert!(applied_again.is_empty());
 
+    let conn = db.guard().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name IN (?, ?, ?)",
+            crate::db_params![
+                "auth_context_id",
+                "auth_context_version",
+                "principal_auth_epoch"
+            ],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let auth_context_columns: i64 = row.get(0).unwrap();
+    assert_eq!(auth_context_columns, 3);
+
     // Check version (global + shared waddle schema)
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(version, Some(1007));
@@ -216,6 +232,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     )
     .await
     .unwrap();
+    create_legacy_session_schema(&conn).await;
     // Seed a row mimicking the prod scenario: a `mime_rejected`
     // throttle persisted before V0004 existed (so the digest column
     // is NULL after the migration).
@@ -241,7 +258,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![4, 5, 6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     // Column exists.
@@ -355,7 +372,7 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let applied_again = runner.run(&db).await.unwrap();
@@ -409,7 +426,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let conn = db.guard().await.unwrap();
@@ -607,6 +624,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     )
     .await
     .expect("create legacy upload_slots");
+    create_legacy_session_schema(&conn).await;
     conn.execute(
         "INSERT INTO upload_slots \
          (id, requester_jid, filename, size_bytes, content_type, expires_at) \
@@ -630,7 +648,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![6, 7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
@@ -692,13 +710,14 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     )
     .await
     .unwrap();
+    create_legacy_session_schema(&conn).await;
     conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let conn = db.guard().await.unwrap();
@@ -808,10 +827,11 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     )
     .await
     .unwrap();
+    create_legacy_session_schema(&conn).await;
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![8, 9, 10]);
+    assert_eq!(applied, vec![8, 9, 10, 11]);
 
     let conn = db.guard().await.unwrap();
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -867,10 +887,11 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
     ] {
         conn.execute(statement, ()).await.unwrap();
     }
+    create_legacy_session_schema(&conn).await;
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![10]);
+    assert_eq!(applied, vec![10, 11]);
 
     let conn = db.guard().await.unwrap();
     for table in [
@@ -889,6 +910,131 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 0, "V0010 must drop {table}");
     }
+}
+
+#[tokio::test]
+async fn sqlite_v0011_adds_auth_context_reference_to_existing_sessions() {
+    let db = Database::in_memory("test-global-v0011-auth-context")
+        .await
+        .expect("in-memory database");
+    let conn = db.guard().await.expect("database guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 11)).await;
+    seed_applied_migrations(&conn, waddle::all()).await;
+    create_legacy_session_schema(&conn).await;
+    conn.execute(
+        "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        crate::db_params!["alice@example.com", "alice", "alice", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+    )
+    .await
+    .expect("seed user");
+    conn.execute(
+        "INSERT INTO sessions (id, user_jid, token_hash, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)",
+        crate::db_params!["legacy-session", "alice@example.com", "token", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+    )
+    .await
+    .expect("seed legacy session");
+    drop(conn);
+
+    assert_eq!(MigrationRunner::global().run(&db).await.unwrap(), vec![11]);
+
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT auth_context_id, auth_context_version, principal_auth_epoch FROM sessions WHERE id = ?",
+            crate::db_params!["legacy-session"],
+        )
+        .await
+        .expect("read migrated legacy session");
+    let row = rows.next().await.expect("read row").expect("legacy row");
+    let auth_context_id: Option<String> = row.get(0).expect("decode nullable context");
+    let auth_context_version: i64 = row.get(1).expect("decode context version");
+    let principal_auth_epoch: i64 = row.get(2).expect("decode auth epoch");
+    assert_eq!(auth_context_id, None);
+    assert_eq!(auth_context_version, 1);
+    assert_eq!(principal_auth_epoch, 1);
+    drop(rows);
+
+    conn.execute(
+        "UPDATE sessions SET auth_context_id = ? WHERE id = ?",
+        crate::db_params!["e54271ba-2fe1-4632-84b0-b8895cb2f5dd", "legacy-session"],
+    )
+    .await
+    .expect("assign durable context");
+    let duplicate = conn
+        .execute(
+            "INSERT INTO sessions (id, user_jid, token_hash, auth_context_id, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
+            crate::db_params!["duplicate-context", "alice@example.com", "token-2", "e54271ba-2fe1-4632-84b0-b8895cb2f5dd", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+        )
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "auth context must be unique when present"
+    );
+}
+
+#[tokio::test]
+async fn postgres_v0011_adds_auth_context_reference_to_existing_sessions() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed migration regression for auth-context reference)"
+        );
+        return;
+    };
+
+    let schema = unique_postgres_schema_name("auth_context");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 11)).await;
+    seed_applied_migrations(&conn, waddle::all()).await;
+    create_legacy_session_schema(&conn).await;
+    conn.execute(
+        "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        crate::db_params!["alice@example.com", "alice", "alice", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+    )
+    .await
+    .expect("seed user");
+    conn.execute(
+        "INSERT INTO sessions (id, user_jid, token_hash, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)",
+        crate::db_params!["legacy-session", "alice@example.com", "token", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+    )
+    .await
+    .expect("seed legacy session");
+    drop(conn);
+
+    assert_eq!(MigrationRunner::global().run(&db).await.unwrap(), vec![11]);
+    // TEXT (not UUID) on Postgres: matches the sm_sessions principal columns
+    // and keeps principal resolution index-served with one shared SQL string
+    // (no CAST on the indexed column — Codex PR review on #1666).
+    assert_postgres_column_type(&db, "sessions", "auth_context_id", "text").await;
+    assert_postgres_column_type(&db, "sessions", "auth_context_version", "bigint").await;
+    assert_postgres_column_type(&db, "sessions", "principal_auth_epoch", "bigint").await;
+
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT auth_context_id::TEXT, auth_context_version, principal_auth_epoch FROM sessions WHERE id = ?",
+            crate::db_params!["legacy-session"],
+        )
+        .await
+        .expect("read migrated legacy session");
+    let row = rows.next().await.expect("read row").expect("legacy row");
+    let auth_context_id: Option<String> = row.get(0).expect("decode nullable context");
+    let auth_context_version: i64 = row.get(1).expect("decode context version");
+    let principal_auth_epoch: i64 = row.get(2).expect("decode auth epoch");
+    assert_eq!(auth_context_id, None);
+    assert_eq!(auth_context_version, 1);
+    assert_eq!(principal_auth_epoch, 1);
+    drop(rows);
+    drop(conn);
+
+    drop_postgres_schema(&admin, &schema).await;
 }
 
 #[tokio::test]
@@ -927,6 +1073,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
     )
     .await
     .expect("create upload_slots");
+    create_legacy_session_schema(&conn).await;
     drop(conn);
 
     let applied = MigrationRunner::global()
@@ -935,7 +1082,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1067,13 +1214,14 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
     )
     .await
     .expect("create upload_slots");
+    create_legacy_session_schema(&conn).await;
     drop(conn);
 
     let applied = MigrationRunner::global()
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![8, 9, 10]);
+    assert_eq!(applied, vec![8, 9, 10, 11]);
 
     let conn = db.guard().await.expect("postgres guard");
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -1241,6 +1389,57 @@ async fn seed_applied_migrations(
         .await
         .expect("seed applied migration row");
     }
+}
+
+/// The historical-upgrade fixtures record V0001 as applied. Their focused
+/// schemas must therefore include V0001's session dependencies once a later
+/// migration alters `sessions`.
+async fn create_legacy_session_schema(conn: &crate::db::ConnectionGuard) {
+    conn.execute(
+        r#"
+        CREATE TABLE users (
+            jid TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            xmpp_localpart TEXT NOT NULL UNIQUE,
+            display_name TEXT,
+            avatar_url TEXT,
+            primary_email TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#,
+        (),
+    )
+    .await
+    .expect("create legacy users schema");
+    conn.execute(
+        r#"
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            user_jid TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT NOT NULL,
+            FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE
+        )
+        "#,
+        (),
+    )
+    .await
+    .expect("create legacy sessions schema");
+    conn.execute(
+        "CREATE INDEX idx_sessions_user_jid ON sessions(user_jid)",
+        (),
+    )
+    .await
+    .expect("create legacy sessions user index");
+    conn.execute(
+        "CREATE INDEX idx_sessions_expires_at ON sessions(expires_at)",
+        (),
+    )
+    .await
+    .expect("create legacy sessions expiry index");
 }
 
 async fn assert_provider_delivery_conflict_target(conn: &crate::db::ConnectionGuard) {

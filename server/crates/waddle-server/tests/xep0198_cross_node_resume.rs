@@ -28,6 +28,9 @@ use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
 use waddle_server::sm_persistence_fenced::PostgresFencedSmPersistence;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, NodeIdentity,
     ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
@@ -94,6 +97,60 @@ fn node_identity() -> NodeIdentity {
 fn alice_jid() -> (BareJid, FullJid) {
     let full: FullJid = "alice@example.com/phone".parse().expect("valid full jid");
     (full.to_bare(), full)
+}
+
+fn alice_principal(bare: &BareJid) -> AuthenticatedPrincipalRef {
+    AuthenticatedPrincipalRef::new(
+        bare.clone(),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    )
+}
+
+async fn persisted_principal_columns(
+    db: &Database,
+    stream_id: &str,
+) -> (Option<String>, Option<String>, Option<i64>, Option<i64>) {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT bare_jid, auth_context_id, auth_context_version, principal_auth_epoch \
+             FROM sm_sessions WHERE stream_id = ?",
+            waddle_server::db_params![stream_id],
+        )
+        .await
+        .expect("select persisted principal columns");
+    let row = rows
+        .next()
+        .await
+        .expect("read persisted principal row")
+        .expect("persisted session row");
+    (
+        row.get(0).expect("bare_jid"),
+        row.get(1).expect("auth_context_id"),
+        row.get(2).expect("auth_context_version"),
+        row.get(3).expect("principal_auth_epoch"),
+    )
+}
+
+async fn assert_claim_retains_recovery_snapshot(
+    registry: &InMemorySmSessionRegistry,
+    stream_id: &str,
+    expected_jid: &FullJid,
+) {
+    let reclaimed = registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim_session after rejected resume");
+    let Some(reclaimed) = reclaimed else {
+        panic!("rejected resume must retain its detached recovery snapshot");
+    };
+    assert_eq!(reclaimed.jid, *expected_jid);
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("return recovery snapshot to detached state");
 }
 
 /// Build a registry for one simulated "node": its own `NodeIdentity`, its
@@ -245,6 +302,176 @@ impl RemoteResumeAsker for UnreachableAsker {
 }
 
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(2);
+
+/// The durable principal reference is written atomically with the detached
+/// snapshot on node A, survives hydration on node B, and remains available
+/// while node B owns the claimed hand-off. The unacked queue is intentionally
+/// non-empty so this also proves that the same successful resume still carries
+/// XEP-0198 replay state rather than only authorization metadata.
+#[tokio::test]
+async fn detached_principal_hydrates_cross_node_and_preserves_replay() {
+    let _guard = serial_lock().lock().await;
+    let Some(db) = clean_db().await else {
+        return;
+    };
+    let (bare, full) = alice_jid();
+    let principal = alice_principal(&bare);
+    let (registry_a, _identity_a) = node_registry(&db, node_identity(), None).await;
+    let (registry_b, _identity_b) = node_registry(&db, node_identity(), None).await;
+    let stream_id = "stream-principal-cross-node";
+    let session = detached_session(stream_id, &full);
+    let expected_replay = session.unacked_stanzas.clone();
+
+    registry_a
+        .store_session_with_principal(session, principal.clone())
+        .await
+        .expect("node A atomically stores detached snapshot and principal");
+
+    let (stored_bare, stored_context, stored_version, stored_epoch) =
+        persisted_principal_columns(&db, stream_id).await;
+    assert_eq!(stored_bare.as_deref(), Some(bare.as_str()));
+    assert_eq!(
+        stored_context.as_deref(),
+        Some(principal.auth_context_id().as_uuid().to_string().as_str())
+    );
+    assert_eq!(
+        stored_version,
+        Some(i64::try_from(principal.auth_context_version().get()).expect("version fits i64"))
+    );
+    assert_eq!(
+        stored_epoch,
+        Some(i64::try_from(principal.auth_epoch().get()).expect("epoch fits i64"))
+    );
+
+    let outcome = registry_b
+        .attempt_cross_node_resume(stream_id, &bare, HANDSHAKE_BUDGET)
+        .await
+        .expect("cross-node claim/hydrate succeeds");
+    let CrossNodeResumeOutcome::Claimed(resumed) = outcome else {
+        panic!("expected cross-node claim with durable principal");
+    };
+    assert_eq!(resumed.jid, full);
+    // Postgres stores receipt timestamps at millisecond precision; compare
+    // at that precision rather than chrono's nanoseconds.
+    let replay_key = |stanzas: &[waddle_xmpp::stream_management::DetachedUnackedStanza]| {
+        stanzas
+            .iter()
+            .map(|s| {
+                (
+                    s.sequence,
+                    s.stanza_xml.clone(),
+                    s.original_receipt_at.timestamp_millis(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        replay_key(&resumed.unacked_stanzas),
+        replay_key(&expected_replay),
+        "replay survives hydration"
+    );
+    assert_eq!(
+        registry_b
+            .session_principal(stream_id)
+            .await
+            .expect("read principal after cross-node hydration"),
+        Some(principal),
+        "node B must read the exact durable principal, never a credential"
+    );
+}
+
+/// A legacy snapshot has all principal columns NULL. It is not resumable;
+/// releasing the tentative claim must return the snapshot to recovery state
+/// rather than dropping it or leaving it frozen in `claimed_sessions`.
+#[tokio::test]
+async fn legacy_null_principal_rejects_without_losing_cross_node_recovery_snapshot() {
+    let _guard = serial_lock().lock().await;
+    let Some(db) = clean_db().await else {
+        return;
+    };
+    let (bare, full) = alice_jid();
+    let (registry_a, _identity_a) = node_registry(&db, node_identity(), None).await;
+    let (registry_b, _identity_b) = node_registry(&db, node_identity(), None).await;
+    let stream_id = "stream-principal-legacy";
+    registry_a
+        .store_session(detached_session(stream_id, &full))
+        .await
+        .expect("node A stores a legacy detached snapshot");
+
+    let outcome = registry_b
+        .attempt_cross_node_resume(stream_id, &bare, HANDSHAKE_BUDGET)
+        .await
+        .expect("cross-node hydration itself succeeds");
+    assert!(matches!(outcome, CrossNodeResumeOutcome::Claimed(_)));
+    assert_eq!(
+        registry_b
+            .session_principal(stream_id)
+            .await
+            .expect("read legacy durable principal"),
+        None,
+        "all-NULL legacy principal columns must force the route-level not-authorized rejection"
+    );
+    // The Claimed outcome froze the snapshot in `claimed_sessions`. Perform
+    // the release the route's not-authorized rejection performs (the claim
+    // guard's unwind) before asserting the snapshot is back in recovery
+    // state and reclaimable.
+    registry_b
+        .release_claim(stream_id)
+        .await
+        .expect("route-level rejection releases the tentative claim");
+    assert_claim_retains_recovery_snapshot(&registry_b, stream_id, &full).await;
+}
+
+/// SM persistence carries exactly the non-secret durable principal tuple. This
+/// guards against accidentally extending the cross-node recovery row with a
+/// bearer credential or password-derived material.
+#[tokio::test]
+async fn persisted_cross_node_principal_contains_only_identity_reference_columns() {
+    let _guard = serial_lock().lock().await;
+    let Some(db) = clean_db().await else {
+        return;
+    };
+    let (bare, full) = alice_jid();
+    let principal = alice_principal(&bare);
+    let (registry, _identity) = node_registry(&db, node_identity(), None).await;
+    registry
+        .store_session_with_principal(
+            detached_session("stream-principal-no-credential", &full),
+            principal.clone(),
+        )
+        .await
+        .expect("store principal-bearing snapshot");
+
+    let (stored_bare, stored_context, stored_version, stored_epoch) =
+        persisted_principal_columns(&db, "stream-principal-no-credential").await;
+    assert_eq!(stored_bare.as_deref(), Some(bare.as_str()));
+    assert_eq!(
+        stored_context.as_deref(),
+        Some(principal.auth_context_id().as_uuid().to_string().as_str())
+    );
+    assert_eq!(stored_version, Some(1));
+    assert_eq!(stored_epoch, Some(1));
+
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_name = 'sm_sessions' \
+                AND (column_name ILIKE '%token%' \
+                  OR column_name ILIKE '%bearer%' \
+                  OR column_name ILIKE '%password%')",
+            (),
+        )
+        .await
+        .expect("inspect sm_sessions credential-shaped columns");
+    assert!(
+        rows.next()
+            .await
+            .expect("read credential-shaped column")
+            .is_none(),
+        "sm_sessions must not contain token, bearer, or password columns"
+    );
+}
 
 #[tokio::test]
 async fn detached_owned_elsewhere_steals_and_hydrates_with_h_counter_integrity() {
@@ -1127,9 +1354,13 @@ async fn post_win_hydrate_failure_repairs_and_client_retry_recovers_the_session(
         .attempt_cross_node_resume("stream-hydrate-fail-pg", &bare, HANDSHAKE_BUDGET)
         .await
         .expect("attempt_cross_node_resume must not error: FIX B repairs, it does not fail");
+    // The injected ensure_claimed failure is a storage-class (Error-source)
+    // repair: the durable row still exists, so it must surface as retryable
+    // StorageUnavailable, never as item-not-found (adversarial round 1,
+    // HIGH: storage loss must not masquerade as absence).
     assert!(
-        matches!(outcome, CrossNodeResumeOutcome::NotFound),
-        "post-win hydrate failure must repair to a clean NotFound, not an error; got {outcome:?}"
+        matches!(outcome, CrossNodeResumeOutcome::StorageUnavailable),
+        "post-win hydrate failure must repair to retryable StorageUnavailable; got {outcome:?}"
     );
 
     // Prove the repair actually released the claim in real Postgres (not

@@ -102,7 +102,7 @@ async fn complete_pending_resume_claim(
                 .await
         }
     };
-    let mut remove_resumable_sidecar = true;
+    let completion_reached_terminal_boundary = completion.is_ok();
     let finalization = match completion {
         Ok(Some(SmClaimCompletion::Resumed(detached))) => match resume_h {
             Some(h) => {
@@ -154,7 +154,6 @@ async fn complete_pending_resume_claim(
                 "SM resume claim gained a replay gap before completion"
             );
             reset_registered_resume_attempt(state, conn, jid, owner).await;
-            remove_resumable_sidecar = false;
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
                 detached.inbound_count,
@@ -170,7 +169,6 @@ async fn complete_pending_resume_claim(
                 "SM resume claim completed with handled count too high"
             );
             close_registered_resume_attempt(state, conn, jid, owner).await;
-            remove_resumable_sidecar = false;
             SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
                 acknowledged,
                 send_count: detached.outbound_count,
@@ -199,8 +197,12 @@ async fn complete_pending_resume_claim(
             ))
         }
     };
-    if remove_resumable_sidecar {
-        state.deps.protocol.resumable_sessions.remove(&stream_id);
+    if let Some(guard) = conn.pending_resume_claim.take() {
+        if completion_reached_terminal_boundary {
+            guard.commit();
+        } else {
+            drop(guard);
+        }
     }
     finalization
 }

@@ -225,14 +225,18 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
         .and_then(|jid| jid.clone().try_into_full().ok())
         .map(|sender| synthetic_session_for_full_jid(&sender));
     let sender_entity = room_entity(room_jid);
-    let deps = build_interpret_deps(state, synthetic_session.as_ref()).with_ordered_relay_origin(
-        Some(OrderedRelayRouteOrigin {
-            kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
-            sender_entity,
-            inbound_sequence: 0,
-            handoff: None,
-        }),
-    );
+    let deps = build_interpret_deps(
+        state,
+        synthetic_session
+            .as_ref()
+            .map(crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session),
+    )
+    .with_ordered_relay_origin(Some(OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+        sender_entity,
+        inbound_sequence: 0,
+        handoff: None,
+    }));
     let outcome = tokio::time::timeout(
         ORDERED_RECEIVER_DELIVERY_TIMEOUT,
         crate::server::routes::interpret::dispatch_muc_to_room_for_relay(

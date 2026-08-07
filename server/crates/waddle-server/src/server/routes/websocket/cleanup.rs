@@ -340,18 +340,9 @@ pub(super) async fn cleanup_connection_shutdown(
 
     if should_detach_for_resume {
         if conn.registry_owner.is_none() {
-            if let Some(stream_id) = conn.pending_resume_stream_id.take() {
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .release_claim(&stream_id)
-                    .await
-                {
-                    warn!(stream_id = %stream_id, error = %error, "Failed to release pending SM resume claim during cleanup");
-                }
-                state.deps.protocol.resumable_sessions.remove(&stream_id);
-            }
+            conn.pending_resume_stream_id = None;
+            conn.pending_resume_h = None;
+            drop(conn.pending_resume_claim.take());
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
@@ -424,11 +415,41 @@ pub(super) async fn cleanup_connection_shutdown(
             },
         ) {
             let stream_id = detached.stream_id.clone();
+            let principal = match conn.authenticated_session.as_ref() {
+                Some(session) => match session.authenticated_principal_ref() {
+                    Ok(principal) => principal,
+                    Err(error) => {
+                        // Pre-v11 rows do not carry an auth context. They
+                        // cannot prove a durable resume identity, so fall
+                        // through to ordinary non-resumable cleanup below.
+                        warn!(jid = %jid, %error, "Refusing SM detach without a durable principal");
+                        return refuse_detach_without_principal(
+                            state,
+                            outbound_rx,
+                            &jid,
+                            conn,
+                            detached,
+                        )
+                        .await;
+                    }
+                },
+                None => {
+                    warn!(jid = %jid, "Refusing SM detach without an authenticated principal");
+                    return refuse_detach_without_principal(
+                        state,
+                        outbound_rx,
+                        &jid,
+                        conn,
+                        detached,
+                    )
+                    .await;
+                }
+            };
             match state
                 .deps
                 .protocol
                 .sm_session_registry
-                .store_session(detached)
+                .store_session_with_principal(detached, principal)
                 .await
             {
                 Ok(displaced) => {
@@ -555,13 +576,6 @@ pub(super) async fn cleanup_connection_shutdown(
                         Some(&stream_id),
                     )
                     .await;
-                    if let Some(session) = conn.authenticated_session.clone() {
-                        state
-                            .deps
-                            .protocol
-                            .resumable_sessions
-                            .insert(stream_id.clone(), session);
-                    }
                     // Remove the routing entry only — the MUC occupant
                     // slot stays. On a successful resume we'll re-register
                     // the same FullJid and presence is preserved.
@@ -574,7 +588,6 @@ pub(super) async fn cleanup_connection_shutdown(
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                    state.deps.protocol.resumable_sessions.remove(&stream_id);
                     let detach_fail_removed = state
                         .deps
                         .protocol
@@ -656,6 +669,50 @@ pub(super) async fn cleanup_connection_shutdown(
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
     ConnectionShutdownOutcome::NotPersisted
+}
+
+/// A session that enabled resumable SM but cannot prove a durable resume
+/// identity (pre-v11 row, or no authenticated session) still owns two
+/// things that must not vanish with it: the `<enabled/>` path published a
+/// durable ClaimStore claim for its stream id, and `to_detached_session`
+/// already captured its unacked server stanzas. Move the claim into
+/// terminal-release inventory and run the captured queue through the
+/// XEP-0198 §5 promote → confirm chain before falling back to ordinary
+/// non-resumable cleanup.
+async fn refuse_detach_without_principal(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    jid: &FullJid,
+    conn: &mut WsConnState,
+    detached: waddle_xmpp::stream_management::DetachedSession,
+) -> ConnectionShutdownOutcome {
+    super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+    conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+    if !detached.unacked_stanzas.is_empty() {
+        crate::sm_promotion::promote_displaced_sessions(
+            vec![detached],
+            crate::sm_promotion::DisplacedPromotionDeps {
+                sm_registry: &state.deps.protocol.sm_session_registry,
+                connection_registry: &state.deps.protocol.connection_registry,
+                user_registry: &state.deps.protocol.user_registry,
+                pending_storage: &state.deps.protocol.pending_delivery_storage,
+                blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            },
+        )
+        .await;
+    }
+    cleanup_without_resumable_snapshot(state, outbound_rx, jid, conn).await
+}
+
+async fn cleanup_without_resumable_snapshot(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    jid: &FullJid,
+    conn: &mut WsConnState,
+) -> ConnectionShutdownOutcome {
+    conn.phase = ConnectionPhase::closing(Some(jid.clone()));
+    Box::pin(cleanup_connection_shutdown(state, outbound_rx, conn, false)).await
 }
 
 /// RFC 6121 §4.5.2: an ungraceful session end (connection drop with no
@@ -1167,11 +1224,6 @@ pub(super) async fn cleanup_invalidated_detached_session(
     detached: waddle_xmpp::stream_management::DetachedSession,
     replacement_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .remove(&detached.stream_id);
     // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
     // DashMap entry. It gates whether we attempt cleanup at all: if the
     // replacement (the freshly-bound session that triggered this invalidation)

@@ -907,6 +907,42 @@ impl InMemorySmSessionRegistry {
         self
     }
 
+    /// Store a detached session with the typed principal reference that must
+    /// authorize its eventual resume. The reference remains operation-local
+    /// until the persistence seam consumes it in the same atomic write as the
+    /// snapshot and unacked queue.
+    pub async fn store_session_with_principal(
+        &self,
+        session: DetachedSession,
+        principal: crate::auth::AuthenticatedPrincipalRef,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        if self.persistence.is_none() {
+            return Err(SmRegistryError::Internal(
+                "durable SM principal persistence requires an attached storage backend".to_string(),
+            ));
+        }
+        self.store_session_with_principal_inner(session, Some(&principal))
+            .await
+    }
+
+    /// Read the durable principal paired with a detached SM session. This is
+    /// deliberately a storage read; it never reconstructs authority from
+    /// local session state.
+    pub async fn session_principal(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<crate::auth::AuthenticatedPrincipalRef>, SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(None);
+        };
+        storage
+            .get_session_principal(&crate::pending_delivery::SmSessionId::new(
+                stream_id.to_string(),
+            ))
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))
+    }
+
     /// Inject a `ClaimStore`/live-identity pair other than the single-node
     /// [`InProcessClaimStore`] default (ADR-0017 Phase 3, Q2). Must be
     /// called once at construction time before the registry is wrapped in
@@ -1948,6 +1984,7 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn persist_detached_session_snapshot(
         &self,
         session: &DetachedSession,
+        principal: Option<&crate::auth::AuthenticatedPrincipalRef>,
     ) -> Result<(), SmRegistryError> {
         let Some(storage) = &self.persistence else {
             return Ok(());
@@ -1962,10 +1999,15 @@ impl InMemorySmSessionRegistry {
                 entry.original_receipt_at,
             )?);
         }
-        storage
-            .store_session_atomic(persisted, unacked_rows)
-            .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+        match principal {
+            Some(principal) => {
+                storage
+                    .store_session_atomic_with_principal(principal, persisted, unacked_rows)
+                    .await
+            }
+            None => storage.store_session_atomic(persisted, unacked_rows).await,
+        }
+        .map_err(|error| SmRegistryError::Internal(error.to_string()))
     }
 
     /// Durably delete the named unacked rows for a stream — exact
@@ -2093,7 +2135,8 @@ impl InMemorySmSessionRegistry {
         // The stream lock serializes this full-snapshot write with other appends
         // and with claim completion/deletion so an older clone cannot overwrite
         // a newer replay window.
-        self.persist_detached_session_snapshot(&updated).await?;
+        self.persist_detached_session_snapshot(&updated, None)
+            .await?;
 
         let updated = {
             let mut sessions = self

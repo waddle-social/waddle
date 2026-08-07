@@ -822,8 +822,6 @@ async fn create_websocket_state(
         })?,
     );
 
-    let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
-        Arc::new(dashmap::DashMap::new());
     let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
         crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
     );
@@ -882,7 +880,6 @@ async fn create_websocket_state(
                 sm_session_registry,
                 link_preview_resolves:
                     crate::server::routes::websocket::default_link_preview_resolve_permits(),
-                resumable_sessions,
                 caps_resolver,
                 avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),

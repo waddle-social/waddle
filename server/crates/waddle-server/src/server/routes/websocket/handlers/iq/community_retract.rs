@@ -4,6 +4,7 @@ use super::story_attachments::{
 };
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) async fn handle_community_retract(
     iq: &xmpp_parsers::iq::Iq,
@@ -11,8 +12,9 @@ pub(super) async fn handle_community_retract(
     community_domain: &str,
     node: &str,
     item_id: &str,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> Vec<String> {
+    let session = principal.map(ResolvedPrincipal::session);
     if is_story_attachment_node(node, community_domain) {
         return handle_story_attachment_retract(
             iq,
@@ -36,7 +38,13 @@ pub(super) async fn handle_community_retract(
     if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         || node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
     {
-        match spaces_node_mutation_allowed(state, session, node).await {
+        match spaces_node_mutation_allowed(
+            state,
+            session.map(ResolvedPrincipal::from_authenticated_session),
+            node,
+        )
+        .await
+        {
             Ok(true) => {}
             Ok(false) => match community_member_publisher(state, session, &community_jid, node)
                 .await
@@ -69,7 +77,13 @@ pub(super) async fn handle_community_retract(
             }
         }
     } else {
-        match spaces_node_mutation_allowed(state, session, node).await {
+        match spaces_node_mutation_allowed(
+            state,
+            session.map(ResolvedPrincipal::from_authenticated_session),
+            node,
+        )
+        .await
+        {
             Ok(true) => {}
             Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
             Err(error) => {

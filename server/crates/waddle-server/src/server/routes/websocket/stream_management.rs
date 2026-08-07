@@ -1,6 +1,45 @@
 use super::transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml};
 use super::*;
 
+/// Operation-owned resume claim.  Dropping an uncommitted guard returns the
+/// frozen snapshot to the registry without creating server-local claim state.
+pub(super) struct SmResumeClaimGuard {
+    registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+    stream_id: String,
+    armed: bool,
+}
+
+impl SmResumeClaimGuard {
+    fn new(
+        registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+        stream_id: String,
+    ) -> Self {
+        Self {
+            registry,
+            stream_id,
+            armed: true,
+        }
+    }
+
+    pub(super) fn commit(mut self) {
+        self.armed = false;
+    }
+
+    async fn release(mut self) {
+        if self.registry.release_claim(&self.stream_id).await.is_ok() {
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for SmResumeClaimGuard {
+    fn drop(&mut self) {
+        if self.armed && !self.registry.defer_claimed_resume_release(&self.stream_id) {
+            warn!(stream_id = %self.stream_id, "cancelled SM resume could not retain exact claim cleanup responsibility");
+        }
+    }
+}
+
 struct SmEnableClaimGuard {
     registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
     stream_id: waddle_xmpp::pending_delivery::SmSessionId,
@@ -274,6 +313,10 @@ pub(super) struct SmCtx<'a> {
     pub(super) pending_subscribes_flushed: &'a mut bool,
     pub(super) pending_resume_stream_id: &'a mut Option<String>,
     pub(super) pending_resume_h: &'a mut Option<u32>,
+    pub(super) pending_resume_claim: &'a mut Option<SmResumeClaimGuard>,
+    #[cfg(test)]
+    pub(super) pre_final_principal_recheck_test_hook:
+        &'a mut Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
     /// the responses it returns — those are replay stanzas already tracked
     /// in the unacked queue.
@@ -630,6 +673,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         pending_subscribes_flushed,
         pending_resume_stream_id,
         pending_resume_h,
+        pending_resume_claim,
+        #[cfg(test)]
+        pre_final_principal_recheck_test_hook,
         suppress_sm_record_next_batch,
         roster_interested,
         blocklist_interested,
@@ -719,6 +765,16 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                     );
                     return vec![SmFailed::with_condition("resource-constraint").to_xml()];
                 }
+                Some(CrossNodeAttemptOutcome::Completed(Ok(
+                    CrossNodeResumeOutcome::StorageUnavailable,
+                ))) => {
+                    warn!(
+                        stream_id = %resume.previd,
+                        "SM resume rejected: transient storage failure after winning the \
+                         cross-node claim; claim released for retry"
+                    );
+                    return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+                }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
                 | None => {
                     info!(
@@ -765,6 +821,49 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         }
     };
 
+    let claim_guard = SmResumeClaimGuard::new(
+        state.deps.protocol.sm_session_registry.clone(),
+        resume.previd.clone(),
+    );
+    let principal = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .session_principal(&resume.previd)
+        .await
+    {
+        Ok(Some(principal)) => principal,
+        Ok(None) => {
+            claim_guard.release().await;
+            return vec![SmFailed::with_condition("not-authorized").to_xml()];
+        }
+        Err(error) => {
+            warn!(stream_id = %resume.previd, %error, "SM resume principal lookup unavailable");
+            claim_guard.release().await;
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    };
+
+    let early_resolution = state
+        .deps
+        .auth_state
+        .session_manager
+        .resolve_principal(&principal)
+        .await;
+    match early_resolution {
+        crate::auth::session::PrincipalResolution::Resolved(_) => {}
+        crate::auth::session::PrincipalResolution::Missing
+        | crate::auth::session::PrincipalResolution::Mismatched => {
+            claim_guard.release().await;
+            return vec![SmFailed::with_condition("not-authorized").to_xml()];
+        }
+        crate::auth::session::PrincipalResolution::StorageError(error) => {
+            warn!(stream_id = %resume.previd, %error, "SM resume principal resolution unavailable");
+            claim_guard.release().await;
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    }
+
     if let ConnectionPhase::Authenticated { bare_jid } = phase {
         if detached.jid.to_bare() != *bare_jid {
             warn!(
@@ -772,20 +871,10 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                 resumed_jid = %detached.jid,
                 "SM resume rejected due to authenticated identity mismatch"
             );
-            if let Err(error) = state
-                .deps
-                .protocol
-                .sm_session_registry
-                .release_claim(&resume.previd)
-                .await
-            {
-                warn!(stream_id = %resume.previd, error = %error, "Failed to release rejected SM resume claim");
-            }
+            claim_guard.release().await;
             return vec![SmFailed::with_condition("not-authorized").to_xml()];
         }
     }
-
-    let preserve_authenticated_session = matches!(phase, ConnectionPhase::Authenticated { .. });
 
     // Ordering matters, mirroring the live ack path:
     // `handled_count_exceeds_outbound` is an exact mod-2^32 window
@@ -803,30 +892,14 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             replay_gap_through = ?detached.replay_gap_through,
             "SM resume rejected: replay window no longer contains every stanza required by client h"
         );
-        if let Err(error) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .release_claim(&resume.previd)
-            .await
-        {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release truncated SM resume claim");
-        }
+        claim_guard.release().await;
         return vec![
             SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_xml(),
         ];
     }
 
     if detached.handled_count_exceeds_outbound(resume.h) {
-        if let Err(error) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .release_claim(&resume.previd)
-            .await
-        {
-            warn!(stream_id = %resume.previd, error = %error, "Failed to release invalid SM resume claim");
-        }
+        claim_guard.release().await;
         *phase = ConnectionPhase::closing(None);
         info!(
             stream_id = %resume.previd,
@@ -840,38 +913,74 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         ];
     }
 
-    // Restore SM counters + the unacked queue.
-    sm_state.restore_from_session(&detached);
-    // The client tells us how many of OUR outbound stanzas they've actually
-    // handled. Acknowledge up to that point so the replay set is minimal.
-    sm_state.acknowledge(resume.h);
-
-    // Restore authentication identity. If the detached sidecar has no
-    // matching Session (TTL expired / crash), the authenticated resume keeps
-    // the fresh transport's current Session context.
-    let restored_session = state
-        .deps
-        .protocol
-        .resumable_sessions
-        .get(&resume.previd)
-        .map(|s| s.clone());
-    if restored_session.is_none() && preserve_authenticated_session {
-        warn!(
-            stream_id = %resume.previd,
-            jid = %detached.jid,
-            "SM resumed without cached detached Session; preserving current authenticated Session"
-        );
+    #[cfg(test)]
+    if let Some((reached, release)) = pre_final_principal_recheck_test_hook.take() {
+        reached.notify_one();
+        release.notified().await;
     }
 
-    let resumed_session = restored_session.or_else(|| {
-        if preserve_authenticated_session {
-            authenticated_session.clone()
-        } else {
-            None
+    // This is the resume linearization point: no SM state has been installed
+    // yet, and this is the final await before Ready/publication/replay.
+    let resumed_session = match state
+        .deps
+        .auth_state
+        .session_manager
+        .resolve_principal(&principal)
+        .await
+    {
+        crate::auth::session::PrincipalResolution::Resolved(session) => session,
+        crate::auth::session::PrincipalResolution::Missing
+        | crate::auth::session::PrincipalResolution::Mismatched => {
+            claim_guard.release().await;
+            return vec![SmFailed::with_condition("not-authorized").to_xml()];
         }
-    });
+        crate::auth::session::PrincipalResolution::StorageError(error) => {
+            warn!(stream_id = %resume.previd, %error, "SM final principal recheck unavailable");
+            claim_guard.release().await;
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    };
 
-    *authenticated_session = resumed_session;
+    // The snapshot and its principal are written in one atomic statement, so
+    // they cannot diverge today; this gate turns that invariant into an
+    // enforced precondition of the commit below rather than an assumption.
+    if detached.jid.to_bare() != *principal.bare_jid() {
+        warn!(
+            stream_id = %resume.previd,
+            detached_jid = %detached.jid,
+            "SM resume rejected: detached snapshot JID diverged from durable principal"
+        );
+        claim_guard.release().await;
+        return vec![SmFailed::with_condition("not-authorized").to_xml()];
+    }
+
+    // Commit the staged snapshot only after the durable recheck succeeds.
+    sm_state.restore_from_session(&detached);
+    sm_state.acknowledge(resume.h);
+    // A native-SCRAM login persisted its own resume-fence row at
+    // authentication; adopting the resumed lineage supersedes that fresh
+    // candidate row, which nothing else will ever delete. Fire-and-forget:
+    // the row is bearer-inert either way, this only reclaims storage.
+    if let Some(superseded) = authenticated_session.take() {
+        if superseded.native_resume_only && superseded.id != resumed_session.id {
+            let actor = state.deps.auth_state.session_manager.actor_ref();
+            tokio::spawn(async move {
+                if let Err(error) = actor
+                    .ask(crate::db::actor::DbExecute {
+                        sql: format!(
+                            "DELETE FROM sessions WHERE id = ? AND token_hash LIKE '{}:%'",
+                            crate::auth::session::NATIVE_RESUME_TOKEN_SENTINEL
+                        ),
+                        params: vec![crate::db::Value::from(superseded.id.clone())],
+                    })
+                    .await
+                {
+                    warn!(%error, "failed to delete superseded native-resume session row");
+                }
+            });
+        }
+    }
+    *authenticated_session = Some(resumed_session);
     *carbons_enabled = detached.carbons_enabled;
     *roster_interested = detached.roster_interested;
     *blocklist_interested = detached.blocklist_interested;
@@ -883,6 +992,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *pending_subscribes_flushed = detached.pending_subscribes_flushed;
     *pending_resume_stream_id = Some(resume.previd.clone());
     *pending_resume_h = Some(resume.h);
+    *pending_resume_claim = Some(claim_guard);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —

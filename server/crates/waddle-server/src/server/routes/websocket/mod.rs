@@ -44,8 +44,7 @@ use waddle_xmpp::{
     },
     registry::{ConnectionRegistry, DeliveryKind, OutboundStanza},
     stream_management::{
-        InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
-        StreamManagementState, SM_NS,
+        InMemorySmSessionRegistry, SmEnable, SmResume, SmStanza, StreamManagementState, SM_NS,
     },
     xep::xep0421::OccupantIdSecret,
     Stanza,
@@ -102,6 +101,7 @@ pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub use cleanup::MucCleanupOutcome;
 pub use connection::router;
+pub(crate) use state::ResolvedPrincipal;
 pub use state::{
     default_link_preview_resolve_permits, ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore,
     PendingDmCallOffer, ProtocolServices, RemoteMucMemberships, ResolverAffiliationSyncSchedule,

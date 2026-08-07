@@ -178,8 +178,7 @@ fn notification_outbox_prune_batch_from_env() -> usize {
 
 pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
     // XEP-0198 expired-session janitor. Without this, detached SM sessions
-    // whose resume window elapses leave MUC occupants in their rooms forever
-    // and the `resumable_sessions` sidecar grows unbounded.
+    // whose resume window elapses leave MUC occupants in their rooms forever.
     let weak_state = Arc::downgrade(websocket_state);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -470,11 +469,6 @@ async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             {
                 sweep_failed = true;
             }
-            state
-                .deps
-                .protocol
-                .resumable_sessions
-                .remove(&session.stream_id);
             // ADR-0017 Phase 1 (Greptile P1 on PR #1177): gate the DashMap
             // removal on the EXPIRED session's own SM stream id, not a plain
             // `unregister`. A plain unregister removes whatever currently
@@ -2862,6 +2856,27 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         sequences: &[u32],
     ) -> Result<u64, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
         self.inner.delete_unacked(stream_id, sequences).await
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,
+        session: waddle_xmpp::stream_management::persistence::PersistedSession,
+        unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
     }
 
     async fn list_unacked(
@@ -6170,8 +6185,30 @@ pub(crate) fn spawn_auth_state_janitor(websocket_state: &Arc<WebSocketState>) {
                 break;
             };
             run_auth_state_sweep(&state).await;
+            sweep_expired_session_rows(&state).await;
         }
     });
+}
+
+/// Delete `sessions` rows whose `expires_at` has passed. Expiry alone only
+/// makes a row fail validation/resolution; nothing else ever deletes it, and
+/// native-SCRAM logins add a resume-fence row per authentication, so without
+/// this sweep the table grows monotonically (#1643 review).
+async fn sweep_expired_session_rows(state: &WebSocketState) {
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Err(error) = state
+        .deps
+        .auth_state
+        .session_manager
+        .actor_ref()
+        .ask(crate::db::actor::DbExecute {
+            sql: "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?".to_string(),
+            params: vec![crate::db::Value::from(now)],
+        })
+        .await
+    {
+        warn!(error = %error, "auth janitor: expired session-row sweep failed; will retry next tick");
+    }
 }
 
 async fn run_auth_state_sweep(state: &WebSocketState) {

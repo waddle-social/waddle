@@ -1,5 +1,6 @@
 use super::permissions::permission_allowed;
 use super::*;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 fn extension_route_room_for_node(state: &WebSocketState, node: &str) -> Option<BareJid> {
     state
@@ -53,7 +54,7 @@ pub(super) async fn handle_extension_route_items(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     muc_domain: &str,
-    session: Option<&Session>,
+    principal: Option<ResolvedPrincipal<'_>>,
     request: PubSubItemsRead<'_>,
 ) -> Vec<String> {
     let node = request.node;
@@ -68,7 +69,7 @@ pub(super) async fn handle_extension_route_items(
     };
     match permission_allowed(
         state,
-        session,
+        principal,
         Object::new(ObjectType::Channel, channel_id.clone()),
         Permission::Custom("outcast".into()),
     )
@@ -81,7 +82,8 @@ pub(super) async fn handle_extension_route_items(
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
-    match managed_channel_permission_allowed(state, session, &channel_id, Permission::View).await {
+    match managed_channel_permission_allowed(state, principal, &channel_id, Permission::View).await
+    {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {

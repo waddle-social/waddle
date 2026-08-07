@@ -1328,12 +1328,6 @@ pub struct ProtocolServices {
     /// where the empty `<metadata/>` is published but vcard-temp
     /// PHOTO is still set.
     pub profile_publish_tracker: tokio_util::task::TaskTracker,
-    /// Sidecar map keyed by SM stream id, holding the authenticated `Session`
-    /// so that a resumed stream doesn't lose its authorization context and
-    /// can serve IQs that check channel membership, etc. Entries are
-    /// populated on detach and removed on take/resume (or swept when the
-    /// corresponding SM session expires).
-    pub resumable_sessions: Arc<dashmap::DashMap<String, Session>>,
     /// PEP → community feed bridge. Observes successful PEP publishes
     /// (mood / activity / tune / avatar / vCard4) and shadow-publishes
     /// a typed feed entry on `community.<domain>` so the community
@@ -1420,6 +1414,37 @@ pub(super) enum StreamOpenWireState {
     Committed,
 }
 
+/// A borrowed capability proving that a session came from this WebSocket
+/// connection's authenticated state.
+///
+/// The wrapped [`Session`] remains owned by [`WsConnState`].  Protocol
+/// dispatch can borrow it, but cannot manufacture this capability from a
+/// standalone session value.  `WsConnState::authenticated_session` is only
+/// populated at the successful SASL and durable XEP-0198 resume boundaries.
+#[derive(Clone, Copy)]
+pub(crate) struct ResolvedPrincipal<'a>(&'a Session);
+
+impl<'a> ResolvedPrincipal<'a> {
+    /// Convert an identity already accepted by an authenticated transport
+    /// boundary into the dispatch capability. This is crate-visible for the
+    /// non-WebSocket interpreter adapters that share the same dispatch path.
+    pub(crate) fn from_authenticated_session(session: &'a Session) -> Self {
+        Self(session)
+    }
+
+    pub(crate) fn session(self) -> &'a Session {
+        self.0
+    }
+}
+
+impl std::ops::Deref for ResolvedPrincipal<'_> {
+    type Target = Session;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
 pub(super) struct WsConnState {
     pub(super) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current
@@ -1474,6 +1499,11 @@ pub(super) struct WsConnState {
     /// registered, closing the take-before-register fanout gap.
     pub(super) pending_resume_stream_id: Option<String>,
     pub(super) pending_resume_h: Option<u32>,
+    /// Claim ownership retained from `<resume/>` through registration.
+    pub(super) pending_resume_claim: Option<super::stream_management::SmResumeClaimGuard>,
+    #[cfg(test)]
+    pub(super) pre_final_principal_recheck_test_hook:
+        Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     #[cfg(test)]
     pub(super) post_sm_finalization_test_hook:
         Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -1563,6 +1593,9 @@ impl WsConnState {
             pending_subscribes_flushed: false,
             pending_resume_stream_id: None,
             pending_resume_h: None,
+            pending_resume_claim: None,
+            #[cfg(test)]
+            pre_final_principal_recheck_test_hook: None,
             #[cfg(test)]
             post_sm_finalization_test_hook: None,
             registry_owner: None,

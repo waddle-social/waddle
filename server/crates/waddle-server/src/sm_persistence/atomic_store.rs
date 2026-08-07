@@ -1,7 +1,26 @@
 use super::*;
+use crate::sm_persistence::codec::encode_session_principal;
 
 pub(super) async fn store_session_atomic(
     storage: &DatabaseSmPersistence,
+    session: PersistedSession,
+    unacked: Vec<PersistedUnackedStanza>,
+) -> Result<(), SmPersistenceError> {
+    store_session_atomic_inner(storage, None, session, unacked).await
+}
+
+pub(super) async fn store_session_atomic_with_principal(
+    storage: &DatabaseSmPersistence,
+    principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,
+    session: PersistedSession,
+    unacked: Vec<PersistedUnackedStanza>,
+) -> Result<(), SmPersistenceError> {
+    store_session_atomic_inner(storage, Some(principal), session, unacked).await
+}
+
+async fn store_session_atomic_inner(
+    storage: &DatabaseSmPersistence,
+    principal: Option<&waddle_xmpp::auth::AuthenticatedPrincipalRef>,
     session: PersistedSession,
     unacked: Vec<PersistedUnackedStanza>,
 ) -> Result<(), SmPersistenceError> {
@@ -13,6 +32,7 @@ pub(super) async fn store_session_atomic(
     let detached_at_ms = session.detached_at.timestamp_millis();
     let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
     let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
+    let encoded_principal = principal.map(encode_session_principal).transpose()?;
 
     let mut tx = storage
         .db
@@ -46,8 +66,9 @@ pub(super) async fn store_session_atomic(
             last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
             carbons_enabled, roster_interested, blocklist_interested, presence_available,
             presence_show, presence_status, presence_priority, replay_gap_through,
-            presence_payloads
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            presence_payloads, bare_jid, auth_context_id, auth_context_version,
+            principal_auth_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (stream_id) DO UPDATE SET
             user_id = excluded.user_id,
             full_jid = excluded.full_jid,
@@ -65,7 +86,11 @@ pub(super) async fn store_session_atomic(
             presence_status = excluded.presence_status,
             presence_priority = excluded.presence_priority,
             replay_gap_through = excluded.replay_gap_through,
-            presence_payloads = excluded.presence_payloads
+            presence_payloads = excluded.presence_payloads,
+            bare_jid = COALESCE(excluded.bare_jid, sm_sessions.bare_jid),
+            auth_context_id = COALESCE(excluded.auth_context_id, sm_sessions.auth_context_id),
+            auth_context_version = COALESCE(excluded.auth_context_version, sm_sessions.auth_context_version),
+            principal_auth_epoch = COALESCE(excluded.principal_auth_epoch, sm_sessions.principal_auth_epoch)
         "#,
         crate::db_params![
             session.stream_id.as_str().to_string(),
@@ -86,6 +111,18 @@ pub(super) async fn store_session_atomic(
             i64::from(session.presence_priority),
             session.replay_gap_through.map(i64::from),
             presence_payloads_xml,
+            encoded_principal
+                .as_ref()
+                .map(|principal| principal.bare_jid.clone()),
+            encoded_principal
+                .as_ref()
+                .map(|principal| principal.auth_context_id.clone()),
+            encoded_principal
+                .as_ref()
+                .map(|principal| principal.auth_context_version),
+            encoded_principal
+                .as_ref()
+                .map(|principal| principal.principal_auth_epoch),
         ],
     )
     .await

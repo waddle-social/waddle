@@ -6,6 +6,9 @@ use chrono::Utc;
 use jid::FullJid;
 use xmpp_parsers::presence::Show;
 
+use crate::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
 use crate::Stanza;
 
 fn make_test_jid() -> FullJid {
@@ -3144,6 +3147,50 @@ async fn store_session_mirrors_to_persistence_when_attached() {
 }
 
 #[tokio::test]
+async fn store_session_with_principal_binds_the_claimed_snapshot_envelope() {
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let principal = AuthenticatedPrincipalRef::new(
+        bare("user@example.com"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    );
+
+    registry
+        .store_session_with_principal(
+            realistic_test_session("principal-claimed"),
+            principal.clone(),
+        )
+        .await
+        .expect("persist detached session with its principal");
+
+    let stream_id = crate::pending_delivery::SmSessionId::new("principal-claimed");
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load persisted principal"),
+        Some(principal.clone())
+    );
+    assert_eq!(
+        registry
+            .session_principal("principal-claimed")
+            .await
+            .expect("load principal through registry"),
+        Some(principal)
+    );
+    assert!(
+        registry
+            .claim_fences
+            .read()
+            .expect("claim fence lock")
+            .contains_key("principal-claimed"),
+        "the persisted principal snapshot must flow through the normal exact-claim lifecycle"
+    );
+}
+
+#[tokio::test]
 async fn take_session_deletes_from_persistence() {
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
@@ -4064,6 +4111,27 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
             ));
         }
         self.inner.store_session_atomic(session, unacked).await
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<crate::auth::AuthenticatedPrincipalRef>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
     }
 }
 
@@ -5509,6 +5577,27 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         }
         self.inner.store_session_atomic(session, unacked).await
     }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<crate::auth::AuthenticatedPrincipalRef>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
+    }
 }
 
 async fn assert_cross_shard_displacement_preserves_claim(snapshot_fails: bool) {
@@ -6122,6 +6211,27 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
     > {
         self.inner.list_all_sessions().await
     }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<crate::auth::AuthenticatedPrincipalRef>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
+    }
 }
 
 #[tokio::test]
@@ -6635,4 +6745,74 @@ async fn typed_resumable_session_probe_surfaces_durable_read_failure() {
         super::ResumableSessionProbe::Failed
     );
     assert!(registry.any_resumable_session_for_full_jid(&jid).await);
+}
+
+/// The cancellation guard's deferred release must not strand an
+/// expired-while-claimed session: the snapshot leaves `claimed_sessions`
+/// entirely (no sweeper walks that map), it is NOT restored to `sessions`
+/// (it is expired), and the exact fence moves into terminal-release
+/// inventory exactly as `release_claim_locked` would arrange (#1643
+/// adversarial round 2).
+#[tokio::test]
+async fn defer_claimed_resume_release_unwinds_expired_claimed_session() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store: std::sync::Arc<dyn crate::ownership::ClaimStore> =
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store, crate::ownership::SharedNodeIdentity::new(me));
+    let stream_id = "defer-expired-claimed";
+
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    let claimed = registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session");
+    assert!(claimed.is_some(), "session must be claimable while fresh");
+
+    // Expire it while claimed, deterministically: rewind the detach clock
+    // past its resume window instead of sleeping.
+    {
+        let mut claimed_map = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed_map
+            .get_mut(stream_id)
+            .expect("claimed entry present");
+        session.max_resume_time = Some(1);
+        session.detached_at = std::time::Instant::now() - std::time::Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    assert!(
+        registry.defer_claimed_resume_release(stream_id),
+        "expired unwind must transfer the exact fence into terminal inventory"
+    );
+
+    assert!(
+        registry
+            .claimed_sessions
+            .read()
+            .expect("claimed_sessions lock")
+            .is_empty(),
+        "expired claimed session must not linger in claimed_sessions (nothing sweeps it)"
+    );
+    assert!(
+        registry.sessions.read().expect("sessions lock").is_empty(),
+        "an expired session must not be restored to the resumable pool"
+    );
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        1,
+        "the exact fence must sit in terminal-release inventory for the janitor"
+    );
+    assert_eq!(
+        registry.retry_pending_claim_releases(8).await,
+        1,
+        "the deferred fence must be releasable by the ordinary retry chain"
+    );
+    assert_eq!(registry.pending_claim_release_count(), 0);
 }
