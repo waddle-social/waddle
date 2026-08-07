@@ -50,7 +50,11 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 presence_priority INTEGER NOT NULL,
                 replay_gap_through {bigint},
                 promotion_attempts INTEGER NOT NULL DEFAULT 0,
-                presence_payloads TEXT
+                presence_payloads TEXT,
+                bare_jid TEXT,
+                auth_context_id TEXT,
+                auth_context_version {bigint},
+                principal_auth_epoch {bigint}
             )
             "#
             ),
@@ -107,6 +111,20 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     // payloads (XEP-0115 caps, XEP-0319 idle, ...) so a rehydrated session
     // relays them verbatim on probe instead of coming back caps-less.
     add_column_if_missing(storage, "sm_sessions", "presence_payloads TEXT").await?;
+    add_column_if_missing(storage, "sm_sessions", "bare_jid TEXT").await?;
+    add_column_if_missing(storage, "sm_sessions", "auth_context_id TEXT").await?;
+    add_column_if_missing(
+        storage,
+        "sm_sessions",
+        &format!("auth_context_version {bigint}"),
+    )
+    .await?;
+    add_column_if_missing(
+        storage,
+        "sm_sessions",
+        &format!("principal_auth_epoch {bigint}"),
+    )
+    .await?;
     // ADR-0017 Phase 3 Slice 5 / element 5 — schema-only groundwork,
     // mirroring `pending_delivery`'s identical column group (see that
     // migration's doc comment for the full rationale and the "deferred,
@@ -141,6 +159,8 @@ async fn widen_existing_postgres_i64_columns(
         ("sm_sessions", "max_resume_secs"),
         ("sm_sessions", "detached_at_ms"),
         ("sm_sessions", "max_resume_duration_ms"),
+        ("sm_sessions", "auth_context_version"),
+        ("sm_sessions", "principal_auth_epoch"),
         ("sm_unacked", "sequence"),
         ("sm_unacked", "original_receipt_at_ms"),
     ] {

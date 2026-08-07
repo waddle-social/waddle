@@ -2864,6 +2864,27 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         self.inner.delete_unacked(stream_id, sequences).await
     }
 
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,
+        session: waddle_xmpp::stream_management::persistence::PersistedSession,
+        unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session_principal(stream_id).await
+    }
+
     async fn list_unacked(
         &self,
         stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
