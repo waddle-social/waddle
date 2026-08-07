@@ -679,6 +679,25 @@ DROP TABLE IF EXISTS clustering_isr_revocation_fences;
 DROP TABLE IF EXISTS clustering_isr_sweep_state;
 "#;
 
+/// Durable, non-secret reference metadata for XMPP SM resumption. The
+/// context UUID is not a session credential; it is resolved against the
+/// still-live session row and its exact version/epoch at resume time.
+pub const V0011_AUTH_CONTEXT_REFERENCE: &str = r#"
+ALTER TABLE sessions ADD COLUMN auth_context_id TEXT;
+ALTER TABLE sessions ADD COLUMN auth_context_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE sessions ADD COLUMN principal_auth_epoch INTEGER NOT NULL DEFAULT 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_auth_context
+    ON sessions (auth_context_id);
+"#;
+
+pub const V0011_AUTH_CONTEXT_REFERENCE_POSTGRES: &str = r#"
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_context_id UUID;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_context_version BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS principal_auth_epoch BIGINT NOT NULL DEFAULT 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_auth_context
+    ON sessions (auth_context_id);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -744,6 +763,12 @@ pub fn all() -> Vec<Migration> {
             description: "Drop retired XEP-0397 ISR token store".to_string(),
             sql_sqlite: V0010_DROP_ISR_TOKEN_STORE,
             sql_postgres: V0010_DROP_ISR_TOKEN_STORE_POSTGRES,
+        },
+        Migration {
+            version: 11,
+            description: "Durable non-secret auth-context references for SM resume".to_string(),
+            sql_sqlite: V0011_AUTH_CONTEXT_REFERENCE,
+            sql_postgres: V0011_AUTH_CONTEXT_REFERENCE_POSTGRES,
         },
     ]
 }
