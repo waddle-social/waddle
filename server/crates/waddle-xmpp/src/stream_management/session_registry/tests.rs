@@ -6746,3 +6746,73 @@ async fn typed_resumable_session_probe_surfaces_durable_read_failure() {
     );
     assert!(registry.any_resumable_session_for_full_jid(&jid).await);
 }
+
+/// The cancellation guard's deferred release must not strand an
+/// expired-while-claimed session: the snapshot leaves `claimed_sessions`
+/// entirely (no sweeper walks that map), it is NOT restored to `sessions`
+/// (it is expired), and the exact fence moves into terminal-release
+/// inventory exactly as `release_claim_locked` would arrange (#1643
+/// adversarial round 2).
+#[tokio::test]
+async fn defer_claimed_resume_release_unwinds_expired_claimed_session() {
+    let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let store: std::sync::Arc<dyn crate::ownership::ClaimStore> =
+        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(store, crate::ownership::SharedNodeIdentity::new(me));
+    let stream_id = "defer-expired-claimed";
+
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    let claimed = registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session");
+    assert!(claimed.is_some(), "session must be claimable while fresh");
+
+    // Expire it while claimed, deterministically: rewind the detach clock
+    // past its resume window instead of sleeping.
+    {
+        let mut claimed_map = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed_map
+            .get_mut(stream_id)
+            .expect("claimed entry present");
+        session.max_resume_time = Some(1);
+        session.detached_at = std::time::Instant::now() - std::time::Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    assert!(
+        registry.defer_claimed_resume_release(stream_id),
+        "expired unwind must transfer the exact fence into terminal inventory"
+    );
+
+    assert!(
+        registry
+            .claimed_sessions
+            .read()
+            .expect("claimed_sessions lock")
+            .is_empty(),
+        "expired claimed session must not linger in claimed_sessions (nothing sweeps it)"
+    );
+    assert!(
+        registry.sessions.read().expect("sessions lock").is_empty(),
+        "an expired session must not be restored to the resumable pool"
+    );
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        1,
+        "the exact fence must sit in terminal-release inventory for the janitor"
+    );
+    assert_eq!(
+        registry.retry_pending_claim_releases(8).await,
+        1,
+        "the deferred fence must be releasable by the ordinary retry chain"
+    );
+    assert_eq!(registry.pending_claim_release_count(), 0);
+}
