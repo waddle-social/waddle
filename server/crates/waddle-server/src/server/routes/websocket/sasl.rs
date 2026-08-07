@@ -269,7 +269,11 @@ pub(super) async fn handle_sasl_scram_response(
     waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", true);
     record_auth_success(AuthStage::Scram);
 
-    let session = Session::new(&bare_jid.to_string(), scram.username(), scram.username());
+    // Native-resume row: backs the durable SM resume fence only. Its id is
+    // never issued to the client and the row is rejected by every bearer
+    // path (OAUTHBEARER, HTTP session auth) via the non-bearer sentinel.
+    let session =
+        Session::new_native_resume(&bare_jid.to_string(), scram.username(), scram.username());
 
     // Persist the session row: the XEP-0198 resume fence authorizes resume
     // exclusively against the durable principal, so an unpersisted SCRAM

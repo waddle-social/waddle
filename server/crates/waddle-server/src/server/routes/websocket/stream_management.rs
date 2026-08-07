@@ -957,6 +957,29 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // Commit the staged snapshot only after the durable recheck succeeds.
     sm_state.restore_from_session(&detached);
     sm_state.acknowledge(resume.h);
+    // A native-SCRAM login persisted its own resume-fence row at
+    // authentication; adopting the resumed lineage supersedes that fresh
+    // candidate row, which nothing else will ever delete. Fire-and-forget:
+    // the row is bearer-inert either way, this only reclaims storage.
+    if let Some(superseded) = authenticated_session.take() {
+        if superseded.native_resume_only && superseded.id != resumed_session.id {
+            let actor = state.deps.auth_state.session_manager.actor_ref();
+            tokio::spawn(async move {
+                if let Err(error) = actor
+                    .ask(crate::db::actor::DbExecute {
+                        sql: format!(
+                            "DELETE FROM sessions WHERE id = ? AND token_hash = '{}'",
+                            crate::auth::session::NATIVE_RESUME_TOKEN_SENTINEL
+                        ),
+                        params: vec![crate::db::Value::from(superseded.id.clone())],
+                    })
+                    .await
+                {
+                    warn!(%error, "failed to delete superseded native-resume session row");
+                }
+            });
+        }
+    }
     *authenticated_session = Some(resumed_session);
     *carbons_enabled = detached.carbons_enabled;
     *roster_interested = detached.roster_interested;

@@ -795,10 +795,17 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         preserve_terminal_release: Option<&super::super::persistence::SmClaimFence>,
     ) {
-        if let Ok(mut sessions) = self.sessions.write() {
+        // Both maps must clear in ONE critical section, in the same
+        // sessions-then-claimed order as `defer_claimed_resume_release`'s
+        // tuple lock: that handback runs from a sync `Drop` with no shard
+        // lock, and if it interleaved between two separate removals here it
+        // could move the snapshot from `claimed_sessions` back into
+        // `sessions` AFTER this demotion already swept `sessions` —
+        // republishing a detached session whose claim Postgres reassigned.
+        if let (Ok(mut sessions), Ok(mut claimed)) =
+            (self.sessions.write(), self.claimed_sessions.write())
+        {
             sessions.remove(stream_id);
-        }
-        if let Ok(mut claimed) = self.claimed_sessions.write() {
             claimed.remove(stream_id);
         }
         // A reservation/acquisition/lookup represents an ownership CAS that

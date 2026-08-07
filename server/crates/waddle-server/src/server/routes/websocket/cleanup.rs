@@ -423,17 +423,26 @@ pub(super) async fn cleanup_connection_shutdown(
                         // cannot prove a durable resume identity, so fall
                         // through to ordinary non-resumable cleanup below.
                         warn!(jid = %jid, %error, "Refusing SM detach without a durable principal");
-                        conn.sm_state =
-                            waddle_xmpp::stream_management::StreamManagementState::new();
-                        return cleanup_without_resumable_snapshot(state, outbound_rx, &jid, conn)
-                            .await;
+                        return refuse_detach_without_principal(
+                            state,
+                            outbound_rx,
+                            &jid,
+                            conn,
+                            detached,
+                        )
+                        .await;
                     }
                 },
                 None => {
                     warn!(jid = %jid, "Refusing SM detach without an authenticated principal");
-                    conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
-                    return cleanup_without_resumable_snapshot(state, outbound_rx, &jid, conn)
-                        .await;
+                    return refuse_detach_without_principal(
+                        state,
+                        outbound_rx,
+                        &jid,
+                        conn,
+                        detached,
+                    )
+                    .await;
                 }
             };
             match state
@@ -660,6 +669,40 @@ pub(super) async fn cleanup_connection_shutdown(
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
     ConnectionShutdownOutcome::NotPersisted
+}
+
+/// A session that enabled resumable SM but cannot prove a durable resume
+/// identity (pre-v11 row, or no authenticated session) still owns two
+/// things that must not vanish with it: the `<enabled/>` path published a
+/// durable ClaimStore claim for its stream id, and `to_detached_session`
+/// already captured its unacked server stanzas. Move the claim into
+/// terminal-release inventory and run the captured queue through the
+/// XEP-0198 §5 promote → confirm chain before falling back to ordinary
+/// non-resumable cleanup.
+async fn refuse_detach_without_principal(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    jid: &FullJid,
+    conn: &mut WsConnState,
+    detached: waddle_xmpp::stream_management::DetachedSession,
+) -> ConnectionShutdownOutcome {
+    super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+    conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+    if !detached.unacked_stanzas.is_empty() {
+        crate::sm_promotion::promote_displaced_sessions(
+            vec![detached],
+            crate::sm_promotion::DisplacedPromotionDeps {
+                sm_registry: &state.deps.protocol.sm_session_registry,
+                connection_registry: &state.deps.protocol.connection_registry,
+                user_registry: &state.deps.protocol.user_registry,
+                pending_storage: &state.deps.protocol.pending_delivery_storage,
+                blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            },
+        )
+        .await;
+    }
+    cleanup_without_resumable_snapshot(state, outbound_rx, jid, conn).await
 }
 
 async fn cleanup_without_resumable_snapshot(

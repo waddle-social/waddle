@@ -4150,9 +4150,7 @@ mod fix_a_post_cas_shutdown {
         ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, NodeIdentity,
         ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
     };
-    use waddle_xmpp::stream_management::{
-        DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
-    };
+    use waddle_xmpp::stream_management::{DetachedSession, InMemorySmSessionRegistry};
 
     fn node_identity() -> NodeIdentity {
         NodeIdentity::new(
@@ -4333,30 +4331,27 @@ mod fix_a_post_cas_shutdown {
             .with_claim_store(owner_claim_store, owner_identity);
 
         let jid: FullJid = "alice@example.com/phone".parse().expect("valid full jid");
-        owner_registry
-            .store_session(DetachedSession {
-                stream_id: "stream-post-cas-shutdown".to_string(),
-                user_id: "alice@example.com".to_string(),
-                jid: jid.clone(),
-                inbound_count: 0,
-                outbound_count: 0,
-                last_acked: 0,
-                replay_gap_through: None,
-                unacked_stanzas: Vec::new(),
-                max_resume_time: Some(300),
-                detached_at: std::time::Instant::now(),
-                carbons_enabled: false,
-                roster_interested: false,
-                blocklist_interested: false,
-                presence_available: false,
-                presence_show: None,
-                presence_status: None,
-                presence_priority: 0,
-                presence_payloads: Vec::new(),
-                pending_subscribes_flushed: false,
-            })
-            .await
-            .expect("owner stores the detached session");
+        let owner_detached = DetachedSession {
+            stream_id: "stream-post-cas-shutdown".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        };
 
         // Resuming node: the one wired into the websocket state under
         // test. Its `ClaimStore` is gated on `ensure_claimed` — the call
@@ -4417,6 +4412,19 @@ mod fix_a_post_cas_shutdown {
             .expect("sole owner immediately after construction")
             .deps
             .shutdown = graceful.handle();
+        // The durable fence authorizes resume against the sessions table:
+        // seed the account + session row and persist the snapshot WITH its
+        // principal, exactly as production detach does.
+        let alice_session = super::create_test_session(state.as_ref(), "alice").await;
+        owner_registry
+            .store_session_with_principal(
+                owner_detached,
+                alice_session
+                    .authenticated_principal_ref()
+                    .expect("test session carries an auth context"),
+            )
+            .await
+            .expect("owner stores the principal-carrying detached session");
 
         let frame = resume_frame_xml("stream-post-cas-shutdown", 0);
         let state_for_task = Arc::clone(&state);

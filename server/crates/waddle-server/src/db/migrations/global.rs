@@ -691,7 +691,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_auth_context
 "#;
 
 pub const V0011_AUTH_CONTEXT_REFERENCE_POSTGRES: &str = r#"
-ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_context_id UUID;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_context_id TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_context_version BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS principal_auth_epoch BIGINT NOT NULL DEFAULT 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_auth_context

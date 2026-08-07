@@ -351,8 +351,23 @@ async fn detached_principal_hydrates_cross_node_and_preserves_replay() {
         panic!("expected cross-node claim with durable principal");
     };
     assert_eq!(resumed.jid, full);
+    // Postgres stores receipt timestamps at millisecond precision; compare
+    // at that precision rather than chrono's nanoseconds.
+    let replay_key = |stanzas: &[waddle_xmpp::stream_management::DetachedUnackedStanza]| {
+        stanzas
+            .iter()
+            .map(|s| {
+                (
+                    s.sequence,
+                    s.stanza_xml.clone(),
+                    s.original_receipt_at.timestamp_millis(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        resumed.unacked_stanzas, expected_replay,
+        replay_key(&resumed.unacked_stanzas),
+        replay_key(&expected_replay),
         "replay survives hydration"
     );
     assert_eq!(
@@ -396,6 +411,14 @@ async fn legacy_null_principal_rejects_without_losing_cross_node_recovery_snapsh
         None,
         "all-NULL legacy principal columns must force the route-level not-authorized rejection"
     );
+    // The Claimed outcome froze the snapshot in `claimed_sessions`. Perform
+    // the release the route's not-authorized rejection performs (the claim
+    // guard's unwind) before asserting the snapshot is back in recovery
+    // state and reclaimable.
+    registry_b
+        .release_claim(stream_id)
+        .await
+        .expect("route-level rejection releases the tentative claim");
     assert_claim_retains_recovery_snapshot(&registry_b, stream_id, &full).await;
 }
 

@@ -21,6 +21,12 @@ use crate::db::{row_value, ValueExt};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Stored in `sessions.token_hash` for native-SCRAM resume rows instead of a
+/// real token hash. Contains `-`, which no hex digest can, so a bearer
+/// presentation can never hash-match it: the row backs SM resume identity
+/// only and is unusable as an OAUTHBEARER/HTTP credential.
+pub const NATIVE_RESUME_TOKEN_SENTINEL: &str = "native-resume";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     /// Opaque session token and database id.
@@ -40,6 +46,11 @@ pub struct Session {
     pub auth_context_id: Option<Uuid>,
     pub auth_context_version: u64,
     pub principal_auth_epoch: u64,
+    /// True for rows persisted solely to back the durable SM resume fence
+    /// (native SCRAM logins). Such rows are invisible to every bearer path
+    /// and are deleted when the connection's resume lineage ends.
+    #[serde(default)]
+    pub native_resume_only: bool,
 }
 
 impl Session {
@@ -56,6 +67,18 @@ impl Session {
             auth_context_id: Some(Uuid::new_v4()),
             auth_context_version: AuthContextVersion::INITIAL.get(),
             principal_auth_epoch: PrincipalAuthEpoch::INITIAL.get(),
+            native_resume_only: false,
+        }
+    }
+
+    /// A session persisted ONLY so the XEP-0198 durable resume fence can
+    /// resolve this connection's principal. Its `id` is a row key, not a
+    /// credential: `create_session` stores the non-bearer sentinel instead
+    /// of a token hash, and every bearer path treats the row as absent.
+    pub fn new_native_resume(user_jid: &str, username: &str, xmpp_localpart: &str) -> Self {
+        Self {
+            native_resume_only: true,
+            ..Self::new(user_jid, username, xmpp_localpart)
         }
     }
 
@@ -143,7 +166,11 @@ impl SessionManager {
 
     #[instrument(skip(self, session))]
     pub async fn create_session(&self, session: &Session) -> Result<(), AuthError> {
-        let token_hash = self.token_hash(&session.id);
+        let token_hash = if session.native_resume_only {
+            NATIVE_RESUME_TOKEN_SENTINEL.to_string()
+        } else {
+            self.token_hash(&session.id)
+        };
         let expires_at = session.expires_at.map(|v| v.to_rfc3339());
         let created_at = session.created_at.to_rfc3339();
         let last_used_at = session.last_used_at.to_rfc3339();
@@ -195,7 +222,8 @@ impl SessionManager {
             .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get token hash: {}", e)))?;
 
-        if token_hash != self.token_hash(&id) {
+        let native_resume_only = token_hash == NATIVE_RESUME_TOKEN_SENTINEL;
+        if !native_resume_only && token_hash != self.token_hash(&id) {
             return Err(AuthError::SessionNotFound(id));
         }
 
@@ -250,6 +278,7 @@ impl SessionManager {
             auth_context_id,
             auth_context_version,
             principal_auth_epoch,
+            native_resume_only,
         })
     }
 
@@ -257,7 +286,7 @@ impl SessionManager {
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AuthError> {
         let sql = r#"
             SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
-                   u.username, u.xmpp_localpart, CAST(s.auth_context_id AS TEXT), s.auth_context_version,
+                   u.username, u.xmpp_localpart, s.auth_context_id, s.auth_context_version,
                    s.principal_auth_epoch
             FROM sessions s
             JOIN users u ON u.jid = s.user_jid
@@ -276,7 +305,13 @@ impl SessionManager {
             .map_err(Self::ask_err)?;
 
         match row {
-            Some(values) => Ok(Some(self.values_to_session(&values)?)),
+            // Native-resume rows exist only for the SM resume fence; every
+            // caller of get_session treats Ok(Some) as bearer-backed, so
+            // they are indistinguishable from absent here.
+            Some(values) => Ok(self
+                .values_to_session(&values)
+                .map(Some)?
+                .filter(|session| !session.native_resume_only)),
             None => Ok(None),
         }
     }
@@ -292,11 +327,11 @@ impl SessionManager {
     ) -> PrincipalResolution {
         let sql = r#"
             SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
-                   u.username, u.xmpp_localpart, CAST(s.auth_context_id AS TEXT), s.auth_context_version,
+                   u.username, u.xmpp_localpart, s.auth_context_id, s.auth_context_version,
                    s.principal_auth_epoch
             FROM sessions s
             JOIN users u ON u.jid = s.user_jid
-            WHERE CAST(s.auth_context_id AS TEXT) = ?
+            WHERE s.auth_context_id = ?
             LIMIT 1
         "#
         .to_string();
@@ -557,5 +592,47 @@ mod tests {
             manager.resolve_principal(&principal).await,
             PrincipalResolution::StorageError(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn native_resume_row_is_bearer_inert_but_resolves_as_principal() {
+        let db = Database::in_memory("test-native-resume-row")
+            .await
+            .expect("in-memory database");
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let actor = DbActor::spawn(DbActor::new(db));
+        let manager = SessionManager::new(actor.clone(), Some(b"test-key"));
+        let session = Session::new_native_resume("alice@example.com", "alice", "alice");
+        let principal = session
+            .authenticated_principal_ref()
+            .expect("typed principal");
+        manager
+            .create_session(&session)
+            .await
+            .expect("create native-resume session");
+
+        // The raw row id must NOT function as a bearer credential: both the
+        // direct lookup and token validation treat the row as absent.
+        assert!(manager
+            .get_session(&session.id)
+            .await
+            .expect("bearer lookup succeeds structurally")
+            .is_none());
+        assert!(matches!(
+            manager.validate_session(&session.id).await,
+            Err(super::AuthError::SessionNotFound(_))
+        ));
+
+        // The SM resume fence still resolves it as a durable principal.
+        match manager.resolve_principal(&principal).await {
+            PrincipalResolution::Resolved(resolved) => {
+                assert!(resolved.native_resume_only);
+                assert_eq!(resolved.id, session.id);
+            }
+            outcome => panic!("expected resolved native principal, got {outcome:?}"),
+        }
     }
 }

@@ -6185,8 +6185,30 @@ pub(crate) fn spawn_auth_state_janitor(websocket_state: &Arc<WebSocketState>) {
                 break;
             };
             run_auth_state_sweep(&state).await;
+            sweep_expired_session_rows(&state).await;
         }
     });
+}
+
+/// Delete `sessions` rows whose `expires_at` has passed. Expiry alone only
+/// makes a row fail validation/resolution; nothing else ever deletes it, and
+/// native-SCRAM logins add a resume-fence row per authentication, so without
+/// this sweep the table grows monotonically (#1643 review).
+async fn sweep_expired_session_rows(state: &WebSocketState) {
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Err(error) = state
+        .deps
+        .auth_state
+        .session_manager
+        .actor_ref()
+        .ask(crate::db::actor::DbExecute {
+            sql: "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?".to_string(),
+            params: vec![crate::db::Value::from(now)],
+        })
+        .await
+    {
+        warn!(error = %error, "auth janitor: expired session-row sweep failed; will retry next tick");
+    }
 }
 
 async fn run_auth_state_sweep(state: &WebSocketState) {
