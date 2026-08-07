@@ -1354,9 +1354,13 @@ async fn post_win_hydrate_failure_repairs_and_client_retry_recovers_the_session(
         .attempt_cross_node_resume("stream-hydrate-fail-pg", &bare, HANDSHAKE_BUDGET)
         .await
         .expect("attempt_cross_node_resume must not error: FIX B repairs, it does not fail");
+    // The injected ensure_claimed failure is a storage-class (Error-source)
+    // repair: the durable row still exists, so it must surface as retryable
+    // StorageUnavailable, never as item-not-found (adversarial round 1,
+    // HIGH: storage loss must not masquerade as absence).
     assert!(
-        matches!(outcome, CrossNodeResumeOutcome::NotFound),
-        "post-win hydrate failure must repair to a clean NotFound, not an error; got {outcome:?}"
+        matches!(outcome, CrossNodeResumeOutcome::StorageUnavailable),
+        "post-win hydrate failure must repair to retryable StorageUnavailable; got {outcome:?}"
     );
 
     // Prove the repair actually released the claim in real Postgres (not
