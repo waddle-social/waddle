@@ -1,5 +1,11 @@
 # ADR-0017: Horizontal Scaling via Remote Actors with Postgres-Authoritative Ownership
 
+> **Superseded in part (2026-08-07):** the XEP-0397 ISR requirements in this
+> ADR (element 10 and related roadmap items) have been removed outright — see
+> issue #1631 and
+> [ADR-011](../../../docs/adr/011-remove-isr-sasl2-inline-future.md). The rest
+> of this ADR remains in force.
+
 ## Status
 
 Accepted (consensus of the adversarial review council: six domain reviewers —

@@ -6,7 +6,7 @@
 //! XEP-conformance rule (official namespaces must match the official
 //! wire shape exactly), the advertisement and the bespoke scheme were
 //! removed. These tests pin the removal:
-//! - server disco#info must not report `urn:xmpp:isr:0`
+//! - server disco#info must not report either retired ISR namespace
 //! - the legacy `<token-request/>` IQ must get a plain
 //!   `feature-not-implemented` error, never a token
 //!
@@ -21,7 +21,8 @@ use xmpp_parsers::minidom::Element;
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
 const CLIENT_NS: &str = "jabber:client";
-const ISR_NS: &str = "urn:xmpp:isr:0";
+const LEGACY_ISR_NS: &str = "urn:xmpp:isr:0";
+const XEP_0397_ISR_NS: &str = "https://xmpp.org/extensions/isr/0";
 
 /// Serialize a `minidom::Element` to a wire frame (typed-XML hard rule:
 /// tests build stanzas via the builder and serialize, never hand-write
@@ -59,8 +60,12 @@ async fn server_disco_info_does_not_advertise_isr() {
         "expected disco#info result, got: {response}"
     );
     assert!(
-        !response.contains(ISR_NS),
+        !response.contains(LEGACY_ISR_NS),
         "server disco#info must not advertise urn:xmpp:isr:0, got: {response}"
+    );
+    assert!(
+        !response.contains(XEP_0397_ISR_NS),
+        "server disco#info must not advertise retired XEP-0397 ISR, got: {response}"
     );
 
     let _ = client.close().await;
@@ -77,7 +82,7 @@ async fn legacy_isr_token_request_iq_is_not_implemented() {
                 minidom::rxml::xml_ncname!("id").to_owned(),
                 "isr-legacy-token",
             )
-            .append(Element::builder("token-request", ISR_NS).build())
+            .append(Element::builder("token-request", LEGACY_ISR_NS).build())
             .build(),
     );
     client

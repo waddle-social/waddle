@@ -274,10 +274,6 @@ impl XmppStateMachine {
             }
             InboundFrame::Auth { .. } => vec![],
             InboundFrame::SaslResponse(_) => vec![],
-            // ADR-0017 Phase 3 Slice 8: XEP-0397 ISR resume, like SASL
-            // Auth/SaslResponse above, is owned by the WebSocket frame
-            // dispatcher; the state machine delegates silently.
-            InboundFrame::IsrResumeAuthenticate { .. } => vec![],
             InboundFrame::Stanza(stanza) => self.on_stanza(*stanza),
         }
     }

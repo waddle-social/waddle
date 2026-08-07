@@ -497,7 +497,7 @@ pub enum ExactReleaseOutcome {
 /// and answers "do I still hold this claim right now," useful for a caller
 /// like a health-ask handler that wants a point-in-time answer with no write
 /// attached. Every fenced write (the Postgres-fenced `SmPersistenceStorage`,
-/// durable MUC writes, ISR consume — all later slices) issues its own
+/// durable MUC writes — all later slices) issues its own
 /// inline `SELECT ... FOR SHARE` on its own `Database::begin()` transaction
 /// instead of calling `fence()`, because the fencing lock and the write it
 /// guards must share one connection/one transaction — a lock taken on a

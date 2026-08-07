@@ -656,14 +656,9 @@ async fn websocket_push_enable_rejects_invalid_service_jid() {
     let _ = client.close().await;
 }
 
-/// ADR-0017 Phase 3 Slice 8 (IQ-issuance retirement): the pre-Slice-8
-/// `urn:xmpp:isr:0` `<token-request/>` IQ was a XEP-0397 conformance
-/// violation (the XEP mints tokens exclusively via the inline
-/// `<isr-enable/>`/`<isr-enabled/>` exchange on `<enable/>`/`<enabled/>`,
-/// never a standalone IQ). That handler, its dispatch, and its builders
-/// have been deleted outright — this IQ now falls through to the server's
-/// ordinary unhandled-IQ catch-all (`feature-not-implemented`), exactly
-/// like any other IQ payload this server does not recognize.
+/// The retired `urn:xmpp:isr:0` `<token-request/>` IQ falls through to the
+/// ordinary unhandled-IQ catch-all (`feature-not-implemented`), exactly like
+/// any other unsupported payload.
 #[tokio::test]
 async fn websocket_legacy_isr_token_request_iq_is_gone() {
     let (_server, mut client) = setup().await;

@@ -872,7 +872,7 @@ impl InMemorySmSessionRegistry {
         Ok(())
     }
 
-    /// Reconcile an ISR epoch-lookup failure atomically with respect to node
+    /// Reconcile an epoch-lookup failure atomically with respect to node
     /// identity rotation. Reading the live identity inside the stream shard
     /// closes both rotation windows: a stale route snapshot cannot preserve
     /// an old-incarnation claim, and rotation cannot occur between the stale

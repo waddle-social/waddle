@@ -43,8 +43,6 @@ mod disco_trace;
 mod dispatch;
 mod frame_parsing;
 mod iq;
-#[cfg(feature = "clustering")]
-mod isr_resume;
 mod messages;
 mod misc;
 mod muc;
@@ -560,8 +558,6 @@ async fn create_test_websocket_state_with_extension_manager(
     runner.run(db_pool.global()).await.expect("migrations");
 
     let server_config = ServerConfig::test_homeserver();
-    // XEP-0397 fixtures exercise token advertisement/issuance and therefore
-    // model the TLS-secured public RFC 7395 endpoint required by the XEP.
     let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");
     let mut app_state_built = AppState::new(Arc::new(db_pool));
     if let Some(clustering) = clustering_override {
@@ -671,10 +667,6 @@ async fn create_test_websocket_state_with_extension_manager(
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,
-                transport_security:
-                    super::state::TransportSecurity::from_public_websocket_url(
-                        &public_websocket_url,
-                    ),
                 service_domains: XmppServiceDomains {
                     muc: "muc.example.com".to_string(),
                     spaces: "spaces.example.com".to_string(),

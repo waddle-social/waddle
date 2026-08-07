@@ -52,7 +52,7 @@
 {{- end -}}
 
 {{- if and (gt (int .Values.replicaCount) 1) (not .Values.clustering.enabled) -}}
-{{- fail (printf "replicaCount (%d) > 1 requires clustering.enabled=true so cross-node routing, claims, MUC, SM, and ISR state use the ordered relay/Postgres fabric." (int .Values.replicaCount)) -}}
+{{- fail (printf "replicaCount (%d) > 1 requires clustering.enabled=true so cross-node routing, claims, MUC, and SM state use the ordered relay/Postgres fabric." (int .Values.replicaCount)) -}}
 {{- end -}}
 
 {{- if .Values.clustering.enabled -}}

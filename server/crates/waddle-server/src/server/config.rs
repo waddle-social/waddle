@@ -57,9 +57,9 @@ pub struct XmppConfig {
     /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub pubsub_database_url: Option<String>,
     /// Trusted public RFC 7395 endpoint used by clients. Its scheme is the
-    /// authoritative source for transport-security decisions such as the
-    /// XEP-0397 TLS-only feature and bearer-token gates; the unrelated HTTP
-    /// application base URL and client-controlled forwarding headers are not.
+    /// authoritative source for transport-security decisions; the unrelated
+    /// HTTP application base URL and client-controlled forwarding headers are
+    /// not.
     pub public_websocket_url: Url,
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
@@ -216,7 +216,7 @@ impl XmppConfig {
 /// derive an explicitly plaintext endpoint so security-sensitive features
 /// fail closed until the deployment declares its TLS-terminated `wss://`
 /// address. Whitespace is normalized here and malformed/HTTP URLs fail
-/// startup instead of silently changing XEP-0397 availability.
+/// startup.
 fn parse_public_websocket_url(raw: Option<&str>, xmpp_domain: &str) -> anyhow::Result<Url> {
     let configured = raw
         .map(str::trim)

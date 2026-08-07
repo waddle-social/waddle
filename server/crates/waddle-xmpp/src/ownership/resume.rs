@@ -67,9 +67,9 @@ pub struct ResumeIdentityProof {
 /// returns `None` so the caller can answer XEP-0198 `<failed/>`
 /// `not-authorized` without ever touching the claim epoch.
 ///
-/// Slice 6 wires the real call sites (`stream_management.rs`'s three resume
-/// branches, the ISR consume flow) against this function; this slice lands
-/// the function itself so [`super::ClaimStore::steal_for_resume`]'s
+/// Slice 6 wires the real `stream_management.rs` resume call sites against
+/// this function; this slice lands the function itself so
+/// [`super::ClaimStore::steal_for_resume`]'s
 /// signature can name [`ResumeIdentityProof`] today.
 pub fn verify_resume_identity(
     sasl_identity: &BareJid,

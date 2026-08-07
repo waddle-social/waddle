@@ -66,7 +66,7 @@ cuenv task dev
   - Shorthand examples: `debug`, `info`, `warn`, `error`
   - Full filter examples: `info,waddle_server=debug,waddle_xmpp=debug`
 - Default logging filter (when neither env var is set): `info,waddle_server=debug,waddle_xmpp=debug`
-- `WADDLE_XMPP_PUBLIC_WEBSOCKET_URL`: Trusted public RFC 7395 endpoint (`ws://` or `wss://`). TLS-only XEP-0397 ISR is enabled only for `wss://`; when omitted, the server derives a fail-closed `ws://<xmpp-domain>/ws` endpoint.
+- `WADDLE_XMPP_PUBLIC_WEBSOCKET_URL`: Trusted public RFC 7395 endpoint (`ws://` or `wss://`), the authoritative source for transport-security decisions; when omitted, the server derives a fail-closed `ws://<xmpp-domain>/ws` endpoint.
 - `WADDLE_MEDIA_BACKEND`: Media backend selector (`disabled`, `webrtc-rs-sfu`, or `embedded-sfu`).
 - `WADDLE_MEDIA_PUBLIC_BASE_URL`: Public base URL used to generate media join endpoints.
 - `WADDLE_MEDIA_SFU_SIGNALING_PATH`: Path prefix used for SFU signaling URLs (default `/v1/media/sfu`).

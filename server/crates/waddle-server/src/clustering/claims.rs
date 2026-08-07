@@ -2176,7 +2176,7 @@ impl NodeLeaseStore for PostgresClaimStore {
         // SM sessions that already have a durable `sm_sessions` row. `<enable
         // resume='true'/>` creates the claim while the socket is still live;
         // stealing such claim-only rows would leave this node owning an
-        // unhydratable session and break later XEP-0198 resume/ISR paths.
+        // unhydratable session and break later XEP-0198 resume paths.
         let mut rows = conn
             .query(
                 r#"

@@ -9,6 +9,12 @@ Tracking: issue #1195 (ADR-0017 horizontal-scaling epic). Phase 4 is the final
 unchecked section: cross-node stanza routing over the ordered relay channel, then
 chart/operational unlock for `clustering.enabled` and `replicaCount > 1`.
 
+> **Superseded (2026-08-07):** The ISR (XEP-0397) design and
+> `clustering_isr_tokens` store described below have been removed outright — see
+> issue #1631 and
+> [ADR-011](../../../docs/adr/011-remove-isr-sasl2-inline-future.md). This
+> historical plan is retained as a record only.
+
 ## Sources reviewed before planning
 
 - ADR-0017, especially elements 3-7, 10, 12, the Phase 4 implementation-plan

@@ -45,12 +45,6 @@ mod dns;
 pub(crate) mod drain;
 #[cfg(feature = "clustering")]
 mod identity;
-/// Postgres-authoritative, epoch-fenced XEP-0397 ISR token storage
-/// (ADR-0017 Phase 3 Slice 8). Public for the same reason as
-/// [`allowlist`]/[`claims`]/[`lease`]: the harness provisions schema via
-/// the production path.
-#[cfg(feature = "clustering")]
-pub mod isr;
 /// Keypair-slot lease store. Public for the same reason as [`allowlist`]:
 /// the harness provisions schema via the production path.
 #[cfg(feature = "clustering")]
@@ -559,15 +553,6 @@ pub enum ClusteringError {
     #[cfg(feature = "clustering")]
     #[error("clustering MUC durable store initialization failed: {0}")]
     MucDurableStoreInit(waddle_xmpp::XmppError),
-
-    /// ADR-0017 Phase 3 Slice 8: the Postgres ISR token store's own startup
-    /// init (`ensure_schema`) failed. Fails clustering startup entirely
-    /// rather than continuing with ISR advertised but its backing schema
-    /// missing — mirrors [`Self::MucDurableStoreInit`]'s identical
-    /// co-location-discipline rationale one store over.
-    #[cfg(feature = "clustering")]
-    #[error("clustering ISR token store initialization failed: {0}")]
-    IsrTokenStoreInit(waddle_xmpp::isr::IsrTokenStoreError),
 }
 
 /// Derive the clustering subsystem's own cancellation scope from the
@@ -657,23 +642,6 @@ pub struct ClusteringHandles {
     /// non-fatal to the rest of clustering).
     #[cfg(feature = "clustering")]
     pub muc_durable_store: Option<Arc<dyn waddle_xmpp::muc::MucDurableStore>>,
-    /// ADR-0017 Phase 3 Slice 8: the Postgres-authoritative, epoch-fenced
-    /// XEP-0397 ISR token store. `isr_token_store()` below is the single
-    /// accessor every reader (the WebSocket ISR-enable/resume handlers, the
-    /// stream-features/disco advertisement gate, `session_janitors.rs`'s
-    /// orphan-reaper TTL sweep) goes through — council-adjudicated FIX 6
-    /// removed the dead second copy this doc comment used to reference
-    /// (`ProtocolServices::isr_token_store`, a field that was written at
-    /// construction time but never read; every real reader already went
-    /// through this accessor). `None` under the exact same conditions
-    /// `muc_durable_store` is `None` (clustering disabled, non-Postgres, a
-    /// build without the `clustering` feature, or this store's own
-    /// `ensure_schema` failing at startup — which, per
-    /// [`ClusteringError::IsrTokenStoreInit`], is fatal to clustering
-    /// startup, so in practice a live `ClusteringHandles` with clustering
-    /// enabled always has this populated).
-    #[cfg(feature = "clustering")]
-    pub isr_token_store: Option<Arc<dyn waddle_xmpp::isr::IsrTokenStore>>,
     /// ADR-0017 Phase 3 Slice 5: a `NodeLeaseStore` handle for the orphan
     /// reaper janitor (`server::session_janitors::spawn_orphan_reaper_janitor`),
     /// which runs on its own periodic cadence outside `run_node_lease`'s
@@ -766,27 +734,6 @@ impl ClusteringHandles {
         #[cfg(feature = "clustering")]
         {
             self.resume_handshake_timeout
-        }
-        #[cfg(not(feature = "clustering"))]
-        {
-            None
-        }
-    }
-
-    /// The Postgres-authoritative ISR token store (ADR-0017 Phase 3 Slice
-    /// 8), `None` under the exact same conditions `claim_pair` is `None`.
-    /// Unconditionally compiled, like `claim_pair`/`resume_handshake_timeout`,
-    /// so the WebSocket layer (outside the `clustering` feature gate) can
-    /// read it without conditional compilation. **This is also the single
-    /// source of truth for "is XEP-0397 available" (Q8's `clustering.enabled
-    /// && Postgres` gate)** — stream-features/disco advertisement and the
-    /// `<isr-enable/>`/ISR-resume handlers all key off `.is_some()` here,
-    /// never a separate config check, so the advertised capability and the
-    /// actually-wired behavior can never drift apart.
-    pub fn isr_token_store(&self) -> Option<Arc<dyn waddle_xmpp::isr::IsrTokenStore>> {
-        #[cfg(feature = "clustering")]
-        {
-            self.isr_token_store.clone()
         }
         #[cfg(not(feature = "clustering"))]
         {
@@ -1030,20 +977,6 @@ pub async fn start_if_enabled(
             .await
             .map_err(ClusteringError::MucDurableStoreInit)?,
         );
-        // ADR-0017 Phase 3 Slice 8: the Postgres ISR token store. Built here
-        // for the same reason `muc_durable_store` is — it only needs `db`,
-        // already in scope — and, per FIX 8's precedent, a schema-init
-        // failure is fatal to clustering startup rather than leaving ISR
-        // silently unadvertised-but-half-wired.
-        let isr_token_store: Arc<dyn waddle_xmpp::isr::IsrTokenStore> = {
-            use waddle_xmpp::isr::IsrTokenStore as _;
-            let store = isr::PostgresIsrTokenStore::new(db.clone());
-            store
-                .ensure_schema()
-                .await
-                .map_err(ClusteringError::IsrTokenStoreInit)?;
-            Arc::new(store)
-        };
         let handles = ClusteringHandles {
             claim_store: Some(claim_store_handle),
             node_identity: Some(live_identity.clone()),
@@ -1051,7 +984,6 @@ pub async fn start_if_enabled(
             room_local_claims: Some(Arc::clone(&room_local_claims)),
             user_local_claims: Some(Arc::clone(&user_local_claims)),
             muc_durable_store: Some(muc_durable_store),
-            isr_token_store: Some(isr_token_store),
             node_lease: Some(node_lease_handle),
             lease_ttl: Some(config.node_lease.lease_ttl),
             pod_template_hash: pod_template_hash.clone(),
