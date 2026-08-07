@@ -49,7 +49,7 @@ async fn revoked_authority_cannot_publish_a_bound_connection() {
         "revoked registration publishes no local routing entry"
     );
 }
-use super::{create_test_session, create_test_websocket_state};
+use super::{create_test_session, create_test_websocket_state, store_resumable_detached_session};
 use jid::{BareJid, FullJid};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -179,16 +179,10 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     let stream_id = "registration-resume-stream".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
 
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), session.clone());
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_resumable_detached_session(
+        state.as_ref(),
+        &session,
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -199,12 +193,12 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             unacked_stanzas: vec![
                 DetachedUnackedStanza {
                     sequence: 9,
-                    stanza_xml: "<message id='m9'/>".to_string(),
+                    stanza_xml: "<message xmlns='jabber:client' id='m9'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
                 },
                 DetachedUnackedStanza {
                     sequence: 10,
-                    stanza_xml: "<message id='m10'/>".to_string(),
+                    stanza_xml: "<message xmlns='jabber:client' id='m10'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
                 },
             ],
@@ -219,9 +213,9 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             presence_priority: 5,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached session");
+        },
+    )
+    .await;
 
     conn.phase = ConnectionPhase::authenticated(&jid);
     conn.authenticated_session = Some(session.clone());
@@ -275,13 +269,10 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     assert!(conn.pending_resume_h.is_none());
     let replay = conn.sm_state.get_stanzas_to_resend(9);
     assert_eq!(replay.len(), 1);
-    assert_eq!(replay[0].stanza_xml, "<message id='m10'/>");
-    assert!(state
-        .deps
-        .protocol
-        .resumable_sessions
-        .get(&stream_id)
-        .is_none());
+    assert_eq!(
+        replay[0].stanza_xml,
+        "<message xmlns='jabber:client' id='m10'/>"
+    );
     assert!(state
         .deps
         .protocol
@@ -317,22 +308,16 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
 
 #[tokio::test]
 async fn authority_revoked_after_resume_finalization_restores_detached_session_on_cleanup() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
 
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "registration-resume-revoked-after-finalization".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), session.clone());
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_resumable_detached_session(
+        state.as_ref(),
+        &session,
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -352,9 +337,9 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached session");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -437,9 +422,7 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
 
 #[tokio::test]
 async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fresh_bind() {
-    use waddle_xmpp::stream_management::{
-        DetachedSession, SmSessionRegistry, DEFAULT_MAX_UNACKED_QUEUE_SIZE,
-    };
+    use waddle_xmpp::stream_management::{DetachedSession, DEFAULT_MAX_UNACKED_QUEUE_SIZE};
 
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
@@ -447,16 +430,10 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
     let stream_id = "registration-resume-gap-stream".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
 
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), session.clone());
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_resumable_detached_session(
+        state.as_ref(),
+        &session,
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -476,9 +453,9 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached session");
+        },
+    )
+    .await;
 
     conn.phase = ConnectionPhase::authenticated(&jid);
     conn.authenticated_session = Some(session);

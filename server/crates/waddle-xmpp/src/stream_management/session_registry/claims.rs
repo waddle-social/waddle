@@ -155,6 +155,36 @@ impl Drop for DrainedSessionBatch<'_> {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Return an in-flight resume claim to the detached pool from a
+    /// cancellation guard.  This is synchronous specifically so a dropped
+    /// WebSocket resume future cannot strand the claimed snapshot between
+    /// awaits.  The durable ownership fence is intentionally retained: an
+    /// unexpired detached session remains owned by this node, exactly as in
+    /// [`Self::release_claim`].
+    ///
+    /// If bookkeeping cannot be acquired, the exact fence is transferred to
+    /// the existing terminal-release inventory rather than being forgotten.
+    pub fn defer_claimed_resume_release(&self, stream_id: &str) -> bool {
+        let reinserted = match (self.sessions.write(), self.claimed_sessions.write()) {
+            (Ok(mut sessions), Ok(mut claimed)) => match claimed.remove(stream_id) {
+                Some(session) if !session.is_expired() => {
+                    sessions.insert(stream_id.to_string(), session);
+                    true
+                }
+                Some(session) => {
+                    claimed.insert(stream_id.to_string(), session);
+                    false
+                }
+                None => false,
+            },
+            _ => false,
+        };
+        if reinserted {
+            return true;
+        }
+        self.defer_enabled_claim_release(stream_id)
+    }
+
     /// Atomically move a claim acquired for `<enable/>` out of the active
     /// live-authority map and into terminal exact-release inventory. This is
     /// synchronous so a cancellation guard can call it from `Drop` when the

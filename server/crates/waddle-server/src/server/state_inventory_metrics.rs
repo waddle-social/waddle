@@ -177,8 +177,9 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
         labels,
     );
 
-    // Stream management — detached XEP-0198 sessions and their
-    // sidecar resumable-session map.
+    // Stream management — detached XEP-0198 sessions. The durable snapshot
+    // count is emitted under the historical metric name for dashboard
+    // continuity; it no longer measures an in-memory authorization sidecar.
     gauge!(
         "waddle.state.sessions.sm_live_sessions",
         "Detached XEP-0198 sessions in the SM session registry."
@@ -189,9 +190,12 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
     );
     gauge!(
         "waddle.state.sessions.resumable_sessions",
-        "Sidecar resumable_sessions entries awaiting take or expiry."
+        "Durable detached XEP-0198 snapshots awaiting resume or expiry."
     )
-    .record(as_i64(snapshot.sessions.resumable_sessions), labels);
+    .record(
+        as_i64(snapshot.sessions.resumable_sessions.unwrap_or(0)),
+        labels,
+    );
 
     // XEP-0115 entity capabilities — the LRU cache and the in-flight
     // pending-resolution table.

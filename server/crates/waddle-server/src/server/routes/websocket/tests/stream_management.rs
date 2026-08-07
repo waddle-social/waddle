@@ -13,6 +13,7 @@ use super::{
     create_test_server_owner_session, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_sm_registry, message_frame_xml_with_id,
     register_test_native_user, scram_client_final_from_challenge, snapshot_room,
+    store_resumable_detached_session,
 };
 use crate::auth::Session;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -140,6 +141,24 @@ fn resume_frame_xml(stream_id: &str, handled_count: u32) -> String {
     )
 }
 
+/// Seed a detached snapshot exactly as a successful authenticated detach
+/// does: the snapshot and its durable principal reference are stored
+/// atomically.  Legacy `store_session` fixtures intentionally remain only in
+/// rejection tests that exercise a missing principal context.
+async fn store_resumable_test_session(
+    state: &super::super::state::WebSocketState,
+    detached: waddle_xmpp::stream_management::DetachedSession,
+) -> Session {
+    let username = detached
+        .jid
+        .node()
+        .expect("test detached JID has a localpart")
+        .to_string();
+    let session = create_test_session(state, &username).await;
+    store_resumable_detached_session(state, &session, detached).await;
+    session
+}
+
 // ---- XEP-0198 stream management --------------------------------
 
 #[test]
@@ -180,6 +199,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("timeout-detach".to_string(), true, Some(300));
@@ -478,7 +498,7 @@ async fn sm_resume_is_allowed_after_auth_before_bind() {
 
 #[tokio::test]
 async fn sm_resume_rejects_when_replay_window_has_gap() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
 
     let state = create_test_websocket_state().await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -527,13 +547,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         );
     }
     assert_eq!(detached.replay_gap_through, Some(1));
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(detached.clone())
-        .await
-        .expect("store");
+    let _detached_session = store_resumable_test_session(state.as_ref(), detached.clone()).await;
 
     let resume_frame = resume_frame_xml("stream-gap", 0);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -561,7 +575,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
 
 #[tokio::test]
 async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
 
     let state = create_test_websocket_state().await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -602,13 +616,7 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     };
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(detached.clone())
-        .await
-        .expect("store");
+    let _detached_session = store_resumable_test_session(state.as_ref(), detached.clone()).await;
 
     let resume_frame = resume_frame_xml("stream-auth-mismatch", 0);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -637,8 +645,291 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
 }
 
 #[tokio::test]
-async fn sm_resume_matching_authenticated_identity_preserves_current_session_without_sidecar() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+async fn sm_resume_final_principal_recheck_rejects_without_committing_staged_state() {
+    use waddle_xmpp::stream_management::DetachedSession;
+
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = "stream-final-principal-recheck".to_string();
+    store_resumable_detached_session(
+        state.as_ref(),
+        &session,
+        DetachedSession {
+            stream_id: stream_id.clone(),
+            user_id: session.user_jid.clone(),
+            jid: jid.clone(),
+            inbound_count: 4,
+            outbound_count: 1,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 1,
+                stanza_xml: "<message xmlns='jabber:client' id='queued'/>".to_string(),
+                original_receipt_at: chrono::Utc::now(),
+            }],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: true,
+            roster_interested: true,
+            blocklist_interested: true,
+            presence_available: true,
+            presence_show: Some(xmpp_parsers::presence::Show::Away),
+            presence_status: Some("detached".to_string()),
+            presence_priority: 3,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: true,
+        },
+    )
+    .await;
+
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    conn.pre_final_principal_recheck_test_hook = Some((reached.clone(), release.clone()));
+    let resume_state = state.clone();
+    let resume = tokio::spawn(async move {
+        let responses = handle_xmpp_frame(
+            &resume_frame_xml(&stream_id, 0),
+            "example.com",
+            resume_state.as_ref(),
+            &mut conn,
+        )
+        .await;
+        (responses, conn)
+    });
+
+    reached.notified().await;
+    state
+        .deps
+        .auth_state
+        .session_manager
+        .delete_session(&session.id)
+        .await
+        .expect("delete durable authenticated session after first resolution");
+    release.notify_one();
+    let (responses, conn) = resume.await.expect("resume task");
+
+    assert_eq!(responses.len(), 1);
+    let failed = Element::from_str(&responses[0]).expect("failed resume XML");
+    assert_eq!(failed.name(), "failed");
+    assert!(failed
+        .get_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+    assert!(
+        !conn.sm_state.enabled,
+        "rejected staging installs no SM state"
+    );
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        0,
+        "rejected staging installs no queue"
+    );
+    assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+    assert!(
+        conn.pending_resume_claim.is_none(),
+        "claim guard was released"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .is_none(),
+        "rejected staging performs no registration"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session("stream-final-principal-recheck")
+            .await
+            .expect("peek retained snapshot")
+            .is_some(),
+        "a final-recheck rejection retains the detached snapshot"
+    );
+}
+
+#[tokio::test]
+async fn dropping_resume_after_claim_returns_the_snapshot_via_the_claim_guard() {
+    use waddle_xmpp::stream_management::DetachedSession;
+
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = "stream-cancelled-after-claim".to_string();
+    store_resumable_detached_session(
+        state.as_ref(),
+        &session,
+        DetachedSession {
+            stream_id: stream_id.clone(),
+            user_id: session.user_jid.clone(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        },
+    )
+    .await;
+
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    conn.pre_final_principal_recheck_test_hook = Some((reached.clone(), release));
+    let resume_state = state.clone();
+    let resume = tokio::spawn(async move {
+        let _ = handle_xmpp_frame(
+            &resume_frame_xml(&stream_id, 0),
+            "example.com",
+            resume_state.as_ref(),
+            &mut conn,
+        )
+        .await;
+    });
+
+    reached.notified().await;
+    resume.abort();
+    let _ = resume.await;
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .claim_session("stream-cancelled-after-claim")
+            .await
+            .expect("claim returned snapshot")
+            .is_some(),
+        "dropping the resume future must synchronously return its frozen claim"
+    );
+}
+
+#[tokio::test]
+async fn sm_resume_legacy_snapshot_without_a_principal_is_not_authorized() {
+    use waddle_xmpp::stream_management::DetachedSession;
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-legacy-null-context".to_string(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store legacy snapshot without a principal");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-legacy-null-context", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    let failed = Element::from_str(&responses[0]).expect("failed resume XML");
+    assert!(failed
+        .get_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+    assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+}
+
+#[tokio::test]
+async fn sm_resume_storage_error_is_reported_as_internal_server_error() {
+    use waddle_xmpp::stream_management::DetachedSession;
+
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    store_resumable_detached_session(
+        state.as_ref(),
+        &session,
+        DetachedSession {
+            stream_id: "stream-storage-error".to_string(),
+            user_id: session.user_jid.clone(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        },
+    )
+    .await;
+
+    state.deps.auth_state.session_manager.actor_ref().kill();
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let responses = handle_xmpp_frame(
+        &resume_frame_xml("stream-storage-error", 0),
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    let failed = Element::from_str(&responses[0]).expect("failed resume XML");
+    assert!(failed
+        .get_child(
+            "internal-server-error",
+            "urn:ietf:params:xml:ns:xmpp-stanzas",
+        )
+        .is_some());
+    assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+    assert!(!conn.sm_state.enabled);
+}
+
+#[tokio::test]
+async fn sm_resume_matching_authenticated_identity_restores_durable_principal_session() {
+    use waddle_xmpp::stream_management::DetachedSession;
 
     let state = create_test_websocket_state().await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -659,11 +950,9 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
     assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
 
     let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-auth-match".to_string(),
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
@@ -683,9 +972,9 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let resume_frame = resume_frame_xml("stream-auth-match", 3);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -713,8 +1002,8 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
 }
 
 #[tokio::test]
-async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_session() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+async fn sm_resume_matching_authenticated_identity_restores_detached_principal_session() {
+    use waddle_xmpp::stream_management::DetachedSession;
 
     let state = create_test_websocket_state().await;
     let domain = state.deps.auth_state.xmpp_domain.clone();
@@ -736,39 +1025,39 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
 
     let stream_id = "stream-auth-match-with-sidecar";
     let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
-    let resumed_session = Session::new(&fresh_session.user_jid, "bob", "bob");
+    let resumed_session = create_test_session(state.as_ref(), "bob").await;
     state
         .deps
         .protocol
         .sm_session_registry
-        .store_session(DetachedSession {
-            stream_id: stream_id.to_string(),
-            user_id: format!("bob@{domain}"),
-            jid: detached_jid.clone(),
-            inbound_count: 0,
-            outbound_count: 0,
-            last_acked: 0,
-            replay_gap_through: None,
-            unacked_stanzas: Vec::new(),
-            max_resume_time: Some(300),
-            detached_at: std::time::Instant::now(),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-            pending_subscribes_flushed: false,
-        })
+        .store_session_with_principal(
+            DetachedSession {
+                stream_id: stream_id.to_string(),
+                user_id: format!("bob@{domain}"),
+                jid: detached_jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            },
+            resumed_session
+                .authenticated_principal_ref()
+                .expect("auth context"),
+        )
         .await
         .expect("store");
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.to_string(), resumed_session.clone());
 
     let resume_frame = resume_frame_xml(stream_id, 0);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -1513,15 +1802,13 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
     // session with outbound_count == last_acked == 2 must reject
     // h == 2 + 0x8000_0000 as handled-count-too-high instead of
     // resuming and poisoning the restored counters.
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-half-window".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -1541,9 +1828,9 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -1574,15 +1861,13 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
     // resume (<failed/> resource-constraint via can_resume_from), NOT
     // a handled-count-too-high stream error — matching the live path
     // where the regress guard runs before the exact-window check.
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-regressed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -1602,9 +1887,9 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -1632,7 +1917,7 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
 
 #[tokio::test]
 async fn sm_resume_restores_session_and_replays_unacked() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     // Seed a detached session directly in the registry — this is the
@@ -1650,12 +1935,12 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 9,
-                stanza_xml: "<message id='m9'/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='m9'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 10,
-                stanza_xml: "<message id='m10'/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='m10'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
         ],
@@ -1671,13 +1956,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     };
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(detached)
-        .await
-        .expect("store");
+    let _detached_session = store_resumable_test_session(state.as_ref(), detached).await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -1716,15 +1995,13 @@ async fn sm_resume_restores_session_and_replays_unacked() {
 
 #[tokio::test]
 async fn sm_resume_rejects_impossible_client_handled_count() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-too-far".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -1734,7 +2011,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             replay_gap_through: None,
             unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
-                stanza_xml: "<message id='m1'/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='m1'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             }],
             max_resume_time: Some(300),
@@ -1748,9 +2025,9 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -1801,16 +2078,14 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
 
 #[tokio::test]
 async fn sm_resume_replays_roster_push_recorded_while_detached() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "stream-roster-replay".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -1830,9 +2105,9 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let recorded = state
             .deps
@@ -1875,7 +2150,7 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
 
 #[tokio::test]
 async fn direct_full_jid_message_records_for_detached_resource_replay() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
@@ -1946,7 +2221,7 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
 
 #[tokio::test]
 async fn bare_jid_message_records_for_detached_resource_replay() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
@@ -2024,7 +2299,7 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
 
 #[tokio::test]
 async fn message_carbons_record_for_detached_enabled_resources() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
     // #1246: an unregistered recipient would bounce with
     // <service-unavailable/>; this test is about carbons for the
@@ -2285,17 +2560,15 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
 
 #[tokio::test]
 async fn roster_set_records_push_for_detached_interested_resource() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let detached_jid: FullJid = "alice@example.com/web".parse().expect("detached jid");
     let source_jid: FullJid = "alice@example.com/phone".parse().expect("source jid");
     let stream_id = "stream-roster-fanout".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
@@ -2315,9 +2588,9 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached session");
+        },
+    )
+    .await;
 
     let mut source = WsConnState::new();
     source.phase = ConnectionPhase::ready(source_jid, false);
@@ -2351,17 +2624,15 @@ async fn roster_set_records_push_for_detached_interested_resource() {
 
 #[tokio::test]
 async fn blocking_set_records_push_for_detached_blocklist_interested_resource() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let detached_jid: FullJid = "alice@example.com/web".parse().expect("detached jid");
     let source_jid: FullJid = "alice@example.com/phone".parse().expect("source jid");
     let stream_id = "stream-blocking-fanout".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
@@ -2381,9 +2652,9 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached session");
+        },
+    )
+    .await;
 
     let mut source = WsConnState::new();
     source.phase = ConnectionPhase::ready(source_jid, false);
@@ -2418,7 +2689,7 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
 
 #[tokio::test]
 async fn subscription_approval_replays_current_presence_from_detached_available_resource() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
@@ -2512,7 +2783,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
 
 #[tokio::test]
 async fn presence_probe_returns_detached_available_resource_presence() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
@@ -2598,7 +2869,7 @@ async fn presence_probe_returns_detached_available_resource_presence() {
 
 #[tokio::test]
 async fn full_jid_presence_probe_returns_only_that_resources_availability() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
@@ -2706,7 +2977,7 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
 
 #[tokio::test]
 async fn presence_probe_without_subscription_does_not_reveal_detached_presence() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let mallory_jid: FullJid = "mallory@example.com/web".parse().expect("mallory jid");
@@ -2854,7 +3125,7 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
 
 #[tokio::test]
 async fn subscription_approval_records_roster_push_for_detached_interested_resource() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
@@ -2877,11 +3148,9 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
     .await;
 
     let stream_id = "stream-detached-subscription-roster-push".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
@@ -2901,9 +3170,9 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached bob");
+        },
+    )
+    .await;
 
     let mut alice = WsConnState::new();
     alice.phase = ConnectionPhase::ready(alice_jid, false);
@@ -2932,17 +3201,15 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
 
 #[tokio::test]
 async fn subscribe_to_detached_available_resource_replays_on_resume() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let stream_id = "stream-detached-subscribe-recipient".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid.clone(),
@@ -2962,9 +3229,9 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached alice");
+        },
+    )
+    .await;
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid, false);
@@ -2991,7 +3258,7 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
 
 #[tokio::test]
 async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
@@ -3017,11 +3284,9 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
     .await;
 
     let stream_id = "stream-detached-presence-broadcast".to_string();
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
@@ -3041,9 +3306,9 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store detached bob");
+        },
+    )
+    .await;
 
     let _ = handle_xmpp_frame(
             r#"<presence xmlns="jabber:client"><show>away</show><status>broadcast while detached</status><priority>5</priority></presence>"#,
@@ -3080,6 +3345,9 @@ async fn sm_resume_with_unknown_stream_id_fails() {
     assert_eq!(responses.len(), 1);
     let el = Element::from_str(&responses[0]).expect("xml");
     assert_eq!(el.name(), "failed");
+    assert!(el
+        .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
     // Must NOT mark the session as bound/resumed.
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
@@ -3093,7 +3361,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
     // for its own response batch. Replayed stanzas are already in the
     // unacked queue — re-recording them would bump `outbound_count` and
     // create duplicates.
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -3109,12 +3377,12 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
-                stanza_xml: "<message id='m1'/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='m1'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 2,
-                stanza_xml: "<message id='m2'/>".to_string(),
+                stanza_xml: "<message xmlns='jabber:client' id='m2'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
         ],
@@ -3130,13 +3398,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     };
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(detached)
-        .await
-        .expect("store");
+    let _detached_session = store_resumable_test_session(state.as_ref(), detached).await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -3169,7 +3431,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         &jid,
         "alice",
         None,
-        &Some(owner_session),
+        &Some(owner_session.clone()),
     )
     .await;
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -3197,6 +3459,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(owner_session.clone());
     conn.registry_owner = Some(owner);
     conn.roster_interested = true;
     conn.sm_state
@@ -3263,6 +3526,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
 async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
     use waddle_xmpp::registry::GetUser;
     let state = create_test_websocket_state().await;
+    let owner_session = create_test_session(state.as_ref(), "alice").await;
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
     let owner = state
@@ -3295,6 +3559,7 @@ async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(owner_session);
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-actor".to_string(), true, Some(300));
@@ -3345,7 +3610,7 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
         &jid,
         "alice",
         None,
-        &Some(owner_session),
+        &Some(owner_session.clone()),
     )
     .await;
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -3357,6 +3622,7 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(owner_session.clone());
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-close".to_string(), false, Some(300));
@@ -3426,7 +3692,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
     // Exercise the pieces the janitor composes: drain_expired() returns
     // the removed sessions, and cleanup_muc_presence_for_jid removes the
     // occupant that was held while the session was detached.
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "expired-channel@muc.example.com".parse().expect("room");
@@ -3440,7 +3706,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         &jid,
         "alice",
         None,
-        &Some(owner_session),
+        &Some(owner_session.clone()),
     )
     .await;
     assert!(snapshot_room(state.as_ref(), &room_jid)
@@ -3478,11 +3744,6 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         })
         .await
         .expect("store");
-    state
-        .deps
-        .protocol
-        .resumable_sessions
-        .insert(stream_id.clone(), Session::new("uid", "alice", "alice"));
 
     // Wait a hair so the 0-second TTL is definitely in the past.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3497,8 +3758,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].stream_id, stream_id);
 
-    // The janitor body: remove sidecar + MUC occupant + any routing slot.
-    state.deps.protocol.resumable_sessions.remove(&stream_id);
+    // The janitor body: remove the MUC occupant + any routing slot.
     state
         .deps
         .protocol
@@ -3506,11 +3766,6 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         .unregister(&drained[0].jid);
     cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
 
-    assert!(!state
-        .deps
-        .protocol
-        .resumable_sessions
-        .contains_key(&stream_id));
     assert!(
         snapshot_room(state.as_ref(), &room_jid)
             .await
@@ -3579,11 +3834,10 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "replayed-iq")
             .build(),
     );
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    store_resumable_detached_session(
+        state.as_ref(),
+        &session,
+        DetachedSession {
             stream_id: "stream-replay-delay".to_string(),
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
@@ -3614,9 +3868,9 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let resume_frame = resume_frame_xml("stream-replay-delay", 0);
     let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
@@ -3666,7 +3920,7 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
         &jid,
         "alice",
         None,
-        &Some(owner_session),
+        &Some(owner_session.clone()),
     )
     .await;
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -3678,6 +3932,7 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(owner_session.clone());
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-call".to_string(), true, Some(300));
@@ -4210,15 +4465,13 @@ mod fix_a_post_cas_shutdown {
 /// live ack path was made wrap-aware, resume must agree).
 #[tokio::test]
 async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-wrapped".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4256,9 +4509,9 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4294,7 +4547,7 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
 /// the client sent no new presence.
 #[tokio::test]
 async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -4303,11 +4556,9 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
             .expect("timestamp")
             .with_timezone(&chrono::Utc),
     );
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-idle".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4327,9 +4578,9 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
             presence_priority: 0,
             presence_payloads: vec![idle.clone()],
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4375,15 +4626,13 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
 /// the user with the still-unanswered subscribe.
 #[tokio::test]
 async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-claimed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4405,9 +4654,9 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: true,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4455,15 +4704,13 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
 /// and the next available re-prompted the user.
 #[tokio::test]
 async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-claimed-unavail".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4485,9 +4732,9 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: true,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4532,15 +4779,13 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
 /// §3.1.3 pending-subscribe delivery.
 #[tokio::test]
 async fn sm_resume_keeps_unconsumed_claim_armed() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-unclaimed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4560,9 +4805,9 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -4673,15 +4918,13 @@ async fn sm_live_ack_behind_last_acked_is_ignored_without_purging() {
 /// refused as a failed resume — session preserved, nothing purged.
 #[tokio::test]
 async fn sm_resume_rejects_handled_count_behind_last_acked() {
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
 
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
+    let _detached_session = store_resumable_test_session(
+        state.as_ref(),
+        DetachedSession {
             stream_id: "stream-regressed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -4705,9 +4948,9 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store");
+        },
+    )
+    .await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);

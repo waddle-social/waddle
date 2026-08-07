@@ -93,6 +93,9 @@ async fn handle_xmpp_frame_impl(
         blocklist_interested,
         pending_resume_stream_id,
         pending_resume_h,
+        pending_resume_claim,
+        #[cfg(test)]
+        pre_final_principal_recheck_test_hook,
         suppress_sm_record_next_batch,
         pending_sm_enable_commit,
         state_machine,
@@ -124,6 +127,9 @@ async fn handle_xmpp_frame_impl(
                 pending_subscribes_flushed,
                 pending_resume_stream_id,
                 pending_resume_h,
+                pending_resume_claim,
+                #[cfg(test)]
+                pre_final_principal_recheck_test_hook,
                 suppress_sm_record_next_batch,
                 roster_interested,
                 blocklist_interested,

@@ -178,8 +178,7 @@ fn notification_outbox_prune_batch_from_env() -> usize {
 
 pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
     // XEP-0198 expired-session janitor. Without this, detached SM sessions
-    // whose resume window elapses leave MUC occupants in their rooms forever
-    // and the `resumable_sessions` sidecar grows unbounded.
+    // whose resume window elapses leave MUC occupants in their rooms forever.
     let weak_state = Arc::downgrade(websocket_state);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -470,11 +469,6 @@ async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             {
                 sweep_failed = true;
             }
-            state
-                .deps
-                .protocol
-                .resumable_sessions
-                .remove(&session.stream_id);
             // ADR-0017 Phase 1 (Greptile P1 on PR #1177): gate the DashMap
             // removal on the EXPIRED session's own SM stream id, not a plain
             // `unregister`. A plain unregister removes whatever currently
