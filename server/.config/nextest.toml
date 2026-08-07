@@ -26,7 +26,6 @@ package(waddle-server) & (
     | test(pubsub::)
     | test(session_janitors::)
     | test(sm_persistence)
-    | test(isr_resume::)
     | test(stream_management::)
 )
 '''

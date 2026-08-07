@@ -2,7 +2,7 @@ replicaCount: 1
 
 # ADR-0017 clustering. Multi-replica deployments must set this true and use
 # Postgres plus shared blob storage/RWX persistence so routing, claims, MUC,
-# SM, and ISR state have one durable source of truth.
+# and SM state have one durable source of truth.
 clustering:
   enabled: false
   swarmPort: 7900
@@ -147,9 +147,10 @@ database:
 xmpp:
   enabled: true
   domain: waddle.local
-  # Trusted public RFC 7395 endpoint. Use wss:// when TLS is terminated at
-  # the ingress/gateway; TLS-only XEP-0397 ISR stays disabled for ws://. Empty
-  # derives the fail-closed ws://<xmpp.domain>/ws endpoint at server startup.
+  # Trusted public RFC 7395 endpoint, the authoritative source for
+  # transport-security decisions. Use wss:// when TLS is terminated at the
+  # ingress/gateway. Empty derives the fail-closed ws://<xmpp.domain>/ws
+  # endpoint at server startup.
   publicWebsocketUrl: ""
   tls:
     secretName: ""

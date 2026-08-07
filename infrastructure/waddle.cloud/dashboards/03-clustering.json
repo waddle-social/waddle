@@ -108,7 +108,7 @@
           "refId": "A"
         },
         {
-          "expr": "sum(count_over_time({service_name=\"waddle-server\"} |~ \"(?i)(SM|ISR) resume (failed|rejected): cross-node\" [5m]))",
+          "expr": "sum(count_over_time({service_name=\"waddle-server\"} |~ \"(?i)SM resume (failed|rejected): cross-node\" [5m]))",
           "legendFormat": "failed or rejected / 5m",
           "refId": "B"
         }
