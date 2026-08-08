@@ -1532,10 +1532,12 @@ pub(super) struct WsConnState {
     /// already-recorded queue rather than detach a resumable snapshot: the
     /// unwritten batch suffix was never accepted into SM ownership.
     pub(super) sm_recovery_required: bool,
-    /// Unbounded terminal XEP-0198 recovery queue. Once the bounded live
-    /// queue has exhausted its deferred-inbound headroom, every subsequently
-    /// accepted reply is recorded here instead of risking an eviction from
-    /// `sm_state`; cleanup promotes both queues and rejects resume.
+    /// Terminal XEP-0198 recovery queue. Once the bounded live queue has
+    /// exhausted its deferred-inbound headroom, replies from already accepted
+    /// frames are recorded here instead of risking an eviction from
+    /// `sm_state`; cleanup stops before accepting another parked frame after
+    /// [`TERMINAL_RECOVERY_QUEUE_CAP`] entries (plus one frame's fan-out),
+    /// promotes both queues, and rejects resume.
     pub(super) terminal_sm_recovery: StreamManagementState,
     /// Loop-level XEP-0198 send-window pause deadline (issue #1219).
     /// `Some(deadline)` while the connection loop is holding off draining
@@ -1632,6 +1634,9 @@ impl WsConnState {
         let Some(stream_id) = self.sm_state.stream_id.clone() else {
             return;
         };
+        // The terminal queue itself stays non-evicting: the epilogue checks
+        // TERMINAL_RECOVERY_QUEUE_CAP before dispatching each parked frame,
+        // so a single accepted frame may retain its complete reply fan-out.
         let mut recovery = StreamManagementState::with_config(usize::MAX, u32::MAX);
         recovery.enable(
             stream_id,
@@ -1790,3 +1795,9 @@ impl WsConnState {
         }
     }
 }
+/// Terminal recovery stops accepting another deferred inbound frame once this
+/// many replayable responses are retained. A single frame can still append its
+/// complete reply fan-out after crossing this threshold; the remaining parked
+/// client frames are discarded and remain the sender's responsibility because
+/// terminal recovery deliberately invalidates XEP-0198 resume.
+pub(super) const TERMINAL_RECOVERY_QUEUE_CAP: usize = 4096;

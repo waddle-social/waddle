@@ -337,21 +337,7 @@ pub(super) async fn cleanup_connection_shutdown(
     };
 
     if superseded {
-        let detached_snapshot = terminal_recovery_snapshot(&jid, conn);
-        let Some(detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
-            super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
-            return ConnectionShutdownOutcome::NotPersisted;
-        };
-        let recovery_session =
-            terminal_recovery_session(state, outbound_rx, conn, detached, detached_snapshot).await;
-        return refuse_detach_without_principal(
-            state,
-            outbound_rx,
-            &jid,
-            conn,
-            vec![recovery_session],
-        )
-        .await;
+        return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
     }
 
     let should_detach_for_resume = (conn.sm_state.is_resumable()
@@ -360,6 +346,9 @@ pub(super) async fn cleanup_connection_shutdown(
 
     if should_detach_for_resume {
         if conn.registry_owner.is_none() {
+            if conn.sm_recovery_required {
+                return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+            }
             conn.pending_resume_stream_id = None;
             conn.pending_resume_h = None;
             drop(conn.pending_resume_claim.take());
@@ -379,6 +368,9 @@ pub(super) async fn cleanup_connection_shutdown(
             .connection_registry
             .entry_if_owner(&jid, owner)
         else {
+            if conn.sm_recovery_required {
+                return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+            }
             super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
             return ConnectionShutdownOutcome::NotPersisted;
@@ -454,22 +446,7 @@ pub(super) async fn cleanup_connection_shutdown(
                 // suffix never entered that channel and remains deliberately
                 // excluded; dropping accepted routed work here would be a
                 // separate silent-loss path.
-                let recovery_session = terminal_recovery_session(
-                    state,
-                    outbound_rx,
-                    conn,
-                    detached,
-                    detached_snapshot,
-                )
-                .await;
-                return refuse_detach_without_principal(
-                    state,
-                    outbound_rx,
-                    &jid,
-                    conn,
-                    vec![recovery_session],
-                )
-                .await;
+                return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
             }
             let stream_id = detached.stream_id.clone();
             let principal = match conn.authenticated_session.as_ref() {
@@ -728,6 +705,26 @@ pub(super) async fn cleanup_connection_shutdown(
     ConnectionShutdownOutcome::NotPersisted
 }
 
+/// Promote terminal recovery without creating a resumable snapshot. This is
+/// also safe after an ownership race because pending delivery is bare-JID
+/// keyed and [`refuse_detach_without_principal`] owner-gates all live-entry
+/// teardown.
+async fn promote_terminal_recovery(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    jid: &FullJid,
+    conn: &mut WsConnState,
+) -> ConnectionShutdownOutcome {
+    let detached_snapshot = terminal_recovery_snapshot(jid, conn);
+    let Some(detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
+        super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+        return ConnectionShutdownOutcome::NotPersisted;
+    };
+    let recovery_session =
+        terminal_recovery_session(state, outbound_rx, conn, detached, detached_snapshot).await;
+    refuse_detach_without_principal(state, outbound_rx, jid, conn, vec![recovery_session]).await
+}
+
 /// Build the detached payload needed solely for terminal recovery when the
 /// connection registry slot may already belong to a same-JID replacement.
 /// These fields are never made resumable: promotion uses the typed JID and
@@ -812,6 +809,20 @@ async fn refuse_detach_without_principal(
     conn: &mut WsConnState,
     detached_sessions: Vec<waddle_xmpp::stream_management::DetachedSession>,
 ) -> ConnectionShutdownOutcome {
+    // A terminal session must disappear from the exact-FullJID routing table
+    // before promotion. Otherwise `send_to` can successfully target this
+    // closed channel and drop a <no-store/> stanza instead of taking the
+    // pending-delivery fallback. Owner gating leaves a replacement untouched.
+    let terminal_removed = conn.registry_owner.as_ref().and_then(|owner| {
+        conn.sm_recovery_required.then(|| {
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .unregister_if_owner(jid, owner)
+                .map(|entry| (entry, std::sync::Arc::clone(owner)))
+        })?
+    });
     // Keep this stream's claim live throughout every promotion. The claim
     // janitor uses SM liveness/fences, and deferring it before the locally
     // held batch is registered would let a sweep release the fence midway.
@@ -831,6 +842,23 @@ async fn refuse_detach_without_principal(
     }
     super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+    if let Some((removed_entry, owner)) = terminal_removed {
+        let was_presence_available = removed_entry.is_presence_available();
+        let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
+        state.deps.protocol.caps_resolver.drop_resource(jid);
+        broadcast_unavailable_if_no_replacement(state, jid, was_presence_available).await;
+        cleanup_muc_presence_with_origin(state, jid, cleanup_origin.as_ref()).await;
+        crate::server::dual_registration::mirror_unregister(
+            &state.deps.protocol.user_registry,
+            jid,
+            Some(std::sync::Arc::clone(&owner)),
+        )
+        .await;
+        unregister_remote_user_resource_if_owner(state, jid, &owner).await;
+        outbound_rx.close();
+        return ConnectionShutdownOutcome::NotPersisted;
+    }
+    conn.sm_recovery_required = false;
     cleanup_without_resumable_snapshot(state, outbound_rx, jid, conn).await
 }
 

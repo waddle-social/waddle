@@ -14,7 +14,7 @@ use super::{
         send_ws_text_frames_with_authority, AuthoritySendOutcome,
     },
     session_init::build_internal_server_error_stream_error,
-    state::{InboundFrameTerminal, WsConnState},
+    state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
     stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
     transport_xml::{
@@ -1314,6 +1314,15 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
     }
     if !conn.sm_inbound_completion.has_unhandled_hole() {
         while conn.sm_inbound_completion.has_pending() {
+            if terminal_recovery_recording_is_full(conn) {
+                warn!(
+                    cap = TERMINAL_RECOVERY_QUEUE_CAP,
+                    recorded = conn.terminal_sm_recovery.queue_len(),
+                    pending = conn.sm_inbound_completion.pending_count(),
+                    "Stopped ordered-relay handoff recording after terminal SM recovery cap; sender replay remains conservative"
+                );
+                break;
+            }
             let Some(completion) = handoff_rx.recv().await else {
                 break;
             };
@@ -1328,6 +1337,15 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
     while conn.sm_inbound_completion.has_pending()
         && drained < ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS
     {
+        if terminal_recovery_recording_is_full(conn) {
+            warn!(
+                cap = TERMINAL_RECOVERY_QUEUE_CAP,
+                recorded = conn.terminal_sm_recovery.queue_len(),
+                pending = conn.sm_inbound_completion.pending_count(),
+                "Stopped ordered-relay handoff recording after terminal SM recovery cap; sender replay remains conservative"
+            );
+            break;
+        }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
@@ -1408,6 +1426,16 @@ async fn process_deferred_inbound_after_transport_loss(
         return;
     }
     while let Some(text) = conn.deferred_inbound.pop_front() {
+        if terminal_recovery_recording_is_full(conn) {
+            let dropped = 1 + discard_deferred_inbound(conn);
+            warn!(
+                cap = TERMINAL_RECOVERY_QUEUE_CAP,
+                recorded = conn.terminal_sm_recovery.queue_len(),
+                dropped,
+                "Dropping deferred inbound frames after terminal SM recovery cap; sender will replay after fresh bind"
+            );
+            break;
+        }
         let responses =
             handle_xmpp_frame_with_admission(&text, domain, state, conn, permit, shutdown).await;
         if matches!(
@@ -1450,6 +1478,11 @@ async fn process_deferred_inbound_after_transport_loss(
     }
 }
 
+fn terminal_recovery_recording_is_full(conn: &WsConnState) -> bool {
+    conn.sm_recovery_required
+        && conn.terminal_sm_recovery.queue_len() >= TERMINAL_RECOVERY_QUEUE_CAP
+}
+
 fn discard_deferred_inbound(conn: &mut WsConnState) -> usize {
     let dropped = conn.deferred_inbound.len();
     conn.deferred_inbound.clear();
@@ -1482,11 +1515,14 @@ mod tests {
         batch_write::{
             write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
         },
+        cleanup::cleanup_connection_shutdown,
+        state::TERMINAL_RECOVERY_QUEUE_CAP,
         transport_xml::websocket_stream_open_xml,
     };
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+    use waddle_xmpp::stream_management::SmSessionRegistry;
 
     #[derive(Default)]
     struct UpgradeCloseSink {
@@ -1787,6 +1823,101 @@ mod tests {
         assert_eq!(conn.sm_state.queue_len(), 8);
         assert_eq!(conn.sm_state.replay_gap_through(), None);
         assert_eq!(conn.terminal_sm_recovery.queue_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_cap_discards_parked_mam_frames_and_promotes_prefix() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let jid: FullJid = "alice@example.com/terminal-cap".parse().expect("jid");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx.clone());
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        conn.registry_owner = Some(owner);
+        conn.sm_state
+            .enable("terminal-cap".to_string(), true, Some(300));
+        conn.begin_terminal_sm_recovery();
+        for sequence in 0..TERMINAL_RECOVERY_QUEUE_CAP {
+            let mut prefix = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
+            prefix.id = Some(xmpp_parsers::message::Id(format!(
+                "terminal-cap-{sequence}"
+            )));
+            let _ = conn.terminal_sm_recovery.record_outbound(
+                waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize terminal prefix"),
+                waddle_xmpp::telemetry::attributes::SmEvictionPath::ReplayTail,
+            );
+        }
+        conn.deferred_inbound.extend((0..96).map(|sequence| {
+            axum::extract::ws::Utf8Bytes::from(format!(
+                "<iq xmlns='jabber:client' type='set' id='mam-{sequence}'><query xmlns='urn:xmpp:mam:2'/></iq>"
+            ))
+        }));
+
+        process_deferred_inbound_after_transport_loss(
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &permit,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            conn.deferred_inbound.is_empty(),
+            "all parked MAM frames are discarded"
+        );
+        assert_eq!(
+            conn.terminal_sm_recovery.queue_len(),
+            TERMINAL_RECOVERY_QUEUE_CAP
+        );
+        assert_eq!(conn.terminal_sm_recovery.replay_gap_through(), None);
+        for path in ["batch", "replay_tail", "direct_outbound", "detach_drain"] {
+            assert_eq!(
+                metrics.counter_sum("xmpp.sm.unacked_evicted", &[("path", path)]),
+                None,
+                "terminal recovery cap must not evict recorded stanzas on path {path}"
+            );
+        }
+        assert_eq!(
+            cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await,
+            super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .peek_session("terminal-cap")
+                .await
+                .expect("registry lookup")
+                .is_none(),
+            "terminal recovery promotes rather than retaining a resumable snapshot"
+        );
+        let pending = state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&jid.to_bare())
+            .await
+            .expect("list promoted rows");
+        assert!(
+            pending.iter().any(|row| {
+                matches!(
+                    &row.payload,
+                    waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                        if message.id.as_ref().is_some_and(|id| id.0 == "terminal-cap-0")
+                )
+            }),
+            "recorded prefix is promoted"
+        );
     }
 
     #[tokio::test(start_paused = true)]

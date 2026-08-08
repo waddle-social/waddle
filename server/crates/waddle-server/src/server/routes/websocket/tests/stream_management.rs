@@ -304,7 +304,9 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
     }
     conn.begin_terminal_sm_recovery();
 
-    let mut buffered = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+    // An exact-FullJID <no-store/> stanza must fall through to pending
+    // delivery after terminal cleanup unregisters this dead route.
+    let mut buffered = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
     buffered.from = Some("bob@example.com/phone".parse().expect("sender jid"));
     buffered.id = Some(xmpp_parsers::message::Id("accepted-backlog".to_string()));
     buffered.type_ = xmpp_parsers::message::MessageType::Chat;
@@ -368,11 +370,11 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
     );
 }
 
-/// A same-FullJid replacement owns registry/MUC cleanup, but must not make a
-/// paused predecessor drop the prefix and accepted receiver backlog that had
-/// already entered terminal XEP-0198 recovery.
+/// If a same-FullJID replacement wins before cleanup rechecks ownership, the
+/// stale non-superseded path must still promote the predecessor's recorded
+/// prefix and accepted backlog without touching the replacement entry.
 #[tokio::test]
-async fn superseded_terminal_recovery_promotes_without_touching_replacement() {
+async fn ownership_moved_before_terminal_cleanup_still_promotes_without_touching_replacement() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/superseded-recovery"
         .parse()
@@ -401,8 +403,10 @@ async fn superseded_terminal_recovery_promotes_without_touching_replacement() {
         .expect("stream id")
         .to_string();
     old_conn.publish_pending_sm_enable(state.as_ref());
+    let mut prefix = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
+    prefix.id = Some(xmpp_parsers::message::Id("superseded-prefix".to_string()));
     let _ = old_conn.sm_state.record_outbound(
-        message_frame_xml_with_id("superseded-prefix".to_string()),
+        waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize prefix"),
         SmEvictionPath::Batch,
     );
     old_conn.begin_terminal_sm_recovery();
@@ -439,7 +443,7 @@ async fn superseded_terminal_recovery_promotes_without_touching_replacement() {
         .expect("old receiver accepted backlog");
 
     assert_eq!(
-        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, true).await,
+        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await,
         super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
     );
     assert!(state
@@ -467,13 +471,18 @@ async fn superseded_terminal_recovery_promotes_without_touching_replacement() {
         .list(&jid.to_bare())
         .await
         .expect("list promoted rows");
-    assert!(pending.iter().any(|row| {
-        matches!(
-            &row.payload,
-            waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
-                if message.id.as_ref().is_some_and(|id| id.0 == "superseded-backlog")
-        )
-    }));
+    for expected_id in ["superseded-prefix", "superseded-backlog"] {
+        assert!(
+            pending.iter().any(|row| {
+                matches!(
+                    &row.payload,
+                    waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                        if message.id.as_ref().is_some_and(|id| id.0 == expected_id)
+                )
+            }),
+            "terminal recovery must promote {expected_id}"
+        );
+    }
 }
 
 #[tokio::test]
