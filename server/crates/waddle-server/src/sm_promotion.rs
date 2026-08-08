@@ -243,11 +243,22 @@ impl<'a> PromotionBatchGuard<'a> {
 impl Drop for PromotionBatchGuard<'_> {
     fn drop(&mut self) {
         for session in self.sessions.drain(..) {
-            if let Err(error) = self.registry.retain_pending_promotion_for_retry(session) {
-                tracing::warn!(
-                    %error,
-                    "cancelled displaced-promotion batch could not restore an unstarted session"
-                );
+            let stream_id = session.stream_id.clone();
+            match self.registry.retain_pending_promotion_for_retry(session) {
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::Retained) => {}
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::NotTracked) => {
+                    tracing::warn!(
+                        %stream_id,
+                        "cancelled displaced-promotion batch found no pending promotion to restore"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %stream_id,
+                        %error,
+                        "cancelled displaced-promotion batch could not restore an unstarted session"
+                    );
+                }
             }
         }
     }
@@ -286,9 +297,13 @@ impl<'a> PromotionSessionGuard<'a> {
             .registry
             .retain_pending_promotion_for_retry(self.session.clone())
         {
-            Ok(()) => {
+            Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::Retained) => {
                 self.armed = false;
                 true
+            }
+            Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::NotTracked) => {
+                self.armed = false;
+                false
             }
             Err(error) => {
                 tracing::warn!(
@@ -305,15 +320,24 @@ impl<'a> PromotionSessionGuard<'a> {
 impl Drop for PromotionSessionGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            if let Err(error) = self
+            match self
                 .registry
                 .retain_pending_promotion_for_retry(self.session.clone())
             {
-                tracing::warn!(
-                    stream_id = %self.session.stream_id,
-                    %error,
-                    "cancelled displaced promotion could not restore its session"
-                );
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::Retained) => {}
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::NotTracked) => {
+                    tracing::warn!(
+                        stream_id = %self.session.stream_id,
+                        "cancelled displaced promotion found no pending promotion to restore"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        stream_id = %self.session.stream_id,
+                        %error,
+                        "cancelled displaced promotion could not restore its session"
+                    );
+                }
             }
         }
     }

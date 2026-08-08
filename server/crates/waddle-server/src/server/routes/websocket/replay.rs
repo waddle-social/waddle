@@ -1,7 +1,7 @@
 use super::*;
 use super::{
-    interpret_loop::build_interpret_deps, stream_management::is_countable_stanza,
-    transport_xml::stanza_to_xml,
+    interpret_loop::build_interpret_deps, state::WsConnState,
+    stream_management::is_countable_stanza, transport_xml::stanza_to_xml,
 };
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
@@ -102,6 +102,70 @@ pub(super) async fn drain_outbound_into_replay(
             }
         }
     }
+}
+
+/// Terminal-recovery variant of [`drain_outbound_into_replay`]. Records only
+/// into [`WsConnState::terminal_sm_recovery`], enforcing that queue's hard cap
+/// in-place so terminal cleanup never evicts its recorded prefix while
+/// draining already accepted outbound work.
+pub(super) async fn drain_outbound_into_terminal_recovery(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    pending_row_policy: PendingRowDrainPolicy,
+) {
+    let principal_session = conn.authenticated_session.clone();
+    let principal = principal_session
+        .as_ref()
+        .map(super::ResolvedPrincipal::from_authenticated_session);
+    let deps = build_interpret_deps(state, principal);
+    while let Ok(outbound_stanza) = outbound_rx.try_recv() {
+        let receipt_at = outbound_stanza
+            .pending_row_original_receipt_at
+            .unwrap_or_else(chrono::Utc::now);
+        let pending_row_id = outbound_stanza.pending_row_id.clone();
+        match outbound_stanza.kind {
+            DeliveryKind::DirectFrame => {
+                let xml = stanza_to_xml(&outbound_stanza.stanza);
+                record_drained_terminal_xml(
+                    state,
+                    conn,
+                    xml,
+                    receipt_at,
+                    pending_row_id,
+                    pending_row_policy,
+                )
+                .await;
+            }
+            DeliveryKind::PeerStanza => {
+                let Some(sm) = conn.state_machine.as_mut() else {
+                    warn!(
+                        "PeerStanza encountered in terminal drain without an SM; \
+                         dropping. Fresh bind will not replay this stanza."
+                    );
+                    continue;
+                };
+                let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(
+                    outbound_stanza.stanza,
+                )));
+                let drive = drive_interpret_loop(events, sm, &deps).await;
+                let mut row_id_for_first = pending_row_id.clone();
+                for xml in drive.frames {
+                    let row_for_this = row_id_for_first.take();
+                    record_drained_terminal_xml(
+                        state,
+                        conn,
+                        xml,
+                        receipt_at,
+                        row_for_this,
+                        pending_row_policy,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+    conn.warn_terminal_recovery_drops_once();
 }
 
 /// Helper: record a single drained XML frame into the per-connection
@@ -220,6 +284,57 @@ async fn record_drained_xml(
             warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");
         }
     }
+}
+
+async fn record_drained_terminal_xml(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    xml: String,
+    original_receipt_at: chrono::DateTime<chrono::Utc>,
+    pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
+    pending_row_policy: PendingRowDrainPolicy,
+) {
+    if matches!(
+        pending_row_policy,
+        PendingRowDrainPolicy::ReleaseForTerminalRecovery
+    ) {
+        if let Some(row_id) = pending_row_id {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .release_row(&row_id)
+                .await
+            {
+                warn!(
+                    row_id = %row_id,
+                    %error,
+                    "pending_delivery release_row (terminal recovery drain) failed; \
+                     claim-expiry janitor will recover the row"
+                );
+            }
+            return;
+        }
+    }
+    if !conn.terminal_sm_recovery.enabled || !is_countable_stanza(&xml) {
+        if let Some(row_id) = pending_row_id {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .release_row(&row_id)
+                .await
+            {
+                warn!(
+                    row_id = %row_id,
+                    %error,
+                    "pending_delivery release_row (terminal drained non-countable or SM-disabled) failed"
+                );
+            }
+        }
+        return;
+    }
+    conn.record_terminal_recovery_outbound_with_receipt_at(xml, original_receipt_at);
 }
 
 /// Accumulated result of [`drive_interpret_loop`]: everything the

@@ -10,7 +10,7 @@ use super::super::{
     batch_write::{
         write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
     },
-    state::{WebSocketState, WsConnState},
+    state::{WebSocketState, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
 };
 use super::create_test_websocket_state;
 use futures::{stream, Sink, Stream, StreamExt as _};
@@ -1046,9 +1046,11 @@ async fn wrap_behind_stale_ack_drained_mid_batch_is_ignored_and_batch_continues(
 /// The core fix: a burst far larger than the unacked-queue cap paces on
 /// the send window instead of overflowing it. With a cap of 10 (high
 /// watermark 8, low watermark 5) and a 40-frame batch, the writer pauses
-/// each time the outstanding count reaches 8, sends an off-cadence `<r/>`,
-/// and blocks until the scripted client ack brings the window back down —
-/// so the queue never evicts and no replay gap is ever marked.
+/// before each next countable frame once the outstanding count has reached 8,
+/// sends an off-cadence `<r/>`, and blocks until the scripted client ack
+/// brings the window back down. If the batch ends exactly on the high
+/// watermark, the final `<r/>` is left to the connection loop's paused-window
+/// gate; the batch writer itself still preserves the no-eviction invariant.
 #[tokio::test]
 async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
     let state = create_test_websocket_state().await;
@@ -1059,14 +1061,15 @@ async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
     conn.sm_state.enable("paced".to_string(), true, Some(300));
 
     let mut sink = CollectSink::default();
-    // The client fully acks at each pause: pauses land at outstanding 8, i.e.
-    // outbound counts 8, 16, 24, 32, 40.
+    // The client fully acks at each inline pause. With pre-countable pacing,
+    // those pauses happen before frames 9/17/25/33, i.e. after counts
+    // 8/16/24/32. The final eight frames are left outstanding for the
+    // connection loop's paused-window gate to prompt.
     let mut reader = reader_with(vec![
         ack_frame(8),
         ack_frame(16),
         ack_frame(24),
         ack_frame(32),
-        ack_frame(40),
     ]);
     let frames: Vec<String> = (1..=40).map(countable_message).collect();
 
@@ -1082,7 +1085,10 @@ async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
 
     assert!(matches!(outcome, BatchWriteOutcome::Continue));
     assert_eq!(conn.sm_state.outbound_count, 40, "every frame was written");
-    assert_eq!(conn.sm_state.last_acked, 40, "final ack landed");
+    assert_eq!(
+        conn.sm_state.last_acked, 32,
+        "the batch writer applies only the four inline pause acks"
+    );
     assert_eq!(
         conn.sm_state.replay_gap_through(),
         None,
@@ -1092,14 +1098,19 @@ async fn send_window_pause_awaits_ack_so_a_burst_over_cap_never_evicts() {
         conn.sm_state.queue_len() <= 10,
         "the retained queue never exceeds the cap under pacing"
     );
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        8,
+        "the final eight frames remain queued for the loop-level paused-window gate"
+    );
     let r_xml = SmRequest::to_xml();
     let texts = sink_texts(&sink);
     assert_eq!(
         texts.iter().filter(|t| **t == r_xml).count(),
-        5,
-        "exactly one off-cadence <r/> per pause (at 8/16/24/32/40)"
+        4,
+        "exactly one off-cadence <r/> per inline pause (at 8/16/24/32)"
     );
-    assert_eq!(texts.len(), 45, "40 stanzas + 5 pacing <r/>");
+    assert_eq!(texts.len(), 44, "40 stanzas + 4 inline pacing <r/>");
 }
 
 #[tokio::test]
@@ -1279,6 +1290,125 @@ async fn replay_suppressed_batch_never_send_window_pauses_even_above_high_waterm
     assert_eq!(
         conn.sm_state.outbound_count, outbound_before,
         "ReplaySuppressed must not record (grow) the window"
+    );
+}
+
+/// Issue #1219 / #1234 review regression: a `Record` batch whose next frame
+/// is uncountable control traffic must not trip send-window pacing just
+/// because the pause latch is already set from earlier countable backlog.
+/// The lone outbound `<a/>` cannot grow or evict the replay queue, so it must
+/// write through even if the paused window would otherwise exhaust its
+/// deferred-headroom reserve while waiting for a fresh ack.
+#[tokio::test]
+async fn control_only_record_batch_writes_through_a_latched_send_window() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("control-only-latched".to_string(), true, Some(300));
+    for i in 0..8 {
+        let _ = conn
+            .sm_state
+            .record_outbound(countable_message(i), SmEvictionPath::Batch);
+    }
+    assert!(
+        conn.sm_state.needs_send_pause(),
+        "precondition: existing countable backlog latched the send-window pause"
+    );
+    conn.deferred_inbound.extend(
+        (0..64).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("noise{i}")))),
+    );
+
+    let control = SmAck::new(17).to_xml();
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(
+        (0..8)
+            .map(|i| Message::Text(message_with_id(&format!("paused-noise{i}")).into()))
+            .collect(),
+    );
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![control.clone()],
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(
+        sink_texts(&sink),
+        vec![control],
+        "the control frame must write immediately"
+    );
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        8,
+        "uncountable control traffic must not grow the replay queue"
+    );
+    assert!(
+        !conn.sm_recovery_required,
+        "the control-only batch must not terminalize the connection"
+    );
+    assert_eq!(
+        conn.deferred_inbound.len(),
+        64,
+        "without a pause, the writer must not consume deferred-headroom reserve"
+    );
+}
+
+/// Mixed batches still honor send-window pacing, but only once they reach the
+/// first countable frame that would grow the replay queue. Any leading
+/// uncountable control frame must preserve FIFO and write through before the
+/// pause loop runs.
+#[tokio::test]
+async fn mixed_batch_pauses_only_when_it_reaches_the_first_countable_frame() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("mixed-latched".to_string(), true, Some(300));
+    for i in 0..8 {
+        let _ = conn
+            .sm_state
+            .record_outbound(countable_message(i), SmEvictionPath::Batch);
+    }
+    assert!(
+        conn.sm_state.needs_send_pause(),
+        "precondition: existing countable backlog latched the send-window pause"
+    );
+
+    let control = SmAck::new(17).to_xml();
+    let countable = countable_message(99);
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(vec![ack_frame(8)]);
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![control.clone(), countable.clone()],
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(
+        sink_texts(&sink),
+        vec![control, SmRequest::to_xml(), countable],
+        "the uncountable control must write first; the pause runs only before the first countable"
+    );
+    assert_eq!(
+        conn.sm_state.last_acked, 8,
+        "the inline pause ack must settle the pre-existing backlog before the new countable frame records"
+    );
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        1,
+        "only the newly-recorded countable frame remains replayable"
     );
 }
 
@@ -1516,10 +1646,11 @@ async fn send_window_absolute_deferred_ceiling_preserves_recorded_prefix() {
     );
 }
 
-/// After terminal recovery begins, post-transport response recording must not
-/// append to the capped live queue and evict its recoverable prefix.
+/// After terminal recovery begins, one oversized fan-out must still obey the
+/// terminal cap: preserve the live prefix, retain exactly the terminal cap,
+/// drop the excess without eviction, and remain promotable.
 #[test]
-fn terminal_recovery_redirects_replay_tail_out_of_capped_sm_queue() {
+fn terminal_recovery_caps_a_single_fanout_without_eviction_and_stays_promotable() {
     let mut conn = WsConnState::new();
     conn.sm_state = StreamManagementState::with_config(8, 100);
     conn.sm_state
@@ -1533,14 +1664,42 @@ fn terminal_recovery_redirects_replay_tail_out_of_capped_sm_queue() {
 
     super::super::batch_write::record_remaining_for_replay(
         &mut conn,
-        (9..=1032).map(countable_message),
+        (9..=u32::try_from(TERMINAL_RECOVERY_QUEUE_CAP + 24).expect("range fits"))
+            .map(|sequence| countable_message(sequence as usize)),
         BatchSmPolicy::Record,
     );
 
     assert_eq!(conn.sm_state.queue_len(), 8);
     assert_eq!(conn.sm_state.replay_gap_through(), None);
-    assert_eq!(conn.terminal_sm_recovery.queue_len(), 1024);
+    assert_eq!(
+        conn.terminal_sm_recovery.queue_len(),
+        TERMINAL_RECOVERY_QUEUE_CAP
+    );
     assert_eq!(conn.terminal_sm_recovery.replay_gap_through(), None);
+    assert_eq!(
+        conn.terminal_sm_recovery.outbound_count as usize, TERMINAL_RECOVERY_QUEUE_CAP,
+        "dropped terminal tail must not invent replay sequence numbers"
+    );
+    assert_eq!(conn.terminal_sm_recovery_dropped, 16);
+    assert!(conn.terminal_sm_recovery_drop_warned);
+
+    let promoted = conn
+        .terminal_sm_recovery
+        .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
+            user_id: "user-1".to_string(),
+            jid: "alice@example.com/terminal-recovery".parse().expect("jid"),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .expect("terminal queue remains promotable");
+    assert_eq!(promoted.unacked_stanzas.len(), TERMINAL_RECOVERY_QUEUE_CAP);
 }
 
 /// A normal deferred backlog is deliberately kept below the physical cap, so

@@ -16,6 +16,12 @@ pub(super) enum ClaimSessionOutcome {
     LostClaim,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingPromotionRetryRetention {
+    Retained,
+    NotTracked,
+}
+
 /// The `ClaimStore` entity naming an SM session's ownership claim (element
 /// 8: `entity_type = sm_session`, `entity = ` the SM-ID/stream id).
 fn sm_session_entity(stream_id: &str) -> Entity {
@@ -103,12 +109,21 @@ impl Drop for PendingPromotionRetryLease<'_> {
             return;
         };
         let stream_id = session.stream_id.clone();
-        if let Err(error) = self.registry.retain_pending_promotion_for_retry(session) {
-            tracing::warn!(
-                %stream_id,
-                %error,
-                "cancelled retry reconciliation could not restore promotion ownership"
-            );
+        match self.registry.retain_pending_promotion_for_retry(session) {
+            Ok(PendingPromotionRetryRetention::Retained) => {}
+            Ok(PendingPromotionRetryRetention::NotTracked) => {
+                tracing::warn!(
+                    %stream_id,
+                    "cancelled retry reconciliation found no pending promotion to restore"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %stream_id,
+                    %error,
+                    "cancelled retry reconciliation could not restore promotion ownership"
+                );
+            }
         }
     }
 }
@@ -143,12 +158,21 @@ impl Drop for DrainedSessionBatch<'_> {
     fn drop(&mut self) {
         for session in self.sessions.drain(..) {
             let stream_id = session.stream_id.clone();
-            if let Err(error) = self.registry.retain_pending_promotion_for_retry(session) {
-                tracing::warn!(
-                    %stream_id,
-                    %error,
-                    "cancelled expiry drain could not restore promotion ownership"
-                );
+            match self.registry.retain_pending_promotion_for_retry(session) {
+                Ok(PendingPromotionRetryRetention::Retained) => {}
+                Ok(PendingPromotionRetryRetention::NotTracked) => {
+                    tracing::warn!(
+                        %stream_id,
+                        "cancelled expiry drain found no pending promotion to restore"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %stream_id,
+                        %error,
+                        "cancelled expiry drain could not restore promotion ownership"
+                    );
+                }
             }
         }
     }
@@ -1354,20 +1378,20 @@ impl InMemorySmSessionRegistry {
     pub fn retain_pending_promotion_for_retry(
         &self,
         session: DetachedSession,
-    ) -> Result<(), SmRegistryError> {
+    ) -> Result<PendingPromotionRetryRetention, SmRegistryError> {
         let stream_id = session.stream_id.clone();
         let promotions = self
             .pending_promotions
             .read()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         if !promotions.contains(&stream_id) {
-            return Ok(());
+            return Ok(PendingPromotionRetryRetention::NotTracked);
         }
         self.pending_promotion_retries
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
             .insert(stream_id, session);
-        Ok(())
+        Ok(PendingPromotionRetryRetention::Retained)
     }
 
     /// Ensure this node holds `stream_id`'s `ClaimStore` claim at

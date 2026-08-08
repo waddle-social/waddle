@@ -4527,9 +4527,12 @@ async fn cancelled_confirm_retains_exact_release_after_durable_delete() {
         .expect("durable lookup")
         .is_none());
     assert_eq!(registry.pending_claim_release_count(), 1);
-    registry
-        .retain_pending_promotion_for_retry(drained[0].clone())
-        .expect("cancelled outer promotion fallback");
+    assert_eq!(
+        registry
+            .retain_pending_promotion_for_retry(drained[0].clone())
+            .expect("cancelled outer promotion fallback"),
+        super::PendingPromotionRetryRetention::NotTracked
+    );
     assert!(!registry
         .sessions
         .read()
@@ -4687,9 +4690,12 @@ async fn concurrent_retry_drains_lease_a_promotion_exactly_once() {
         .into_iter()
         .next()
         .expect("drained session");
-    registry
-        .retain_pending_promotion_for_retry(session)
-        .expect("queue retry");
+    assert_eq!(
+        registry
+            .retain_pending_promotion_for_retry(session)
+            .expect("queue retry"),
+        super::PendingPromotionRetryRetention::Retained
+    );
 
     let first_registry = registry.clone();
     let second_registry = registry.clone();

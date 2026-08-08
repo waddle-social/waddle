@@ -1535,10 +1535,18 @@ pub(super) struct WsConnState {
     /// Terminal XEP-0198 recovery queue. Once the bounded live queue has
     /// exhausted its deferred-inbound headroom, replies from already accepted
     /// frames are recorded here instead of risking an eviction from
-    /// `sm_state`; cleanup stops before accepting another parked frame after
-    /// [`TERMINAL_RECOVERY_QUEUE_CAP`] entries (plus one frame's fan-out),
-    /// promotes both queues, and rejects resume.
+    /// `sm_state`. This queue is also bounded at
+    /// [`TERMINAL_RECOVERY_QUEUE_CAP`]: once full, later countable replies
+    /// from the same terminal session are dropped instead of evicting the
+    /// recorded prefix. Partial recording is acceptable here because cleanup
+    /// promotes what was retained, rejects XEP-0198 resume, and regenerable
+    /// presence fan-out is replayed by a fresh bind/rejoin.
     pub(super) terminal_sm_recovery: StreamManagementState,
+    /// Countable stanzas dropped because terminal recovery hit
+    /// [`TERMINAL_RECOVERY_QUEUE_CAP`]. Logged at most once per connection.
+    pub(super) terminal_sm_recovery_dropped: usize,
+    /// Whether the terminal recovery cap warning was already emitted.
+    pub(super) terminal_sm_recovery_drop_warned: bool,
     /// Loop-level XEP-0198 send-window pause deadline (issue #1219).
     /// `Some(deadline)` while the connection loop is holding off draining
     /// the outbound mpsc because `sm_state.needs_send_pause()` latched:
@@ -1616,6 +1624,8 @@ impl WsConnState {
             deferred_inbound: std::collections::VecDeque::new(),
             sm_recovery_required: false,
             terminal_sm_recovery: StreamManagementState::new(),
+            terminal_sm_recovery_dropped: 0,
+            terminal_sm_recovery_drop_warned: false,
             send_window_pause_deadline: None,
             send_window_last_request_acked: 0,
             state_machine: None,
@@ -1634,9 +1644,8 @@ impl WsConnState {
         let Some(stream_id) = self.sm_state.stream_id.clone() else {
             return;
         };
-        // The terminal queue itself stays non-evicting: the epilogue checks
-        // TERMINAL_RECOVERY_QUEUE_CAP before dispatching each parked frame,
-        // so a single accepted frame may retain its complete reply fan-out.
+        self.terminal_sm_recovery_dropped = 0;
+        self.terminal_sm_recovery_drop_warned = false;
         let mut recovery = StreamManagementState::with_config(usize::MAX, u32::MAX);
         recovery.enable(
             stream_id,
@@ -1644,6 +1653,44 @@ impl WsConnState {
             self.sm_state.max_resume_time,
         );
         self.terminal_sm_recovery = recovery;
+    }
+
+    pub(super) fn record_terminal_recovery_outbound(&mut self, stanza_xml: String) {
+        self.record_terminal_recovery_outbound_with_receipt_at(stanza_xml, chrono::Utc::now());
+    }
+
+    pub(super) fn record_terminal_recovery_outbound_with_receipt_at(
+        &mut self,
+        stanza_xml: String,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        if self.terminal_sm_recovery.queue_len() >= TERMINAL_RECOVERY_QUEUE_CAP {
+            self.terminal_sm_recovery_dropped = self.terminal_sm_recovery_dropped.saturating_add(1);
+            return;
+        }
+        let _ = self.terminal_sm_recovery.record_outbound_with_receipt_at(
+            stanza_xml,
+            original_receipt_at,
+            waddle_xmpp::telemetry::attributes::SmEvictionPath::ReplayTail,
+        );
+    }
+
+    pub(super) fn warn_terminal_recovery_drops_once(&mut self) {
+        if self.terminal_sm_recovery_drop_warned || self.terminal_sm_recovery_dropped == 0 {
+            return;
+        }
+        warn!(
+            stream_id = self
+                .terminal_sm_recovery
+                .stream_id
+                .as_deref()
+                .or(self.sm_state.stream_id.as_deref())
+                .unwrap_or("<unset>"),
+            cap = TERMINAL_RECOVERY_QUEUE_CAP,
+            dropped = self.terminal_sm_recovery_dropped,
+            "Terminal SM recovery queue hit cap; keeping recorded prefix and dropping replayable tail until fresh bind"
+        );
+        self.terminal_sm_recovery_drop_warned = true;
     }
 
     /// Covers tests and exceptional cleanup paths that established the
@@ -1796,8 +1843,8 @@ impl WsConnState {
     }
 }
 /// Terminal recovery stops accepting another deferred inbound frame once this
-/// many replayable responses are retained. A single frame can still append its
-/// complete reply fan-out after crossing this threshold; the remaining parked
-/// client frames are discarded and remain the sender's responsibility because
-/// terminal recovery deliberately invalidates XEP-0198 resume.
+/// many replayable responses are retained. Further countable replies from the
+/// already-terminal session are dropped in place; the recorded prefix is still
+/// promoted, resume is rejected, and the sender must re-establish any
+/// regenerable state such as MUC presence via a fresh bind/rejoin.
 pub(super) const TERMINAL_RECOVERY_QUEUE_CAP: usize = 4096;

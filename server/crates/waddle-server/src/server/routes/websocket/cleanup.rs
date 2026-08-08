@@ -1,6 +1,8 @@
 use super::*;
 use super::{
-    replay::{drain_outbound_into_replay, PendingRowDrainPolicy},
+    replay::{
+        drain_outbound_into_replay, drain_outbound_into_terminal_recovery, PendingRowDrainPolicy,
+    },
     state::WsConnState,
     stream_management::sm_show_from_name,
 };
@@ -758,8 +760,9 @@ fn terminal_recovery_snapshot(
 
 /// Combine replies recorded after cap exhaustion with the accepted outbound
 /// receiver backlog into one synthetic detached session. Both buffers are
-/// intentionally unbounded only during terminal recovery, and are promoted
-/// rather than made resumable. Keeping one session per stream preserves the
+/// promoted rather than made resumable; terminal recovery itself is bounded,
+/// keeping the recorded prefix and dropping later replayable stanzas once the
+/// terminal cap is full. Keeping one session per stream preserves the
 /// promotion helper's retry identity invariant.
 async fn terminal_recovery_session(
     state: &WebSocketState,
@@ -770,13 +773,10 @@ async fn terminal_recovery_session(
 ) -> waddle_xmpp::stream_management::DetachedSession {
     outbound_rx.close();
     conn.ensure_terminal_sm_recovery();
-    drain_outbound_into_replay(
+    drain_outbound_into_terminal_recovery(
         state,
-        conn.state_machine.as_mut(),
-        &mut conn.terminal_sm_recovery,
-        conn.authenticated_session.as_ref(),
+        conn,
         outbound_rx,
-        None,
         PendingRowDrainPolicy::ReleaseForTerminalRecovery,
     )
     .await;
@@ -857,17 +857,34 @@ async fn refuse_detach_without_principal(
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     if let Some((removed_entry, owner)) = terminal_removed {
         let was_presence_available = removed_entry.is_presence_available();
-        let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
-        state.deps.protocol.caps_resolver.drop_resource(jid);
-        broadcast_unavailable_if_no_replacement(state, jid, was_presence_available).await;
-        cleanup_muc_presence_with_origin(state, jid, cleanup_origin.as_ref()).await;
+        // The promotion await above can overlap a same-FullJID replacement
+        // binding and rejoining rooms. At this point the old route is already
+        // gone, so any live registry entry is necessarily that replacement and
+        // owns the FullJID-keyed resources below.
+        let replacement_took_over = state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(jid)
+            .is_some();
+        if !replacement_took_over {
+            let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
+            state.deps.protocol.caps_resolver.drop_resource(jid);
+            broadcast_unavailable_if_no_replacement(state, jid, was_presence_available).await;
+            cleanup_muc_presence_with_origin(state, jid, cleanup_origin.as_ref()).await;
+            unregister_remote_user_resource_if_owner(state, jid, &owner).await;
+        } else {
+            debug!(
+                jid = %jid,
+                "Skipped terminal shared-resource cleanup: a replacement connection retook the FullJid during promotion"
+            );
+        }
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             jid,
             Some(std::sync::Arc::clone(&owner)),
         )
         .await;
-        unregister_remote_user_resource_if_owner(state, jid, &owner).await;
         outbound_rx.close();
         return ConnectionShutdownOutcome::NotPersisted;
     }

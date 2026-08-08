@@ -210,47 +210,35 @@ where
         record_remaining_for_replay(conn, frames, policy);
         return BatchWriteOutcome::AuthorityRevoked;
     }
-    // Send-window pacing applies ONLY to batches that actually grow the SM
-    // unacked queue (issue #1219 review). A `ReplaySuppressed` batch is the
-    // XEP-0198 resume replay: its stanzas are ALREADY in the restored unacked
-    // queue and are re-sent without recording, so it never grows the window.
-    // If a stream resumes with a backlog ≥ the high watermark, the pause latch
-    // is already set from `restore_from_session`; pacing the replay batch
-    // would block waiting for acks of frames it has not sent yet and livelock
-    // the resume (re-introducing the #1219 poisoning class). The post-replay
-    // connection-loop gate paces any NEW traffic and elicits the ack that
-    // drains the restored backlog.
-    let pacing = matches!(policy, BatchSmPolicy::Record);
-    // Pace on ENTRY too (Codex P2 review on PR #1234): if the batch is entered
-    // while the window is ALREADY latched — a `Record` batch after a resume
-    // restored a full unacked queue, or one dispatched from the inbound /
-    // handoff arms while the loop-level outbound gate holds the pause — the
-    // first frame must not be recorded before the window recovers, or
-    // `record_outbound` could evict from an already-full queue and re-poison
-    // resume. Await recovery before recording anything.
-    if pacing && conn.sm_state.needs_send_pause() {
-        match await_send_window_recovery(sender, reader, state, conn, authority).await {
-            SendWindowOutcome::Recovered => {}
-            SendWindowOutcome::DeferredCapExhausted => {
-                conn.begin_terminal_sm_recovery();
-                return BatchWriteOutcome::DeferredCapExhausted;
-            }
-            SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
-                record_remaining_for_replay(conn, frames, policy);
-                return BatchWriteOutcome::TransportClosed;
-            }
-            SendWindowOutcome::AuthorityRevoked => {
-                record_remaining_for_replay(conn, frames, policy);
-                return BatchWriteOutcome::AuthorityRevoked;
-            }
-        }
-    }
+    // Send-window pacing applies ONLY before frames that would actually grow
+    // the SM unacked queue (issue #1219 review). `ReplaySuppressed` resume
+    // replay still never pauses because its frames are already queued, and a
+    // `Record` batch whose next frame is uncountable control traffic must
+    // write that control through even while a previously-recorded backlog has
+    // the pause latch set.
     while let Some(frame) = frames.next() {
         if !batch_authoritative(authority) {
             record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
             return BatchWriteOutcome::AuthorityRevoked;
         }
         let current_recorded = should_record(conn, &frame, policy);
+        if current_recorded && conn.sm_state.needs_send_pause() {
+            match await_send_window_recovery(sender, reader, state, conn, authority).await {
+                SendWindowOutcome::Recovered => {}
+                SendWindowOutcome::DeferredCapExhausted => {
+                    conn.begin_terminal_sm_recovery();
+                    return BatchWriteOutcome::DeferredCapExhausted;
+                }
+                SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
+                    record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
+                    return BatchWriteOutcome::TransportClosed;
+                }
+                SendWindowOutcome::AuthorityRevoked => {
+                    record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
+                    return BatchWriteOutcome::AuthorityRevoked;
+                }
+            }
+        }
         let request_ack = if current_recorded {
             conn.sm_state
                 .record_outbound(frame.clone(), SmEvictionPath::Batch)
@@ -324,39 +312,6 @@ where
                     return BatchWriteOutcome::TransportClosed;
                 }
                 DrainSignal::AuthorityRevoked => {
-                    record_remaining_for_replay(conn, frames, policy);
-                    return BatchWriteOutcome::AuthorityRevoked;
-                }
-            }
-        }
-        // Send-window pacing (issue #1219): if recording this frame pushed
-        // the outstanding unacked count over the high watermark, stop
-        // feeding the queue and block until the client acks it back down —
-        // so a MAM catch-up / fan-out burst can never overflow the 1000-slot
-        // queue and poison resume. XEP-0198 §4: the server may request an
-        // ack at any time and is under no obligation to transmit queued
-        // stanzas immediately (xep-0198.xml:307/357).
-        if pacing && conn.sm_state.needs_send_pause() {
-            match await_send_window_recovery(sender, reader, state, conn, authority).await {
-                SendWindowOutcome::Recovered => {}
-                SendWindowOutcome::DeferredCapExhausted => {
-                    conn.begin_terminal_sm_recovery();
-                    return BatchWriteOutcome::DeferredCapExhausted;
-                }
-                SendWindowOutcome::TransportClosed => {
-                    record_remaining_for_replay(conn, frames, policy);
-                    return BatchWriteOutcome::TransportClosed;
-                }
-                SendWindowOutcome::TimedOut => {
-                    // Dead/stalled peer: record the untransmitted tail for
-                    // replay (evicting + marking the replay gap if it no longer
-                    // fits, so a later resume fails loud rather than silently
-                    // omitting frames — Codex P1), then close into
-                    // detach-for-resume via the loop break.
-                    record_remaining_for_replay(conn, frames, policy);
-                    return BatchWriteOutcome::TransportClosed;
-                }
-                SendWindowOutcome::AuthorityRevoked => {
                     record_remaining_for_replay(conn, frames, policy);
                     return BatchWriteOutcome::AuthorityRevoked;
                 }
@@ -558,8 +513,9 @@ fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool
 /// [`StreamManagementState::record_outbound`], which marks a replay gap if a
 /// post-transport-loss tail cannot fit. Once deferred headroom is exhausted,
 /// it instead writes exclusively to `terminal_sm_recovery`: terminal cleanup
-/// promotes that unbounded typed queue and rejects resume, so no later frame
-/// can evict the already-recorded prefix from the capped live SM queue.
+/// promotes the bounded recorded prefix and rejects resume, so partial
+/// recording is acceptable and no later frame can evict the already-recorded
+/// prefix from the capped live SM queue.
 pub(super) fn record_remaining_for_replay(
     conn: &mut WsConnState,
     frames: impl Iterator<Item = String>,
@@ -567,14 +523,16 @@ pub(super) fn record_remaining_for_replay(
 ) {
     for frame in frames {
         if should_record(conn, &frame, policy) {
-            let state = if conn.sm_recovery_required {
-                &mut conn.terminal_sm_recovery
+            if conn.sm_recovery_required {
+                conn.record_terminal_recovery_outbound(frame);
             } else {
-                &mut conn.sm_state
-            };
-            let _ = state.record_outbound(frame, SmEvictionPath::ReplayTail);
+                let _ = conn
+                    .sm_state
+                    .record_outbound(frame, SmEvictionPath::ReplayTail);
+            }
         }
     }
+    conn.warn_terminal_recovery_drops_once();
 }
 
 /// Preserve the current frame plus the unconsumed iterator tail when
