@@ -18,6 +18,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use waddle_xmpp::stream_management::{SmAck, SmRequest, StreamManagementState};
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
 use axum::extract::ws::Message;
 use xmpp_parsers::minidom::Element;
@@ -884,11 +885,11 @@ async fn drain_drops_oversized_frames_instead_of_parking_them() {
     assert_eq!(deferred, vec![kept]);
 }
 
-/// The drain parks non-ack frames in `deferred_inbound` — but only up
-/// to a cap, past which it stops reading so a flooding client hits
-/// TCP backpressure instead of growing server heap without bound.
+/// Normal drain parking leaves reserved headroom for an active
+/// send-window pause, then stops reading so a flooding client hits TCP
+/// backpressure instead of growing server heap without bound.
 #[tokio::test]
-async fn drain_stops_parking_deferred_frames_at_the_cap() {
+async fn drain_stops_parking_before_the_reserved_ack_headroom() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     conn.sm_state = StreamManagementState::with_config(10_000, 5);
@@ -916,8 +917,8 @@ async fn drain_stops_parking_deferred_frames_at_the_cap() {
     assert!(matches!(outcome, BatchWriteOutcome::Continue));
     assert_eq!(
         conn.deferred_inbound.len(),
-        64,
-        "deferred queue must stop growing at the cap"
+        56,
+        "normal drain must retain the eight-frame ack headroom"
     );
 }
 
@@ -1238,7 +1239,9 @@ async fn replay_suppressed_batch_never_send_window_pauses_even_above_high_waterm
     conn.sm_state = StreamManagementState::with_config(10, 100);
     conn.sm_state.enable("resumed".to_string(), true, Some(300));
     for i in 0..9 {
-        let _ = conn.sm_state.record_outbound(countable_message(i));
+        let _ = conn
+            .sm_state
+            .record_outbound(countable_message(i), SmEvictionPath::Batch);
     }
     assert!(
         conn.sm_state.needs_send_pause(),
@@ -1279,31 +1282,26 @@ async fn replay_suppressed_batch_never_send_window_pauses_even_above_high_waterm
     );
 }
 
-/// When the client floods the socket with non-ack frames while the writer
-/// is paused, the awaited `<a/>` cannot be read in order once 64 frames are
-/// parked. The writer then degrades to the pre-#1219 evict-oldest behaviour
-/// for the rest of the batch (this stream only) rather than wedging.
+/// A full deferred buffer is terminal for a paused send window. The writer
+/// must not abandon pacing and record the batch tail into the capped unacked
+/// queue: that is the eviction path which previously poisoned resume.
 #[tokio::test]
-async fn send_window_deferred_cap_degrades_to_eviction() {
-    // This test intentionally evicts, bumping the process-global
-    // `waddle_sm_unacked_evicted_total`. Hold the shared metrics lock so it
-    // serializes against `write_response_batch_drains_acks_between_chunks_so_nothing_evicts`,
-    // which asserts that counter's delta is zero under the same lock —
-    // otherwise these two contend under parallel test execution.
-    let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+async fn send_window_deferred_cap_exhaustion_closes_without_eviction_or_silent_tail() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     conn.sm_state = StreamManagementState::with_config(10, 100);
-    conn.sm_state.enable("degrade".to_string(), true, Some(300));
+    conn.sm_state
+        .enable("cap-exhausted".to_string(), true, Some(300));
 
     let mut sink = CollectSink::default();
-    // 64 non-ack frames (the DEFERRED_INBOUND_CAP) buffered ahead of any
-    // ack, so the pause fills the deferred buffer and cannot make progress.
-    let noise: Vec<Message> = (0..64)
-        .map(|i| Message::Text(message_with_id(&format!("noise{i}")).into()))
-        .collect();
-    let mut reader = reader_with(noise);
-    let frames: Vec<String> = (1..=20).map(countable_message).collect();
+    // Model the incident's sticky deferred queue: the connection loop has
+    // already parked a full cap of ordinary inbound frames and this batch's
+    // pause has no reserved slot left to hunt for an ack.
+    conn.deferred_inbound.extend(
+        (0..64).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("noise{i}")))),
+    );
+    let mut reader = reader_with(vec![]);
+    let frames: Vec<String> = (1..=1200).map(countable_message).collect();
 
     let outcome = write_response_batch(
         &mut sink,
@@ -1315,21 +1313,112 @@ async fn send_window_deferred_cap_degrades_to_eviction() {
     )
     .await;
 
-    assert!(
-        matches!(outcome, BatchWriteOutcome::Continue),
-        "the batch still completes under degrade"
+    assert!(matches!(outcome, BatchWriteOutcome::DeferredCapExhausted));
+    assert_eq!(
+        conn.sm_state.outbound_count, 8,
+        "only the paced prefix is accepted into SM ownership"
     );
     assert_eq!(
-        conn.sm_state.outbound_count, 20,
-        "all frames were still written"
+        conn.sm_state.replay_gap_through(),
+        None,
+        "cap exhaustion must not evict the recorded prefix"
     );
-    assert!(
-        conn.sm_state.replay_gap_through().is_some(),
-        "degrade falls back to evict-oldest, which marks the replay gap"
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        8,
+        "the capped queue retains the complete recorded prefix"
     );
     assert_eq!(
         conn.deferred_inbound.len(),
         64,
-        "the parked non-ack frames stay for the main loop to process in order"
+        "the terminal batch never consumes or discards deferred frames"
     );
+    assert!(
+        conn.sm_recovery_required,
+        "connection cleanup must promote the recorded prefix and reject resume"
+    );
+    assert_eq!(
+        sink_texts(&sink)
+            .iter()
+            .filter(|text| text.contains("<message"))
+            .count(),
+        8,
+        "the unrecorded tail was neither written nor silently accepted"
+    );
+}
+
+/// Normal non-ack parking leaves the final eight slots for a paused writer.
+/// An `<a/>` behind seven ordinary frames therefore still reaches the inline
+/// ack handler and releases the window without closing the stream.
+#[tokio::test]
+async fn send_window_reserved_headroom_recovers_from_ack_behind_ordinary_frames() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("reserved-headroom".to_string(), true, Some(300));
+    conn.deferred_inbound.extend(
+        (0..56).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("parked{i}")))),
+    );
+
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(
+        (0..7)
+            .map(|i| Message::Text(message_with_id(&format!("during-pause{i}")).into()))
+            .chain(std::iter::once(ack_frame(8)))
+            .collect(),
+    );
+    let frames: Vec<String> = (1..=9).map(countable_message).collect();
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(conn.sm_state.last_acked, 8);
+    assert_eq!(conn.deferred_inbound.len(), 63);
+    assert!(!conn.sm_recovery_required);
+}
+
+/// A normal deferred backlog is deliberately kept below the physical cap, so
+/// consecutive paced batches still have ack-read room. This is the regression
+/// for the old sticky-cap behavior where every later batch immediately
+/// degraded after the first flood.
+#[tokio::test]
+async fn send_window_near_full_deferred_backlog_stays_paced_across_batches() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("cross-batch-headroom".to_string(), true, Some(300));
+    conn.deferred_inbound.extend(
+        (0..56).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("queued{i}")))),
+    );
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(vec![ack_frame(8), ack_frame(16)]);
+
+    for start in [1, 10] {
+        let outcome = write_response_batch(
+            &mut sink,
+            &mut reader,
+            state.as_ref(),
+            &mut conn,
+            (start..start + 9).map(countable_message).collect(),
+            BatchSmPolicy::Record,
+        )
+        .await;
+        assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    }
+
+    assert_eq!(conn.sm_state.outbound_count, 18);
+    assert_eq!(conn.sm_state.last_acked, 16);
+    assert_eq!(conn.sm_state.replay_gap_through(), None);
+    assert_eq!(conn.deferred_inbound.len(), 56);
+    assert!(!conn.sm_recovery_required);
 }

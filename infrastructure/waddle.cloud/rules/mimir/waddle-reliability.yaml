@@ -151,7 +151,7 @@ groups:
     - name: waddle-aliases-sm
       rules:
         - record: waddle_sm_unacked_evicted_total
-          expr: sum by (job, instance) (xmpp_sm_unacked_evicted_total)
+          expr: sum by (job, instance, path) (xmpp_sm_unacked_evicted_total)
         - record: waddle_sm_promotion_storage_failed_total
           expr: sum by (job, instance) (xmpp_sm_promotion_storage_failed_total)
         - record: waddle_sm_promotion_not_promotable_total

@@ -18,6 +18,7 @@ use super::stream_management::{apply_sm_ack, is_countable_stanza};
 use super::*;
 use futures::FutureExt as _;
 use waddle_xmpp::stream_management::SmRequest;
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
 /// How the writer records countable frames into XEP-0198 bookkeeping.
 ///
@@ -51,6 +52,10 @@ pub(super) enum BatchWriteOutcome {
     /// must break the connection loop; the SM unacked queue already
     /// holds every replayable countable frame of the batch.
     TransportClosed,
+    /// The paused send window exhausted its reserved inbound headroom before
+    /// receiving a recovering ack. The connection must close through the
+    /// non-resumable promotion path without recording the unwritten tail.
+    DeferredCapExhausted,
     /// The node serving generation changed before the next record/write.
     AuthorityRevoked,
 }
@@ -58,18 +63,15 @@ pub(super) enum BatchWriteOutcome {
 /// Upper bound on frames the mid-batch drain may park in
 /// [`WsConnState::deferred_inbound`]. Once reached the drain stops
 /// reading, so a flooding client hits TCP backpressure again instead
-/// of converting its send rate into unbounded server heap. `<a/>`
-/// acks are consumed (never parked), acks only stop draining once 64
-/// non-ack frames are already parked ahead of them — reads must stay
-/// in order, so an ack behind parked frames cannot be consumed until
-/// the connection loop processes the backlog. At the cap, behavior
-/// degrades exactly to the pre-#1089 semantics (no mid-batch ack
-/// draining: the queue may evict and mark a replay gap), and only
-/// this connection's own stream is affected. Note a well-behaved
-/// client can reach the cap during a very large batch — e.g. one
-/// XEP-0184 receipt or XEP-0085 chat state per delivered message —
-/// so this is a graceful-degradation bound, not a misbehavior gate.
+/// of converting its send rate into unbounded server heap.
 const DEFERRED_INBOUND_CAP: usize = 64;
+
+/// Frames reserved for a paused send window to read through ordinary client
+/// traffic while looking for the `<a/>` that reopens it. Normal mid-batch
+/// draining never consumes this capacity, so a pause entered near a full
+/// deferred queue still gets a bounded chance to recover.
+const RESERVED_ACK_HEADROOM: usize = 8;
+const NORMAL_DEFERRED_INBOUND_CAP: usize = DEFERRED_INBOUND_CAP - RESERVED_ACK_HEADROOM;
 
 /// Deadline for a single XEP-0198 send-window pause (issue #1219). A
 /// healthy client acks within one RTT; a pause that outlives this means
@@ -85,11 +87,10 @@ enum SendWindowOutcome {
     /// The client acked enough that the window fell to the low watermark;
     /// resume writing.
     Recovered,
-    /// The deferred-inbound buffer filled with non-ack frames while paused,
-    /// so the awaited `<a/>` cannot be read in order. Degrade to the
-    /// pre-#1219 evict-oldest behaviour for the rest of the batch (this
-    /// stream only) and keep writing.
-    DeferredCapReached,
+    /// Even the paused window's reserved inbound headroom filled before an
+    /// ack arrived. The batch must stop without recording its unwritten tail:
+    /// cleanup promotes the already-recorded queue and invalidates resume.
+    DeferredCapExhausted,
     /// No recovering ack arrived before the deadline — the peer is dead or
     /// stalled. Caller records the tail (capped) and closes for resume.
     TimedOut,
@@ -212,11 +213,6 @@ where
     // connection-loop gate paces any NEW traffic and elicits the ack that
     // drains the restored backlog.
     let pacing = matches!(policy, BatchSmPolicy::Record);
-    // Once the deferred buffer fills while paused we cannot read the awaited
-    // ack in order, so pacing is abandoned for the rest of THIS batch and we
-    // fall back to the pre-#1219 evict-oldest behaviour. Latched so we don't
-    // re-enter the pause (and re-send `<r/>`) on every remaining frame.
-    let mut send_window_degraded = false;
     // Pace on ENTRY too (Codex P2 review on PR #1234): if the batch is entered
     // while the window is ALREADY latched — a `Record` batch after a resume
     // restored a full unacked queue, or one dispatched from the inbound /
@@ -227,7 +223,10 @@ where
     if pacing && conn.sm_state.needs_send_pause() {
         match await_send_window_recovery(sender, reader, state, conn, authority).await {
             SendWindowOutcome::Recovered => {}
-            SendWindowOutcome::DeferredCapReached => send_window_degraded = true,
+            SendWindowOutcome::DeferredCapExhausted => {
+                conn.sm_recovery_required = true;
+                return BatchWriteOutcome::DeferredCapExhausted;
+            }
             SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
                 record_remaining_for_replay(conn, frames, policy);
                 return BatchWriteOutcome::TransportClosed;
@@ -245,7 +244,9 @@ where
         }
         let current_recorded = should_record(conn, &frame, policy);
         let request_ack = if current_recorded {
-            conn.sm_state.record_outbound(frame.clone()).request_ack
+            conn.sm_state
+                .record_outbound(frame.clone(), SmEvictionPath::Batch)
+                .request_ack
         } else {
             false
         };
@@ -274,7 +275,7 @@ where
                     BatchWriteOutcome::AuthorityRevoked
                 }
                 SendWindowOutcome::Recovered
-                | SendWindowOutcome::DeferredCapReached
+                | SendWindowOutcome::DeferredCapExhausted
                 | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
             };
         }
@@ -301,7 +302,7 @@ where
                         BatchWriteOutcome::AuthorityRevoked
                     }
                     SendWindowOutcome::Recovered
-                    | SendWindowOutcome::DeferredCapReached
+                    | SendWindowOutcome::DeferredCapExhausted
                     | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
                 };
             }
@@ -327,15 +328,12 @@ where
         // queue and poison resume. XEP-0198 §4: the server may request an
         // ack at any time and is under no obligation to transmit queued
         // stanzas immediately (xep-0198.xml:307/357).
-        if pacing && !send_window_degraded && conn.sm_state.needs_send_pause() {
+        if pacing && conn.sm_state.needs_send_pause() {
             match await_send_window_recovery(sender, reader, state, conn, authority).await {
                 SendWindowOutcome::Recovered => {}
-                SendWindowOutcome::DeferredCapReached => {
-                    // Cannot read the awaited ack in order behind 64 parked
-                    // frames; degrade to evict-oldest for the batch tail
-                    // (this stream only). record_outbound above will evict
-                    // and mark the replay gap exactly as pre-#1219.
-                    send_window_degraded = true;
+                SendWindowOutcome::DeferredCapExhausted => {
+                    conn.sm_recovery_required = true;
+                    return BatchWriteOutcome::DeferredCapExhausted;
                 }
                 SendWindowOutcome::TransportClosed => {
                     record_remaining_for_replay(conn, frames, policy);
@@ -365,7 +363,8 @@ where
 /// the deferred buffer (issue #1219). One off-cadence `<r/>` is sent on
 /// entry and re-sent after each ack that does not yet recover the window,
 /// because the wasm client acks only in response to a request. Bounded by
-/// [`SEND_WINDOW_PAUSE_DEADLINE`] and [`DEFERRED_INBOUND_CAP`]; other
+/// [`SEND_WINDOW_PAUSE_DEADLINE`] and the reserved portion of
+/// [`DEFERRED_INBOUND_CAP`]; other
 /// select concerns (shutdown, keepalive) are not serviced while parked, so
 /// the deadline is the safety valve.
 async fn await_send_window_recovery<S, SE, R, RE>(
@@ -409,7 +408,7 @@ where
             return SendWindowOutcome::Recovered;
         }
         if conn.deferred_inbound.len() >= DEFERRED_INBOUND_CAP {
-            return SendWindowOutcome::DeferredCapReached;
+            return SendWindowOutcome::DeferredCapExhausted;
         }
         let next = match tokio::select! {
             biased;
@@ -552,7 +551,9 @@ pub(super) fn record_remaining_for_replay(
 ) {
     for frame in frames {
         if should_record(conn, &frame, policy) {
-            let _ = conn.sm_state.record_outbound(frame);
+            let _ = conn
+                .sm_state
+                .record_outbound(frame, SmEvictionPath::ReplayTail);
         }
     }
 }
@@ -589,7 +590,7 @@ enum DrainSignal {
 /// socket. `<a/>` acks are applied immediately (they are what keeps
 /// the unacked queue from evicting mid-flood); every other text frame
 /// is deferred, in arrival order, for the main frame dispatcher — up
-/// to [`DEFERRED_INBOUND_CAP`], past which the drain stops reading so
+/// to [`NORMAL_DEFERRED_INBOUND_CAP`], past which the drain stops reading so
 /// TCP backpressure throttles a flooding client. Pings are answered
 /// inline so a mid-flood client keepalive isn't starved;
 /// pongs/binary only count as liveness evidence.
@@ -613,7 +614,7 @@ where
         if !batch_authoritative(authority) {
             return DrainSignal::AuthorityRevoked;
         }
-        if conn.deferred_inbound.len() >= DEFERRED_INBOUND_CAP {
+        if conn.deferred_inbound.len() >= NORMAL_DEFERRED_INBOUND_CAP {
             return DrainSignal::Idle;
         }
         let Some(next) = reader.next().now_or_never() else {
@@ -674,7 +675,7 @@ where
                                     DrainSignal::AuthorityRevoked
                                 }
                                 SendWindowOutcome::Recovered
-                                | SendWindowOutcome::DeferredCapReached
+                                | SendWindowOutcome::DeferredCapExhausted
                                 | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
                             };
                         }
@@ -700,7 +701,7 @@ where
                         SendWindowOutcome::TransportClosed => DrainSignal::TransportClosed,
                         SendWindowOutcome::AuthorityRevoked => DrainSignal::AuthorityRevoked,
                         SendWindowOutcome::Recovered
-                        | SendWindowOutcome::DeferredCapReached
+                        | SendWindowOutcome::DeferredCapExhausted
                         | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
                     };
                 }

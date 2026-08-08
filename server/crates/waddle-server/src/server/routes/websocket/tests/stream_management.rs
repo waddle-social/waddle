@@ -25,6 +25,7 @@ use waddle_xmpp::{
     protocol::{Blocklist, ConnectionPhase, InboundEvent},
     registry::{DeliveryKind, OutboundStanza},
     stream_management::{SmSessionRegistry, SM_NS},
+    telemetry::attributes::SmEvictionPath,
     Stanza,
 };
 use xmpp_parsers::minidom::Element;
@@ -261,6 +262,109 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
         resumed_frame.attr("h"),
         Some("1"),
         "the timed-out second stanza must remain outside the server acknowledgement"
+    );
+}
+
+/// When a send-window pause exhausts its reserved inbound headroom, the
+/// recorded prefix is promoted through the established XEP-0198 recovery
+/// chain instead of becoming a resumable snapshot with an unrecorded tail.
+#[tokio::test]
+async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/cap-exhaustion".parse().expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx.clone());
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    conn.registry_owner = Some(owner);
+    let enable_responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let stream_id = Element::from_str(&enable_responses[0])
+        .expect("enabled xml")
+        .attr("id")
+        .expect("stream id")
+        .to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+    for sequence in 1..=8 {
+        let _ = conn.sm_state.record_outbound(
+            message_frame_xml_with_id(format!("recorded-{sequence}")),
+            SmEvictionPath::Batch,
+        );
+    }
+    conn.sm_recovery_required = true;
+
+    let mut buffered = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+    buffered.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+    buffered.id = Some(xmpp_parsers::message::Id("accepted-backlog".to_string()));
+    buffered.type_ = xmpp_parsers::message::MessageType::Chat;
+    buffered.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "accepted backlog".to_string(),
+    );
+    waddle_xmpp::xep::xep0334::add_hint(
+        &mut buffered,
+        waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+    );
+    tx.send(OutboundStanza::new(Stanza::Message(buffered)))
+        .await
+        .expect("queue accepted outbound stanza");
+
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session(&stream_id)
+            .await
+            .expect("registry lookup")
+            .is_none(),
+        "the cap-exhausted stream must never persist a resumable snapshot"
+    );
+
+    let mut resumed = WsConnState::new();
+    resumed.phase = ConnectionPhase::authenticated(&jid);
+    let resume_responses = handle_xmpp_frame(
+        &resume_frame_xml(&stream_id, 0),
+        "example.com",
+        state.as_ref(),
+        &mut resumed,
+    )
+    .await;
+    assert!(
+        resume_responses.iter().any(|xml| xml.contains("<failed")),
+        "a later resume is deliberately rejected after recovery promotion"
+    );
+    let pending = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list promoted pending rows");
+    assert!(
+        pending.iter().any(|row| {
+            matches!(
+                &row.payload,
+                waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                    if message.id.as_ref().is_some_and(|id| id.0 == "accepted-backlog")
+            )
+        }),
+        "accepted outbound work is promoted instead of silently dropped"
     );
 }
 
@@ -1480,12 +1584,14 @@ async fn sm_live_ack_with_impossible_handled_count_closes_stream_without_purging
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
     // Two outbound stanzas recorded → send-count is 2.
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 
@@ -1546,12 +1652,14 @@ async fn sm_live_ack_with_valid_handled_count_purges_queue_and_rows() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 
@@ -1592,12 +1700,14 @@ async fn sm_live_ack_at_exact_outbound_count_is_accepted() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
 
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='2'/>",
@@ -1706,12 +1816,14 @@ async fn sm_live_ack_at_half_window_distance_is_ignored_not_acknowledged() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
     // Full valid ack first: last_acked == outbound_count == 2.
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='2'/>",
@@ -1759,12 +1871,14 @@ async fn sm_live_ack_in_regressed_half_space_is_ignored_without_purge() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
     // Partial ack: last_acked = 1, one stanza still unacked.
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='1'/>",
@@ -4868,12 +4982,14 @@ async fn sm_live_ack_behind_last_acked_is_ignored_without_purging() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 

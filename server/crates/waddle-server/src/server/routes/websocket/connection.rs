@@ -152,6 +152,10 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 /// breaks into the same detach-for-resume path a keepalive close uses.
 /// Matches the batch writer's inline pause deadline.
 const SEND_WINDOW_LOOP_PAUSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+/// Bounded deferred-frame work per connection-loop turn. This clears a
+/// full normal parking budget promptly without letting one client monopolize
+/// the executor while its deferred queue is non-empty.
+const DEFERRED_INBOUND_DRAIN_CHUNK: usize = 8;
 
 /// Budget for writing the system-shutdown stream error + close frames
 /// to one peer during graceful shutdown (issue #1091). Deliberately
@@ -280,7 +284,7 @@ async fn handle_xmpp_websocket(
     // belong to the newcomer now.
     let mut superseded = false;
 
-    loop {
+    'connection: loop {
         // Loop-level XEP-0198 send-window gate (issue #1219). When the
         // outstanding unacked count has latched the pause, stop draining the
         // outbound mpsc (its `recv()` arm is guarded below): producers then
@@ -335,12 +339,10 @@ async fn handle_xmpp_websocket(
         // socket ahead of the dispatcher must be processed in arrival
         // order BEFORE the socket is polled again — so the socket arm
         // below is gated on the queue being empty, and an
-        // always-ready arm processes one deferred frame per
+        // always-ready arm processes a bounded ordered chunk per
         // iteration. Deferred processing stays a select arm (not a
-        // pre-select loop) so the outbound channel and the keepalive
-        // timer keep getting polled between deferred frames — a
-        // client streaming frames mid-flood must not be able to
-        // starve routed stanzas or dead-peer detection.
+        // pre-select loop), and yields between chunks, so a client
+        // streaming frames mid-flood cannot monopolize the executor.
         let deferred_pending = !conn.deferred_inbound.is_empty();
         tokio::select! {
             biased;
@@ -370,33 +372,36 @@ async fn handle_xmpp_websocket(
                 break;
             }
 
-            // Process one drain-deferred inbound frame.
+            // Process a bounded drain-deferred inbound chunk.
             _ = std::future::ready(()), if deferred_pending => {
-                let Some(text) = conn.deferred_inbound.pop_front() else {
-                    continue;
-                };
-                if !handle_inbound_text(
-                    &text,
-                    &domain,
-                    &state,
-                    &mut conn,
-                    RegistrationChannels {
-                        pending_tx: &mut pending_tx,
-                        force_detach_rx: &mut force_detach_rx,
-                    },
-                    ConnectionIo {
-                        sender: &mut ws_sender,
-                        receiver: &mut ws_receiver,
-                    },
-                    FrameAuthority {
-                        permit: &admission_permit,
-                        shutdown: &shutdown_token,
-                    },
-                )
-                .await
-                {
-                    break;
+                for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
+                    let Some(text) = conn.deferred_inbound.pop_front() else {
+                        break;
+                    };
+                    if !handle_inbound_text(
+                        &text,
+                        &domain,
+                        &state,
+                        &mut conn,
+                        RegistrationChannels {
+                            pending_tx: &mut pending_tx,
+                            force_detach_rx: &mut force_detach_rx,
+                        },
+                        ConnectionIo {
+                            sender: &mut ws_sender,
+                            receiver: &mut ws_receiver,
+                        },
+                        FrameAuthority {
+                            permit: &admission_permit,
+                            shutdown: &shutdown_token,
+                        },
+                    )
+                    .await
+                    {
+                        break 'connection;
+                    }
                 }
+                tokio::task::yield_now().await;
             }
 
             // Handle inbound WebSocket messages from the client
@@ -1180,7 +1185,9 @@ async fn handle_inbound_text(
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
         }
-        BatchWriteOutcome::TransportClosed => return false,
+        BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
+            return false;
+        }
         BatchWriteOutcome::AuthorityRevoked => {
             // No further frame was recorded or written. Any `<enable/>`
             // response that did reach the socket returned Continue and must
@@ -1289,7 +1296,7 @@ where
     .await
     {
         BatchWriteOutcome::Continue => true,
-        BatchWriteOutcome::TransportClosed => false,
+        BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => false,
         BatchWriteOutcome::AuthorityRevoked => false,
     }
 }

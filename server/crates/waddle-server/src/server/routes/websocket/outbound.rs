@@ -13,6 +13,7 @@ use super::{
     transport_xml::stanza_to_xml,
 };
 use waddle_xmpp::stream_management::SmRequest;
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
 #[derive(Clone, Copy)]
 pub(super) struct OutboundAuthority<'a> {
@@ -51,10 +52,14 @@ where
             let mut request_ack_after = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
                 let record_result = match pending_row_receipt_at {
-                    Some(receipt_at) => conn
+                    Some(receipt_at) => conn.sm_state.record_outbound_with_receipt_at(
+                        xml.clone(),
+                        receipt_at,
+                        SmEvictionPath::DirectOutbound,
+                    ),
+                    None => conn
                         .sm_state
-                        .record_outbound_with_receipt_at(xml.clone(), receipt_at),
-                    None => conn.sm_state.record_outbound(xml.clone()),
+                        .record_outbound(xml.clone(), SmEvictionPath::DirectOutbound),
                 };
                 request_ack_after = record_result.request_ack;
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound
@@ -226,7 +231,9 @@ where
             .await
             {
                 BatchWriteOutcome::Continue => {}
-                BatchWriteOutcome::TransportClosed => return false,
+                BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
+                    return false;
+                }
                 BatchWriteOutcome::AuthorityRevoked => return false,
             }
             if close {

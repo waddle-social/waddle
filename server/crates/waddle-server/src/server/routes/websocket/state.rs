@@ -1527,6 +1527,11 @@ pub(super) struct WsConnState {
     /// the main frame dispatcher in arrival order, so the connection
     /// loop processes this queue before polling the socket again.
     pub(super) deferred_inbound: std::collections::VecDeque<axum::extract::ws::Utf8Bytes>,
+    /// The send-window pause ran out of reserved inbound headroom before it
+    /// could read a recovering XEP-0198 ack.  Cleanup must promote the
+    /// already-recorded queue rather than detach a resumable snapshot: the
+    /// unwritten batch suffix was never accepted into SM ownership.
+    pub(super) sm_recovery_required: bool,
     /// Loop-level XEP-0198 send-window pause deadline (issue #1219).
     /// `Some(deadline)` while the connection loop is holding off draining
     /// the outbound mpsc because `sm_state.needs_send_pause()` latched:
@@ -1602,6 +1607,7 @@ impl WsConnState {
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
             deferred_inbound: std::collections::VecDeque::new(),
+            sm_recovery_required: false,
             send_window_pause_deadline: None,
             send_window_last_request_acked: 0,
             state_machine: None,

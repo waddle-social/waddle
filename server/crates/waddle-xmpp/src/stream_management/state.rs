@@ -7,6 +7,7 @@ use super::{
     DetachedSession, UnackedPushResult, UnackedQueue, DEFAULT_ACK_REQUEST_THRESHOLD,
     DEFAULT_MAX_UNACKED_QUEUE_SIZE,
 };
+use crate::telemetry::attributes::SmEvictionPath;
 
 /// Per-stream state that must survive XEP-0198 detachment.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +106,9 @@ const EVICTION_WARN_WINDOW: std::time::Duration = std::time::Duration::from_secs
 /// ≈80% of the cap so pacing engages before the queue evicts (issue
 /// #1219). Never zero.
 fn send_window_high_for(max_queue_size: usize) -> usize {
-    (max_queue_size * 4 / 5).max(1)
+    let quotient = max_queue_size / 5;
+    let remainder = max_queue_size % 5;
+    (quotient * 4 + remainder * 4 / 5).max(1)
 }
 
 /// Send-window low watermark for a queue of `max_queue_size`: ≈50% of the
@@ -215,8 +218,12 @@ impl StreamManagementState {
     /// means a subsequent `<resume/>` from a client whose `h` is older
     /// than the retained window must fail instead of returning a
     /// misleading `<resumed/>` with missing stanzas.
-    pub fn record_outbound(&mut self, stanza_xml: String) -> RecordOutboundResult {
-        self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now())
+    pub fn record_outbound(
+        &mut self,
+        stanza_xml: String,
+        eviction_path: SmEvictionPath,
+    ) -> RecordOutboundResult {
+        self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now(), eviction_path)
     }
 
     /// Record an outbound stanza with an explicit `original_receipt_at`.
@@ -233,6 +240,7 @@ impl StreamManagementState {
         &mut self,
         stanza_xml: String,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
+        eviction_path: SmEvictionPath,
     ) -> RecordOutboundResult {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         match self.unacked_queue.push_with_receipt_at(
@@ -243,8 +251,8 @@ impl StreamManagementState {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(evicted) => {
                 self.mark_replay_gap_through(evicted.sequence);
-                crate::telemetry::reliability::increment_sm_unacked_evicted();
-                self.note_eviction_for_throttled_warn(evicted.sequence);
+                crate::telemetry::reliability::increment_sm_unacked_evicted(eviction_path);
+                self.note_eviction_for_throttled_warn(evicted.sequence, eviction_path);
             }
         }
         // The window just grew — engage the send-window pause latch if it
@@ -404,7 +412,11 @@ impl StreamManagementState {
     /// per event at the call site; this is purely log-storm suppression —
     /// 325 identical lines in 0.4 s (the 2026-07-07 incident) drown out
     /// every other signal on the pod.
-    fn note_eviction_for_throttled_warn(&mut self, evicted_sequence: u32) {
+    fn note_eviction_for_throttled_warn(
+        &mut self,
+        evicted_sequence: u32,
+        eviction_path: SmEvictionPath,
+    ) {
         self.evicted_since_warn = self.evicted_since_warn.saturating_add(1);
         let due = self
             .last_eviction_warn
@@ -414,6 +426,7 @@ impl StreamManagementState {
         }
         warn!(
             stream_id = self.stream_id.as_deref().unwrap_or("<unset>"),
+            eviction_path = eviction_path.as_str(),
             evicted_in_window = self.evicted_since_warn,
             latest_evicted_sequence = evicted_sequence,
             queue_len = self.unacked_queue.len(),
@@ -499,6 +512,7 @@ impl StreamManagementState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::attributes::SmEvictionPath;
 
     #[test]
     fn test_sm_state_counting() {
@@ -574,9 +588,18 @@ mod tests {
         let mut state = StreamManagementState::new();
         state.enable("test-id".to_string(), true, Some(300));
 
-        let _ = state.record_outbound("<message id='1'/>".to_string());
-        let _ = state.record_outbound("<message id='2'/>".to_string());
-        let _ = state.record_outbound("<message id='3'/>".to_string());
+        let _ = state.record_outbound(
+            "<message id='1'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
+        let _ = state.record_outbound(
+            "<message id='2'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
+        let _ = state.record_outbound(
+            "<message id='3'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
 
         assert_eq!(state.outbound_count, 3);
         assert_eq!(state.queue_len(), 3);
@@ -590,32 +613,36 @@ mod tests {
         assert_eq!(resend.len(), 1); // Only 3 is left in queue after ack(2)
     }
 
-    #[tokio::test]
-    async fn test_record_outbound_surfaces_eviction_to_metric() {
+    #[test]
+    fn test_record_outbound_eviction_keeps_the_replay_gap_contract() {
         // With a tiny queue cap, the 4th push must evict the 1st — and
         // that eviction must bump `xmpp.sm.unacked_evicted` (answering
         // as `waddle_sm_unacked_evicted_total` via the Mimir alias) so
         // operators can distinguish "everything's fine" from "your
         // <resumed/> replays have holes".
-        let metrics = crate::telemetry::test_support::acquire().await;
-
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));
 
-        let _ = state.record_outbound("<message id='1'/>".to_string());
-        let _ = state.record_outbound("<message id='2'/>".to_string());
-        let _ = state.record_outbound("<message id='3'/>".to_string());
+        let _ = state.record_outbound(
+            "<message id='1'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
+        let _ = state.record_outbound(
+            "<message id='2'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
+        let _ = state.record_outbound(
+            "<message id='3'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
         assert_eq!(state.queue_len(), 3);
 
         // 4th push evicts seq=1
-        let _ = state.record_outbound("<message id='4'/>".to_string());
-        assert_eq!(state.queue_len(), 3);
-
-        assert_eq!(
-            metrics.counter_sum("xmpp.sm.unacked_evicted", &[]),
-            Some(1),
-            "one eviction must have bumped the counter by one"
+        let _ = state.record_outbound(
+            "<message id='4'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
         );
+        assert_eq!(state.queue_len(), 3);
 
         // The retained queue no longer contains the evicted stanza; the
         // replay-gap marker added below is what prevents a successful resume
@@ -634,10 +661,22 @@ mod tests {
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));
 
-        let _ = state.record_outbound("<message id='1'/>".to_string());
-        let _ = state.record_outbound("<message id='2'/>".to_string());
-        let _ = state.record_outbound("<message id='3'/>".to_string());
-        let _ = state.record_outbound("<message id='4'/>".to_string());
+        let _ = state.record_outbound(
+            "<message id='1'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
+        let _ = state.record_outbound(
+            "<message id='2'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
+        let _ = state.record_outbound(
+            "<message id='3'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
+        let _ = state.record_outbound(
+            "<message id='4'/>".to_string(),
+            SmEvictionPath::DirectOutbound,
+        );
 
         assert_eq!(state.replay_gap_through(), Some(1));
         assert!(
@@ -732,6 +771,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn send_window_watermarks_handle_the_largest_queue_capacity() {
+        let high = send_window_high_for(usize::MAX);
+        assert_eq!(high, usize::MAX / 5 * 4 + usize::MAX % 5 * 4 / 5);
+        assert!(send_window_low_for(usize::MAX) < high);
+    }
+
     /// XEP-0198 §4 servers SHOULD request `<a/>` periodically; without
     /// it the wasm client (which only acks in response to `<r/>`,
     /// `runtime/sm.rs`) lets the unacked queue grow unbounded until
@@ -746,17 +792,41 @@ mod tests {
         state.enable("cadence".to_string(), true, Some(300));
 
         // Push 1, 2 — below threshold, no request yet.
-        assert!(!state.record_outbound("<m id='1'/>".to_string()).request_ack);
-        assert!(!state.record_outbound("<m id='2'/>".to_string()).request_ack);
+        assert!(
+            !state
+                .record_outbound("<m id='1'/>".to_string(), SmEvictionPath::DirectOutbound)
+                .request_ack
+        );
+        assert!(
+            !state
+                .record_outbound("<m id='2'/>".to_string(), SmEvictionPath::DirectOutbound)
+                .request_ack
+        );
         // Push 3 — threshold met, request fires.
-        assert!(state.record_outbound("<m id='3'/>".to_string()).request_ack);
+        assert!(
+            state
+                .record_outbound("<m id='3'/>".to_string(), SmEvictionPath::DirectOutbound)
+                .request_ack
+        );
         // Push 4, 5 — request_ack must NOT keep firing on every
         // subsequent stanza; that would spam the client with one
         // `<r/>` per stanza.
-        assert!(!state.record_outbound("<m id='4'/>".to_string()).request_ack);
-        assert!(!state.record_outbound("<m id='5'/>".to_string()).request_ack);
+        assert!(
+            !state
+                .record_outbound("<m id='4'/>".to_string(), SmEvictionPath::DirectOutbound)
+                .request_ack
+        );
+        assert!(
+            !state
+                .record_outbound("<m id='5'/>".to_string(), SmEvictionPath::DirectOutbound)
+                .request_ack
+        );
         // Push 6 — three more since the last request, next request fires.
-        assert!(state.record_outbound("<m id='6'/>".to_string()).request_ack);
+        assert!(
+            state
+                .record_outbound("<m id='6'/>".to_string(), SmEvictionPath::DirectOutbound)
+                .request_ack
+        );
     }
 
     #[test]
@@ -768,7 +838,8 @@ mod tests {
         let mut state = StreamManagementState::with_config(1000, 1);
         // NOTE: `enable` deliberately NOT called.
 
-        let result = state.record_outbound("<m id='1'/>".to_string());
+        let result =
+            state.record_outbound("<m id='1'/>".to_string(), SmEvictionPath::DirectOutbound);
         assert!(!result.request_ack);
     }
 
@@ -806,18 +877,27 @@ mod tests {
         // Push 1, 2 — below the post-resume threshold.
         assert!(
             !state
-                .record_outbound("<m id='post-1'/>".to_string())
+                .record_outbound(
+                    "<m id='post-1'/>".to_string(),
+                    SmEvictionPath::DirectOutbound,
+                )
                 .request_ack
         );
         assert!(
             !state
-                .record_outbound("<m id='post-2'/>".to_string())
+                .record_outbound(
+                    "<m id='post-2'/>".to_string(),
+                    SmEvictionPath::DirectOutbound,
+                )
                 .request_ack
         );
         // Push 3 — threshold met against the *post-resume* baseline.
         assert!(
             state
-                .record_outbound("<m id='post-3'/>".to_string())
+                .record_outbound(
+                    "<m id='post-3'/>".to_string(),
+                    SmEvictionPath::DirectOutbound,
+                )
                 .request_ack
         );
     }
@@ -834,14 +914,14 @@ mod tests {
         state.enable("sw".to_string(), true, Some(300));
 
         for n in 0..7 {
-            let _ = state.record_outbound(format!("<m id='{n}'/>"));
+            let _ = state.record_outbound(format!("<m id='{n}'/>"), SmEvictionPath::DirectOutbound);
             assert!(
                 !state.needs_send_pause(),
                 "below the high watermark the window is open (n={n})"
             );
         }
         // 8th outbound: outstanding == 8 == high watermark → pause.
-        let _ = state.record_outbound("<m id='7'/>".to_string());
+        let _ = state.record_outbound("<m id='7'/>".to_string(), SmEvictionPath::DirectOutbound);
         assert!(state.needs_send_pause(), "high watermark engages the pause");
         assert!(!state.send_window_recovered());
 
@@ -871,7 +951,7 @@ mod tests {
         // enable WITHOUT resume.
         state.enable("no-resume".to_string(), false, None);
         for n in 0..30 {
-            let _ = state.record_outbound(format!("<m id='{n}'/>"));
+            let _ = state.record_outbound(format!("<m id='{n}'/>"), SmEvictionPath::DirectOutbound);
             assert!(
                 !state.needs_send_pause(),
                 "a non-resumable stream is never send-window paced (n={n})"

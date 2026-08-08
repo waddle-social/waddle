@@ -335,8 +335,9 @@ pub(super) async fn cleanup_connection_shutdown(
         return ConnectionShutdownOutcome::NotPersisted;
     };
 
-    let should_detach_for_resume =
-        conn.sm_state.is_resumable() && !matches!(conn.phase, ConnectionPhase::Closing { .. });
+    let should_detach_for_resume = (conn.sm_state.is_resumable()
+        && !matches!(conn.phase, ConnectionPhase::Closing { .. }))
+        || conn.sm_recovery_required;
 
     if should_detach_for_resume {
         if conn.registry_owner.is_none() {
@@ -366,54 +367,112 @@ pub(super) async fn cleanup_connection_shutdown(
 
         let carbons_enabled = conn.carbons_enabled;
         let presence_available = entry.is_presence_available();
-        // First detach drain: snapshot whatever's already in the
-        // channel into the unacked queue. No detached_stream_id yet
-        // because we haven't decided to store the detached session.
-        drain_outbound_into_replay(
-            state,
-            conn.state_machine.as_mut(),
-            &mut conn.sm_state,
-            conn.authenticated_session.as_ref(),
-            outbound_rx,
-            None,
-        )
-        .await;
+        if !conn.sm_recovery_required {
+            // First detach drain: snapshot whatever's already in the
+            // channel into the unacked queue. No detached_stream_id yet
+            // because we haven't decided to store the detached session.
+            drain_outbound_into_replay(
+                state,
+                conn.state_machine.as_mut(),
+                &mut conn.sm_state,
+                conn.authenticated_session.as_ref(),
+                outbound_rx,
+                None,
+            )
+            .await;
+        }
         let user_id = conn
             .authenticated_session
             .as_ref()
             .map(|session| session.user_jid.to_string())
             .unwrap_or_else(|| jid.to_bare().to_string());
-        if let Some(detached) = conn.sm_state.to_detached_session(
-            waddle_xmpp::stream_management::DetachedSessionSnapshot {
-                user_id,
-                jid: jid.clone(),
-                carbons_enabled,
-                roster_interested: conn.roster_interested,
-                blocklist_interested: conn.blocklist_interested,
-                presence_available,
-                presence_show: presence_state
-                    .as_ref()
-                    .and_then(|state| state.show.as_deref())
-                    .and_then(sm_show_from_name),
-                presence_status: presence_state
-                    .as_ref()
-                    .and_then(|state| state.status.clone()),
-                presence_priority: presence_state
-                    .as_ref()
-                    .map(|state| state.priority)
-                    .unwrap_or_else(|| entry.presence_priority()),
-                presence_payloads: presence_state
-                    .map(|state| state.payloads)
-                    .unwrap_or_default(),
-                // The once-per-session claim state travels with the
-                // detached session (not inferred from presence): a
-                // session that went available then unavailable before
-                // detaching keeps its consumed claim across resume.
-                pending_subscribes_flushed: entry
-                    .pending_subscribes_flushed
-                    .load(std::sync::atomic::Ordering::Acquire),
-            },
-        ) {
+        let detached_snapshot = waddle_xmpp::stream_management::DetachedSessionSnapshot {
+            user_id,
+            jid: jid.clone(),
+            carbons_enabled,
+            roster_interested: conn.roster_interested,
+            blocklist_interested: conn.blocklist_interested,
+            presence_available,
+            presence_show: presence_state
+                .as_ref()
+                .and_then(|state| state.show.as_deref())
+                .and_then(sm_show_from_name),
+            presence_status: presence_state
+                .as_ref()
+                .and_then(|state| state.status.clone()),
+            presence_priority: presence_state
+                .as_ref()
+                .map(|state| state.priority)
+                .unwrap_or_else(|| entry.presence_priority()),
+            presence_payloads: presence_state
+                .map(|state| state.payloads)
+                .unwrap_or_default(),
+            // The once-per-session claim state travels with the
+            // detached session (not inferred from presence): a
+            // session that went available then unavailable before
+            // detaching keeps its consumed claim across resume.
+            pending_subscribes_flushed: entry
+                .pending_subscribes_flushed
+                .load(std::sync::atomic::Ordering::Acquire),
+        };
+        if let Some(detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) {
+            if conn.sm_recovery_required {
+                // The batch writer stopped before accepting the unwritten
+                // tail into the capped SM queue.  Persisting a resumable
+                // snapshot here would let a later `<resume/>` claim a stream
+                // whose response tail was never recorded.  Promote only the
+                // already-recorded queue through the established recovery
+                // chain, then close as non-resumable so that resume fails
+                // deliberately instead of silently omitting that tail.
+                warn!(
+                    jid = %jid,
+                    stream_id = %detached.stream_id,
+                    recorded = detached.unacked_stanzas.len(),
+                    "SM send-window deferred capacity exhausted; promoting recorded queue and invalidating resume"
+                );
+                // Stop accepting new routed work, then recover everything
+                // already accepted by the bounded channel. The paused batch
+                // suffix never entered that channel and remains deliberately
+                // excluded; dropping accepted routed work here would be a
+                // separate silent-loss path.
+                outbound_rx.close();
+                // A peer-routed channel entry may expand into several output
+                // frames during its recipient pass. This terminal recovery
+                // buffer therefore must not inherit the channel-entry count
+                // as a queue cap: every already-accepted frame has to reach
+                // the promotion chain, whereas the normal live SM queue and
+                // the channel itself retain their ordinary bounded limits.
+                let mut recovery_backlog =
+                    waddle_xmpp::stream_management::StreamManagementState::with_config(
+                        usize::MAX,
+                        u32::MAX,
+                    );
+                recovery_backlog.enable(detached.stream_id.clone(), true, detached.max_resume_time);
+                drain_outbound_into_replay(
+                    state,
+                    conn.state_machine.as_mut(),
+                    &mut recovery_backlog,
+                    conn.authenticated_session.as_ref(),
+                    outbound_rx,
+                    None,
+                )
+                .await;
+
+                let mut recovery_sessions = vec![detached];
+                if let Some(backlog) = recovery_backlog.to_detached_session(detached_snapshot) {
+                    if !backlog.unacked_stanzas.is_empty() {
+                        recovery_sessions.push(backlog);
+                    }
+                }
+                return refuse_detach_without_principal(
+                    state,
+                    outbound_rx,
+                    &jid,
+                    conn,
+                    recovery_sessions,
+                )
+                .await;
+            }
             let stream_id = detached.stream_id.clone();
             let principal = match conn.authenticated_session.as_ref() {
                 Some(session) => match session.authenticated_principal_ref() {
@@ -428,7 +487,7 @@ pub(super) async fn cleanup_connection_shutdown(
                             outbound_rx,
                             &jid,
                             conn,
-                            detached,
+                            vec![detached],
                         )
                         .await;
                     }
@@ -440,7 +499,7 @@ pub(super) async fn cleanup_connection_shutdown(
                         outbound_rx,
                         &jid,
                         conn,
-                        detached,
+                        vec![detached],
                     )
                     .await;
                 }
@@ -676,7 +735,7 @@ pub(super) async fn cleanup_connection_shutdown(
 /// things that must not vanish with it: the `<enabled/>` path published a
 /// durable ClaimStore claim for its stream id, and `to_detached_session`
 /// already captured its unacked server stanzas. Move the claim into
-/// terminal-release inventory and run the captured queue through the
+/// terminal-release inventory and run the captured queues through the
 /// XEP-0198 §5 promote → confirm chain before falling back to ordinary
 /// non-resumable cleanup.
 async fn refuse_detach_without_principal(
@@ -684,13 +743,13 @@ async fn refuse_detach_without_principal(
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     jid: &FullJid,
     conn: &mut WsConnState,
-    detached: waddle_xmpp::stream_management::DetachedSession,
+    detached_sessions: Vec<waddle_xmpp::stream_management::DetachedSession>,
 ) -> ConnectionShutdownOutcome {
     super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
-    if !detached.unacked_stanzas.is_empty() {
+    if !detached_sessions.is_empty() {
         crate::sm_promotion::promote_displaced_sessions(
-            vec![detached],
+            detached_sessions,
             crate::sm_promotion::DisplacedPromotionDeps {
                 sm_registry: &state.deps.protocol.sm_session_registry,
                 connection_registry: &state.deps.protocol.connection_registry,

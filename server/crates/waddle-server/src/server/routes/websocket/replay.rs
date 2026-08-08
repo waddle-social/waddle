@@ -3,6 +3,7 @@ use super::{
     interpret_loop::build_interpret_deps, stream_management::is_countable_stanza,
     transport_xml::stanza_to_xml,
 };
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
 /// Drain `outbound_rx` of all immediately-available
 /// [`OutboundStanza`] values and record them into the per-connection
@@ -133,7 +134,13 @@ async fn record_drained_xml(
     // client counts it). Server-generated MAM responses also cannot
     // reach this path: they are produced synchronously on the
     // requester's own connection, never routed via the registry.
-    let _ = sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
+    // This record runs while a live transport is detaching; it keeps the
+    // connection-local replay queue aligned with the detached-session drain.
+    let _ = sm_state.record_outbound_with_receipt_at(
+        xml.clone(),
+        original_receipt_at,
+        SmEvictionPath::DetachDrain,
+    );
     let sequence = sm_state.outbound_count;
     if let Some(row_id) = pending_row_id.as_ref() {
         if let Err(error) = state

@@ -124,6 +124,58 @@ impl MetricAttribute for SweepOutcome {
     }
 }
 
+/// `path` — which XEP-0198 replay buffer evicted an unacked stanza.
+///
+/// The same logical eviction signal exists on two code paths:
+/// the live attached stream state and the detached persisted session.
+/// The metric keeps one family and an enumerated `path` label so
+/// aliases and dashboards can preserve the distinction without
+/// proliferating near-duplicate instruments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmEvictionPath {
+    /// A paced batch write grew the replay window past capacity.
+    Batch,
+    /// A replay-tail fallback recorded unsent frames after pacing timed out.
+    ReplayTail,
+    /// A direct outbound write grew the replay window past capacity.
+    DirectOutbound,
+    /// A detach/drain path recorded while no live wire was available.
+    DetachDrain,
+}
+
+impl SmEvictionPath {
+    /// Every allowed value. Startup zero-registration iterates this so
+    /// every path series exists before the first real eviction.
+    pub const ALL: [Self; 4] = [
+        Self::Batch,
+        Self::ReplayTail,
+        Self::DirectOutbound,
+        Self::DetachDrain,
+    ];
+
+    /// Stable string form shared by logs and metrics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Batch => "batch",
+            Self::ReplayTail => "replay_tail",
+            Self::DirectOutbound => "direct_outbound",
+            Self::DetachDrain => "detach_drain",
+        }
+    }
+}
+
+impl sealed::Sealed for SmEvictionPath {}
+impl MetricAttribute for SmEvictionPath {
+    fn key(&self) -> &'static str {
+        "path"
+    }
+
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
 /// `reason` — why an XEP-0357 push notification was suppressed.
 ///
 /// This is the metric-facing closed set. `waddle-server` converts its
