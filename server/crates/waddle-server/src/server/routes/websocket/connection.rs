@@ -720,7 +720,9 @@ async fn handle_xmpp_websocket(
         }
     }
     if superseded {
-        super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
+        if !conn.sm_recovery_required {
+            super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
+        }
     } else {
         if shutdown_token.is_cancelled() || admission_permit.revalidate().is_err() {
             let dropped = discard_deferred_inbound(&mut conn);
@@ -1750,6 +1752,41 @@ mod tests {
             "the contiguous pre-hole stanza must be acknowledged before detach"
         );
         assert!(!conn.sm_inbound_completion.has_pending());
+    }
+
+    #[test]
+    fn terminal_recovery_handoff_replies_bypass_the_capped_sm_queue() {
+        let mut conn = WsConnState::new();
+        conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::with_config(8, 100);
+        conn.sm_state
+            .enable("terminal-handoff".to_string(), true, Some(300));
+        for sequence in 1..=8 {
+            let mut prefix = xmpp_parsers::message::Message::new(Some(
+                "alice@example.com".parse().expect("recipient JID"),
+            ));
+            prefix.id = Some(xmpp_parsers::message::Id(sequence.to_string()));
+            let _ = conn.sm_state.record_outbound(
+                waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize prefix"),
+                waddle_xmpp::telemetry::attributes::SmEvictionPath::Batch,
+            );
+        }
+        conn.begin_terminal_sm_recovery();
+        let inbound_sequence = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        let reply = xmpp_parsers::message::Message::new(Some(
+            "alice@example.com".parse().expect("recipient JID"),
+        ));
+
+        apply_ordered_relay_handoff_completion(
+            &mut conn,
+            crate::server::routes::interpret::OrderedRelayHandoffCompletion {
+                inbound_sequence,
+                replies: vec![Stanza::Message(reply)],
+            },
+        );
+
+        assert_eq!(conn.sm_state.queue_len(), 8);
+        assert_eq!(conn.sm_state.replay_gap_through(), None);
+        assert_eq!(conn.terminal_sm_recovery.queue_len(), 1);
     }
 
     #[tokio::test(start_paused = true)]

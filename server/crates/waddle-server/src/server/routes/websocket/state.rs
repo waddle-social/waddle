@@ -1532,6 +1532,11 @@ pub(super) struct WsConnState {
     /// already-recorded queue rather than detach a resumable snapshot: the
     /// unwritten batch suffix was never accepted into SM ownership.
     pub(super) sm_recovery_required: bool,
+    /// Unbounded terminal XEP-0198 recovery queue. Once the bounded live
+    /// queue has exhausted its deferred-inbound headroom, every subsequently
+    /// accepted reply is recorded here instead of risking an eviction from
+    /// `sm_state`; cleanup promotes both queues and rejects resume.
+    pub(super) terminal_sm_recovery: StreamManagementState,
     /// Loop-level XEP-0198 send-window pause deadline (issue #1219).
     /// `Some(deadline)` while the connection loop is holding off draining
     /// the outbound mpsc because `sm_state.needs_send_pause()` latched:
@@ -1608,11 +1613,42 @@ impl WsConnState {
             pending_sm_enable_commit: None,
             deferred_inbound: std::collections::VecDeque::new(),
             sm_recovery_required: false,
+            terminal_sm_recovery: StreamManagementState::new(),
             send_window_pause_deadline: None,
             send_window_last_request_acked: 0,
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }
+    }
+
+    /// Enter terminal non-resumable recovery without ever appending another
+    /// frame to the capped live SM queue. This queue exists only until
+    /// cleanup's XEP-0198 §5 promotion completes.
+    pub(super) fn begin_terminal_sm_recovery(&mut self) {
+        if self.sm_recovery_required {
+            return;
+        }
+        self.sm_recovery_required = true;
+        let Some(stream_id) = self.sm_state.stream_id.clone() else {
+            return;
+        };
+        let mut recovery = StreamManagementState::with_config(usize::MAX, u32::MAX);
+        recovery.enable(
+            stream_id,
+            self.sm_state.resumable,
+            self.sm_state.max_resume_time,
+        );
+        self.terminal_sm_recovery = recovery;
+    }
+
+    /// Covers tests and exceptional cleanup paths that established the
+    /// terminal flag before this buffer existed.
+    pub(super) fn ensure_terminal_sm_recovery(&mut self) {
+        if !self.sm_recovery_required || self.terminal_sm_recovery.enabled {
+            return;
+        }
+        self.sm_recovery_required = false;
+        self.begin_terminal_sm_recovery();
     }
 
     /// Start the semantic handling of a typed client `<open/>` frame.

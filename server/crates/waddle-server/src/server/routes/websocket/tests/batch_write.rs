@@ -1294,13 +1294,16 @@ async fn send_window_deferred_cap_exhaustion_closes_without_eviction_or_silent_t
         .enable("cap-exhausted".to_string(), true, Some(300));
 
     let mut sink = CollectSink::default();
-    // Model the incident's sticky deferred queue: the connection loop has
-    // already parked a full cap of ordinary inbound frames and this batch's
-    // pause has no reserved slot left to hunt for an ack.
+    // Model a full deferred queue whose freshly entered pause consumes its
+    // replenished eight-frame ack-search allowance without finding an ack.
     conn.deferred_inbound.extend(
         (0..64).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("noise{i}")))),
     );
-    let mut reader = reader_with(vec![]);
+    let mut reader = reader_with(
+        (0..8)
+            .map(|i| Message::Text(message_with_id(&format!("terminal-noise{i}")).into()))
+            .collect(),
+    );
     let frames: Vec<String> = (1..=1200).map(countable_message).collect();
 
     let outcome = write_response_batch(
@@ -1330,8 +1333,8 @@ async fn send_window_deferred_cap_exhaustion_closes_without_eviction_or_silent_t
     );
     assert_eq!(
         conn.deferred_inbound.len(),
-        64,
-        "the terminal batch never consumes or discards deferred frames"
+        72,
+        "the terminal batch consumes only its replenished bounded allowance"
     );
     assert!(
         conn.sm_recovery_required,
@@ -1384,6 +1387,76 @@ async fn send_window_reserved_headroom_recovers_from_ack_behind_ordinary_frames(
     assert_eq!(conn.sm_state.last_acked, 8);
     assert_eq!(conn.deferred_inbound.len(), 63);
     assert!(!conn.sm_recovery_required);
+}
+
+/// Every successful ack roundtrip replenishes the next in-batch pause's
+/// bounded ordinary-frame allowance. The second pause begins after the first
+/// already parked seven frames, so a static 64-slot check would terminalize a
+/// healthy client before it could read the second ack.
+#[tokio::test]
+async fn send_window_headroom_replenishes_for_second_pause_in_one_batch() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("two-pauses".to_string(), true, Some(300));
+    conn.deferred_inbound.extend(
+        (0..56).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("parked{i}")))),
+    );
+
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(
+        (0..7)
+            .map(|i| Message::Text(message_with_id(&format!("first-pause{i}")).into()))
+            .chain(std::iter::once(ack_frame(8)))
+            .chain(
+                (0..7).map(|i| Message::Text(message_with_id(&format!("second-pause{i}")).into())),
+            )
+            .chain(std::iter::once(ack_frame(16)))
+            .collect(),
+    );
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        (1..=18).map(countable_message).collect(),
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(conn.sm_state.last_acked, 16);
+    assert_eq!(conn.deferred_inbound.len(), 70);
+    assert!(!conn.sm_recovery_required);
+}
+
+/// After terminal recovery begins, post-transport response recording must not
+/// append to the capped live queue and evict its recoverable prefix.
+#[test]
+fn terminal_recovery_redirects_replay_tail_out_of_capped_sm_queue() {
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(8, 100);
+    conn.sm_state
+        .enable("terminal-recovery".to_string(), true, Some(300));
+    for sequence in 1..=8 {
+        let _ = conn
+            .sm_state
+            .record_outbound(countable_message(sequence), SmEvictionPath::Batch);
+    }
+    conn.begin_terminal_sm_recovery();
+
+    super::super::batch_write::record_remaining_for_replay(
+        &mut conn,
+        (9..=1032).map(countable_message),
+        BatchSmPolicy::Record,
+    );
+
+    assert_eq!(conn.sm_state.queue_len(), 8);
+    assert_eq!(conn.sm_state.replay_gap_through(), None);
+    assert_eq!(conn.terminal_sm_recovery.queue_len(), 1024);
+    assert_eq!(conn.terminal_sm_recovery.replay_gap_through(), None);
 }
 
 /// A normal deferred backlog is deliberately kept below the physical cap, so

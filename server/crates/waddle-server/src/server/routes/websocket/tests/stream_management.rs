@@ -302,7 +302,7 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
             SmEvictionPath::Batch,
         );
     }
-    conn.sm_recovery_required = true;
+    conn.begin_terminal_sm_recovery();
 
     let mut buffered = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
     buffered.from = Some("bob@example.com/phone".parse().expect("sender jid"));
@@ -366,6 +366,114 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
         }),
         "accepted outbound work is promoted instead of silently dropped"
     );
+}
+
+/// A same-FullJid replacement owns registry/MUC cleanup, but must not make a
+/// paused predecessor drop the prefix and accepted receiver backlog that had
+/// already entered terminal XEP-0198 recovery.
+#[tokio::test]
+async fn superseded_terminal_recovery_promotes_without_touching_replacement() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/superseded-recovery"
+        .parse()
+        .expect("jid");
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+    let old_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), old_tx.clone());
+
+    let mut old_conn = WsConnState::new();
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    old_conn.registry_owner = Some(old_owner);
+    let enabled = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    let old_stream_id = Element::from_str(&enabled[0])
+        .expect("enabled xml")
+        .attr("id")
+        .expect("stream id")
+        .to_string();
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    let _ = old_conn.sm_state.record_outbound(
+        message_frame_xml_with_id("superseded-prefix".to_string()),
+        SmEvictionPath::Batch,
+    );
+    old_conn.begin_terminal_sm_recovery();
+
+    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+    let replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+    let replacement_stream =
+        waddle_xmpp::pending_delivery::SmSessionId::new("replacement-stream".to_string());
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id_if_owner(&jid, &replacement_owner, Some(replacement_stream.clone())));
+
+    let mut accepted = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+    accepted.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+    accepted.id = Some(xmpp_parsers::message::Id("superseded-backlog".to_string()));
+    accepted.type_ = xmpp_parsers::message::MessageType::Chat;
+    accepted.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "accepted before replacement cleanup".to_string(),
+    );
+    waddle_xmpp::xep::xep0334::add_hint(
+        &mut accepted,
+        waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+    );
+    old_tx
+        .send(OutboundStanza::new(Stanza::Message(accepted)))
+        .await
+        .expect("old receiver accepted backlog");
+
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, true).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(state
+        .deps
+        .protocol
+        .sm_session_registry
+        .peek_session(&old_stream_id)
+        .await
+        .expect("registry lookup")
+        .is_none());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .and_then(|entry| entry.sm_stream_id()),
+        Some(replacement_stream),
+        "terminal recovery must not mutate the replacement registry entry"
+    );
+    let pending = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list promoted rows");
+    assert!(pending.iter().any(|row| {
+        matches!(
+            &row.payload,
+            waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                if message.id.as_ref().is_some_and(|id| id.0 == "superseded-backlog")
+        )
+    }));
 }
 
 #[tokio::test]

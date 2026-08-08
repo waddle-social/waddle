@@ -317,10 +317,11 @@ pub(super) async fn cleanup_connection_shutdown(
     conn: &mut WsConnState,
     superseded: bool,
 ) -> ConnectionShutdownOutcome {
-    // Short-circuit when this task was superseded: the registry and MUC
-    // occupant slots now belong to the newer connection for this FullJid,
-    // and any cleanup we do here would clobber the newcomer.
-    if superseded {
+    // A superseded ordinary connection must not touch the replacement's
+    // registry or MUC state. Terminal SM recovery is different: it only
+    // promotes this task's already accepted delivery and leaves those shared
+    // resources alone.
+    if superseded && !conn.sm_recovery_required {
         return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
@@ -334,6 +335,24 @@ pub(super) async fn cleanup_connection_shutdown(
     let Some(jid) = conn.phase.cleanup_jid().cloned() else {
         return ConnectionShutdownOutcome::NotPersisted;
     };
+
+    if superseded {
+        let detached_snapshot = terminal_recovery_snapshot(&jid, conn);
+        let Some(detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
+            super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+            return ConnectionShutdownOutcome::NotPersisted;
+        };
+        let recovery_session =
+            terminal_recovery_session(state, outbound_rx, conn, detached, detached_snapshot).await;
+        return refuse_detach_without_principal(
+            state,
+            outbound_rx,
+            &jid,
+            conn,
+            vec![recovery_session],
+        )
+        .await;
+    }
 
     let should_detach_for_resume = (conn.sm_state.is_resumable()
         && !matches!(conn.phase, ConnectionPhase::Closing { .. }))
@@ -435,41 +454,20 @@ pub(super) async fn cleanup_connection_shutdown(
                 // suffix never entered that channel and remains deliberately
                 // excluded; dropping accepted routed work here would be a
                 // separate silent-loss path.
-                outbound_rx.close();
-                // A peer-routed channel entry may expand into several output
-                // frames during its recipient pass. This terminal recovery
-                // buffer therefore must not inherit the channel-entry count
-                // as a queue cap: every already-accepted frame has to reach
-                // the promotion chain, whereas the normal live SM queue and
-                // the channel itself retain their ordinary bounded limits.
-                let mut recovery_backlog =
-                    waddle_xmpp::stream_management::StreamManagementState::with_config(
-                        usize::MAX,
-                        u32::MAX,
-                    );
-                recovery_backlog.enable(detached.stream_id.clone(), true, detached.max_resume_time);
-                drain_outbound_into_replay(
+                let recovery_session = terminal_recovery_session(
                     state,
-                    conn.state_machine.as_mut(),
-                    &mut recovery_backlog,
-                    conn.authenticated_session.as_ref(),
                     outbound_rx,
-                    None,
+                    conn,
+                    detached,
+                    detached_snapshot,
                 )
                 .await;
-
-                let mut recovery_sessions = vec![detached];
-                if let Some(backlog) = recovery_backlog.to_detached_session(detached_snapshot) {
-                    if !backlog.unacked_stanzas.is_empty() {
-                        recovery_sessions.push(backlog);
-                    }
-                }
                 return refuse_detach_without_principal(
                     state,
                     outbound_rx,
                     &jid,
                     conn,
-                    recovery_sessions,
+                    vec![recovery_session],
                 )
                 .await;
             }
@@ -730,6 +728,75 @@ pub(super) async fn cleanup_connection_shutdown(
     ConnectionShutdownOutcome::NotPersisted
 }
 
+/// Build the detached payload needed solely for terminal recovery when the
+/// connection registry slot may already belong to a same-JID replacement.
+/// These fields are never made resumable: promotion uses the typed JID and
+/// unacked queue, while the replacement retains all registry/MUC ownership.
+fn terminal_recovery_snapshot(
+    jid: &FullJid,
+    conn: &WsConnState,
+) -> waddle_xmpp::stream_management::DetachedSessionSnapshot {
+    waddle_xmpp::stream_management::DetachedSessionSnapshot {
+        user_id: conn
+            .authenticated_session
+            .as_ref()
+            .map(|session| session.user_jid.to_string())
+            .unwrap_or_else(|| jid.to_bare().to_string()),
+        jid: jid.clone(),
+        carbons_enabled: conn.carbons_enabled,
+        roster_interested: conn.roster_interested,
+        blocklist_interested: conn.blocklist_interested,
+        presence_available: conn.presence_available,
+        presence_show: conn.presence_show.clone(),
+        presence_status: conn.presence_status.clone(),
+        presence_priority: conn.presence_priority,
+        presence_payloads: conn.presence_payloads.clone(),
+        pending_subscribes_flushed: conn.pending_subscribes_flushed,
+    }
+}
+
+/// Combine replies recorded after cap exhaustion with the accepted outbound
+/// receiver backlog into one synthetic detached session. Both buffers are
+/// intentionally unbounded only during terminal recovery, and are promoted
+/// rather than made resumable. Keeping one session per stream preserves the
+/// promotion helper's retry identity invariant.
+async fn terminal_recovery_session(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    conn: &mut WsConnState,
+    mut detached: waddle_xmpp::stream_management::DetachedSession,
+    detached_snapshot: waddle_xmpp::stream_management::DetachedSessionSnapshot,
+) -> waddle_xmpp::stream_management::DetachedSession {
+    outbound_rx.close();
+    conn.ensure_terminal_sm_recovery();
+    drain_outbound_into_replay(
+        state,
+        conn.state_machine.as_mut(),
+        &mut conn.terminal_sm_recovery,
+        conn.authenticated_session.as_ref(),
+        outbound_rx,
+        None,
+    )
+    .await;
+
+    if let Some(backlog) = conn
+        .terminal_sm_recovery
+        .to_detached_session(detached_snapshot)
+    {
+        let backlog_len = backlog.unacked_stanzas.len();
+        for (offset, mut stanza) in backlog.unacked_stanzas.into_iter().enumerate() {
+            stanza.sequence = detached
+                .outbound_count
+                .wrapping_add(u32::try_from(offset + 1).unwrap_or(u32::MAX));
+            detached.unacked_stanzas.push(stanza);
+        }
+        detached.outbound_count = detached
+            .outbound_count
+            .wrapping_add(u32::try_from(backlog_len).unwrap_or(u32::MAX));
+    }
+    detached
+}
+
 /// A session that enabled resumable SM but cannot prove a durable resume
 /// identity (pre-v11 row, or no authenticated session) still owns two
 /// things that must not vanish with it: the `<enabled/>` path published a
@@ -745,8 +812,9 @@ async fn refuse_detach_without_principal(
     conn: &mut WsConnState,
     detached_sessions: Vec<waddle_xmpp::stream_management::DetachedSession>,
 ) -> ConnectionShutdownOutcome {
-    super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
-    conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+    // Keep this stream's claim live throughout every promotion. The claim
+    // janitor uses SM liveness/fences, and deferring it before the locally
+    // held batch is registered would let a sweep release the fence midway.
     if !detached_sessions.is_empty() {
         crate::sm_promotion::promote_displaced_sessions(
             detached_sessions,
@@ -761,6 +829,8 @@ async fn refuse_detach_without_principal(
         )
         .await;
     }
+    super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+    conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     cleanup_without_resumable_snapshot(state, outbound_rx, jid, conn).await
 }
 

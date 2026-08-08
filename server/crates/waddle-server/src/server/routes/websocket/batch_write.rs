@@ -224,7 +224,7 @@ where
         match await_send_window_recovery(sender, reader, state, conn, authority).await {
             SendWindowOutcome::Recovered => {}
             SendWindowOutcome::DeferredCapExhausted => {
-                conn.sm_recovery_required = true;
+                conn.begin_terminal_sm_recovery();
                 return BatchWriteOutcome::DeferredCapExhausted;
             }
             SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
@@ -332,7 +332,7 @@ where
             match await_send_window_recovery(sender, reader, state, conn, authority).await {
                 SendWindowOutcome::Recovered => {}
                 SendWindowOutcome::DeferredCapExhausted => {
-                    conn.sm_recovery_required = true;
+                    conn.begin_terminal_sm_recovery();
                     return BatchWriteOutcome::DeferredCapExhausted;
                 }
                 SendWindowOutcome::TransportClosed => {
@@ -388,6 +388,13 @@ where
     }
     waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
     let deadline = tokio::time::Instant::now() + SEND_WINDOW_PAUSE_DEADLINE;
+    // Each pause earns a fresh bounded ack-search allowance. A previous
+    // successful pause may have parked ordinary frames, but it also proved
+    // the client completed an ack roundtrip; permanently charging those
+    // frames against later pauses would turn a healthy client terminal.
+    let deferred_at_pause_entry = conn.deferred_inbound.len();
+    let deferred_cap_for_pause =
+        DEFERRED_INBOUND_CAP.max(deferred_at_pause_entry.saturating_add(RESERVED_ACK_HEADROOM));
     // Elicit an ack immediately — nothing more is being written until the
     // window recovers, so the client must be prompted.
     if let Err(outcome) = send_window_message(
@@ -407,7 +414,7 @@ where
         if conn.sm_state.send_window_recovered() {
             return SendWindowOutcome::Recovered;
         }
-        if conn.deferred_inbound.len() >= DEFERRED_INBOUND_CAP {
+        if conn.deferred_inbound.len() >= deferred_cap_for_pause {
             return SendWindowOutcome::DeferredCapExhausted;
         }
         let next = match tokio::select! {
@@ -534,16 +541,12 @@ fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool
 /// Also used by the connection loop's shutdown path for responses to
 /// frames the drain had deferred before the transport went away.
 ///
-/// This records via [`StreamManagementState::record_outbound`], which — if
-/// the queue is genuinely over capacity — evicts the oldest entry and marks
-/// the replay gap. It deliberately does NOT silently drop the untransmitted
-/// tail (Codex P1 review on PR #1234): dropping without a replay gap would let
-/// a later `<resume/>` succeed against the client's old `h` while omitting
-/// those never-written stanzas, i.e. a silent message loss. Marking the gap
-/// instead makes the resume fail loud so the client fresh-binds and recovers
-/// via MAM catch-up. This only runs once the transport is already gone — the
-/// send-window pacing keeps the queue under cap during normal writing — so it
-/// does not reintroduce the #1219 routine-burst poison loop.
+/// Before terminal recovery this records via
+/// [`StreamManagementState::record_outbound`], which marks a replay gap if a
+/// post-transport-loss tail cannot fit. Once deferred headroom is exhausted,
+/// it instead writes exclusively to `terminal_sm_recovery`: terminal cleanup
+/// promotes that unbounded typed queue and rejects resume, so no later frame
+/// can evict the already-recorded prefix from the capped live SM queue.
 pub(super) fn record_remaining_for_replay(
     conn: &mut WsConnState,
     frames: impl Iterator<Item = String>,
@@ -551,9 +554,12 @@ pub(super) fn record_remaining_for_replay(
 ) {
     for frame in frames {
         if should_record(conn, &frame, policy) {
-            let _ = conn
-                .sm_state
-                .record_outbound(frame, SmEvictionPath::ReplayTail);
+            let state = if conn.sm_recovery_required {
+                &mut conn.terminal_sm_recovery
+            } else {
+                &mut conn.sm_state
+            };
+            let _ = state.record_outbound(frame, SmEvictionPath::ReplayTail);
         }
     }
 }
