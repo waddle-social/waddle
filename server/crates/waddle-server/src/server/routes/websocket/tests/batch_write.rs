@@ -1432,6 +1432,90 @@ async fn send_window_headroom_replenishes_for_second_pause_in_one_batch() {
     assert!(!conn.sm_recovery_required);
 }
 
+/// Recovered pauses replenish their local ack-search allowance, but a giant
+/// batch cannot use repeated seven-frame interleaving to retain more than the
+/// absolute pause-time ceiling. The sixth ack remains behind seven ordinary
+/// frames and is deliberately not consumed once the ceiling binds.
+#[tokio::test]
+async fn send_window_absolute_deferred_ceiling_preserves_recorded_prefix() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("absolute-deferred-ceiling".to_string(), true, Some(300));
+    conn.deferred_inbound.extend(
+        (0..56).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("parked{i}")))),
+    );
+
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(
+        (1..=6)
+            .flat_map(|pause| {
+                (0..7)
+                    .map(move |i| {
+                        Message::Text(message_with_id(&format!("pause{pause}-ordinary{i}")).into())
+                    })
+                    .chain(std::iter::once(ack_frame(pause * 8)))
+            })
+            .collect(),
+    );
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        (1..=1200).map(countable_message).collect(),
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::DeferredCapExhausted));
+    assert_eq!(
+        conn.deferred_inbound.len(),
+        96,
+        "the queue never exceeds the absolute ceiling"
+    );
+    let deferred: Vec<String> = conn
+        .deferred_inbound
+        .iter()
+        .map(|text| text.to_string())
+        .collect();
+    let expected_last_deferred = message_with_id("pause6-ordinary4");
+    assert_eq!(
+        deferred.last().map(String::as_str),
+        Some(expected_last_deferred.as_str()),
+        "ceiling binding stops before a sixth recovering ack can be consumed"
+    );
+    assert_eq!(
+        conn.sm_state.last_acked, 40,
+        "the five recovering acks remain applied"
+    );
+    assert_eq!(
+        conn.sm_state.outbound_count, 48,
+        "only the prefix through the terminal sixth pause enters SM ownership"
+    );
+    assert_eq!(
+        conn.sm_state.replay_gap_through(),
+        None,
+        "the recorded prefix is retained without eviction"
+    );
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        8,
+        "the unacked recorded prefix remains intact"
+    );
+    assert!(conn.sm_recovery_required);
+    assert_eq!(
+        sink_texts(&sink)
+            .iter()
+            .filter(|text| text.contains("<message"))
+            .count(),
+        48,
+        "the unwritten tail is not sent or silently accepted"
+    );
+}
+
 /// After terminal recovery begins, post-transport response recording must not
 /// append to the capped live queue and evict its recoverable prefix.
 #[test]

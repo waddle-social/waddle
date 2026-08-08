@@ -60,7 +60,7 @@ pub(super) enum BatchWriteOutcome {
     AuthorityRevoked,
 }
 
-/// Upper bound on frames the mid-batch drain may park in
+/// Normal upper bound on frames the mid-batch drain may park in
 /// [`WsConnState::deferred_inbound`]. Once reached the drain stops
 /// reading, so a flooding client hits TCP backpressure again instead
 /// of converting its send rate into unbounded server heap.
@@ -72,6 +72,14 @@ const DEFERRED_INBOUND_CAP: usize = 64;
 /// deferred queue still gets a bounded chance to recover.
 const RESERVED_ACK_HEADROOM: usize = 8;
 const NORMAL_DEFERRED_INBOUND_CAP: usize = DEFERRED_INBOUND_CAP - RESERVED_ACK_HEADROOM;
+
+/// Hard limit for deferred inbound frames while a paced batch is waiting for
+/// XEP-0198 acknowledgement recovery. This bounds retained payload bytes to
+/// [`DEFERRED_INBOUND_ABSOLUTE_CEILING`] times [`MAX_FRAME_SIZE`] (96 MiB at
+/// the current 1 MiB frame limit), plus container overhead. Healthy
+/// low-chatter clients acknowledge promptly without parking ordinary frames,
+/// so their pauses stay well below this last-resort ceiling.
+const DEFERRED_INBOUND_ABSOLUTE_CEILING: usize = DEFERRED_INBOUND_CAP + 4 * RESERVED_ACK_HEADROOM;
 
 /// Deadline for a single XEP-0198 send-window pause (issue #1219). A
 /// healthy client acks within one RTT; a pause that outlives this means
@@ -364,7 +372,11 @@ where
 /// entry and re-sent after each ack that does not yet recover the window,
 /// because the wasm client acks only in response to a request. Bounded by
 /// [`SEND_WINDOW_PAUSE_DEADLINE`] and the reserved portion of
-/// [`DEFERRED_INBOUND_CAP`]; other
+/// [`DEFERRED_INBOUND_ABSOLUTE_CEILING`]. Each recovered pause receives a
+/// fresh ordinary-frame allowance, but the absolute ceiling prevents a giant
+/// single batch from accumulating that allowance indefinitely. Healthy
+/// low-chatter clients park few or no ordinary frames before promptly acking,
+/// so they never approach the ceiling; other
 /// select concerns (shutdown, keepalive) are not serviced while parked, so
 /// the deadline is the safety valve.
 async fn await_send_window_recovery<S, SE, R, RE>(
@@ -393,8 +405,9 @@ where
     // the client completed an ack roundtrip; permanently charging those
     // frames against later pauses would turn a healthy client terminal.
     let deferred_at_pause_entry = conn.deferred_inbound.len();
-    let deferred_cap_for_pause =
-        DEFERRED_INBOUND_CAP.max(deferred_at_pause_entry.saturating_add(RESERVED_ACK_HEADROOM));
+    let deferred_cap_for_pause = DEFERRED_INBOUND_CAP
+        .max(deferred_at_pause_entry.saturating_add(RESERVED_ACK_HEADROOM))
+        .min(DEFERRED_INBOUND_ABSOLUTE_CEILING);
     // Elicit an ack immediately — nothing more is being written until the
     // window recovers, so the client must be prompted.
     if let Err(outcome) = send_window_message(
