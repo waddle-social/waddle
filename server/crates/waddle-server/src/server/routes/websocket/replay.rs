@@ -16,6 +16,19 @@ pub(super) enum PendingRowDrainPolicy {
     ReleaseForTerminalRecovery,
 }
 
+pub(super) struct TerminalDrainContext<'a> {
+    pub(super) session: &'a waddle_xmpp::stream_management::DetachedSession,
+    pub(super) blocklist: Option<&'a waddle_xmpp::protocol::session_state::Blocklist>,
+    pub(super) recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
+    pub(super) promote_incrementally: bool,
+}
+
+struct TerminalDrainedFrame {
+    xml: String,
+    original_receipt_at: chrono::DateTime<chrono::Utc>,
+    pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
+}
+
 /// Drain `outbound_rx` of all immediately-available
 /// [`OutboundStanza`] values and record them into the per-connection
 /// XEP-0198 unacked queue (and, when a `detached_stream_id` is
@@ -113,12 +126,15 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     conn: &mut WsConnState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     pending_row_policy: PendingRowDrainPolicy,
-) {
+    terminal: TerminalDrainContext<'_>,
+) -> Vec<waddle_xmpp::stream_management::DetachedUnackedStanza> {
     let principal_session = conn.authenticated_session.clone();
     let principal = principal_session
         .as_ref()
         .map(super::ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal);
+    let mut retained_overflow = Vec::new();
+    let mut retain_overflow_for_retry = false;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
         let receipt_at = outbound_stanza
             .pending_row_original_receipt_at
@@ -127,15 +143,23 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
         match outbound_stanza.kind {
             DeliveryKind::DirectFrame => {
                 let xml = stanza_to_xml(&outbound_stanza.stanza);
-                record_drained_terminal_xml(
+                let retained = record_drained_terminal_xml(
                     state,
                     conn,
-                    xml,
-                    receipt_at,
-                    pending_row_id,
+                    TerminalDrainedFrame {
+                        xml,
+                        original_receipt_at: receipt_at,
+                        pending_row_id,
+                    },
                     pending_row_policy,
+                    &terminal,
+                    retain_overflow_for_retry,
                 )
                 .await;
+                if let Some(entry) = retained {
+                    retain_overflow_for_retry = true;
+                    retained_overflow.push(entry);
+                }
             }
             DeliveryKind::PeerStanza => {
                 let Some(sm) = conn.state_machine.as_mut() else {
@@ -152,20 +176,29 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                 let mut row_id_for_first = pending_row_id.clone();
                 for xml in drive.frames {
                     let row_for_this = row_id_for_first.take();
-                    record_drained_terminal_xml(
+                    let retained = record_drained_terminal_xml(
                         state,
                         conn,
-                        xml,
-                        receipt_at,
-                        row_for_this,
+                        TerminalDrainedFrame {
+                            xml,
+                            original_receipt_at: receipt_at,
+                            pending_row_id: row_for_this,
+                        },
                         pending_row_policy,
+                        &terminal,
+                        retain_overflow_for_retry,
                     )
                     .await;
+                    if let Some(entry) = retained {
+                        retain_overflow_for_retry = true;
+                        retained_overflow.push(entry);
+                    }
                 }
             }
         }
     }
     conn.warn_terminal_recovery_drops_once();
+    retained_overflow
 }
 
 /// Helper: record a single drained XML frame into the per-connection
@@ -289,11 +322,16 @@ async fn record_drained_xml(
 async fn record_drained_terminal_xml(
     state: &WebSocketState,
     conn: &mut WsConnState,
-    xml: String,
-    original_receipt_at: chrono::DateTime<chrono::Utc>,
-    pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
+    frame: TerminalDrainedFrame,
     pending_row_policy: PendingRowDrainPolicy,
-) {
+    terminal: &TerminalDrainContext<'_>,
+    retain_overflow_for_retry: bool,
+) -> Option<waddle_xmpp::stream_management::DetachedUnackedStanza> {
+    let TerminalDrainedFrame {
+        xml,
+        original_receipt_at,
+        pending_row_id,
+    } = frame;
     if matches!(
         pending_row_policy,
         PendingRowDrainPolicy::ReleaseForTerminalRecovery
@@ -313,7 +351,7 @@ async fn record_drained_terminal_xml(
                      claim-expiry janitor will recover the row"
                 );
             }
-            return;
+            return None;
         }
     }
     if !conn.terminal_sm_recovery.enabled || !is_countable_stanza(&xml) {
@@ -332,9 +370,44 @@ async fn record_drained_terminal_xml(
                 );
             }
         }
-        return;
+        return None;
     }
-    conn.record_terminal_recovery_outbound_with_receipt_at(xml, original_receipt_at);
+    let entry = waddle_xmpp::stream_management::DetachedUnackedStanza {
+        sequence: terminal.session.outbound_count.wrapping_add(1),
+        stanza_xml: xml,
+        original_receipt_at,
+    };
+    // The queue was snapshotted before this drain. Never put another frame
+    // back into it: success promotes incrementally, while a failed/blocked
+    // prefix keeps the bounded receiver tail with the synthetic session.
+    if !terminal.promote_incrementally || retain_overflow_for_retry {
+        return Some(entry);
+    }
+    let Some(blocklist) = terminal.blocklist else {
+        return Some(entry);
+    };
+    let summary = crate::sm_promotion::promote_terminal_overflow_entry(
+        terminal.session,
+        entry.clone(),
+        crate::sm_promotion::TerminalOverflowPromotionDeps {
+            registry: &state.deps.protocol.connection_registry,
+            user_registry: &state.deps.protocol.user_registry,
+            pending_storage: &state.deps.protocol.pending_delivery_storage,
+            blocklist,
+            server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            recent_tombstones: terminal.recent_tombstones,
+        },
+    )
+    .await;
+    if summary.has_storage_failure() {
+        warn!(
+            stream_id = %terminal.session.stream_id,
+            storage_failed = summary.storage_failed,
+            "terminal recovery overflow promotion failed durable storage; retaining for retry"
+        );
+        return Some(entry);
+    }
+    None
 }
 
 /// Accumulated result of [`drive_interpret_loop`]: everything the

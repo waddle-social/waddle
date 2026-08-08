@@ -42,7 +42,9 @@ use waddle_xmpp::protocol::dm_routing::{
 };
 use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
-use waddle_xmpp::stream_management::{DetachedSession, TOMBSTONE_CLOCK_SKEW_SLACK};
+use waddle_xmpp::stream_management::{
+    DetachedSession, DetachedUnackedStanza, TOMBSTONE_CLOCK_SKEW_SLACK,
+};
 use waddle_xmpp::Stanza;
 
 use live::{build_online_resources, collect_live_targets};
@@ -191,6 +193,59 @@ pub async fn promote_session_unacked(
         crate::telemetry::mark_span_error("Q6 promotion: unacked stanzas failed durable storage");
     }
     summary
+}
+
+/// Promote one accepted terminal-recovery frame without placing it in the
+/// capped in-memory replay queue. The terminal receiver is closed before its
+/// drain begins, so the normal live-redelivery attempt cannot re-enqueue work
+/// on the dead connection; the regular Q6 classifier then selects an
+/// alternate live resource, durable pending delivery, or an RFC-permitted
+/// drop.
+pub(crate) async fn promote_terminal_overflow_entry(
+    source: &DetachedSession,
+    entry: DetachedUnackedStanza,
+    deps: TerminalOverflowPromotionDeps<'_>,
+) -> PromotionSummary {
+    let session = DetachedSession {
+        stream_id: source.stream_id.clone(),
+        user_id: source.user_id.clone(),
+        jid: source.jid.clone(),
+        inbound_count: source.inbound_count,
+        outbound_count: source.outbound_count,
+        last_acked: source.last_acked,
+        replay_gap_through: source.replay_gap_through,
+        unacked_stanzas: vec![entry],
+        max_resume_time: source.max_resume_time,
+        detached_at: source.detached_at,
+        carbons_enabled: source.carbons_enabled,
+        roster_interested: source.roster_interested,
+        blocklist_interested: source.blocklist_interested,
+        presence_available: source.presence_available,
+        presence_show: source.presence_show.clone(),
+        presence_status: source.presence_status.clone(),
+        presence_priority: source.presence_priority,
+        presence_payloads: source.presence_payloads.clone(),
+        pending_subscribes_flushed: source.pending_subscribes_flushed,
+    };
+    promote_session_unacked(
+        &session,
+        deps.registry,
+        deps.user_registry,
+        deps.pending_storage,
+        deps.blocklist,
+        deps.server_domain,
+        deps.recent_tombstones,
+    )
+    .await
+}
+
+pub(crate) struct TerminalOverflowPromotionDeps<'a> {
+    pub(crate) registry: &'a ConnectionRegistry,
+    pub(crate) user_registry: &'a ActorRef<UserRegistryActor>,
+    pub(crate) pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
+    pub(crate) blocklist: &'a Blocklist,
+    pub(crate) server_domain: &'a str,
+    pub(crate) recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
 }
 
 /// Dependencies for [`promote_displaced_sessions`]. Grouped so the

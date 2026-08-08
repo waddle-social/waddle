@@ -255,6 +255,43 @@ pub trait PendingDeliveryStorage: Send + Sync {
         self.release_row(id).await
     }
 
+    /// Release only rows whose recorded outbound sequence belongs to a
+    /// terminally-promoted SM queue. This is the inverse of
+    /// [`Self::delete_acked_in_window`]: terminal recovery abandons replay,
+    /// so a row that already has a durable `(session, sequence)` binding must
+    /// return to ordinary pending-delivery redelivery instead of being
+    /// promoted from its unacked XML a second time.
+    ///
+    /// The default keeps storage implementations source-compatible while
+    /// preserving the ownership check through [`Self::release_row_if_session`].
+    /// Implementations may override it with a set-based query.
+    async fn release_rows_for_outbound_sequences(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        sequences: &HashSet<u32>,
+    ) -> Result<HashSet<u32>, PendingStorageError> {
+        if sequences.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let rows = self.list(recipient).await?;
+        let mut released = HashSet::new();
+        for row in rows.into_iter().filter(|row| {
+            row.flushed_in_session.as_ref() == Some(session)
+                && row
+                    .outbound_sequence
+                    .is_some_and(|sequence| sequences.contains(&sequence))
+        }) {
+            if self.release_row_if_session(&row.id, session).await? > 0 {
+                if let Some(sequence) = row.outbound_sequence {
+                    released.insert(sequence);
+                }
+            }
+        }
+        Ok(released)
+    }
+
     /// Stamp the XEP-0198 outbound counter value onto a previously-
     /// claimed row, after that row's flush stanza has been pushed
     /// onto the recovering session's outbound queue and assigned its

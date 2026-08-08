@@ -5,7 +5,7 @@ use super::super::{
     handlers::{self, presence::handle_muc_join},
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
-    state::WsConnState,
+    state::{WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
     stream_management::is_countable_stanza,
     transport_xml::{build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml},
 };
@@ -766,24 +766,26 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
         .expect("stream id")
         .to_string();
     conn.publish_pending_sm_enable(state.as_ref());
-    for sequence in 1..=8 {
-        let _ = conn.sm_state.record_outbound(
-            message_frame_xml_with_id(format!("recorded-{sequence}")),
-            SmEvictionPath::Batch,
-        );
-    }
-    conn.begin_terminal_sm_recovery();
 
-    // A flush stanza can already have a durable Archived row when it is
-    // waiting in the outbound channel. Terminal recovery must return that
-    // row to pending-delivery redelivery, rather than promote its replay XML
-    // as a second row and collide with the archive-id uniqueness invariant.
+    // This row has already been written to the live wire and bound to the
+    // SM sequence. Its detached XML has no row id, so terminal cleanup must
+    // recover the durable binding by `(stream_id, outbound_sequence)` rather
+    // than promote a second Archived row from the replay copy.
     let pending_row_id = waddle_xmpp::pending_delivery::PendingRowId::fresh();
     let original_receipt_at = chrono::Utc::now();
     let archived_id = waddle_xmpp_core::xep0359::StanzaId::new(
         "terminal-row-backed-archive",
         jid::Jid::from(jid.to_bare()),
     );
+    let mut row_backed = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+    row_backed.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+    row_backed.id = Some(xmpp_parsers::message::Id("terminal-row-backed".to_string()));
+    row_backed.type_ = xmpp_parsers::message::MessageType::Chat;
+    row_backed.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "row-backed live unacked".to_string(),
+    );
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut row_backed, &archived_id);
     state
         .deps
         .protocol
@@ -796,29 +798,47 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
             flushed_in_session: Some(waddle_xmpp::pending_delivery::SmSessionId::new(
                 stream_id.clone(),
             )),
-            outbound_sequence: None,
+            outbound_sequence: Some(1),
         })
         .await
-        .expect("seed claimed archived pending row");
-    let mut row_backed = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
-    row_backed.from = Some("bob@example.com/phone".parse().expect("sender jid"));
-    row_backed.id = Some(xmpp_parsers::message::Id("terminal-row-backed".to_string()));
-    row_backed.type_ = xmpp_parsers::message::MessageType::Chat;
-    row_backed.bodies.insert(
-        xmpp_parsers::message::Lang::new(),
-        "row-backed backlog".to_string(),
+        .expect("seed written claimed archived pending row");
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(row_backed).expect("serialize written flush stanza"),
+        SmEvictionPath::Batch,
     );
-    waddle_xmpp_core::xep0359::add_stanza_id(&mut row_backed, &archived_id);
-    tx.send(OutboundStanza::for_pending_flush(
-        Stanza::Message(row_backed),
-        pending_row_id.clone(),
-        original_receipt_at,
-    ))
-    .await
-    .expect("queue row-backed flush stanza");
+    for sequence in 2..=8 {
+        let _ = conn.sm_state.record_outbound(
+            message_frame_xml_with_id(format!("recorded-{sequence}")),
+            SmEvictionPath::Batch,
+        );
+    }
+    conn.begin_terminal_sm_recovery();
 
-    // An exact-FullJID <no-store/> stanza must fall through to pending
-    // delivery after terminal cleanup unregisters this dead route.
+    for sequence in 0..TERMINAL_RECOVERY_QUEUE_CAP {
+        let xml = if sequence == 0 {
+            let mut prefix =
+                xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+            prefix.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+            prefix.id = Some(xmpp_parsers::message::Id("terminal-prefix-0".to_string()));
+            prefix.type_ = xmpp_parsers::message::MessageType::Chat;
+            prefix.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                "older retained terminal prefix".to_string(),
+            );
+            waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize terminal prefix")
+        } else {
+            message_frame_xml_with_id(format!("terminal-prefix-{sequence}"))
+        };
+        conn.record_terminal_recovery_outbound(xml);
+    }
+    assert_eq!(
+        conn.terminal_sm_recovery.queue_len(),
+        TERMINAL_RECOVERY_QUEUE_CAP,
+        "the terminal replay buffer starts physically full"
+    );
+
+    // An accepted exact-FullJID <no-store/> stanza must bypass the full
+    // in-memory terminal queue and promote directly to pending delivery.
     let mut buffered = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
     buffered.from = Some("bob@example.com/phone".parse().expect("sender jid"));
     buffered.id = Some(xmpp_parsers::message::Id("accepted-backlog".to_string()));
@@ -879,7 +899,31 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
                     if message.id.as_ref().is_some_and(|id| id.0 == "accepted-backlog")
             )
         }),
-        "accepted outbound work is promoted instead of silently dropped"
+        "accepted outbound work beyond the terminal cap is promoted instead of silently dropped"
+    );
+    let first_terminal_prefix = pending
+        .iter()
+        .position(|row| {
+            matches!(
+                &row.payload,
+                waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                    if message.id.as_ref().is_some_and(|id| id.0 == "terminal-prefix-0")
+            )
+        })
+        .expect("the retained terminal prefix is promoted");
+    let accepted_backlog = pending
+        .iter()
+        .position(|row| {
+            matches!(
+                &row.payload,
+                waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                    if message.id.as_ref().is_some_and(|id| id.0 == "accepted-backlog")
+            )
+        })
+        .expect("the accepted overflow is promoted");
+    assert!(
+        first_terminal_prefix < accepted_backlog,
+        "incremental overflow promotion must not overtake the retained terminal prefix"
     );
     let row_backed_rows: Vec<_> = pending
         .iter()
@@ -888,7 +932,7 @@ async fn deferred_cap_exhaustion_promotes_recorded_prefix_and_rejects_resume() {
     assert_eq!(
         row_backed_rows.len(),
         1,
-        "terminal promotion must not insert a duplicate row-backed flush stanza"
+        "terminal promotion must not insert a duplicate written flush stanza"
     );
     assert!(
         matches!(
@@ -4663,6 +4707,18 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
         .parse()
         .expect("room");
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let sibling_jid: FullJid = "alice@example.com/laptop".parse().expect("sibling jid");
+    let (sibling_tx, mut sibling_rx) = mpsc::channel::<OutboundStanza>(4);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(sibling_jid.clone(), sibling_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&sibling_jid, true, -1);
 
     let _ = handle_muc_join(
         state.as_ref(),
@@ -4677,6 +4733,11 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
 
     let (tx, rx) = mpsc::channel::<OutboundStanza>(4);
     let owner = super::register_test_connection(state.as_ref(), &jid, tx).await;
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 0);
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
     conn.registry_owner = Some(owner);
@@ -4695,6 +4756,7 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
         waddle_xmpp::parser::stanza_to_string(message).expect("serialize queued message"),
         SmEvictionPath::DirectOutbound,
     );
+    conn.begin_terminal_sm_recovery();
 
     let state_for_cleanup = Arc::clone(&state);
     let cleanup_task = tokio::spawn(async move {
@@ -4727,6 +4789,17 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
     assert!(
         state.deps.protocol.connection_registry.is_connected(&jid),
         "replacement bind must survive the predecessor's terminal cleanup"
+    );
+    let unavailable =
+        tokio::time::timeout(std::time::Duration::from_millis(250), sibling_rx.recv())
+            .await
+            .expect("silent replacement must not suppress predecessor unavailable")
+            .expect("sibling channel open");
+    let unavailable_xml = stanza_to_xml(&unavailable.stanza);
+    assert!(
+        unavailable_xml.contains("from='alice@example.com/web'")
+            && unavailable_xml.contains("type='unavailable'"),
+        "terminal cleanup must broadcast unavailable past a silent replacement: {unavailable_xml}"
     );
     assert!(
         snapshot_room(state.as_ref(), &room_jid)
