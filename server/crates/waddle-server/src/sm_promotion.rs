@@ -26,7 +26,7 @@ mod stanza;
 mod tests;
 mod types;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -205,6 +205,20 @@ pub struct DisplacedPromotionDeps<'a> {
     pub server_domain: &'a str,
 }
 
+/// Terminal state of a displaced-promotion batch. A retrying stream remains
+/// owned by the SM registry, so its claim fence must stay live until that
+/// retry's own promote → confirm completion settles it.
+#[derive(Debug, Default)]
+pub(crate) struct DisplacedPromotionOutcome {
+    retrying_stream_ids: HashSet<String>,
+}
+
+impl DisplacedPromotionOutcome {
+    pub(crate) fn is_retrying(&self, stream_id: &str) -> bool {
+        self.retrying_stream_ids.contains(stream_id)
+    }
+}
+
 pub(crate) struct PromotionBatchGuard<'a> {
     registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     sessions: VecDeque<DetachedSession>,
@@ -264,6 +278,28 @@ impl<'a> PromotionSessionGuard<'a> {
     pub(crate) fn complete(&mut self) {
         self.armed = false;
     }
+
+    /// Make the guard's cancellation fallback explicit so callers can report
+    /// whether a retry really remains live before deciding claim cleanup.
+    pub(crate) fn retain_for_retry(&mut self) -> bool {
+        match self
+            .registry
+            .retain_pending_promotion_for_retry(self.session.clone())
+        {
+            Ok(()) => {
+                self.armed = false;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    stream_id = %self.session.stream_id,
+                    %error,
+                    "displaced promotion could not retain its session for retry"
+                );
+                false
+            }
+        }
+    }
 }
 
 impl Drop for PromotionSessionGuard<'_> {
@@ -316,6 +352,18 @@ pub async fn reinsert_failed_session_for_retry(
         return false;
     }
     true
+}
+
+async fn reinsert_or_retain_for_retry(
+    promotion_guard: &mut PromotionSessionGuard<'_>,
+    session: DetachedSession,
+) -> bool {
+    if reinsert_failed_session_for_retry(promotion_guard.registry, session).await {
+        promotion_guard.complete();
+        true
+    } else {
+        promotion_guard.retain_for_retry()
+    }
 }
 
 /// After a PARTIAL promotion failure, durably erase the successfully
@@ -470,10 +518,11 @@ pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
     }
 }
 
-pub async fn promote_displaced_sessions(
+pub(crate) async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
-) {
+) -> DisplacedPromotionOutcome {
+    let mut outcome = DisplacedPromotionOutcome::default();
     let mut batch_guard = PromotionBatchGuard::new(deps.sm_registry, sessions);
     while let Some(pending_session) = batch_guard.pop() {
         let mut promotion_guard = PromotionSessionGuard::new(deps.sm_registry, pending_session);
@@ -498,8 +547,10 @@ pub async fn promote_displaced_sessions(
                         "displaced SM session: blocklist load and failure recording both \
                          failed; preserving durable rows and re-inserting for janitor retry"
                     );
-                    if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
-                        promotion_guard.complete();
+                    if reinsert_or_retain_for_retry(&mut promotion_guard, session.clone()).await {
+                        outcome
+                            .retrying_stream_ids
+                            .insert(session.stream_id.clone());
                     }
                     continue;
                 }
@@ -511,8 +562,10 @@ pub async fn promote_displaced_sessions(
                      preserve fail-closed XEP-0191 policy. Re-inserted for retry on the \
                      SM-expiry janitor's next pass."
                 );
-                if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
-                    promotion_guard.complete();
+                if reinsert_or_retain_for_retry(&mut promotion_guard, session.clone()).await {
+                    outcome
+                        .retrying_stream_ids
+                        .insert(session.stream_id.clone());
                 }
                 continue;
             }
@@ -575,10 +628,22 @@ pub async fn promote_displaced_sessions(
                 .await
             {
                 promotion_guard.complete();
+                outcome
+                    .retrying_stream_ids
+                    .insert(session.stream_id.clone());
+            } else if promotion_guard.retain_for_retry() {
+                outcome
+                    .retrying_stream_ids
+                    .insert(session.stream_id.clone());
             }
             continue;
         }
         if !deps.sm_registry.confirm_drained(&session.stream_id).await {
+            if promotion_guard.retain_for_retry() {
+                outcome
+                    .retrying_stream_ids
+                    .insert(session.stream_id.clone());
+            }
             continue;
         }
         promotion_guard.complete();
@@ -605,6 +670,7 @@ pub async fn promote_displaced_sessions(
             "displaced SM session: Q6 promotion completed"
         );
     }
+    outcome
 }
 
 /// Extract the stamp of a `<delay/>` this server itself added to the

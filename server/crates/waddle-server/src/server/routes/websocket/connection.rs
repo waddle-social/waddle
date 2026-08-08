@@ -1856,9 +1856,18 @@ mod tests {
             );
         }
         conn.deferred_inbound.extend((0..96).map(|sequence| {
-            axum::extract::ws::Utf8Bytes::from(format!(
-                "<iq xmlns='jabber:client' type='set' id='mam-{sequence}'><query xmlns='urn:xmpp:mam:2'/></iq>"
-            ))
+            let mam_query =
+                xmpp_parsers::minidom::Element::builder("query", waddle_xmpp_core::mam::MAM_NS)
+                    .build();
+            let iq = xmpp_parsers::iq::Iq::Set {
+                from: None,
+                to: None,
+                id: format!("mam-{sequence}"),
+                payload: mam_query,
+            };
+            axum::extract::ws::Utf8Bytes::from(
+                waddle_xmpp::parser::stanza_to_string(iq).expect("serialize MAM query"),
+            )
         }));
 
         process_deferred_inbound_after_transport_loss(

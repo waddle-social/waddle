@@ -1,6 +1,8 @@
 use super::*;
 use super::{
-    replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
+    replay::{drain_outbound_into_replay, PendingRowDrainPolicy},
+    state::WsConnState,
+    stream_management::sm_show_from_name,
 };
 use waddle_xmpp::muc::room_actor::{LeaveOutcome, SealGuard};
 use waddle_xmpp::muc::room_registry_actor::{RoomAcquisition, RoomRegistryError};
@@ -389,6 +391,7 @@ pub(super) async fn cleanup_connection_shutdown(
                 conn.authenticated_session.as_ref(),
                 outbound_rx,
                 None,
+                PendingRowDrainPolicy::PreserveForReplay,
             )
             .await;
         }
@@ -608,6 +611,7 @@ pub(super) async fn cleanup_connection_shutdown(
                         conn.authenticated_session.as_ref(),
                         outbound_rx,
                         Some(&stream_id),
+                        PendingRowDrainPolicy::PreserveForReplay,
                     )
                     .await;
                     // Remove the routing entry only — the MUC occupant
@@ -773,6 +777,7 @@ async fn terminal_recovery_session(
         conn.authenticated_session.as_ref(),
         outbound_rx,
         None,
+        PendingRowDrainPolicy::ReleaseForTerminalRecovery,
     )
     .await;
 
@@ -826,8 +831,10 @@ async fn refuse_detach_without_principal(
     // Keep this stream's claim live throughout every promotion. The claim
     // janitor uses SM liveness/fences, and deferring it before the locally
     // held batch is registered would let a sweep release the fence midway.
-    if !detached_sessions.is_empty() {
-        crate::sm_promotion::promote_displaced_sessions(
+    let retrying = if detached_sessions.is_empty() {
+        false
+    } else {
+        let outcome = crate::sm_promotion::promote_displaced_sessions(
             detached_sessions,
             crate::sm_promotion::DisplacedPromotionDeps {
                 sm_registry: &state.deps.protocol.sm_session_registry,
@@ -839,8 +846,14 @@ async fn refuse_detach_without_principal(
             },
         )
         .await;
+        conn.sm_state
+            .stream_id
+            .as_deref()
+            .is_some_and(|stream_id| outcome.is_retrying(stream_id))
+    };
+    if !retrying {
+        super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
     }
-    super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     if let Some((removed_entry, owner)) = terminal_removed {
         let was_presence_available = removed_entry.is_presence_available();

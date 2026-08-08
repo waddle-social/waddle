@@ -883,10 +883,7 @@ async fn storage_failure_exports_error_promotion_span() {
     .await;
 
     assert_eq!(summary.storage_failed, 1);
-    assert!(matches!(
-        spans.status_of("promote_session_unacked"),
-        Some(opentelemetry::trace::Status::Error { .. })
-    ));
+    assert!(spans.has_error_status("promote_session_unacked"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1305,6 +1302,113 @@ async fn displaced_promotion_storage_failure_keeps_session_drainable_for_retry()
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn displaced_promotion_retry_retains_claim_fence_until_it_settles() {
+    // A failed promotion must retain the original stream fence. Terminal
+    // cleanup uses this outcome to avoid scheduling a competing terminal
+    // claim release while the janitor-owned retry still needs fenced writes.
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+        Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let sm_registry = InMemorySmSessionRegistry::new().with_claim_store(
+        Arc::clone(&claim_store),
+        waddle_xmpp::ownership::SharedNodeIdentity::new(waddle_xmpp::ownership::NodeIdentity::new(
+            "promotion-node",
+            "incarnation",
+        )),
+    );
+    let stream_id = "stream-retry-keeps-fence";
+    assert!(sm_registry.ensure_session_claim(stream_id).await.is_some());
+    let jid = full("alice@example.com/retry-fence");
+    assert!(sm_registry
+        .store_session(detached_session_with_unacked(
+            stream_id,
+            jid.clone(),
+            vec![dm_xml("bob@elsewhere/x", "alice@example.com", "held")],
+        ))
+        .await
+        .expect("store session")
+        .is_empty());
+    let displaced = sm_registry
+        .invalidate_sessions_for_jid(&jid)
+        .await
+        .expect("displace session");
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let blocking = InMemoryBlockingStorage::new();
+    let failing: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
+    let failed = promote_displaced_sessions(
+        displaced,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            user_registry: &user_registry,
+            pending_storage: &failing,
+            blocking_storage: &blocking,
+            server_domain: "example.com",
+        },
+    )
+    .await;
+    assert!(failed.is_retrying(stream_id));
+    assert!(
+        sm_registry
+            .locally_owned_claim_ids()
+            .expect("owned claim inventory")
+            .iter()
+            .any(|owned| owned == stream_id),
+        "the retry keeps its claim fence live"
+    );
+    assert_eq!(
+        sm_registry.pending_claim_release_count(),
+        0,
+        "no terminal release may be inventoried while retry is pending"
+    );
+
+    let retry = sm_registry.drain_expired().await.expect("drain retry");
+    let recovered: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let settled = promote_displaced_sessions(
+        retry,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            user_registry: &user_registry,
+            pending_storage: &recovered,
+            blocking_storage: &blocking,
+            server_domain: "example.com",
+        },
+    )
+    .await;
+    assert!(!settled.is_retrying(stream_id));
+    assert_eq!(
+        sm_registry.pending_claim_release_count(),
+        0,
+        "the settled retry releases its own claim instead of leaving terminal inventory"
+    );
+    assert!(
+        !sm_registry
+            .locally_owned_claim_ids()
+            .expect("owned claim inventory")
+            .iter()
+            .any(|owned| owned == stream_id),
+        "the fence releases once the retry has settled"
+    );
+    assert!(
+        claim_store
+            .current_claim(&waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::SmSession,
+                stream_id,
+            ))
+            .await
+            .expect("claim lookup")
+            .is_none(),
+        "the retry completion releases the exact stream claim once"
+    );
 }
 
 #[tokio::test]

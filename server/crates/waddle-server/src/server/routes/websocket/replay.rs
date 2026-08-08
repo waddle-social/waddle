@@ -5,6 +5,17 @@ use super::{
 };
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
+/// How a detach drain handles an outbound item that already belongs to a
+/// durable pending-delivery row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingRowDrainPolicy {
+    /// Bind the row to the detached SM sequence for resumable replay.
+    PreserveForReplay,
+    /// Return the row to normal pending-delivery redelivery instead of
+    /// appending it to a terminal promotion queue.
+    ReleaseForTerminalRecovery,
+}
+
 /// Drain `outbound_rx` of all immediately-available
 /// [`OutboundStanza`] values and record them into the per-connection
 /// XEP-0198 unacked queue (and, when a `detached_stream_id` is
@@ -29,6 +40,7 @@ pub(super) async fn drain_outbound_into_replay(
     authenticated_session: Option<&crate::auth::Session>,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     detached_stream_id: Option<&str>,
+    pending_row_policy: PendingRowDrainPolicy,
 ) {
     let principal = authenticated_session.map(super::ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal);
@@ -54,6 +66,7 @@ pub(super) async fn drain_outbound_into_replay(
                     xml,
                     receipt_at,
                     pending_row_id,
+                    pending_row_policy,
                 )
                 .await;
             }
@@ -82,6 +95,7 @@ pub(super) async fn drain_outbound_into_replay(
                         xml,
                         receipt_at,
                         row_for_this,
+                        pending_row_policy,
                     )
                     .await;
                 }
@@ -103,7 +117,30 @@ async fn record_drained_xml(
     xml: String,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
+    pending_row_policy: PendingRowDrainPolicy,
 ) {
+    if matches!(
+        pending_row_policy,
+        PendingRowDrainPolicy::ReleaseForTerminalRecovery
+    ) {
+        if let Some(row_id) = pending_row_id {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .release_row(&row_id)
+                .await
+            {
+                warn!(
+                    row_id = %row_id,
+                    %error,
+                    "pending_delivery release_row (terminal recovery drain) failed; \
+                     claim-expiry janitor will recover the row"
+                );
+            }
+            return;
+        }
+    }
     if !sm_state.enabled || !is_countable_stanza(&xml) {
         if let Some(row_id) = pending_row_id {
             if let Err(error) = state

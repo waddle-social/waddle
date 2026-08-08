@@ -90,6 +90,7 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -102,6 +103,26 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry(
         None,
         None,
         Some(sm_session_registry),
+        None,
+    )
+    .await
+}
+
+/// Build a test state with explicit SM registry and pending-delivery storage.
+/// This keeps recovery tests on the production cleanup path while allowing a
+/// single promotion attempt to model a transient storage outage.
+pub(crate) async fn create_test_websocket_state_with_sm_registry_and_pending_storage(
+    sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    pending_delivery_storage: Arc<
+        dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage,
+    >,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        None,
+        None,
+        Some(sm_session_registry),
+        Some(pending_delivery_storage),
     )
     .await
 }
@@ -124,6 +145,7 @@ pub(crate) async fn create_test_websocket_state_with_clustering(
         None,
         Some(clustering),
         Some(sm_session_registry),
+        None,
     )
     .await
 }
@@ -183,6 +205,7 @@ pub(crate) async fn create_test_websocket_state_with_sfu(
         Some(sfu),
         None,
         None,
+        None,
     )
     .await
 }
@@ -200,6 +223,7 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
         empty_extension_manager().await,
         Some(sfu),
         Some(clustering),
+        None,
         None,
     )
     .await
@@ -523,6 +547,7 @@ pub(crate) async fn create_test_websocket_state_with_calls() -> Arc<WebSocketSta
         Some(fixture_call_sfu()),
         None,
         None,
+        None,
     )
     .await
 }
@@ -547,6 +572,9 @@ async fn create_test_websocket_state_with_extension_manager(
     call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
     clustering_override: Option<crate::clustering::ClusteringHandles>,
     sm_session_registry_override: Option<Arc<InMemorySmSessionRegistry>>,
+    pending_delivery_storage_override: Option<
+        Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
+    >,
 ) -> Arc<WebSocketState> {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
@@ -695,9 +723,11 @@ async fn create_test_websocket_state_with_extension_manager(
                     blocking_storage: Arc::new(
                         waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new(),
                     ),
-                    pending_delivery_storage: Arc::new(
-                        waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::with_default_quota(),
-                    ),
+                    pending_delivery_storage: pending_delivery_storage_override.unwrap_or_else(|| {
+                        Arc::new(
+                            waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::with_default_quota(),
+                        )
+                    }),
                     command_registry: {
                         // The XEP-0050 push commands (`register-device`,
                         // `disable-device`) are registered here so the
