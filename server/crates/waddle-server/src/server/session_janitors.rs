@@ -248,7 +248,24 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                 pending_session,
             );
             let session = promotion_guard.session().clone();
-            let released_redrive_aborted = row_release.released_rows
+            // Ordering barrier for retried sessions: a previous cleanup can
+            // have QUEUED earlier rows whose re-drive aborted (their SM
+            // sequences were pruned, so this pass cannot rediscover them
+            // from the replay queue). Any unflushed backlog for the user
+            // must reach a live replacement BEFORE this session's replay
+            // promotes later traffic to it — re-drive unconditionally when
+            // rows were released this pass or any unflushed rows remain.
+            let has_unflushed_backlog = match state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(&session.jid.to_bare())
+                .await
+            {
+                Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
+                Err(_) => false,
+            };
+            let released_redrive_aborted = (row_release.released_rows || has_unflushed_backlog)
                 && routes::websocket::redrive_terminal_pending_rows_to_live_resource(
                     state,
                     &session.jid.to_bare(),

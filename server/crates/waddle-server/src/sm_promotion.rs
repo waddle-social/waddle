@@ -367,6 +367,22 @@ pub(crate) async fn release_row_backed_replay_copies(
     let mut replay_sequences_to_strip = outcome.released.clone();
     let mut release_failed_known_rows = false;
     let mut ownership_unknown = false;
+    if outcome.error.is_none() {
+        if let Some(sequence_bound_rows) = preflight.as_ref() {
+            // A preflight-known bound sequence missing from a SUCCESSFUL
+            // release means the row's claim changed hands between the two
+            // reads (reclaimed, expired, or already released elsewhere).
+            // Either way its durable row is authoritative — promoting the
+            // replay copy as fresh work would duplicate it. Strip it; no
+            // re-drive obligation is ours (the row's current owner settles
+            // it).
+            for sequence in sequence_bound_rows {
+                if !outcome.released.contains(sequence) {
+                    replay_sequences_to_strip.insert(*sequence);
+                }
+            }
+        }
+    }
     if let Some(error) = outcome.error.as_ref() {
         match preflight.as_ref() {
             Some(sequence_bound_rows) => {

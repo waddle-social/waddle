@@ -750,16 +750,19 @@ fn apply_inbox_rsm(
         .take(window_end - window_start)
         .collect();
     let truncated = effective < window.len();
-    let (first_index, page): (usize, Vec<_>) =
-        if matches!(rsm.and_then(|request| request.before.as_deref()), Some("")) {
-            // Last page: take the final `effective` items of the window.
-            let skip = window.len().saturating_sub(effective);
-            (window_start + skip, window.into_iter().skip(skip).collect())
-        } else if truncated {
-            (window_start, window.into_iter().take(effective).collect())
-        } else {
-            (window_start, window)
-        };
+    // XEP-0059 §2.3: ANY `<before/>` request pages BACKWARD — the page is
+    // the final `effective` entries immediately preceding the cursor (the
+    // empty form being the special case "last page"). Forward truncation
+    // applies only to `<after/>`/index/plain requests.
+    let backward = rsm.is_some_and(|request| request.before.is_some());
+    let (first_index, page): (usize, Vec<_>) = if backward && truncated {
+        let skip = window.len().saturating_sub(effective);
+        (window_start + skip, window.into_iter().skip(skip).collect())
+    } else if truncated {
+        (window_start, window.into_iter().take(effective).collect())
+    } else {
+        (window_start, window)
+    };
 
     // Carry an RSM response whenever the client asked for paging OR the
     // server truncated on its own ceiling — a partial set without `<set/>`
@@ -951,5 +954,32 @@ mod inbox_rsm_tests {
             Some(u32::try_from(INBOX_QUERY_MAX_PAGE).expect("index fits")),
             "the continuation reports its real window offset"
         );
+    }
+
+    /// XEP-0059 §2.3: a nonempty `<before/>` pages BACKWARD — the final
+    /// `max` entries immediately preceding the cursor, not the window's
+    /// forward prefix.
+    #[test]
+    fn inbox_before_cursor_returns_the_page_immediately_preceding_it() {
+        let all = entries(10);
+        let cursor = super::inbox_rsm_cursor(&all[8]);
+        let (page, set) = apply_inbox_rsm(
+            all,
+            Some(&RsmRequest {
+                max: Some(2),
+                before: Some(cursor),
+                ..RsmRequest::default()
+            }),
+        );
+        let partners: Vec<String> = page.iter().map(|entry| entry.partner.to_string()).collect();
+        assert_eq!(
+            partners,
+            vec![
+                "peer6@example.com".to_string(),
+                "peer7@example.com".to_string()
+            ],
+            "backward paging returns the entries immediately preceding the cursor"
+        );
+        assert_eq!(set.expect("set").first_index, Some(6));
     }
 }
