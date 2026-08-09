@@ -730,6 +730,7 @@ struct TerminalRecoverySessionResult {
     released_pending_rows: bool,
     queued_pending_rows: bool,
     release_failed_pending_rows: bool,
+    prefix_redrive_aborted: bool,
 }
 
 /// Row-recovery facts a terminal cleanup carries into
@@ -750,6 +751,9 @@ struct TerminalRowRecovery {
     /// online-resource snapshot may have missed a concurrently binding
     /// replacement.
     queued_pending_rows: bool,
+    /// A re-drive inside the recovery session aborted with entries retained
+    /// behind the stuck row — final promotion must defer too.
+    redrive_aborted: bool,
 }
 
 async fn promote_terminal_recovery(
@@ -802,7 +806,12 @@ async fn promote_terminal_recovery(
         detached_snapshot,
         terminal_route_removed.is_some()
             && !row_release.ownership_unknown
-            && !released_redrive_aborted,
+            && !released_redrive_aborted
+            // A known row whose release failed stays claimed until the
+            // settled promotion's release_claim; incremental promotion would
+            // deliver later entries to a live replacement ahead of it, and
+            // the post-claim re-drive cannot repair that inversion.
+            && !row_release.release_failed_known_rows,
     )
     .await;
     refuse_detach_without_principal(
@@ -817,6 +826,7 @@ async fn promote_terminal_recovery(
                 || recovery.release_failed_pending_rows,
             ownership_unknown: row_release.ownership_unknown,
             queued_pending_rows: recovery.queued_pending_rows,
+            redrive_aborted: recovery.prefix_redrive_aborted || released_redrive_aborted,
         },
         TerminalRouteRemoval::Attempted(terminal_route_removed),
     )
@@ -939,6 +949,14 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             .connection_registry
             .entry_if_owner(&target.resource, &target.owner)
             .is_some();
+        if !target_still_current && (outcome.claimed > 0 || outcome.pushed > 0) {
+            // Rows were claimed/pushed into a session that has since been
+            // superseded: they sit in that session's channel until ITS
+            // cleanup releases and re-drives them. Reporting Settled here
+            // would let the caller promote later traffic to the successor
+            // ahead of those rows — treat the attempt as aborted instead.
+            return TerminalRedriveOutcome::Aborted;
+        }
         last_attempt_left_rows = terminal_reflush_left_retryable_rows(state, recipient).await;
         if target_still_current && last_attempt_left_rows {
             if let Some(entry) = state
@@ -1071,9 +1089,9 @@ async fn terminal_recovery_session(
     // Q6 sink before any subsequently accepted channel frame. Once that
     // prefix is settled, channel work is promoted one frame at a time rather
     // than being allowed to grow another terminal replay queue.
-    let (promote_incrementally, mut queued_pending_rows) =
+    let (promote_incrementally, mut queued_pending_rows, prefix_redrive_aborted) =
         match (can_promote_incrementally, blocklist.as_ref()) {
-            (false, _) => (false, false),
+            (false, _) => (false, false, false),
             (true, Some(blocklist)) => {
                 let prefix = promote_terminal_recovery_prefix(
                     state,
@@ -1082,9 +1100,9 @@ async fn terminal_recovery_session(
                     &recent_tombstones,
                 )
                 .await;
-                (prefix.settled, prefix.queued_rows)
+                (prefix.settled, prefix.queued_rows, prefix.redrive_aborted)
             }
-            (true, None) => (false, false),
+            (true, None) => (false, false, false),
         };
     // Per-item re-drives inside the prefix promotion already covered freshly
     // queued rows (and halted the prefix on an aborted re-drive, which also
@@ -1119,6 +1137,7 @@ async fn terminal_recovery_session(
         released_pending_rows: drain_outcome.released_pending_rows,
         queued_pending_rows,
         release_failed_pending_rows: drain_outcome.release_failed_pending_rows,
+        prefix_redrive_aborted,
     }
 }
 
@@ -1187,6 +1206,10 @@ struct TerminalPrefixPromotion {
     /// concurrently — the caller must re-drive them before promoting
     /// later traffic.
     queued_rows: bool,
+    /// A queued row's re-drive aborted mid-prefix: the retained remainder
+    /// must not be promoted at all (not even by the final displaced
+    /// promotion) until the stuck row settles via the janitor.
+    redrive_aborted: bool,
 }
 
 /// Promote the recorded prefix ONE entry at a time, stopping at the first
@@ -1207,12 +1230,14 @@ async fn promote_terminal_recovery_prefix(
         return TerminalPrefixPromotion {
             settled: true,
             queued_rows: false,
+            redrive_aborted: false,
         };
     }
     let entries = std::mem::take(&mut detached.unacked_stanzas);
     let mut retained = Vec::new();
     let mut queued_rows = false;
     let mut halted = false;
+    let mut redrive_aborted = false;
     for entry in entries {
         if halted {
             retained.push(entry);
@@ -1272,8 +1297,10 @@ async fn promote_terminal_recovery_prefix(
                 == TerminalRedriveOutcome::Aborted
             {
                 // The queued row could not reach the live target; promoting
-                // later entries directly would overtake it.
+                // later entries directly would overtake it — including via
+                // the final displaced promotion, so the abort propagates.
                 halted = true;
+                redrive_aborted = true;
             }
         }
     }
@@ -1281,6 +1308,7 @@ async fn promote_terminal_recovery_prefix(
     TerminalPrefixPromotion {
         settled: !halted && detached.unacked_stanzas.is_empty(),
         queued_rows,
+        redrive_aborted,
     }
 }
 
@@ -1335,7 +1363,10 @@ async fn refuse_detach_without_principal(
     // held batch is registered would let a sweep release the fence midway.
     let (retrying, promotion_queued_rows) = if detached_sessions.is_empty() {
         (false, false)
-    } else if row_recovery.ownership_unknown || pre_promotion_redrive_aborted {
+    } else if row_recovery.ownership_unknown
+        || row_recovery.redrive_aborted
+        || pre_promotion_redrive_aborted
+    {
         // Two deferral reasons share this arm: row ownership could not be
         // discovered (promoting could duplicate still-claimed durable rows),
         // or an earlier released row is stuck at a live replacement

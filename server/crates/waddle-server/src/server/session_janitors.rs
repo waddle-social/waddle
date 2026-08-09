@@ -712,14 +712,14 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                     }
                 }
             }
-            let claim_released = match state
+            let (claim_released, freed_rows) = match state
                 .deps
                 .protocol
                 .pending_delivery_storage
                 .release_claim(&session_id)
                 .await
             {
-                Ok(_) => true,
+                Ok(freed) => (true, freed),
                 Err(error) => {
                     sweep_failed = true;
                     warn!(
@@ -729,10 +729,19 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                         "SM janitor: pending_delivery release_claim failed; \
                          rows remain claimed and will be released by claim-expiry janitor"
                     );
-                    false
+                    (false, 0)
                 }
             };
-            if (row_release.release_failed_known_rows && claim_released) || summary.queued > 0 {
+            // `freed_rows > 0` re-drives rows whose release-failure fact was
+            // recorded only in a previous pass's connection-local state (for
+            // example a receiver-tail release_row failure before the retry
+            // was reinserted): whenever settling this stream frees claimed
+            // rows, they need the re-drive regardless of which pass learned
+            // about them first.
+            if (row_release.release_failed_known_rows && claim_released)
+                || freed_rows > 0
+                || summary.queued > 0
+            {
                 // Rows the release_claim above just freed (their sequence
                 // release had failed), and rows this promotion freshly queued
                 // while a replacement raced it, have no future trigger if a

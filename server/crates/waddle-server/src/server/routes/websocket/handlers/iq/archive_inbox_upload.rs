@@ -693,6 +693,14 @@ async fn inbox_last_message_for_entry(
 
 /// Apply RSM `<max/>` paging to a sorted inbox list and produce the
 /// matching `<set/>` response with `first`/`last`/`count`.
+/// Server-side ceiling on one XEP-0430 result page. XEP-0059 §2.1 lets the
+/// server return a partial set with an RSM `<set/>` regardless of what the
+/// client asked for; an unbounded inbox (one countable `<message/>` per
+/// conversation plus `<fin/>`) could otherwise exceed the terminal-recovery
+/// window when a send-window pause exhausts mid-response, permanently losing
+/// the acknowledged query's tail.
+const INBOX_QUERY_MAX_PAGE: usize = 512;
+
 fn apply_inbox_rsm(
     entries: Vec<waddle_xmpp::inbox::InboxEntry>,
     rsm: Option<&waddle_xmpp::xep::xep0059::RsmRequest>,
@@ -703,17 +711,20 @@ fn apply_inbox_rsm(
     use waddle_xmpp::xep::xep0059::RsmResponse;
 
     let total = u32::try_from(entries.len()).unwrap_or(u32::MAX);
-    let max = rsm.and_then(|r| r.max).map(|m| m as usize);
+    let requested = rsm.and_then(|r| r.max).map(|m| m as usize);
+    let effective = requested.map_or(INBOX_QUERY_MAX_PAGE, |max| max.min(INBOX_QUERY_MAX_PAGE));
 
-    let page: Vec<_> = match max {
-        Some(max) if max < entries.len() => entries.into_iter().take(max).collect(),
-        _ => entries,
+    let truncated = effective < entries.len();
+    let page: Vec<_> = if truncated {
+        entries.into_iter().take(effective).collect()
+    } else {
+        entries
     };
 
-    // Carry RSM response only when the client asked for paging; the
-    // empty case is still meaningful (signals "page complete" with
-    // total=count).
-    if rsm.is_none() {
+    // Carry an RSM response whenever the client asked for paging OR the
+    // server truncated on its own ceiling — a partial set without `<set/>`
+    // would read as complete.
+    if rsm.is_none() && !truncated {
         return (page, None);
     }
 
@@ -803,4 +814,68 @@ async fn handle_inbox_mark_read_iq(
     }
 
     vec![iq_to_xml(build_mark_read_result(iq))]
+}
+
+#[cfg(test)]
+mod inbox_rsm_tests {
+    use super::{apply_inbox_rsm, INBOX_QUERY_MAX_PAGE};
+    use waddle_xmpp::xep::xep0059::RsmRequest;
+
+    fn entries(count: usize) -> Vec<waddle_xmpp::inbox::InboxEntry> {
+        (0..count)
+            .map(|index| {
+                waddle_xmpp::inbox::InboxEntry::new(
+                    format!("peer{index}@example.com")
+                        .parse()
+                        .expect("valid bare jid"),
+                    waddle_xmpp::inbox::ConversationKind::Direct,
+                    format!("anchor-{index}"),
+                    1_700_000_000_000 + index as i64,
+                )
+            })
+            .collect()
+    }
+
+    /// XEP-0430 + XEP-0059 §2.1: the server may return a partial set, but a
+    /// partial set MUST carry an RSM `<set/>` so the client can page. The
+    /// ceiling keeps one response page well under the terminal-recovery
+    /// window so an exhausted send pause cannot strand an acknowledged
+    /// query's unbounded tail.
+    #[test]
+    fn inbox_pages_are_bounded_by_the_server_ceiling() {
+        let (page, set) = apply_inbox_rsm(entries(INBOX_QUERY_MAX_PAGE + 100), None);
+        assert_eq!(page.len(), INBOX_QUERY_MAX_PAGE);
+        let set = set.expect("server-side truncation must advertise RSM paging");
+        assert_eq!(
+            set.count,
+            Some(u32::try_from(INBOX_QUERY_MAX_PAGE + 100).expect("count fits"))
+        );
+
+        let (page, set) = apply_inbox_rsm(entries(3), None);
+        assert_eq!(page.len(), 3);
+        assert!(set.is_none(), "a complete un-paged set stays bare");
+
+        let (page, _) = apply_inbox_rsm(
+            entries(20),
+            Some(&RsmRequest {
+                max: Some(10),
+                ..RsmRequest::default()
+            }),
+        );
+        assert_eq!(page.len(), 10);
+
+        let (page, set) = apply_inbox_rsm(
+            entries(INBOX_QUERY_MAX_PAGE + 5),
+            Some(&RsmRequest {
+                max: Some(u32::MAX),
+                ..RsmRequest::default()
+            }),
+        );
+        assert_eq!(
+            page.len(),
+            INBOX_QUERY_MAX_PAGE,
+            "a client max above the ceiling is clamped"
+        );
+        assert!(set.is_some());
+    }
 }
