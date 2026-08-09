@@ -230,6 +230,18 @@ impl MigrationRunner {
         Ok(ledger)
     }
 
+    /// The table each namespace's first migration unconditionally drops and
+    /// recreates. The exhaustive match ties the data-loss guard to the
+    /// namespace enum: adding a namespace without a sentinel fails to
+    /// compile, and `sentinel_tables_match_first_migration_sql` pins each
+    /// name to the actual `CREATE TABLE` in that namespace's first migration.
+    pub(super) const fn sentinel_table(namespace: MigrationNamespace) -> &'static str {
+        match namespace {
+            MigrationNamespace::Global => "users",
+            MigrationNamespace::Waddle => "channels",
+        }
+    }
+
     /// Refuse to run a destructive initial migration when its owned schema
     /// already exists but its namespace has no ledger history. Global V0001
     /// drops then creates `users`; Waddle V1001 drops then creates `channels`.
@@ -239,10 +251,8 @@ impl MigrationRunner {
         driver: DatabaseDriver,
         applied_rows: &[LedgerRow],
     ) -> Result<(), DatabaseError> {
-        for (namespace, sentinel_table) in [
-            (MigrationNamespace::Global, "users"),
-            (MigrationNamespace::Waddle, "channels"),
-        ] {
+        for namespace in [MigrationNamespace::Global, MigrationNamespace::Waddle] {
+            let sentinel_table = Self::sentinel_table(namespace);
             if !self.owned_namespaces.contains(&namespace)
                 || applied_rows
                     .iter()

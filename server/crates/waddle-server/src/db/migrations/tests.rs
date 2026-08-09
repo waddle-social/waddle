@@ -1192,6 +1192,29 @@ fn migration_catalog_obeys_namespace_boundary() {
 }
 
 #[test]
+fn sentinel_tables_match_first_migration_sql() {
+    for (namespace, catalog) in [
+        (MigrationNamespace::Global, global::all()),
+        (MigrationNamespace::Waddle, waddle::all()),
+    ] {
+        let sentinel = MigrationRunner::sentinel_table(namespace);
+        let first = catalog
+            .into_iter()
+            .min_by_key(|migration| migration.version)
+            .expect("namespace catalog is non-empty");
+        for sql in [first.sql_sqlite, first.sql_postgres] {
+            assert!(
+                sql.contains(&format!("CREATE TABLE {sentinel} (")),
+                "{namespace} sentinel table {sentinel} must be created by that \
+                 namespace's first migration (v{}); the SchemaWithoutLedger \
+                 guard depends on it",
+                first.version
+            );
+        }
+    }
+}
+
+#[test]
 fn db_public_exports_expose_migration_foundation() {
     assert_eq!(MigrationNamespace::of(-5), MigrationNamespace::Global);
     assert_eq!(MigrationNamespace::of(1001), MigrationNamespace::Waddle);
