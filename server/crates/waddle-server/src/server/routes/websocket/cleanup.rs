@@ -768,6 +768,7 @@ async fn promote_terminal_recovery(
         return ConnectionShutdownOutcome::NotPersisted;
     };
     let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+        &state.deps.protocol.sm_session_registry,
         &state.deps.protocol.pending_delivery_storage,
         &mut detached,
     )
@@ -1137,7 +1138,7 @@ async fn terminal_recovery_session(
         released_pending_rows: drain_outcome.released_pending_rows,
         queued_pending_rows,
         release_failed_pending_rows: drain_outcome.release_failed_pending_rows,
-        prefix_redrive_aborted,
+        prefix_redrive_aborted: prefix_redrive_aborted || drain_outcome.redrive_aborted,
     }
 }
 

@@ -905,6 +905,50 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 );
             }
         };
+        // Clustered fencing, identical shape to `insert_fenced`: a deposed
+        // but still-running node must not clear sequence bindings after
+        // another node acquired and hydrated the same durable SM session —
+        // the new owner would then promote the replay copies as
+        // non-row-backed while the original rows remain pending. The fence
+        // is the first statement inside this transaction; lost ownership
+        // aborts (rollback on drop) and surfaces as a failed release, which
+        // every caller already treats as retain-and-defer.
+        if let Some(fencing) = &self.fencing {
+            let identity = fencing.node_identity.current();
+            let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), session.as_str());
+            let fence_rows = tx
+                .query(
+                    "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? FOR SHARE",
+                    crate::db_params![
+                        entity_key,
+                        identity.node_id.clone(),
+                        identity.node_epoch.clone(),
+                    ],
+                )
+                .await;
+            let held = match fence_rows {
+                Ok(mut rows) => match rows.next().await {
+                    Ok(row) => row.is_some(),
+                    Err(error) => {
+                        return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                            PendingStorageError::Other(error.to_string()),
+                        );
+                    }
+                },
+                Err(error) => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                        PendingStorageError::Other(error.to_string()),
+                    );
+                }
+            };
+            if !held {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::NotOwner {
+                        entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                    },
+                );
+            }
+        }
         let rows = tx.query(&select_sql, select_params).await;
         let mut rows = match rows {
             Ok(rows) => rows,

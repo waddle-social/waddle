@@ -35,6 +35,9 @@ pub(super) struct TerminalDrainOutcome {
     /// the row is only freed later by the settled promotion's
     /// `release_claim` — cleanup must re-drive it after that.
     pub(super) release_failed_pending_rows: bool,
+    /// An inline re-drive during the drain aborted: later items were
+    /// retained, and the FINAL promotion must defer behind the stuck row.
+    pub(super) redrive_aborted: bool,
 }
 
 struct TerminalDrainedFrame {
@@ -159,6 +162,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     let mut released_pending_rows = false;
     let mut queued_pending_rows = false;
     let mut release_failed_pending_rows = false;
+    let mut redrive_aborted = false;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
         let receipt_at = outbound_stanza
             .pending_row_original_receipt_at
@@ -181,7 +185,13 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                 )
                 .await;
                 released_pending_rows |= result.released_pending_row;
-                release_failed_pending_rows |= result.release_failed_pending_row;
+                if result.release_failed_pending_row {
+                    release_failed_pending_rows = true;
+                    // The failed row stays claimed until promotion's
+                    // release_claim; promoting later tail items live would
+                    // overtake it, so the remainder is retained.
+                    retain_overflow_for_retry = true;
+                }
                 if result.queued_pending_row || result.released_pending_row {
                     queued_pending_rows |= result.queued_pending_row;
                     // Re-drive BEFORE the next frame: each single-item
@@ -199,6 +209,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         == super::cleanup::TerminalRedriveOutcome::Aborted
                     {
                         retain_overflow_for_retry = true;
+                        redrive_aborted = true;
                     }
                 }
                 if let Some(entry) = result.retained {
@@ -235,7 +246,10 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                     )
                     .await;
                     released_pending_rows |= result.released_pending_row;
-                    release_failed_pending_rows |= result.release_failed_pending_row;
+                    if result.release_failed_pending_row {
+                        release_failed_pending_rows = true;
+                        retain_overflow_for_retry = true;
+                    }
                     if result.queued_pending_row || result.released_pending_row {
                         queued_pending_rows |= result.queued_pending_row;
                         if super::cleanup::redrive_terminal_pending_rows_to_live_resource(
@@ -246,6 +260,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                             == super::cleanup::TerminalRedriveOutcome::Aborted
                         {
                             retain_overflow_for_retry = true;
+                            redrive_aborted = true;
                         }
                     }
                     if let Some(entry) = result.retained {
@@ -262,6 +277,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
         released_pending_rows,
         queued_pending_rows,
         release_failed_pending_rows,
+        redrive_aborted,
     }
 }
 

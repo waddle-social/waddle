@@ -714,12 +714,52 @@ fn apply_inbox_rsm(
     let requested = rsm.and_then(|r| r.max).map(|m| m as usize);
     let effective = requested.map_or(INBOX_QUERY_MAX_PAGE, |max| max.min(INBOX_QUERY_MAX_PAGE));
 
-    let truncated = effective < entries.len();
-    let page: Vec<_> = if truncated {
-        entries.into_iter().take(effective).collect()
-    } else {
-        entries
+    // Cursors resolve BEFORE the ceiling. The server-enforced ceiling makes
+    // paging mandatory for large inboxes, so a follow-up `<after>` request
+    // must actually continue from the advertised cursor — slicing from index
+    // zero would repeat page one forever and leave everything past the
+    // ceiling unreachable.
+    let window_start: usize = match rsm {
+        Some(request) => {
+            if let Some(after) = request.after.as_deref() {
+                entries
+                    .iter()
+                    .position(|entry| inbox_rsm_cursor(entry) == after)
+                    .map_or(entries.len(), |index| index + 1)
+            } else if let Some(index) = request.index {
+                (index as usize).min(entries.len())
+            } else {
+                0
+            }
+        }
+        None => 0,
     };
+    let window_end: usize = match rsm.and_then(|request| request.before.as_deref()) {
+        // XEP-0059 §2.3: an empty <before/> asks for the LAST page.
+        Some("") => entries.len(),
+        Some(before) => entries
+            .iter()
+            .position(|entry| inbox_rsm_cursor(entry) == before)
+            .unwrap_or(entries.len()),
+        None => entries.len(),
+    };
+    let window_start = window_start.min(window_end);
+    let window: Vec<_> = entries
+        .into_iter()
+        .skip(window_start)
+        .take(window_end - window_start)
+        .collect();
+    let truncated = effective < window.len();
+    let (first_index, page): (usize, Vec<_>) =
+        if matches!(rsm.and_then(|request| request.before.as_deref()), Some("")) {
+            // Last page: take the final `effective` items of the window.
+            let skip = window.len().saturating_sub(effective);
+            (window_start + skip, window.into_iter().skip(skip).collect())
+        } else if truncated {
+            (window_start, window.into_iter().take(effective).collect())
+        } else {
+            (window_start, window)
+        };
 
     // Carry an RSM response whenever the client asked for paging OR the
     // server truncated on its own ceiling — a partial set without `<set/>`
@@ -732,7 +772,7 @@ fn apply_inbox_rsm(
     let last = page.last().map(inbox_rsm_cursor);
     let response = RsmResponse {
         first,
-        first_index: Some(0),
+        first_index: Some(u32::try_from(first_index).unwrap_or(u32::MAX)),
         last,
         count: Some(total),
     };

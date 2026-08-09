@@ -295,6 +295,7 @@ pub(crate) struct RowBackedReleaseOutcome {
 /// replay copies whose rows were never (or have meanwhile been)
 /// released.
 pub(crate) async fn release_row_backed_replay_copies(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     detached: &mut DetachedSession,
 ) -> RowBackedReleaseOutcome {
@@ -331,6 +332,35 @@ pub(crate) async fn release_row_backed_replay_copies(
             None
         }
     };
+    if let Some(sequence_bound_rows) = preflight.as_ref() {
+        if !sequence_bound_rows.is_empty() {
+            // Crash-consistency ordering: durably prune the replay copies of
+            // the known bound sequences BEFORE releasing their pending rows,
+            // so a restart between the two rehydrates NO stale replay copy
+            // for a row that has returned to ordinary redelivery — the
+            // pending row stays the single authority across the crash. A
+            // failed prune aborts the release (nothing changed durably) and
+            // the whole reconciliation retries on a later pass.
+            let bound: Vec<u32> = sequence_bound_rows.iter().copied().collect();
+            if let Err(error) = sm_registry
+                .delete_unacked_sequences(&detached.stream_id, &bound)
+                .await
+            {
+                tracing::warn!(
+                    stream_id = %detached.stream_id,
+                    jid = %detached.jid,
+                    %error,
+                    "row-backed replay reconciliation could not durably prune replay \
+                     copies; deferring the pending-row release to a later pass"
+                );
+                return RowBackedReleaseOutcome {
+                    released_rows: false,
+                    release_failed_known_rows: true,
+                    ownership_unknown: false,
+                };
+            }
+        }
+    }
     let outcome = pending_storage
         .release_rows_for_outbound_sequences(&recipient, &session_id, &sequences)
         .await;

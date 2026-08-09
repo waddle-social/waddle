@@ -234,6 +234,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             // copy whose row still exists duplicates a Transient payload or
             // collides with the Archived uniqueness key.
             let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+                &state.deps.protocol.sm_session_registry,
                 &state.deps.protocol.pending_delivery_storage,
                 &mut pending_session,
             )
@@ -738,9 +739,8 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             // was reinserted): whenever settling this stream frees claimed
             // rows, they need the re-drive regardless of which pass learned
             // about them first.
-            if (row_release.release_failed_known_rows && claim_released)
-                || freed_rows > 0
-                || summary.queued > 0
+            if claim_released
+                && (row_release.release_failed_known_rows || freed_rows > 0 || summary.queued > 0)
             {
                 // Rows the release_claim above just freed (their sequence
                 // release had failed), and rows this promotion freshly queued
