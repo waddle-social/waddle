@@ -782,6 +782,14 @@ async fn promote_terminal_recovery(
                 .map(|entry| (entry.is_presence_available(), std::sync::Arc::clone(owner)))
         })?
     });
+    // Settle released rows BEFORE any incremental promotion can run: the
+    // prefix path awaits blocklist/tombstone reads during which a
+    // replacement can bind, and a later stanza delivered live there would
+    // overtake the released earlier row. An aborted re-drive suppresses the
+    // incremental path the same way ownership_unknown does.
+    let released_redrive_aborted = row_release.released_rows
+        && redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await
+            == TerminalRedriveOutcome::Aborted;
     // With row ownership unknown, neither the prefix nor the per-item
     // overflow promotion may run: unidentified row-backed replay copies
     // would be promoted as fresh work. The drain still releases channel
@@ -792,7 +800,9 @@ async fn promote_terminal_recovery(
         conn,
         detached,
         detached_snapshot,
-        terminal_route_removed.is_some() && !row_release.ownership_unknown,
+        terminal_route_removed.is_some()
+            && !row_release.ownership_unknown
+            && !released_redrive_aborted,
     )
     .await;
     refuse_detach_without_principal(
@@ -1056,7 +1066,7 @@ async fn terminal_recovery_session(
         "terminal recovery overflow promotion",
     )
     .unwrap_or_default();
-    append_terminal_recovery_backlog(conn, &mut detached, detached_snapshot);
+    append_terminal_recovery_backlog(state, conn, &mut detached, detached_snapshot).await;
     // Preserve offline FIFO ordering: the live/unacked prefix must reach its
     // Q6 sink before any subsequently accepted channel frame. Once that
     // prefix is settled, channel work is promoted one frame at a time rather
@@ -1097,6 +1107,7 @@ async fn terminal_recovery_session(
         stanza.sequence = detached
             .outbound_count
             .wrapping_add(u32::try_from(offset + 1).unwrap_or(u32::MAX));
+        persist_terminal_suffix_entry(state, &detached.stream_id, &stanza).await;
         detached.unacked_stanzas.push(stanza);
     }
     detached.outbound_count = detached
@@ -1111,7 +1122,41 @@ async fn terminal_recovery_session(
     }
 }
 
-fn append_terminal_recovery_backlog(
+/// Persist a synthetic terminal-recovery entry into the stream's durable
+/// `sm_unacked` rows. Retry retention goes through
+/// `reinsert_for_retry`, whose reconciliation keeps only sequences present
+/// durably whenever the durable session row exists — without this write an
+/// ownership/blocklist/storage failure would silently drop exactly the
+/// terminal backlog and accepted channel tail before the janitor's retry.
+async fn persist_terminal_suffix_entry(
+    state: &WebSocketState,
+    stream_id: &str,
+    stanza: &waddle_xmpp::stream_management::DetachedUnackedStanza,
+) {
+    if let Err(error) = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .record_outbound_for_detached_stream_at(
+            stream_id,
+            stanza.sequence,
+            stanza.stanza_xml.clone(),
+            stanza.original_receipt_at,
+        )
+        .await
+    {
+        warn!(
+            stream_id = %stream_id,
+            sequence = stanza.sequence,
+            %error,
+            "terminal recovery could not persist a synthetic suffix entry; a retry \
+             after reinsertion may drop it during durable reconciliation"
+        );
+    }
+}
+
+async fn append_terminal_recovery_backlog(
+    state: &WebSocketState,
     conn: &mut WsConnState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
     detached_snapshot: waddle_xmpp::stream_management::DetachedSessionSnapshot,
@@ -1125,6 +1170,7 @@ fn append_terminal_recovery_backlog(
             stanza.sequence = detached
                 .outbound_count
                 .wrapping_add(u32::try_from(offset + 1).unwrap_or(u32::MAX));
+            persist_terminal_suffix_entry(state, &detached.stream_id, &stanza).await;
             detached.unacked_stanzas.push(stanza);
         }
         detached.outbound_count = detached
@@ -1272,23 +1318,30 @@ async fn refuse_detach_without_principal(
         }),
         TerminalRouteRemoval::Attempted(removed) => removed,
     };
-    if row_recovery.released_rows {
+    let pre_promotion_redrive_aborted = if row_recovery.released_rows {
         // Preserve FIFO when terminal recovery released an earlier
         // pending_delivery row but still has later unacked traffic to
         // promote: drive the released prefix back onto any live replacement
-        // before promotion can enqueue the tail.
-        redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await;
-    }
+        // before promotion can enqueue the tail. An abort means the earlier
+        // row is still pending at a live replacement — promoting the tail
+        // now would overtake it, so the session defers to the janitor.
+        redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await
+            == TerminalRedriveOutcome::Aborted
+    } else {
+        false
+    };
     // Keep this stream's claim live throughout every promotion. The claim
     // janitor uses SM liveness/fences, and deferring it before the locally
     // held batch is registered would let a sweep release the fence midway.
     let (retrying, promotion_queued_rows) = if detached_sessions.is_empty() {
         (false, false)
-    } else if row_recovery.ownership_unknown {
-        // Row ownership could not be discovered: promoting this queue could
-        // duplicate still-claimed durable rows. Keep the whole queue out of
-        // promotion and hand it to the SM-expiry janitor, whose retry pass
-        // re-runs the ownership discovery before promoting.
+    } else if row_recovery.ownership_unknown || pre_promotion_redrive_aborted {
+        // Two deferral reasons share this arm: row ownership could not be
+        // discovered (promoting could duplicate still-claimed durable rows),
+        // or an earlier released row is stuck at a live replacement
+        // (promoting the tail would overtake it). Keep the whole queue out
+        // of promotion and hand it to the SM-expiry janitor, whose retry
+        // pass re-runs discovery and the re-drive before promoting.
         let mut conn_stream_retrying = false;
         for session in detached_sessions {
             let is_conn_stream = conn

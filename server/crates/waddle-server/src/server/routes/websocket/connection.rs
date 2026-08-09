@@ -1425,6 +1425,23 @@ async fn process_deferred_inbound_after_transport_loss(
         }
         return;
     }
+    if conn.sm_recovery_required {
+        // Terminal recovery deliberately invalidates resume, so the client
+        // never learns a handled count covering these still-parked stanzas
+        // and, per XEP-0198, resends them after the failed resume. Executing
+        // them here would run routing and non-idempotent IQ mutations a
+        // second time on that resend; discarding is lossless because nothing
+        // parked was ever handled or counted.
+        let dropped = discard_deferred_inbound(conn);
+        if dropped > 0 {
+            warn!(
+                dropped,
+                "Dropping unhandled deferred inbound frames after terminal SM recovery; \
+                 sender replays them after the deliberately failed resume"
+            );
+        }
+        return;
+    }
     while let Some(text) = conn.deferred_inbound.pop_front() {
         if terminal_recovery_recording_is_full(conn) {
             let dropped = 1 + discard_deferred_inbound(conn);

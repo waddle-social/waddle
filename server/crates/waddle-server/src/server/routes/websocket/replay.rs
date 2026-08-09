@@ -285,13 +285,31 @@ async fn record_drained_xml(
         PendingRowDrainPolicy::ReleaseForTerminalRecovery
     ) {
         if let Some(row_id) = pending_row_id {
-            if let Err(error) = state
-                .deps
-                .protocol
-                .pending_delivery_storage
-                .release_row(&row_id)
-                .await
-            {
+            // Ownership-conditional when the dead stream is known: a claim
+            // released mid-cleanup and re-claimed by a replacement must not
+            // be stripped from that replacement (see the terminal drain).
+            let result = match sm_state.stream_id.as_deref() {
+                Some(stream_id) => {
+                    state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_row_if_session(
+                            &row_id,
+                            &waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.to_string()),
+                        )
+                        .await
+                }
+                None => {
+                    state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_row(&row_id)
+                        .await
+                }
+            };
+            if let Err(error) = result {
                 warn!(
                     row_id = %row_id,
                     %error,
@@ -401,11 +419,18 @@ async fn record_drained_terminal_xml(
         PendingRowDrainPolicy::ReleaseForTerminalRecovery
     ) {
         if let Some(row_id) = pending_row_id {
+            // Ownership-conditional: long awaited work earlier in this
+            // cleanup can outlive the pending-claim recency floor, letting
+            // the claim janitor release the row and a replacement re-claim
+            // and push it. An unconditional release would strip that
+            // replacement's claim and double-deliver via the re-drive.
+            let dead_session =
+                waddle_xmpp::pending_delivery::SmSessionId::new(terminal.session.stream_id.clone());
             let (released_pending_row, release_failed_pending_row) = match state
                 .deps
                 .protocol
                 .pending_delivery_storage
-                .release_row(&row_id)
+                .release_row_if_session(&row_id, &dead_session)
                 .await
             {
                 Ok(released) => (released > 0, false),

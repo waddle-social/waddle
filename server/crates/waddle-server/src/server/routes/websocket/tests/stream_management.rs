@@ -1813,7 +1813,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
 /// "spent replacement CAS + retryable unclaimed row" path.
 struct FailFirstClaimBatchPendingStorage {
     inner: waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage,
-    fail_next_claim_batch: std::sync::atomic::AtomicBool,
+    remaining_claim_batch_failures: std::sync::atomic::AtomicU32,
 }
 
 impl FailFirstClaimBatchPendingStorage {
@@ -1821,7 +1821,11 @@ impl FailFirstClaimBatchPendingStorage {
         Self {
             inner:
                 waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::unlimited(),
-            fail_next_claim_batch: std::sync::atomic::AtomicBool::new(true),
+            // Cleanup now retries the re-drive once (pre-session and
+            // pre-promotion), so a PERSISTENT abort needs both bounded
+            // in-cleanup attempts to fail before the re-arm semantics can be
+            // observed.
+            remaining_claim_batch_failures: std::sync::atomic::AtomicU32::new(2),
         }
     }
 }
@@ -1871,10 +1875,12 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         Vec<waddle_xmpp::pending_delivery::PendingRow>,
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
     > {
-        if self
-            .fail_next_claim_batch
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
+        let remaining = self
+            .remaining_claim_batch_failures
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if remaining > 0 {
+            self.remaining_claim_batch_failures
+                .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
             return Err(
                 waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
                     "simulated claim-batch failure".to_string(),
