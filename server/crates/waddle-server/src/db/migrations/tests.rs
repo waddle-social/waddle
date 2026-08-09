@@ -1,5 +1,8 @@
 use super::*;
-use crate::db::{Database, DatabaseConfig, DatabaseDriver};
+use crate::db::{
+    migration_checksum, Database, DatabaseConfig, DatabaseDriver, DatabaseError,
+    MigrationLedgerError, MigrationNamespace, WADDLE_NAMESPACE_START,
+};
 
 #[tokio::test]
 async fn test_migration_runner_global() {
@@ -549,6 +552,63 @@ fn all_migrations_have_non_empty_postgres_sql() {
             m.version
         );
     }
+}
+
+#[test]
+fn migration_catalog_obeys_namespace_boundary() {
+    assert_eq!(WADDLE_NAMESPACE_START, 1000);
+
+    for migration in global::all() {
+        assert!(
+            migration.version < WADDLE_NAMESPACE_START,
+            "global migration v{} must stay below the waddle namespace boundary",
+            migration.version
+        );
+        assert_eq!(
+            MigrationNamespace::of(migration.version),
+            MigrationNamespace::Global
+        );
+    }
+
+    for migration in waddle::all() {
+        assert!(
+            migration.version >= WADDLE_NAMESPACE_START,
+            "waddle migration v{} must stay inside the waddle namespace",
+            migration.version
+        );
+        assert_eq!(
+            MigrationNamespace::of(migration.version),
+            MigrationNamespace::Waddle
+        );
+    }
+}
+
+#[test]
+fn db_public_exports_expose_migration_foundation() {
+    assert_eq!(MigrationNamespace::of(-5), MigrationNamespace::Global);
+    assert_eq!(MigrationNamespace::of(1001), MigrationNamespace::Waddle);
+
+    let checksum = migration_checksum(
+        &Migration {
+            version: 1234,
+            description: "test export".to_string(),
+            sql_sqlite: "SELECT 1;",
+            sql_postgres: "SELECT 2;",
+        },
+        DatabaseDriver::Sqlite,
+    );
+    assert_eq!(checksum.len(), 64);
+
+    let database_error: DatabaseError = MigrationLedgerError::ChecksumMismatch {
+        version: 1001,
+        expected: "expected".to_string(),
+        found: "found".to_string(),
+    }
+    .into();
+    assert_eq!(
+        database_error.to_string(),
+        "migration startup is refusing to continue rather than repairing the ledger: migration v1001 checksum expected expected, found found"
+    );
 }
 
 #[test]

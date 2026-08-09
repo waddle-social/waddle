@@ -18,7 +18,10 @@ use tracing::{debug, info, instrument};
 
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
-pub use migrations::MigrationRunner;
+pub use migrations::{
+    migration_checksum, MigrationLedgerError, MigrationNamespace, MigrationRunner,
+    WADDLE_NAMESPACE_START,
+};
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};
 pub use value::{row_value, DbDecode, IntoParams, Row, Rows, Value, ValueExt};
@@ -44,6 +47,11 @@ pub enum DatabaseError {
 
     #[error("Migration failed: {0}")]
     MigrationFailed(String),
+
+    /// Fail-closed startup refusal for an append-only migration ledger
+    /// violation, rather than an environmental database failure.
+    #[error(transparent)]
+    MigrationLedger(#[from] migrations::MigrationLedgerError),
 
     #[error("Internal database error: {0}")]
     Internal(#[from] sqlx::Error),
