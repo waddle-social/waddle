@@ -248,6 +248,133 @@ pub(crate) struct TerminalOverflowPromotionDeps<'a> {
     pub(crate) recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
 }
 
+/// Result of reconciling a detached session's replay queue against the
+/// durable `(stream_id, outbound_sequence)` pending-delivery bindings
+/// before its queue is promoted.
+///
+/// A live SM queue stores only replay XML, while `pending_delivery`
+/// stores the durable ownership binding. Promotion must discard the
+/// replay copy of every bound row after releasing the row itself;
+/// otherwise the copy is treated as new work and can collide with an
+/// existing Archived payload's uniqueness key (or duplicate a
+/// Transient one).
+#[derive(Debug, Default)]
+pub(crate) struct RowBackedReleaseOutcome {
+    /// Some bound rows were actually released back to ordinary
+    /// pending-delivery redelivery (their replay copies were stripped).
+    pub(crate) released_rows: bool,
+    /// Known bound rows had their replay copies stripped but the row
+    /// release itself failed — the rows stay claimed by the dead stream
+    /// until `release_claim`/the claim-expiry janitor frees them, so the
+    /// caller must re-drive them once that release lands.
+    pub(crate) release_failed_known_rows: bool,
+    /// Both the ownership preflight (`list`) and the sequence release
+    /// failed: row-backed replay entries cannot be told apart from fresh
+    /// work. The caller MUST keep this session's queue out of promotion
+    /// and retry after ownership can be discovered again.
+    pub(crate) ownership_unknown: bool,
+}
+
+/// Discover which of `detached`'s replay entries are copies of durable
+/// sequence-bound `pending_delivery` rows, release those rows back to
+/// ordinary redelivery, and strip the released copies from the queue.
+///
+/// Shared by terminal-recovery cleanup and the SM-expiry janitor's
+/// retry pass: promotion retries must repeat this ownership discovery,
+/// otherwise a session reinserted after a storage failure would promote
+/// replay copies whose rows were never (or have meanwhile been)
+/// released.
+pub(crate) async fn release_row_backed_replay_copies(
+    pending_storage: &Arc<dyn PendingDeliveryStorage>,
+    detached: &mut DetachedSession,
+) -> RowBackedReleaseOutcome {
+    let sequences: HashSet<u32> = detached
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    if sequences.is_empty() {
+        return RowBackedReleaseOutcome::default();
+    }
+    let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone());
+    let recipient = detached.jid.to_bare();
+    let preflight = match pending_storage.list(&recipient).await {
+        Ok(rows) => Some(
+            rows.into_iter()
+                .filter(|row| {
+                    row.flushed_in_session.as_ref() == Some(&session_id)
+                        && row
+                            .outbound_sequence
+                            .is_some_and(|sequence| sequences.contains(&sequence))
+                })
+                .filter_map(|row| row.outbound_sequence)
+                .collect::<HashSet<u32>>(),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                stream_id = %detached.stream_id,
+                jid = %detached.jid,
+                %error,
+                "row-backed replay reconciliation could not preflight sequence-bound \
+                 pending rows; a release failure now leaves ownership unknown"
+            );
+            None
+        }
+    };
+    let outcome = pending_storage
+        .release_rows_for_outbound_sequences(&recipient, &session_id, &sequences)
+        .await;
+    let mut replay_sequences_to_strip = outcome.released.clone();
+    let mut release_failed_known_rows = false;
+    let mut ownership_unknown = false;
+    if let Some(error) = outcome.error.as_ref() {
+        match preflight.as_ref() {
+            Some(sequence_bound_rows) => {
+                let unreleased: Vec<u32> = sequence_bound_rows
+                    .iter()
+                    .copied()
+                    .filter(|sequence| !outcome.released.contains(sequence))
+                    .collect();
+                release_failed_known_rows = !unreleased.is_empty();
+                replay_sequences_to_strip.extend(unreleased);
+                tracing::warn!(
+                    stream_id = %detached.stream_id,
+                    jid = %detached.jid,
+                    released = outcome.released.len(),
+                    %error,
+                    "row-backed replay reconciliation could not release every \
+                     sequence-bound pending row; stripped every matching replay copy \
+                     so the durable rows are re-driven after claim cleanup instead of \
+                     being promoted again"
+                );
+            }
+            None => {
+                // Findings PR#1669 round 8: with neither the preflight nor
+                // the release having succeeded, row-backed replay entries
+                // cannot be identified. Promoting ANY of this queue risks
+                // duplicating a still-claimed durable row.
+                ownership_unknown = true;
+                tracing::warn!(
+                    stream_id = %detached.stream_id,
+                    jid = %detached.jid,
+                    %error,
+                    "row-backed replay reconciliation failed ownership discovery AND \
+                     release; the session's queue must stay out of promotion until a \
+                     retry can discover row ownership"
+                );
+            }
+        }
+    }
+    detached
+        .unacked_stanzas
+        .retain(|entry| !replay_sequences_to_strip.contains(&entry.sequence));
+    RowBackedReleaseOutcome {
+        released_rows: !outcome.released.is_empty(),
+        release_failed_known_rows,
+        ownership_unknown,
+    }
+}
+
 /// Dependencies for [`promote_displaced_sessions`]. Grouped so the
 /// two displacement call sites (max_sessions eviction at detach,
 /// fresh-bind invalidation at registration) share one signature.
@@ -266,11 +393,21 @@ pub struct DisplacedPromotionDeps<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct DisplacedPromotionOutcome {
     retrying_stream_ids: HashSet<String>,
+    queued_pending_rows: bool,
 }
 
 impl DisplacedPromotionOutcome {
     pub(crate) fn is_retrying(&self, stream_id: &str) -> bool {
         self.retrying_stream_ids.contains(stream_id)
+    }
+
+    /// True when any session in the batch inserted `pending_delivery`
+    /// rows. The online-resource snapshot inside promotion can miss a
+    /// replacement that binds mid-batch and spends its once-only
+    /// offline flush before the insert commits, so callers with a live
+    /// routing view must re-drive queued rows afterwards.
+    pub(crate) fn queued_pending_rows(&self) -> bool {
+        self.queued_pending_rows
     }
 }
 
@@ -670,6 +807,9 @@ pub(crate) async fn promote_displaced_sessions(
             &recent_tombstones,
         )
         .await;
+        if summary.queued > 0 {
+            outcome.queued_pending_rows = true;
+        }
         // Finding B: a retraction recorded AFTER the snapshot above
         // raced this session's promotion — re-scrub pending rows
         // before the drain is confirmed (or the session reinserted).

@@ -469,7 +469,7 @@ pub(super) async fn cleanup_connection_shutdown(
                             &jid,
                             conn,
                             vec![detached],
-                            false,
+                            TerminalRowRecovery::default(),
                             TerminalRouteRemoval::NotAttempted,
                         )
                         .await;
@@ -483,7 +483,7 @@ pub(super) async fn cleanup_connection_shutdown(
                         &jid,
                         conn,
                         vec![detached],
-                        false,
+                        TerminalRowRecovery::default(),
                         TerminalRouteRemoval::NotAttempted,
                     )
                     .await;
@@ -728,6 +728,27 @@ enum TerminalRouteRemoval {
 struct TerminalRecoverySessionResult {
     session: waddle_xmpp::stream_management::DetachedSession,
     released_pending_rows: bool,
+    queued_pending_rows: bool,
+}
+
+/// Row-recovery facts a terminal cleanup carries into
+/// [`refuse_detach_without_principal`] so the promotion aftermath can
+/// re-drive or retain durable rows correctly.
+#[derive(Default)]
+struct TerminalRowRecovery {
+    /// Sequence-bound rows were released back to bare-JID pending
+    /// delivery (or row-backed channel entries released individually).
+    released_rows: bool,
+    /// Known sequence-bound rows failed to release and stay claimed by
+    /// the dead stream until promotion's `release_claim` frees them.
+    release_failed_known_rows: bool,
+    /// Row ownership could not be discovered at all; the session's
+    /// queue must stay out of promotion until a retry re-discovers it.
+    ownership_unknown: bool,
+    /// Promotion inserted fresh `pending_delivery` rows whose
+    /// online-resource snapshot may have missed a concurrently binding
+    /// replacement.
+    queued_pending_rows: bool,
 }
 
 async fn promote_terminal_recovery(
@@ -741,8 +762,11 @@ async fn promote_terminal_recovery(
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     };
-    let released_terminal_rows =
-        release_terminally_promoted_pending_rows(state, &mut detached).await;
+    let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+        &state.deps.protocol.pending_delivery_storage,
+        &mut detached,
+    )
+    .await;
     // Overflow promotion can route directly to another resource. Remove this
     // terminal connection first, otherwise an exact-FullJID route can select
     // its already-closed channel and prevent the RFC 6121 bare-JID fallback.
@@ -757,102 +781,34 @@ async fn promote_terminal_recovery(
                 .map(|entry| (entry.is_presence_available(), std::sync::Arc::clone(owner)))
         })?
     });
+    // With row ownership unknown, neither the prefix nor the per-item
+    // overflow promotion may run: unidentified row-backed replay copies
+    // would be promoted as fresh work. The drain still releases channel
+    // entries that carry their own explicit row id (ownership known).
     let recovery = terminal_recovery_session(
         state,
         outbound_rx,
         conn,
         detached,
         detached_snapshot,
-        terminal_route_removed.is_some(),
+        terminal_route_removed.is_some() && !row_release.ownership_unknown,
     )
     .await;
-    let released_terminal_rows = released_terminal_rows || recovery.released_pending_rows;
     refuse_detach_without_principal(
         state,
         outbound_rx,
         jid,
         conn,
         vec![recovery.session],
-        released_terminal_rows,
+        TerminalRowRecovery {
+            released_rows: row_release.released_rows || recovery.released_pending_rows,
+            release_failed_known_rows: row_release.release_failed_known_rows,
+            ownership_unknown: row_release.ownership_unknown,
+            queued_pending_rows: recovery.queued_pending_rows,
+        },
         TerminalRouteRemoval::Attempted(terminal_route_removed),
     )
     .await
-}
-
-/// A live SM queue stores only replay XML, while pending-delivery stores the
-/// durable `(stream_id, outbound_sequence)` ownership binding. Terminal
-/// recovery must discard that replay copy after releasing the durable row;
-/// otherwise promotion treats it as a new message and can collide with an
-/// existing Archived payload's uniqueness key.
-async fn release_terminally_promoted_pending_rows(
-    state: &WebSocketState,
-    detached: &mut waddle_xmpp::stream_management::DetachedSession,
-) -> bool {
-    let sequences: std::collections::HashSet<u32> = detached
-        .unacked_stanzas
-        .iter()
-        .map(|entry| entry.sequence)
-        .collect::<std::collections::HashSet<u32>>();
-    let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone());
-    let sequence_bound_rows = match state
-        .deps
-        .protocol
-        .pending_delivery_storage
-        .list(&detached.jid.to_bare())
-        .await
-    {
-        Ok(rows) => rows
-            .into_iter()
-            .filter(|row| {
-                row.flushed_in_session.as_ref() == Some(&session_id)
-                    && row
-                        .outbound_sequence
-                        .is_some_and(|sequence| sequences.contains(&sequence))
-            })
-            .filter_map(|row| row.outbound_sequence)
-            .collect::<std::collections::HashSet<u32>>(),
-        Err(error) => {
-            warn!(
-                stream_id = %detached.stream_id,
-                jid = %detached.jid,
-                %error,
-                "terminal recovery could not preflight sequence-bound pending rows; release failures may still leave replay entries promotable"
-            );
-            std::collections::HashSet::new()
-        }
-    };
-    let outcome = state
-        .deps
-        .protocol
-        .pending_delivery_storage
-        .release_rows_for_outbound_sequences(&detached.jid.to_bare(), &session_id, &sequences)
-        .await;
-    let mut replay_sequences_to_strip = outcome.released.clone();
-    if outcome.error.is_some() {
-        replay_sequences_to_strip.extend(sequence_bound_rows.iter().copied());
-    }
-    detached
-        .unacked_stanzas
-        .retain(|entry| !replay_sequences_to_strip.contains(&entry.sequence));
-    if let Some(error) = outcome.error {
-        if outcome.released.is_empty() {
-            warn!(
-                stream_id = %detached.stream_id,
-                jid = %detached.jid,
-                %error,
-                "terminal recovery could not release sequence-bound pending rows; stripped any row-backed replay copies so cleanup can only re-drive the durable rows after claim cleanup"
-            );
-        } else {
-            warn!(
-                stream_id = %detached.stream_id,
-                jid = %detached.jid,
-                released = outcome.released.len(),
-                %error,
-                "terminal recovery partially released sequence-bound pending rows; stripped every matching replay copy so unreleased durable rows wait for claim cleanup instead of being promoted again"
-            );
-        }
-    }
-    !replay_sequences_to_strip.is_empty()
 }
 
 #[derive(Clone)]
@@ -897,16 +853,16 @@ fn preferred_live_pending_flush_target(
 }
 
 /// Terminal recovery can release sequence-bound `pending_delivery` rows back
-/// to bare-JID storage after a newer live resource has already spent its own
-/// once-per-session offline-flush claim. Re-drive those rows directly to the
-/// current best live resource here so they do not wait for a future presence
-/// update that may never arrive.
+/// to bare-JID storage — and promotion can insert fresh rows — after a newer
+/// live resource has already spent its own once-per-session offline-flush
+/// claim. Re-drive those rows directly to the current best live resource here
+/// so they do not wait for a future presence update that may never arrive.
 ///
 /// This intentionally does NOT touch RFC 6121 pending-subscribe delivery. That
 /// queue is bare-JID scoped and persists until approval/denial; fresh sessions
 /// already deliver it on their own initial available presence, and live
 /// subscription traffic bypasses this cleanup path entirely.
-async fn reflush_terminally_released_pending_rows_to_live_resource(
+pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     state: &WebSocketState,
     recipient: &BareJid,
 ) {
@@ -1066,14 +1022,29 @@ async fn terminal_recovery_session(
     // Q6 sink before any subsequently accepted channel frame. Once that
     // prefix is settled, channel work is promoted one frame at a time rather
     // than being allowed to grow another terminal replay queue.
-    let promote_incrementally = match (can_promote_incrementally, blocklist.as_ref()) {
-        (false, _) => false,
-        (true, Some(blocklist)) => {
-            promote_terminal_recovery_prefix(state, &mut detached, blocklist, &recent_tombstones)
-                .await
-        }
-        (true, None) => false,
-    };
+    let (promote_incrementally, mut queued_pending_rows) =
+        match (can_promote_incrementally, blocklist.as_ref()) {
+            (false, _) => (false, false),
+            (true, Some(blocklist)) => {
+                let prefix = promote_terminal_recovery_prefix(
+                    state,
+                    &mut detached,
+                    blocklist,
+                    &recent_tombstones,
+                )
+                .await;
+                (prefix.settled, prefix.queued_rows)
+            }
+            (true, None) => (false, false),
+        };
+    if queued_pending_rows {
+        // A replacement can bind and spend its once-only offline flush while
+        // the prefix inserts above are still in flight; its snapshot-based
+        // classification then leaves the fresh rows stranded. Re-drive them
+        // NOW, before the incremental overflow promotion below can deliver
+        // later traffic directly to that replacement and invert FIFO.
+        redrive_terminal_pending_rows_to_live_resource(state, &detached.jid.to_bare()).await;
+    }
     let drain_outcome = drain_outbound_into_terminal_recovery(
         state,
         conn,
@@ -1097,9 +1068,11 @@ async fn terminal_recovery_session(
     detached.outbound_count = detached
         .outbound_count
         .wrapping_add(u32::try_from(retained_len).unwrap_or(u32::MAX));
+    queued_pending_rows |= drain_outcome.queued_pending_rows;
     TerminalRecoverySessionResult {
         session: detached,
         released_pending_rows: drain_outcome.released_pending_rows,
+        queued_pending_rows,
     }
 }
 
@@ -1125,14 +1098,27 @@ fn append_terminal_recovery_backlog(
     }
 }
 
+struct TerminalPrefixPromotion {
+    /// The prefix settled completely; overflow may promote incrementally.
+    settled: bool,
+    /// The prefix inserted fresh `pending_delivery` rows whose
+    /// online-resource snapshot may have missed a replacement binding
+    /// concurrently — the caller must re-drive them before promoting
+    /// later traffic.
+    queued_rows: bool,
+}
+
 async fn promote_terminal_recovery_prefix(
     state: &WebSocketState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
     blocklist: &waddle_xmpp::protocol::session_state::Blocklist,
     recent_tombstones: &[waddle_xmpp::stream_management::RecentTombstoneRecord],
-) -> bool {
+) -> TerminalPrefixPromotion {
     if detached.unacked_stanzas.is_empty() {
-        return true;
+        return TerminalPrefixPromotion {
+            settled: true,
+            queued_rows: false,
+        };
     }
     let summary = crate::sm_promotion::promote_session_unacked(
         detached,
@@ -1151,16 +1137,23 @@ async fn promote_terminal_recovery_prefix(
         "terminal recovery prefix promotion",
     )
     .await;
+    let queued_rows = summary.queued > 0;
     if summary.has_storage_failure() {
         let completed: std::collections::HashSet<u32> =
             summary.promoted_sequences.into_iter().collect();
         detached
             .unacked_stanzas
             .retain(|entry| !completed.contains(&entry.sequence));
-        return false;
+        return TerminalPrefixPromotion {
+            settled: false,
+            queued_rows,
+        };
     }
     detached.unacked_stanzas.clear();
-    true
+    TerminalPrefixPromotion {
+        settled: true,
+        queued_rows,
+    }
 }
 
 /// A session that enabled resumable SM but cannot prove a durable resume
@@ -1177,7 +1170,7 @@ async fn refuse_detach_without_principal(
     jid: &FullJid,
     conn: &mut WsConnState,
     detached_sessions: Vec<waddle_xmpp::stream_management::DetachedSession>,
-    released_terminal_rows: bool,
+    row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
     // A terminal session must disappear from the exact-FullJID routing table
@@ -1197,18 +1190,41 @@ async fn refuse_detach_without_principal(
         }),
         TerminalRouteRemoval::Attempted(removed) => removed,
     };
-    if released_terminal_rows {
+    if row_recovery.released_rows {
         // Preserve FIFO when terminal recovery released an earlier
         // pending_delivery row but still has later unacked traffic to
         // promote: drive the released prefix back onto any live replacement
         // before promotion can enqueue the tail.
-        reflush_terminally_released_pending_rows_to_live_resource(state, &jid.to_bare()).await;
+        redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await;
     }
     // Keep this stream's claim live throughout every promotion. The claim
     // janitor uses SM liveness/fences, and deferring it before the locally
     // held batch is registered would let a sweep release the fence midway.
-    let retrying = if detached_sessions.is_empty() {
-        false
+    let (retrying, promotion_queued_rows) = if detached_sessions.is_empty() {
+        (false, false)
+    } else if row_recovery.ownership_unknown {
+        // Row ownership could not be discovered: promoting this queue could
+        // duplicate still-claimed durable rows. Keep the whole queue out of
+        // promotion and hand it to the SM-expiry janitor, whose retry pass
+        // re-runs the ownership discovery before promoting.
+        let mut conn_stream_retrying = false;
+        for session in detached_sessions {
+            let is_conn_stream = conn
+                .sm_state
+                .stream_id
+                .as_deref()
+                .is_some_and(|stream_id| stream_id == session.stream_id);
+            if crate::sm_promotion::reinsert_failed_session_for_retry(
+                &state.deps.protocol.sm_session_registry,
+                session,
+            )
+            .await
+                && is_conn_stream
+            {
+                conn_stream_retrying = true;
+            }
+        }
+        (conn_stream_retrying, false)
     } else {
         let outcome = crate::sm_promotion::promote_displaced_sessions(
             detached_sessions,
@@ -1222,13 +1238,30 @@ async fn refuse_detach_without_principal(
             },
         )
         .await;
-        conn.sm_state
-            .stream_id
-            .as_deref()
-            .is_some_and(|stream_id| outcome.is_retrying(stream_id))
+        (
+            conn.sm_state
+                .stream_id
+                .as_deref()
+                .is_some_and(|stream_id| outcome.is_retrying(stream_id)),
+            outcome.queued_pending_rows(),
+        )
     };
+    if row_recovery.queued_pending_rows || promotion_queued_rows {
+        // Rows promotion freshly queued while a replacement bound mid-await
+        // (spending its once-only offline flush) are already durable and are
+        // NOT re-reported by a promotion retry — re-drive them regardless of
+        // retry status, before a later retry can deliver the remaining tail
+        // ahead of them.
+        redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await;
+    }
     if !retrying {
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+        if row_recovery.release_failed_known_rows {
+            // Known row-backed replay copies were stripped while their
+            // release failed; the settled promotion's `release_claim` has
+            // since freed those rows and nothing else re-drives them.
+            redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await;
+        }
     }
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     if let Some((was_presence_available, owner)) = terminal_removed {

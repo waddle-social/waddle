@@ -99,6 +99,7 @@ pub use cleanup::cleanup_muc_presence_for_jid;
 pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
+pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
 pub use cleanup::MucCleanupOutcome;
 pub use connection::router;
 pub(crate) use state::ResolvedPrincipal;

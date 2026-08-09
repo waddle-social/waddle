@@ -2088,6 +2088,1068 @@ async fn terminal_release_failure_blocks_row_backed_replay_promotion() {
     ));
 }
 
+/// Fail one `list` and one `release_rows_for_outbound_sequences` call when
+/// armed, leaving the in-memory backend intact so a later retry can converge.
+struct FailOnceListAndReleasePendingStorage {
+    inner: waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage,
+    fail_next_list: std::sync::atomic::AtomicBool,
+    fail_next_release: std::sync::atomic::AtomicBool,
+}
+
+impl FailOnceListAndReleasePendingStorage {
+    fn new() -> Self {
+        Self {
+            inner:
+                waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::unlimited(),
+            fail_next_list: std::sync::atomic::AtomicBool::new(false),
+            fail_next_release: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.fail_next_list
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.fail_next_release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
+    for FailOnceListAndReleasePendingStorage
+{
+    async fn insert(
+        &self,
+        row: waddle_xmpp::pending_delivery::PendingRow,
+    ) -> Result<
+        waddle_xmpp::pending_delivery::InsertOutcome,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.insert(row).await
+    }
+
+    async fn list(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        if self
+            .fail_next_list
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                    "simulated list failure".to_string(),
+                ),
+            );
+        }
+        self.inner.list(recipient).await
+    }
+
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.claim_for_session(recipient, session).await
+    }
+
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .claim_batch_for_session(recipient, session, after, limit)
+            .await
+    }
+
+    async fn delete_claimed(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_claimed(session).await
+    }
+
+    async fn delete_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_row(id).await
+    }
+
+    async fn release_claim(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_claim(session).await
+    }
+
+    async fn release_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_row(id).await
+    }
+
+    async fn release_rows_for_outbound_sequences(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequences: &std::collections::HashSet<u32>,
+    ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
+        if self
+            .fail_next_release
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                    "simulated release transaction failure".to_string(),
+                ),
+            );
+        }
+        self.inner
+            .release_rows_for_outbound_sequences(recipient, session, sequences)
+            .await
+    }
+
+    async fn record_pushed_at(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.record_pushed_at(id, sequence).await
+    }
+
+    async fn delete_acked_in_window(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        to_inclusive: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner
+            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .await
+    }
+
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+        claimed_before_ms: i64,
+    ) -> Result<
+        Vec<(
+            waddle_xmpp::pending_delivery::PendingRowId,
+            waddle_xmpp::pending_delivery::SmSessionId,
+        )>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_orphaned_claims(live_sessions, claimed_before_ms)
+            .await
+    }
+
+    async fn count(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<u32, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.count(recipient).await
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_older_than(cutoff).await
+    }
+
+    async fn scrub_for_tombstone(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.scrub_for_tombstone(target).await
+    }
+}
+
+/// PR #1669 round 8: when BOTH the ownership preflight (`list`) and the
+/// sequence release fail during terminal cleanup, row-backed replay copies
+/// cannot be told apart from fresh work. The whole queue must stay out of
+/// promotion (no duplicate row is minted while the original stays claimed)
+/// and converge via the SM-expiry janitor once ownership can be discovered
+/// again.
+#[tokio::test]
+async fn terminal_ownership_discovery_failure_defers_promotion_until_janitor_retry() {
+    let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    let failing_storage = Arc::new(FailOnceListAndReleasePendingStorage::new());
+    let pending_storage: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        Arc::clone(&failing_storage) as _;
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        Arc::clone(&sm_registry),
+        pending_storage,
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/ownership-unknown".parse().expect("jid");
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+    let old_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), old_tx);
+
+    let mut old_conn = WsConnState::new();
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    old_conn.registry_owner = Some(old_owner);
+    let enabled = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    let old_stream_id = Element::from_str(&enabled[0])
+        .expect("enabled xml")
+        .attr("id")
+        .expect("stream id")
+        .to_string();
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    seed_claimed_pending_row(state.as_ref(), &jid.to_bare(), &old_stream_id, 1).await;
+    let _ = old_conn.sm_state.record_outbound(
+        message_frame_xml_with_id("terminal-release-replay-copy".to_string()),
+        SmEvictionPath::Batch,
+    );
+    old_conn.begin_terminal_sm_recovery();
+
+    failing_storage.arm();
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list pending rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "with ownership unknown, no replay copy may be promoted into a duplicate row"
+    );
+    assert_eq!(
+        rows[0].flushed_in_session.as_ref().map(|s| s.as_str()),
+        Some(old_stream_id.as_str()),
+        "the original row must stay claimed until the retry discovers ownership"
+    );
+
+    // Storage has recovered (the failures were one-shot). The janitor's next
+    // sweep re-runs ownership discovery, releases the row, strips the replay
+    // copy, and settles the synthetic session without duplicating anything.
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
+
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list pending rows after janitor retry");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the janitor retry must not promote the replay copy into a duplicate row"
+    );
+    assert_eq!(
+        rows[0].flushed_in_session, None,
+        "the janitor retry must release the dead stream's claim on the original row"
+    );
+    assert!(
+        sm_registry
+            .drain_expired()
+            .await
+            .expect("drain after retry")
+            .is_empty(),
+        "the synthetic session must settle once ownership discovery succeeds"
+    );
+}
+
+/// PR #1669 round 8: when the ownership preflight identifies a sequence-bound
+/// row but the release itself fails, the replay copy is stripped and promotion
+/// later frees the row via `release_claim`. The rows must then be re-driven to
+/// a live replacement whose once-only offline flush is already spent, instead
+/// of sitting pending until some future bind.
+#[tokio::test]
+async fn terminal_release_failure_redrives_row_after_promotion_frees_claim() {
+    let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    let pending_storage: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        Arc::new(FailFirstReleaseRowsPendingStorage::new());
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        Arc::clone(&sm_registry),
+        pending_storage,
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/release-failure-redrive"
+        .parse()
+        .expect("jid");
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+    let old_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), old_tx);
+
+    let mut old_conn = WsConnState::new();
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    old_conn.registry_owner = Some(old_owner);
+    let enabled = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    let old_stream_id = Element::from_str(&enabled[0])
+        .expect("enabled xml")
+        .attr("id")
+        .expect("stream id")
+        .to_string();
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    seed_claimed_pending_row(state.as_ref(), &jid.to_bare(), &old_stream_id, 1).await;
+    let _ = old_conn.sm_state.record_outbound(
+        message_frame_xml_with_id("terminal-release-replay-copy".to_string()),
+        SmEvictionPath::Batch,
+    );
+    old_conn.begin_terminal_sm_recovery();
+
+    let (replacement_tx, mut replacement_rx) = mpsc::channel::<OutboundStanza>(4);
+    let replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 0);
+    let replacement_stream = waddle_xmpp::pending_delivery::SmSessionId::new(
+        "release-failure-replacement-stream".to_string(),
+    );
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id_if_owner(&jid, &replacement_owner, Some(replacement_stream.clone())));
+    let replacement_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &replacement_owner)
+        .expect("replacement entry");
+    assert!(
+        replacement_entry.claim_offline_flush(),
+        "replacement already spent its initial offline flush claim"
+    );
+
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+
+    let delivered = replacement_rx
+        .recv()
+        .await
+        .expect("cleanup must re-drive the row freed by promotion's release_claim");
+    match &delivered.stanza {
+        Stanza::Message(message) => {
+            assert_eq!(
+                message.id.as_ref().map(|id| id.0.as_str()),
+                Some("pd-1"),
+                "the live replacement should receive the release-failed row after \
+                 promotion freed its claim"
+            );
+        }
+        other => panic!("expected replayed Message, got {other:?}"),
+    }
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list pending rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the replay copy must not be promoted into a duplicate row"
+    );
+    assert_eq!(
+        rows[0].flushed_in_session.as_ref(),
+        Some(&replacement_stream),
+        "the post-promotion re-drive must rebind the freed row to the live replacement"
+    );
+}
+
+/// PR #1669 round 8: the terminal prefix promotion snapshots online resources
+/// once. A replacement that binds and spends its once-only offline flush while
+/// a prefix insert is still in flight would otherwise leave the freshly queued
+/// row stranded (and later incremental traffic could overtake it). The
+/// post-prefix recheck must re-drive the row to that replacement.
+#[tokio::test]
+async fn terminal_prefix_promotion_redrives_rows_to_replacement_bound_mid_insert() {
+    let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    let gated_storage = Arc::new(GatedFirstInsertPendingStorage::new());
+    let pending_storage: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        Arc::clone(&gated_storage) as _;
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        Arc::clone(&sm_registry),
+        pending_storage,
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/prefix-race".parse().expect("jid");
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+    let old_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), old_tx);
+
+    let mut old_conn = WsConnState::new();
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    old_conn.registry_owner = Some(old_owner);
+    let _ = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    let mut queued = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+    queued.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+    queued.id = Some(xmpp_parsers::message::Id("prefix-race-message".to_string()));
+    queued.type_ = xmpp_parsers::message::MessageType::Chat;
+    queued.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "queued while the replacement was binding".to_string(),
+    );
+    waddle_xmpp::xep::xep0334::add_hint(
+        &mut queued,
+        waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+    );
+    let _ = old_conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(queued).expect("serialize queued message"),
+        SmEvictionPath::Batch,
+    );
+    old_conn.begin_terminal_sm_recovery();
+
+    let cleanup_state = Arc::clone(&state);
+    let cleanup = tokio::spawn(async move {
+        cleanup_connection_shutdown(cleanup_state.as_ref(), &mut old_rx, &mut old_conn, false).await
+    });
+    gated_storage.wait_until_insert_blocks().await;
+
+    // The replacement binds while the prefix insert is mid-flight and spends
+    // its once-per-session offline flush before the row commits.
+    let (replacement_tx, mut replacement_rx) = mpsc::channel::<OutboundStanza>(4);
+    let replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 0);
+    let replacement_stream =
+        waddle_xmpp::pending_delivery::SmSessionId::new("prefix-race-replacement".to_string());
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id_if_owner(&jid, &replacement_owner, Some(replacement_stream.clone())));
+    let replacement_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &replacement_owner)
+        .expect("replacement entry");
+    assert!(
+        replacement_entry.claim_offline_flush(),
+        "replacement already spent its initial offline flush claim"
+    );
+    gated_storage.release_insert();
+
+    assert_eq!(
+        cleanup.await.expect("cleanup task"),
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+
+    let delivered = replacement_rx
+        .recv()
+        .await
+        .expect("the post-prefix recheck must re-drive the freshly queued row");
+    match &delivered.stanza {
+        Stanza::Message(message) => {
+            assert_eq!(
+                message.id.as_ref().map(|id| id.0.as_str()),
+                Some("prefix-race-message"),
+                "the replacement should receive the row inserted while it bound"
+            );
+        }
+        other => panic!("expected replayed Message, got {other:?}"),
+    }
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list pending rows");
+    assert_eq!(rows.len(), 1, "exactly the one promoted row exists");
+    assert_eq!(
+        rows[0].flushed_in_session.as_ref(),
+        Some(&replacement_stream),
+        "the re-driven row must be claimed by the live replacement stream"
+    );
+}
+
+/// Reject every insert whose Transient payload carries `fail_id`, and gate
+/// the first surviving insert behind the wrapped storage's semaphore. Models
+/// a per-stanza durable-storage failure that persists across promotion
+/// retries while a replacement binds mid-insert.
+struct FailInsertsForMessageIdPendingStorage {
+    inner: GatedFirstInsertPendingStorage,
+    fail_id: &'static str,
+}
+
+#[async_trait::async_trait]
+impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
+    for FailInsertsForMessageIdPendingStorage
+{
+    async fn insert(
+        &self,
+        row: waddle_xmpp::pending_delivery::PendingRow,
+    ) -> Result<
+        waddle_xmpp::pending_delivery::InsertOutcome,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        if matches!(
+            &row.payload,
+            waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                if message.id.as_ref().is_some_and(|id| id.0 == self.fail_id)
+        ) {
+            return Err(
+                waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                    "simulated per-stanza insert failure".to_string(),
+                ),
+            );
+        }
+        self.inner.insert(row).await
+    }
+
+    async fn list(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.list(recipient).await
+    }
+
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.claim_for_session(recipient, session).await
+    }
+
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .claim_batch_for_session(recipient, session, after, limit)
+            .await
+    }
+
+    async fn delete_claimed(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_claimed(session).await
+    }
+
+    async fn delete_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_row(id).await
+    }
+
+    async fn release_claim(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_claim(session).await
+    }
+
+    async fn release_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_row(id).await
+    }
+
+    async fn record_pushed_at(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.record_pushed_at(id, sequence).await
+    }
+
+    async fn delete_acked_in_window(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        to_inclusive: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner
+            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .await
+    }
+
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+        claimed_before_ms: i64,
+    ) -> Result<
+        Vec<(
+            waddle_xmpp::pending_delivery::PendingRowId,
+            waddle_xmpp::pending_delivery::SmSessionId,
+        )>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_orphaned_claims(live_sessions, claimed_before_ms)
+            .await
+    }
+
+    async fn count(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<u32, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.count(recipient).await
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_older_than(cutoff).await
+    }
+
+    async fn scrub_for_tombstone(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.scrub_for_tombstone(target).await
+    }
+}
+
+fn transient_chat_message_xml(id: &str, recipient: &BareJid) -> String {
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+    message.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+    message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), format!("body of {id}"));
+    waddle_xmpp::xep::xep0334::add_hint(
+        &mut message,
+        waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+    );
+    waddle_xmpp::parser::stanza_to_string(message).expect("serialize message")
+}
+
+/// Codex round-9 finding 1: an overflow row queued while a replacement binds
+/// must be re-driven BEFORE the next channel frame is promoted, otherwise the
+/// later frame's fresh online snapshot delivers it live ahead of the earlier
+/// stanza and inverts the stream's FIFO order.
+#[tokio::test]
+async fn terminal_overflow_queued_row_redrives_before_next_frame_preserving_fifo() {
+    let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    let gated_storage = Arc::new(GatedFirstInsertPendingStorage::new());
+    let pending_storage: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        Arc::clone(&gated_storage) as _;
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        Arc::clone(&sm_registry),
+        pending_storage,
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/overflow-fifo".parse().expect("jid");
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(8);
+    let old_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), old_tx.clone());
+
+    let mut old_conn = WsConnState::new();
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    old_conn.registry_owner = Some(old_owner);
+    let _ = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    old_conn.begin_terminal_sm_recovery();
+
+    for id in ["overflow-first", "overflow-second"] {
+        let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+        message.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+        message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), format!("body of {id}"));
+        waddle_xmpp::xep::xep0334::add_hint(
+            &mut message,
+            waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+        );
+        old_tx
+            .send(OutboundStanza::new(Stanza::Message(message)))
+            .await
+            .expect("queue accepted overflow frame");
+    }
+
+    let cleanup_state = Arc::clone(&state);
+    let cleanup = tokio::spawn(async move {
+        cleanup_connection_shutdown(cleanup_state.as_ref(), &mut old_rx, &mut old_conn, false).await
+    });
+    gated_storage.wait_until_insert_blocks().await;
+
+    let (replacement_tx, mut replacement_rx) = mpsc::channel::<OutboundStanza>(8);
+    let replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 0);
+    let replacement_stream =
+        waddle_xmpp::pending_delivery::SmSessionId::new("overflow-fifo-replacement".to_string());
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id_if_owner(&jid, &replacement_owner, Some(replacement_stream)));
+    let replacement_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &replacement_owner)
+        .expect("replacement entry");
+    assert!(
+        replacement_entry.claim_offline_flush(),
+        "replacement already spent its initial offline flush claim"
+    );
+    gated_storage.release_insert();
+
+    assert_eq!(
+        cleanup.await.expect("cleanup task"),
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+
+    let mut delivered_ids = Vec::new();
+    for _ in 0..2 {
+        let delivered = replacement_rx
+            .recv()
+            .await
+            .expect("both overflow frames must reach the replacement");
+        if let Stanza::Message(message) = &delivered.stanza {
+            delivered_ids.push(message.id.as_ref().map(|id| id.0.clone()));
+        }
+    }
+    assert_eq!(
+        delivered_ids,
+        vec![
+            Some("overflow-first".to_string()),
+            Some("overflow-second".to_string())
+        ],
+        "the queued first frame must be re-driven before the second frame is \
+         promoted live, preserving FIFO"
+    );
+}
+
+/// Codex round-9 finding 4: rows queued by the displaced promotion while a
+/// replacement bound mid-insert are already durable and are NOT re-reported
+/// by a promotion retry. They must be re-driven even when a later stanza's
+/// persistent storage failure leaves the session retrying.
+#[tokio::test]
+async fn terminal_promotion_queued_row_redrives_even_while_session_retries() {
+    let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    let storage = Arc::new(FailInsertsForMessageIdPendingStorage {
+        inner: GatedFirstInsertPendingStorage::new(),
+        fail_id: "retry-poisoned",
+    });
+    let pending_storage: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        Arc::clone(&storage) as _;
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        Arc::clone(&sm_registry),
+        pending_storage,
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/queued-despite-retry"
+        .parse()
+        .expect("jid");
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+    let old_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), old_tx);
+
+    let mut old_conn = WsConnState::new();
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    old_conn.registry_owner = Some(old_owner);
+    let _ = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    let _ = old_conn.sm_state.record_outbound(
+        transient_chat_message_xml("retry-queued", &jid.to_bare()),
+        SmEvictionPath::Batch,
+    );
+    let _ = old_conn.sm_state.record_outbound(
+        transient_chat_message_xml("retry-poisoned", &jid.to_bare()),
+        SmEvictionPath::Batch,
+    );
+    // Drop the principal so cleanup takes the refuse-detach path: the
+    // displaced promotion (not the terminal prefix) performs the inserts.
+    old_conn.authenticated_session = None;
+
+    let cleanup_state = Arc::clone(&state);
+    let cleanup = tokio::spawn(async move {
+        cleanup_connection_shutdown(cleanup_state.as_ref(), &mut old_rx, &mut old_conn, false).await
+    });
+    storage.inner.wait_until_insert_blocks().await;
+
+    // The replacement binds mid-insert with its once-only offline flush
+    // spent; the second stanza's insert keeps failing, so the session stays
+    // in the retry inventory.
+    let (replacement_tx, mut replacement_rx) = mpsc::channel::<OutboundStanza>(4);
+    let replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 0);
+    let replacement_stream = waddle_xmpp::pending_delivery::SmSessionId::new(
+        "queued-despite-retry-replacement".to_string(),
+    );
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id_if_owner(&jid, &replacement_owner, Some(replacement_stream.clone())));
+    let replacement_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &replacement_owner)
+        .expect("replacement entry");
+    assert!(
+        replacement_entry.claim_offline_flush(),
+        "replacement already spent its initial offline flush claim"
+    );
+    storage.inner.release_insert();
+
+    assert_eq!(
+        cleanup.await.expect("cleanup task"),
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+
+    let delivered = replacement_rx
+        .recv()
+        .await
+        .expect("the queued row must be re-driven even though the session retries");
+    match &delivered.stanza {
+        Stanza::Message(message) => {
+            assert_eq!(
+                message.id.as_ref().map(|id| id.0.as_str()),
+                Some("retry-queued"),
+                "the replacement should receive the row queued during its bind"
+            );
+        }
+        other => panic!("expected replayed Message, got {other:?}"),
+    }
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list pending rows");
+    assert!(
+        rows.iter().any(|row| {
+            matches!(
+                &row.payload,
+                waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                    if message.id.as_ref().is_some_and(|id| id.0 == "retry-queued")
+            ) && row.flushed_in_session.as_ref() == Some(&replacement_stream)
+        }),
+        "the re-driven row must be claimed by the live replacement stream"
+    );
+    assert_eq!(
+        sm_registry
+            .drain_expired()
+            .await
+            .expect("drain retry inventory")
+            .len(),
+        1,
+        "the poisoned stanza's storage failure must have left the session retrying"
+    );
+}
+
+/// Codex round-9 finding 2: the janitor must re-drive released row-backed
+/// rows BEFORE promoting the remaining queue, otherwise later unacked traffic
+/// reaches a live replacement ahead of the earlier released row.
+#[tokio::test]
+async fn janitor_redrives_released_rows_before_promoting_remainder() {
+    use waddle_xmpp::stream_management::{DetachedSession, DetachedUnackedStanza};
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/janitor-fifo".parse().expect("jid");
+    let stream_id = "janitor-fifo-expired".to_string();
+    seed_claimed_pending_row(state.as_ref(), &jid.to_bare(), &stream_id, 1).await;
+
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: stream_id.clone(),
+            user_id: "alice@example.com".to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            outbound_count: 2,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![
+                DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: message_frame_xml_with_id("row-backed-copy".to_string()),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                DetachedUnackedStanza {
+                    sequence: 2,
+                    stanza_xml: transient_chat_message_xml("janitor-later", &jid.to_bare()),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+            ],
+            max_resume_time: Some(0),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store expired session");
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let (replacement_tx, mut replacement_rx) = mpsc::channel::<OutboundStanza>(8);
+    let replacement_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), replacement_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 0);
+    let replacement_stream =
+        waddle_xmpp::pending_delivery::SmSessionId::new("janitor-fifo-replacement".to_string());
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id_if_owner(&jid, &replacement_owner, Some(replacement_stream)));
+    let replacement_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &replacement_owner)
+        .expect("replacement entry");
+    assert!(
+        replacement_entry.claim_offline_flush(),
+        "replacement already spent its initial offline flush claim"
+    );
+
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
+
+    let mut delivered_ids = Vec::new();
+    while let Ok(delivered) = replacement_rx.try_recv() {
+        if let Stanza::Message(message) = &delivered.stanza {
+            delivered_ids.push(message.id.as_ref().map(|id| id.0.clone()));
+        }
+    }
+    assert_eq!(
+        delivered_ids,
+        vec![Some("pd-1".to_string()), Some("janitor-later".to_string())],
+        "the janitor must re-drive the released earlier row before promoting the \
+         later unacked stanza to the live replacement"
+    );
+}
+
 /// Regression: a terminal reflush that aborts before claiming any row must
 /// still re-open the replacement session's once-only offline-flush gate so the
 /// released backlog can be retried on the next live flush trigger.
