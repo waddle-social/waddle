@@ -1,25 +1,45 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tracing::{debug, info, instrument};
 
 use super::sql::migrations_table_sql;
-use super::{global, waddle, Migration};
-use crate::db::{ConnectionGuard, Database, DatabaseDriver, DatabaseError};
+use super::{
+    global, migration_checksum, waddle, Migration, MigrationLedgerError, MigrationNamespace,
+};
+#[cfg(test)]
+use crate::db::ConnectionGuard;
+use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
-/// Migration runner for applying migrations to a database
+/// Dedicated, cluster-wide Postgres advisory-lock key for serializing the
+/// append-only migration ledger. This differs from the claims lock key in
+/// `clustering::claims`; SQLite is single-node, where `BEGIN IMMEDIATE`
+/// provides the corresponding write serialization.
+pub(super) const MIGRATION_LEDGER_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_992;
+
+/// Migration runner for applying migrations to a database.
 pub struct MigrationRunner {
     pub(super) migrations: Vec<Migration>,
+    owned_namespaces: HashSet<MigrationNamespace>,
 }
 
 impl MigrationRunner {
-    /// Create a new migration runner with the given migrations
+    /// Create a new migration runner with the given migrations. A runner owns
+    /// every namespace represented by its catalog; ledger rows outside those
+    /// namespaces intentionally belong to another runner and are ignored.
     pub fn new(migrations: Vec<Migration>) -> Self {
         let mut sorted = migrations;
-        sorted.sort_by_key(|m| m.version);
-        Self { migrations: sorted }
+        sorted.sort_by_key(|migration| migration.version);
+        let owned_namespaces = sorted
+            .iter()
+            .map(|migration| MigrationNamespace::of(migration.version))
+            .collect();
+        Self {
+            migrations: sorted,
+            owned_namespaces,
+        }
     }
 
-    /// Create a runner for global database migrations
+    /// Create a runner for global database migrations.
     #[cfg(test)]
     pub fn global() -> Self {
         Self::single()
@@ -33,152 +53,261 @@ impl MigrationRunner {
 
     /// Create a runner for single-database mode.
     ///
-    /// This composes global + channel/message schema migrations into one ordered
-    /// stream so they share one migration history without version collisions.
+    /// This composes global + channel/message schema migrations into one
+    /// ordered stream so they share one migration history without collisions.
     pub fn single() -> Self {
         let mut migrations = global::all();
         migrations.extend(waddle::all());
         Self::new(migrations)
     }
 
-    /// Run all pending migrations on the database
+    /// Run all pending migrations on one transaction. Postgres serializes
+    /// starters with a transaction-scoped advisory lock; SQLite is a
+    /// single-node deployment and uses its immediate write lock instead.
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn run(&self, db: &Database) -> Result<Vec<i64>, DatabaseError> {
-        let conn = db.guard().await?;
-        self.run_with_connection(&conn, db.driver()).await
-    }
-
-    /// Internal method to run migrations with a given connection
-    async fn run_with_connection(
-        &self,
-        conn: &ConnectionGuard,
-        driver: DatabaseDriver,
-    ) -> Result<Vec<i64>, DatabaseError> {
-        // Ensure migrations table exists
-        conn.execute(migrations_table_sql(driver), ())
-            .await
-            .map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to create migrations table: {}", e))
-            })?;
-
-        // Get applied migrations (version + description).
-        let mut applied_rows: Vec<(i64, String)> = Vec::new();
-        let mut rows = conn
-            .query(
-                "SELECT version, description FROM _migrations ORDER BY version",
-                (),
-            )
-            .await
-            .map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to query migrations: {}", e))
-            })?;
-
-        while let Some(row) = rows.next().await.map_err(|e| {
-            DatabaseError::MigrationFailed(format!("Failed to read migration row: {}", e))
-        })? {
-            let version: i64 = row.get(0).map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to get version from row: {}", e))
-            })?;
-            let description: String = row.get(1).map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to get description from row: {}", e))
-            })?;
-            applied_rows.push((version, description));
-        }
-
-        // Hard-cut protection: if the migration history doesn't match this binary's
-        // migration set (unknown versions or differing descriptions), reset migration
-        // tracking and re-apply current migrations from scratch.
-        let expected: HashMap<i64, &str> = self
-            .migrations
-            .iter()
-            .map(|m| (m.version, m.description.as_str()))
-            .collect();
-        let has_incompatible_history = applied_rows.iter().any(|(version, description)| {
-            expected
-                .get(version)
-                .map(|expected_desc| *expected_desc != description.as_str())
-                .unwrap_or(true)
-        });
-
-        let applied: Vec<i64> = if has_incompatible_history {
-            info!("Incompatible migration history detected, resetting migration tracking");
-            conn.execute_batch("DROP TABLE IF EXISTS _migrations;")
-                .await
-                .map_err(|e| {
-                    DatabaseError::MigrationFailed(format!(
-                        "Failed to reset migration tracking table: {}",
-                        e
-                    ))
-                })?;
-            conn.execute(migrations_table_sql(driver), ())
-                .await
-                .map_err(|e| {
-                    DatabaseError::MigrationFailed(format!(
-                        "Failed to recreate migrations table: {}",
-                        e
-                    ))
-                })?;
-            Vec::new()
-        } else {
-            applied_rows.iter().map(|(version, _)| *version).collect()
+        let driver = db.driver();
+        let mut tx = match driver {
+            DatabaseDriver::Postgres => {
+                let mut tx = db.begin().await?;
+                tx.query(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    crate::db_params![MIGRATION_LEDGER_ADVISORY_LOCK_KEY],
+                )
+                .await?;
+                tx
+            }
+            DatabaseDriver::Sqlite => db.begin_immediate().await?,
         };
 
-        debug!("Already applied migrations: {:?}", applied);
+        let checksum_column_added = self.bootstrap(&mut tx, driver).await?;
+        let applied_rows = self.read_ledger(&mut tx).await?;
+        let adoption_backfill =
+            self.validate_ledger(&applied_rows, driver, checksum_column_added)?;
 
-        // Apply pending migrations
+        for (version, checksum) in adoption_backfill {
+            tx.execute(
+                "UPDATE _migrations SET checksum = ? WHERE version = ? AND checksum IS NULL",
+                (checksum, version),
+            )
+            .await?;
+        }
+
+        let applied: HashSet<i64> = applied_rows
+            .iter()
+            .filter(|row| self.owns_version(row.version))
+            .map(|row| row.version)
+            .collect();
+        debug!(?applied, "Already applied migrations");
+
         let mut newly_applied = Vec::new();
         for migration in &self.migrations {
             if applied.contains(&migration.version) {
-                debug!("Skipping already applied migration v{}", migration.version);
+                debug!(
+                    version = migration.version,
+                    "Skipping already applied migration"
+                );
                 continue;
             }
 
             info!(
-                "Applying migration v{}: {}",
-                migration.version, migration.description
+                version = migration.version,
+                description = %migration.description,
+                "Applying migration"
             );
-
-            // Execute migration SQL using batch execution (driver-specific dialect)
-            let sql = migration.sql_for(driver);
-            conn.execute_batch(sql).await.map_err(|e| {
-                DatabaseError::MigrationFailed(format!(
-                    "Migration v{} failed: {}",
-                    migration.version, e
-                ))
-            })?;
-
-            // Record the migration. `ON CONFLICT DO NOTHING`: there is
-            // no cross-node lock (#1338), so two replicas booting
-            // concurrently can both pass the applied-versions check and
-            // race this insert; the loser must not crash-loop on the
-            // duplicate primary key after (idempotent) DDL succeeded.
-            conn.execute(
-                "INSERT INTO _migrations (version, description) VALUES (?, ?) \
-                 ON CONFLICT (version) DO NOTHING",
-                (migration.version, migration.description.as_str()),
+            tx.execute_batch(migration.sql_for(driver)).await?;
+            tx.execute(
+                "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
+                crate::db_params![
+                    migration.version,
+                    migration.description.as_str(),
+                    migration_checksum(migration, driver)
+                ],
             )
-            .await
-            .map_err(|e| {
-                DatabaseError::MigrationFailed(format!(
-                    "Failed to record migration v{}: {}",
-                    migration.version, e
-                ))
-            })?;
+            .await?;
 
             newly_applied.push(migration.version);
-            info!("Applied migration v{}", migration.version);
+            info!(version = migration.version, "Applied migration");
         }
+
+        tx.commit().await?;
 
         if newly_applied.is_empty() {
             debug!("No new migrations to apply");
         } else {
-            info!("Applied {} new migrations", newly_applied.len());
+            info!(count = newly_applied.len(), "Applied new migrations");
         }
 
         Ok(newly_applied)
     }
 
-    /// Get the current schema version
+    async fn bootstrap(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+    ) -> Result<bool, DatabaseError> {
+        tx.execute(migrations_table_sql(driver), ()).await?;
+
+        let has_checksum_column = Self::has_checksum_column(tx, driver).await?;
+        match driver {
+            DatabaseDriver::Postgres => {
+                tx.execute(
+                    "ALTER TABLE _migrations ADD COLUMN IF NOT EXISTS checksum TEXT",
+                    (),
+                )
+                .await?;
+            }
+            DatabaseDriver::Sqlite if !has_checksum_column => {
+                tx.execute("ALTER TABLE _migrations ADD COLUMN checksum TEXT", ())
+                    .await?;
+            }
+            DatabaseDriver::Sqlite => {}
+        }
+
+        Ok(!has_checksum_column)
+    }
+
+    async fn has_checksum_column(
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+    ) -> Result<bool, DatabaseError> {
+        let mut rows = match driver {
+            DatabaseDriver::Sqlite => tx.query("PRAGMA table_info('_migrations')", ()).await?,
+            DatabaseDriver::Postgres => {
+                tx.query(
+                    "SELECT column_name FROM information_schema.columns \
+                     WHERE table_schema = current_schema() \
+                     AND table_name = ? AND column_name = ?",
+                    ("_migrations", "checksum"),
+                )
+                .await?
+            }
+        };
+
+        while let Some(row) = rows.next().await? {
+            let column_name: String = match driver {
+                DatabaseDriver::Sqlite => row.get(1)?,
+                DatabaseDriver::Postgres => row.get(0)?,
+            };
+            if column_name == "checksum" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn read_ledger(&self, tx: &mut Transaction<'_>) -> Result<Vec<LedgerRow>, DatabaseError> {
+        let mut rows = tx
+            .query(
+                "SELECT version, description, checksum FROM _migrations ORDER BY version",
+                (),
+            )
+            .await?;
+        let mut ledger = Vec::new();
+        while let Some(row) = rows.next().await? {
+            ledger.push(LedgerRow {
+                version: row.get(0)?,
+                description: row.get(1)?,
+                checksum: row.get(2)?,
+            });
+        }
+        Ok(ledger)
+    }
+
+    fn validate_ledger(
+        &self,
+        applied_rows: &[LedgerRow],
+        driver: DatabaseDriver,
+        checksum_column_added: bool,
+    ) -> Result<Vec<(i64, String)>, DatabaseError> {
+        let expected: HashMap<i64, &Migration> = self
+            .migrations
+            .iter()
+            .map(|migration| (migration.version, migration))
+            .collect();
+        let mut applied_by_namespace: HashMap<MigrationNamespace, Vec<i64>> = HashMap::new();
+        let mut adoption_backfill = Vec::new();
+
+        for row in applied_rows {
+            let namespace = MigrationNamespace::of(row.version);
+            if !self.owned_namespaces.contains(&namespace) {
+                continue;
+            }
+
+            let Some(migration) = expected.get(&row.version) else {
+                return Err(MigrationLedgerError::UnknownVersion {
+                    version: row.version,
+                    description: row.description.clone(),
+                }
+                .into());
+            };
+            if migration.description != row.description {
+                return Err(MigrationLedgerError::DescriptionMismatch {
+                    version: row.version,
+                    expected: migration.description.clone(),
+                    found: row.description.clone(),
+                }
+                .into());
+            }
+
+            let expected_checksum = migration_checksum(migration, driver);
+            match &row.checksum {
+                Some(found) if found != &expected_checksum => {
+                    return Err(MigrationLedgerError::ChecksumMismatch {
+                        version: row.version,
+                        expected: expected_checksum,
+                        found: found.clone(),
+                    }
+                    .into());
+                }
+                Some(_) => {}
+                None if checksum_column_added => {
+                    adoption_backfill.push((row.version, expected_checksum));
+                }
+                None => {
+                    return Err(MigrationLedgerError::MissingChecksum {
+                        version: row.version,
+                    }
+                    .into())
+                }
+            }
+            applied_by_namespace
+                .entry(namespace)
+                .or_default()
+                .push(row.version);
+        }
+
+        for migration in &self.migrations {
+            let namespace = MigrationNamespace::of(migration.version);
+            let Some(applied_versions) = applied_by_namespace.get(&namespace) else {
+                continue;
+            };
+            if applied_versions.contains(&migration.version) {
+                continue;
+            }
+            if let Some(applied_after) = applied_versions
+                .iter()
+                .copied()
+                .find(|version| *version > migration.version)
+            {
+                return Err(MigrationLedgerError::VersionGap {
+                    namespace,
+                    missing: migration.version,
+                    applied_after,
+                }
+                .into());
+            }
+        }
+
+        Ok(adoption_backfill)
+    }
+
+    fn owns_version(&self, version: i64) -> bool {
+        self.owned_namespaces
+            .contains(&MigrationNamespace::of(version))
+    }
+
+    /// Get the current schema version.
     #[cfg(test)]
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn current_version(&self, db: &Database) -> Result<Option<i64>, DatabaseError> {
@@ -187,45 +316,39 @@ impl MigrationRunner {
             .await
     }
 
-    /// Internal method to get current version with a given connection
+    /// Internal method to get current version with a given connection.
     #[cfg(test)]
     async fn current_version_with_connection(
         &self,
         conn: &ConnectionGuard,
         driver: DatabaseDriver,
     ) -> Result<Option<i64>, DatabaseError> {
-        conn.execute(migrations_table_sql(driver), ())
-            .await
-            .map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to ensure migrations table: {}", e))
-            })?;
-
-        // Get the latest version
+        conn.execute(migrations_table_sql(driver), ()).await?;
         let mut rows = conn
             .query("SELECT MAX(version) FROM _migrations", ())
-            .await
-            .map_err(|e| {
-                DatabaseError::QueryFailed(format!("Failed to query max version: {}", e))
-            })?;
+            .await?;
 
-        match rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::QueryFailed(format!("Failed to read max version: {}", e)))?
-        {
-            Some(row) => {
-                let version: Option<i64> = row.get(0).ok();
-                Ok(version)
-            }
+        match rows.next().await? {
+            Some(row) => Ok(row.get(0)?),
             None => Ok(None),
         }
     }
 
-    /// Check if there are pending migrations
+    /// Check if there are pending migrations.
     #[cfg(test)]
     pub async fn has_pending(&self, db: &Database) -> Result<bool, DatabaseError> {
         let current = self.current_version(db).await?.unwrap_or(0);
-        let latest = self.migrations.last().map(|m| m.version).unwrap_or(0);
+        let latest = self
+            .migrations
+            .last()
+            .map(|migration| migration.version)
+            .unwrap_or(0);
         Ok(current < latest)
     }
+}
+
+struct LedgerRow {
+    version: i64,
+    description: String,
+    checksum: Option<String>,
 }

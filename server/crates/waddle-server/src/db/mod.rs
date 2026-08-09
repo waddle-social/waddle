@@ -45,9 +45,6 @@ pub enum DatabaseError {
     #[error("Database query failed: {0}")]
     QueryFailed(String),
 
-    #[error("Migration failed: {0}")]
-    MigrationFailed(String),
-
     /// Fail-closed startup refusal for an append-only migration ledger
     /// violation, rather than an environmental database failure.
     #[error(transparent)]
