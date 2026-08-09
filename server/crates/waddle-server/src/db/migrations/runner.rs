@@ -70,6 +70,9 @@ impl MigrationRunner {
         let mut tx = match driver {
             DatabaseDriver::Postgres => {
                 let mut tx = db.begin().await?;
+                // The loser must see the winner's post-lock ledger commit.
+                tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+                    .await?;
                 tx.query(
                     "SELECT pg_advisory_xact_lock(?)",
                     crate::db_params![MIGRATION_LEDGER_ADVISORY_LOCK_KEY],
@@ -82,6 +85,8 @@ impl MigrationRunner {
 
         let checksum_column_added = self.bootstrap(&mut tx, driver).await?;
         let applied_rows = self.read_ledger(&mut tx).await?;
+        self.validate_schema_has_ledger(&mut tx, driver, &applied_rows)
+            .await?;
         let adoption_backfill =
             self.validate_ledger(&applied_rows, driver, checksum_column_added)?;
 
@@ -115,7 +120,13 @@ impl MigrationRunner {
                 description = %migration.description,
                 "Applying migration"
             );
-            tx.execute_batch(migration.sql_for(driver)).await?;
+            tx.execute_batch(migration.sql_for(driver))
+                .await
+                .map_err(|source| DatabaseError::MigrationApply {
+                    version: migration.version,
+                    description: migration.description.clone(),
+                    source: Box::new(source),
+                })?;
             tx.execute(
                 "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
                 crate::db_params![
@@ -124,7 +135,12 @@ impl MigrationRunner {
                     migration_checksum(migration, driver)
                 ],
             )
-            .await?;
+            .await
+            .map_err(|source| DatabaseError::MigrationApply {
+                version: migration.version,
+                description: migration.description.clone(),
+                source: Box::new(source),
+            })?;
 
             newly_applied.push(migration.version);
             info!(version = migration.version, "Applied migration");
@@ -212,6 +228,56 @@ impl MigrationRunner {
             });
         }
         Ok(ledger)
+    }
+
+    /// Refuse to run a destructive initial migration when its owned schema
+    /// already exists but its namespace has no ledger history. Global V0001
+    /// drops then creates `users`; Waddle V1001 drops then creates `channels`.
+    async fn validate_schema_has_ledger(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+        applied_rows: &[LedgerRow],
+    ) -> Result<(), DatabaseError> {
+        for (namespace, sentinel_table) in [
+            (MigrationNamespace::Global, "users"),
+            (MigrationNamespace::Waddle, "channels"),
+        ] {
+            if !self.owned_namespaces.contains(&namespace)
+                || applied_rows
+                    .iter()
+                    .any(|row| MigrationNamespace::of(row.version) == namespace)
+            {
+                continue;
+            }
+
+            let mut rows = match driver {
+                DatabaseDriver::Sqlite => {
+                    tx.query(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                        crate::db_params![sentinel_table],
+                    )
+                    .await?
+                }
+                DatabaseDriver::Postgres => {
+                    tx.query(
+                        "SELECT table_name FROM information_schema.tables \
+                         WHERE table_schema = current_schema() AND table_name = ?",
+                        crate::db_params![sentinel_table],
+                    )
+                    .await?
+                }
+            };
+            if rows.next().await?.is_some() {
+                return Err(MigrationLedgerError::SchemaWithoutLedger {
+                    namespace,
+                    table: sentinel_table.to_string(),
+                }
+                .into());
+            }
+        }
+
+        Ok(())
     }
 
     fn validate_ledger(

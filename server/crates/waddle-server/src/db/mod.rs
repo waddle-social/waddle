@@ -50,6 +50,16 @@ pub enum DatabaseError {
     #[error(transparent)]
     MigrationLedger(#[from] migrations::MigrationLedgerError),
 
+    /// A migration statement batch (or its ledger record insert) failed while
+    /// applying. Carries which migration so a crash-looping pod's log names it.
+    #[error("migration v{version} ({description}) failed to apply")]
+    MigrationApply {
+        version: i64,
+        description: String,
+        #[source]
+        source: Box<DatabaseError>,
+    },
+
     #[error("Internal database error: {0}")]
     Internal(#[from] sqlx::Error),
 

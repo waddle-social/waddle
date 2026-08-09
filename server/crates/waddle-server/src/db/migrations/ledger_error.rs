@@ -39,6 +39,17 @@ pub enum MigrationLedgerError {
     MissingChecksum { version: i64 },
 
     #[error(
+        "migration startup is refusing to continue rather than repairing the ledger: the \
+         {namespace} schema exists (found table {table}), but the migration ledger has no \
+         record of that namespace; startup refuses to re-run destructive initial migrations; \
+         restore the _migrations table (or intentionally start from an empty database)"
+    )]
+    SchemaWithoutLedger {
+        namespace: MigrationNamespace,
+        table: String,
+    },
+
+    #[error(
         "migration startup is refusing to continue rather than repairing the ledger: {namespace} \
          migration v{missing} is missing, but found later applied migration v{applied_after}; \
          expected all prior namespace migrations to be recorded"
@@ -86,6 +97,22 @@ mod tests {
         assert_eq!(
             MigrationLedgerError::MissingChecksum { version: 11 }.to_string(),
             "migration startup is refusing to continue rather than repairing the ledger: migration v11 checksum found NULL, expected a stored checksum because adoption is one-time"
+        );
+        assert_eq!(
+            MigrationLedgerError::SchemaWithoutLedger {
+                namespace: MigrationNamespace::Waddle,
+                table: "channels".to_string(),
+            }
+            .to_string(),
+            "migration startup is refusing to continue rather than repairing the ledger: the waddle schema exists (found table channels), but the migration ledger has no record of that namespace; startup refuses to re-run destructive initial migrations; restore the _migrations table (or intentionally start from an empty database)"
+        );
+        assert_eq!(
+            MigrationLedgerError::SchemaWithoutLedger {
+                namespace: MigrationNamespace::Global,
+                table: "users".to_string(),
+            }
+            .to_string(),
+            "migration startup is refusing to continue rather than repairing the ledger: the global schema exists (found table users), but the migration ledger has no record of that namespace; startup refuses to re-run destructive initial migrations; restore the _migrations table (or intentionally start from an empty database)"
         );
         assert_eq!(
             MigrationLedgerError::VersionGap {

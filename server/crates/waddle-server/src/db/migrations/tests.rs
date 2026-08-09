@@ -467,6 +467,96 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
 }
 
 #[tokio::test]
+async fn sqlite_single_runner_refuses_to_reapply_global_initial_migration_when_schema_exists_but_ledger_is_empty(
+) {
+    let db = Database::in_memory("sqlite-schema-without-ledger-global")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute("DELETE FROM _migrations", ()).await.unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Global,
+            ref table,
+        }) if table == "users"
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, 0);
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+    assert!(sqlite_table_exists(&db, "users").await);
+    assert!(sqlite_table_exists(&db, "channels").await);
+}
+
+#[tokio::test]
+async fn sqlite_single_runner_refuses_to_reapply_waddle_initial_migration_when_only_waddle_ledger_rows_are_missing(
+) {
+    let db = Database::in_memory("sqlite-schema-without-ledger-waddle")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let global_before = migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        "DELETE FROM _migrations WHERE version >= ?",
+        crate::db_params![WADDLE_NAMESPACE_START],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Waddle,
+            ref table,
+        }) if table == "channels"
+    ));
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await,
+        global_before
+    );
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Waddle).await,
+        0
+    );
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+    assert!(sqlite_table_exists(&db, "users").await);
+    assert!(sqlite_table_exists(&db, "channels").await);
+}
+
+#[tokio::test]
+async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pending_migrations() {
+    let db = Database::in_memory("sqlite-ledger-pure-adoption-single")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    assert_eq!(runner.migrations.len(), 18);
+    runner.run(&db).await.unwrap();
+
+    let conn = db.guard().await.unwrap();
+    conn.execute("ALTER TABLE _migrations DROP COLUMN checksum", ())
+        .await
+        .unwrap();
+    drop(conn);
+
+    assert!(runner.run(&db).await.unwrap().is_empty());
+    assert_eq!(migration_ledger_row_count(&db).await, 18);
+    assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
+    assert!(runner.run(&db).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn unknown_owned_ledger_version_fails_closed_without_changes() {
     let db = Database::in_memory("unknown-migration-ledger-version")
         .await
@@ -638,6 +728,36 @@ async fn single_runner_is_idempotent_with_a_stable_ledger() {
 }
 
 #[tokio::test]
+async fn migration_apply_error_names_the_failing_migration_and_preserves_its_source() {
+    let db = Database::in_memory("migration-apply-error-context")
+        .await
+        .expect("open in-memory database");
+    let runner = MigrationRunner::new(vec![Migration {
+        version: 42,
+        description: "invalid migration for error context".to_string(),
+        sql_sqlite: "THIS IS NOT VALID SQL;",
+        sql_postgres: "THIS IS NOT VALID SQL;",
+    }]);
+
+    let error = runner
+        .run(&db)
+        .await
+        .expect_err("invalid migration must fail");
+    assert!(matches!(
+        &error,
+        DatabaseError::MigrationApply { version: 42, .. }
+    ));
+    assert!(error.to_string().contains("migration v42"));
+    let source = std::error::Error::source(&error)
+        .expect("MigrationApply must retain the database error source chain");
+    assert!(source.to_string().contains("Internal database error"));
+    assert!(
+        std::error::Error::source(source).is_some(),
+        "MigrationApply must retain the underlying sqlx error beneath DatabaseError::Internal"
+    );
+}
+
+#[tokio::test]
 async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger adoption)");
@@ -691,6 +811,130 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
 }
 
 #[tokio::test]
+async fn postgres_single_runner_refuses_to_reapply_global_initial_migration_when_schema_exists_but_ledger_is_empty(
+) {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres schema without ledger global)"
+        );
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_missing_global");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.expect("initial single migration run");
+
+    let schema_before = postgres_schema_object_count(&db).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute("DELETE FROM _migrations", ())
+        .await
+        .expect("delete all migration ledger rows");
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Global,
+            ref table,
+        }) if table == "users"
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, 0);
+    assert_eq!(postgres_schema_object_count(&db).await, schema_before);
+    assert!(postgres_table_exists(&db, "users").await);
+    assert!(postgres_table_exists(&db, "channels").await);
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_single_runner_refuses_to_reapply_waddle_initial_migration_when_only_waddle_ledger_rows_are_missing(
+) {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres schema without ledger waddle)"
+        );
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_missing_waddle");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.expect("initial single migration run");
+
+    let schema_before = postgres_schema_object_count(&db).await;
+    let global_before = migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(
+        "DELETE FROM _migrations WHERE version >= ?",
+        crate::db_params![WADDLE_NAMESPACE_START],
+    )
+    .await
+    .expect("delete waddle migration ledger rows");
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Waddle,
+            ref table,
+        }) if table == "channels"
+    ));
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await,
+        global_before
+    );
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Waddle).await,
+        0
+    );
+    assert_eq!(postgres_schema_object_count(&db).await, schema_before);
+    assert!(postgres_table_exists(&db, "users").await);
+    assert!(postgres_table_exists(&db, "channels").await);
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pending_migrations() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres pure migration ledger adoption)"
+        );
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_pure_adoption");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let runner = MigrationRunner::single();
+    assert_eq!(runner.migrations.len(), 18);
+    runner.run(&db).await.expect("initial single migration run");
+
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute("ALTER TABLE _migrations DROP COLUMN checksum", ())
+        .await
+        .expect("drop checksum column");
+    drop(conn);
+
+    assert!(runner
+        .run(&db)
+        .await
+        .expect("pure adoption rerun")
+        .is_empty());
+    assert_eq!(migration_ledger_row_count(&db).await, 18);
+    assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
+    assert!(runner
+        .run(&db)
+        .await
+        .expect("third single migration run")
+        .is_empty());
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
 async fn postgres_migration_runner_blocks_until_the_advisory_lock_is_released() {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger lock)");
@@ -715,6 +959,11 @@ async fn postgres_migration_runner_blocks_until_the_advisory_lock_is_released() 
     });
     local
         .run_until(async {
+            wait_for_postgres_advisory_waiter(
+                &admin,
+                super::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
+            )
+            .await;
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(100), &mut run)
                     .await
@@ -1892,6 +2141,41 @@ async fn migration_ledger_checksum(db: &Database, version: i64) -> Option<String
     row.get(0).expect("decode migration ledger checksum")
 }
 
+async fn assert_all_migration_checksums(db: &Database, driver: DatabaseDriver) {
+    for migration in MigrationRunner::single().migrations {
+        let expected_checksum = migration_checksum(&migration, driver);
+        assert_eq!(
+            migration_ledger_checksum(db, migration.version)
+                .await
+                .as_deref(),
+            Some(expected_checksum.as_str()),
+            "migration v{} must be recorded with its active-dialect checksum",
+            migration.version
+        );
+    }
+}
+
+async fn migration_ledger_namespace_row_count(db: &Database, namespace: MigrationNamespace) -> i64 {
+    let conn = db.guard().await.expect("database guard");
+    let predicate = match namespace {
+        MigrationNamespace::Global => "version < 1000",
+        MigrationNamespace::Waddle => "version >= 1000",
+    };
+    let mut rows = conn
+        .query(
+            &format!("SELECT COUNT(*) FROM _migrations WHERE {predicate}"),
+            (),
+        )
+        .await
+        .expect("query namespace migration ledger count");
+    let row = rows
+        .next()
+        .await
+        .expect("read namespace migration ledger count")
+        .expect("namespace migration ledger count row");
+    row.get(0).expect("decode namespace migration ledger count")
+}
+
 async fn sqlite_schema_object_count(db: &Database) -> i64 {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
@@ -1907,6 +2191,63 @@ async fn sqlite_schema_object_count(db: &Database) -> i64 {
         .expect("read SQLite schema object count")
         .expect("SQLite schema object count row");
     row.get(0).expect("decode SQLite schema object count")
+}
+
+async fn sqlite_table_exists(db: &Database, table: &str) -> bool {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            crate::db_params![table],
+        )
+        .await
+        .expect("query sqlite table existence");
+    let row = rows
+        .next()
+        .await
+        .expect("read sqlite table existence")
+        .expect("sqlite table existence row");
+    let count: i64 = row.get(0).expect("decode sqlite table existence");
+    count == 1
+}
+
+async fn postgres_schema_object_count(db: &Database) -> i64 {
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) \
+             FROM information_schema.tables \
+             WHERE table_schema = current_schema()",
+            (),
+        )
+        .await
+        .expect("query postgres schema object count");
+    let row = rows
+        .next()
+        .await
+        .expect("read postgres schema object count")
+        .expect("postgres schema object count row");
+    row.get(0).expect("decode postgres schema object count")
+}
+
+async fn postgres_table_exists(db: &Database, table: &str) -> bool {
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) \
+             FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = ?",
+            crate::db_params![table],
+        )
+        .await
+        .expect("query postgres table existence");
+    let row = rows
+        .next()
+        .await
+        .expect("read postgres table existence")
+        .expect("postgres table existence row");
+    let count: i64 = row.get(0).expect("decode postgres table existence");
+    count == 1
 }
 
 /// The historical-upgrade fixtures record V0001 as applied. Their focused
@@ -2181,6 +2522,36 @@ async fn drop_postgres_schema(admin: &sqlx::PgPool, schema: &str) {
         .execute(admin)
         .await
         .expect("drop isolated postgres schema");
+}
+
+async fn wait_for_postgres_advisory_waiter(admin: &sqlx::PgPool, key: i64) {
+    let waiter = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            // Postgres exposes a single-bigint advisory key with its high
+            // 32 bits in `classid`, low 32 bits in `objid`, and `objsubid = 1`.
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) \
+                 FROM pg_locks \
+                 WHERE locktype = 'advisory' \
+                   AND granted = false \
+                   AND objsubid = 1 \
+                   AND ((classid::bigint << 32) | objid::bigint) = $1",
+            )
+            .bind(key)
+            .fetch_one(admin)
+            .await
+            .expect("query postgres advisory lock waiters");
+            if count > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(
+        waiter.is_ok(),
+        "migration runner must show an ungranted advisory waiter in pg_locks"
+    );
 }
 
 fn unique_postgres_schema_name(prefix: &str) -> String {
