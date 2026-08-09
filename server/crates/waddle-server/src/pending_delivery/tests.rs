@@ -1,6 +1,7 @@
 use super::*;
 use chrono::Utc;
 use kameo::actor::{ActorRef, Spawn};
+use std::collections::HashSet;
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
 use waddle_xmpp::registry::UserRegistryActor;
@@ -1511,6 +1512,56 @@ async fn release_row_if_session_releases_when_claim_unchanged() {
     let after = storage.list(&alice).await.unwrap();
     assert!(after[0].flushed_in_session.is_none());
     assert!(after[0].outbound_sequence.is_none());
+}
+
+#[tokio::test]
+async fn db_storage_release_rows_for_outbound_sequences_releases_exact_set() {
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .unwrap();
+    let recipient = bare("alice@example.com");
+    for archive_id in ["id-0", "id-1", "id-2"] {
+        storage
+            .insert(archived_row("alice@example.com", archive_id))
+            .await
+            .unwrap();
+    }
+
+    let session = SmSessionId::new("sm-stream-terminal");
+    let claimed = storage
+        .claim_for_session(&recipient, &session)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 3);
+    storage.record_pushed_at(&claimed[0].id, 5).await.unwrap();
+    storage.record_pushed_at(&claimed[1].id, 6).await.unwrap();
+    storage.record_pushed_at(&claimed[2].id, 7).await.unwrap();
+
+    let released = storage
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]))
+        .await;
+    assert!(
+        released.error.is_none(),
+        "release should complete without backend error"
+    );
+    assert_eq!(released.released, HashSet::from([5, 7]));
+
+    let rows = storage.list(&recipient).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    let still_claimed = rows
+        .iter()
+        .find(|row| row.outbound_sequence == Some(6))
+        .expect("sequence 6 row remains claimed");
+    assert_eq!(still_claimed.flushed_in_session.as_ref(), Some(&session));
+
+    let released_rows = rows
+        .iter()
+        .filter(|row| row.id == claimed[0].id || row.id == claimed[2].id)
+        .collect::<Vec<_>>();
+    assert_eq!(released_rows.len(), 2);
+    assert!(released_rows
+        .iter()
+        .all(|row| row.flushed_in_session.is_none() && row.outbound_sequence.is_none()));
 }
 
 #[tokio::test]

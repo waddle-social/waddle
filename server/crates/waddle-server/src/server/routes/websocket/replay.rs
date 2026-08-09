@@ -386,6 +386,16 @@ async fn record_drained_terminal_xml(
     let Some(blocklist) = terminal.blocklist else {
         return Some(entry);
     };
+    // The terminal prefix already settled, so each overflow frame is its own
+    // promotion window. Re-read recent tombstones per item, then re-scrub
+    // pending rows recorded during that single-item promotion span. Reusing
+    // the batch-start snapshot here leaves a TOCTOU where a retraction lands
+    // after the prefix promotion but before this later overflow item commits.
+    let recent_tombstones = crate::sm_promotion::recent_tombstones_for_promotion(
+        &state.deps.protocol.sm_session_registry,
+        "terminal recovery overflow promotion",
+    )
+    .unwrap_or_else(|_| terminal.recent_tombstones.to_vec());
     let summary = crate::sm_promotion::promote_terminal_overflow_entry(
         terminal.session,
         entry.clone(),
@@ -395,8 +405,15 @@ async fn record_drained_terminal_xml(
             pending_storage: &state.deps.protocol.pending_delivery_storage,
             blocklist,
             server_domain: state.deps.auth_state.xmpp_domain.as_str(),
-            recent_tombstones: terminal.recent_tombstones,
+            recent_tombstones: &recent_tombstones,
         },
+    )
+    .await;
+    crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+        &state.deps.protocol.sm_session_registry,
+        &state.deps.protocol.pending_delivery_storage,
+        &recent_tombstones,
+        "terminal recovery overflow promotion",
     )
     .await;
     if summary.has_storage_failure() {

@@ -1,6 +1,8 @@
 use super::*;
 use crate::pending_delivery::PendingPayload;
 use chrono::Utc;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
@@ -410,6 +412,213 @@ async fn record_pushed_at_is_idempotent_per_row() {
     store.record_pushed_at(id, 12).await.unwrap();
     let rows = store.list(&bare("alice@example.com")).await.unwrap();
     assert_eq!(rows[0].outbound_sequence, Some(12));
+}
+
+#[tokio::test]
+async fn release_rows_for_outbound_sequences_releases_only_matching_rows() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    for archive_id in ["id-0", "id-1", "id-2"] {
+        store
+            .insert(archived_row("alice@example.com", archive_id))
+            .await
+            .unwrap();
+    }
+
+    let session = SmSessionId::new("sm-stream-terminal");
+    let claimed = store.claim_for_session(&recipient, &session).await.unwrap();
+    assert_eq!(claimed.len(), 3);
+    store.record_pushed_at(&claimed[0].id, 5).await.unwrap();
+    store.record_pushed_at(&claimed[1].id, 6).await.unwrap();
+    store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
+
+    let released = store
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]))
+        .await;
+    assert!(released.error.is_none());
+    assert_eq!(released.released, HashSet::from([5, 7]));
+
+    let rows = store.list(&recipient).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    let still_claimed = rows
+        .iter()
+        .find(|row| row.outbound_sequence == Some(6))
+        .expect("sequence 6 row remains claimed");
+    assert_eq!(still_claimed.flushed_in_session.as_ref(), Some(&session));
+
+    let released_rows = rows
+        .iter()
+        .filter(|row| row.id == claimed[0].id || row.id == claimed[2].id)
+        .collect::<Vec<_>>();
+    assert_eq!(released_rows.len(), 2);
+    assert!(released_rows
+        .iter()
+        .all(|row| row.flushed_in_session.is_none() && row.outbound_sequence.is_none()));
+}
+
+struct FailNthReleaseRowIfSessionStorage {
+    inner: InMemoryPendingDeliveryStorage,
+    fail_on_call: usize,
+    calls: AtomicUsize,
+}
+
+impl FailNthReleaseRowIfSessionStorage {
+    fn new(fail_on_call: usize) -> Self {
+        Self {
+            inner: InMemoryPendingDeliveryStorage::unlimited(),
+            fail_on_call,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl PendingDeliveryStorage for FailNthReleaseRowIfSessionStorage {
+    async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+        self.inner.insert(row).await
+    }
+
+    async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
+        self.inner.list(recipient).await
+    }
+
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        self.inner.claim_for_session(recipient, session).await
+    }
+
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        self.inner
+            .claim_batch_for_session(recipient, session, after, limit)
+            .await
+    }
+
+    async fn delete_claimed(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        self.inner.delete_claimed(session).await
+    }
+
+    async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.inner.delete_row(id).await
+    }
+
+    async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        self.inner.release_claim(session).await
+    }
+
+    async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.inner.release_row(id).await
+    }
+
+    async fn release_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) + 1 == self.fail_on_call {
+            return Err(PendingStorageError::Other(
+                "simulated release_row_if_session failure".to_string(),
+            ));
+        }
+        self.inner
+            .release_row_if_session(id, expected_session)
+            .await
+    }
+
+    async fn record_pushed_at(
+        &self,
+        id: &PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.record_pushed_at(id, sequence).await
+    }
+
+    async fn delete_acked_in_window(
+        &self,
+        session: &SmSessionId,
+        from_exclusive: u32,
+        to_inclusive: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner
+            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .await
+    }
+
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[SmSessionId],
+        claimed_before_ms: i64,
+    ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
+        self.inner
+            .list_orphaned_claims(live_sessions, claimed_before_ms)
+            .await
+    }
+
+    async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
+        self.inner.count(recipient).await
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.delete_older_than(cutoff).await
+    }
+
+    async fn scrub_for_tombstone(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.scrub_for_tombstone(target).await
+    }
+}
+
+#[tokio::test]
+async fn default_release_rows_reports_partial_progress_before_error() {
+    let store = FailNthReleaseRowIfSessionStorage::new(2);
+    let recipient = bare("alice@example.com");
+    for archive_id in ["id-0", "id-1", "id-2"] {
+        store
+            .insert(archived_row("alice@example.com", archive_id))
+            .await
+            .unwrap();
+    }
+
+    let session = SmSessionId::new("sm-stream-terminal");
+    let claimed = store.claim_for_session(&recipient, &session).await.unwrap();
+    store.record_pushed_at(&claimed[0].id, 5).await.unwrap();
+    store.record_pushed_at(&claimed[1].id, 6).await.unwrap();
+    store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
+
+    let outcome = store
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 6, 7]))
+        .await;
+    assert_eq!(outcome.released, HashSet::from([5]));
+    assert!(matches!(
+        outcome.error,
+        Some(PendingStorageError::Other(message))
+            if message == "simulated release_row_if_session failure"
+    ));
+
+    let rows = store.list(&recipient).await.unwrap();
+    let released_row = rows
+        .iter()
+        .find(|row| row.id == claimed[0].id)
+        .expect("first row retained");
+    assert!(released_row.flushed_in_session.is_none());
+    assert!(released_row.outbound_sequence.is_none());
+    assert!(rows
+        .iter()
+        .filter(|row| row.id == claimed[1].id || row.id == claimed[2].id)
+        .all(|row| row.flushed_in_session.as_ref() == Some(&session)));
 }
 
 fn transient_dm_row(recipient: &str, from: &str, wire_id: &str, body: &str) -> PendingRow {

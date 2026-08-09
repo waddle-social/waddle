@@ -469,6 +469,7 @@ pub(super) async fn cleanup_connection_shutdown(
                             &jid,
                             conn,
                             vec![detached],
+                            false,
                             TerminalRouteRemoval::NotAttempted,
                         )
                         .await;
@@ -482,6 +483,7 @@ pub(super) async fn cleanup_connection_shutdown(
                         &jid,
                         conn,
                         vec![detached],
+                        false,
                         TerminalRouteRemoval::NotAttempted,
                     )
                     .await;
@@ -734,7 +736,8 @@ async fn promote_terminal_recovery(
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     };
-    release_terminally_promoted_pending_rows(state, &mut detached).await;
+    let released_terminal_rows =
+        release_terminally_promoted_pending_rows(state, &mut detached).await;
     // Overflow promotion can route directly to another resource. Remove this
     // terminal connection first, otherwise an exact-FullJID route can select
     // its already-closed channel and prevent the RFC 6121 bare-JID fallback.
@@ -764,6 +767,7 @@ async fn promote_terminal_recovery(
         jid,
         conn,
         vec![recovery_session],
+        released_terminal_rows,
         TerminalRouteRemoval::Attempted(terminal_route_removed),
     )
     .await
@@ -777,31 +781,155 @@ async fn promote_terminal_recovery(
 async fn release_terminally_promoted_pending_rows(
     state: &WebSocketState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
-) {
+) -> bool {
     let sequences = detached
         .unacked_stanzas
         .iter()
         .map(|entry| entry.sequence)
         .collect();
     let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone());
-    match state
+    let outcome = state
         .deps
         .protocol
         .pending_delivery_storage
         .release_rows_for_outbound_sequences(&detached.jid.to_bare(), &session_id, &sequences)
-        .await
-    {
-        Ok(released) => {
-            detached
-                .unacked_stanzas
-                .retain(|entry| !released.contains(&entry.sequence));
+        .await;
+    detached
+        .unacked_stanzas
+        .retain(|entry| !outcome.released.contains(&entry.sequence));
+    if let Some(error) = outcome.error {
+        if outcome.released.is_empty() {
+            warn!(
+                stream_id = %detached.stream_id,
+                jid = %detached.jid,
+                %error,
+                "terminal recovery could not release sequence-bound pending rows; keeping their replay entries for retry"
+            );
+        } else {
+            warn!(
+                stream_id = %detached.stream_id,
+                jid = %detached.jid,
+                released = outcome.released.len(),
+                %error,
+                "terminal recovery partially released sequence-bound pending rows; stripped released replay entries and kept the rest for retry"
+            );
         }
-        Err(error) => warn!(
-            stream_id = %detached.stream_id,
-            jid = %detached.jid,
-            %error,
-            "terminal recovery could not release sequence-bound pending rows; keeping their replay entries for retry"
-        ),
+    }
+    !outcome.released.is_empty()
+}
+
+#[derive(Clone)]
+struct LivePendingFlushTarget {
+    resource: FullJid,
+    owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    sm_session: Option<waddle_xmpp::pending_delivery::SmSessionId>,
+}
+
+fn preferred_live_pending_flush_target(
+    state: &WebSocketState,
+    recipient: &BareJid,
+) -> Option<LivePendingFlushTarget> {
+    let mut resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_available_resources_for_user(recipient)
+        .into_iter()
+        // Match the XEP-0160/RFC 6121 gate in the normal initial-presence
+        // flush: a negative-priority resource is available for presence, but
+        // must not receive bare-JID/offline delivery.
+        .filter(|(_, priority)| *priority >= 0)
+        .collect::<Vec<_>>();
+    resources.sort_by(|(left_jid, left_priority), (right_jid, right_priority)| {
+        right_priority
+            .cmp(left_priority)
+            .then_with(|| left_jid.to_string().cmp(&right_jid.to_string()))
+    });
+    resources.into_iter().find_map(|(resource, _)| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&resource)
+            .map(|entry| LivePendingFlushTarget {
+                resource,
+                owner: std::sync::Arc::clone(&entry.carbons_enabled),
+                sm_session: entry.sm_stream_id(),
+            })
+    })
+}
+
+/// Terminal recovery can release sequence-bound `pending_delivery` rows back
+/// to bare-JID storage after a newer live resource has already spent its own
+/// once-per-session offline-flush claim. Re-drive those rows directly to the
+/// current best live resource here so they do not wait for a future presence
+/// update that may never arrive.
+///
+/// This intentionally does NOT touch RFC 6121 pending-subscribe delivery. That
+/// queue is bare-JID scoped and persists until approval/denial; fresh sessions
+/// already deliver it on their own initial available presence, and live
+/// subscription traffic bypasses this cleanup path entirely.
+async fn reflush_terminally_released_pending_rows_to_live_resource(
+    state: &WebSocketState,
+    recipient: &BareJid,
+) {
+    let blocking_storage: &std::sync::Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
+        &state.deps.protocol.blocking_storage;
+    // A same-FullJID replacement can race the owner-gated send below. Retry
+    // one fresh target selection in that case: the successor may already have
+    // consumed its initial offline-flush CAS, which is exactly why terminal
+    // recovery drives this path directly. The bound prevents cleanup from
+    // chasing an unbounded stream of reconnects.
+    for _ in 0..2 {
+        let Some(target) = preferred_live_pending_flush_target(state, recipient) else {
+            return;
+        };
+        let resolver = crate::pending_delivery::MamArchiveResolver {
+            mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
+        };
+        let outcome = crate::pending_delivery::flush_for_resource(
+            &state.deps.protocol.pending_delivery_storage,
+            &state.deps.protocol.connection_registry,
+            recipient,
+            &target.resource,
+            crate::pending_delivery::FlushContext {
+                server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                sm_session: target.sm_session.as_ref(),
+                blocking_storage: Some(blocking_storage),
+                owner: Some(&target.owner),
+                archive_resolver: &resolver,
+            },
+        )
+        .await;
+        let target_still_current = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(&target.resource, &target.owner)
+            .is_some();
+        if outcome.deferred_transient > 0 {
+            if let Some(entry) = state
+                .deps
+                .protocol
+                .connection_registry
+                .entry_if_owner(&target.resource, &target.owner)
+            {
+                entry.reset_offline_flush();
+            }
+        }
+        if outcome.claimed > 0 {
+            debug!(
+                recipient = %recipient,
+                resource = %target.resource,
+                claimed = outcome.claimed,
+                pushed = outcome.pushed,
+                deferred_transient = outcome.deferred_transient,
+                "terminal cleanup re-drove pending_delivery rows onto a live resource"
+            );
+        }
+        if target_still_current {
+            return;
+        }
     }
 }
 
@@ -984,6 +1112,7 @@ async fn refuse_detach_without_principal(
     jid: &FullJid,
     conn: &mut WsConnState,
     detached_sessions: Vec<waddle_xmpp::stream_management::DetachedSession>,
+    released_terminal_rows: bool,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
     // A terminal session must disappear from the exact-FullJID routing table
@@ -1028,6 +1157,9 @@ async fn refuse_detach_without_principal(
     };
     if !retrying {
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+    }
+    if released_terminal_rows {
+        reflush_terminally_released_pending_rows_to_live_resource(state, &jid.to_bare()).await;
     }
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     if let Some((was_presence_available, owner)) = terminal_removed {

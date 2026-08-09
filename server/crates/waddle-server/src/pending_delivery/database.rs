@@ -867,6 +867,148 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn release_rows_for_outbound_sequences(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        sequences: &std::collections::HashSet<u32>,
+    ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
+        if sequences.is_empty() {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
+                std::collections::HashSet::new(),
+            );
+        }
+
+        let sequence_placeholders = std::iter::repeat_n("?", sequences.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let select_sql = format!(
+            "SELECT row_id, outbound_sequence \
+             FROM pending_delivery \
+             WHERE recipient_jid = ? \
+               AND flushed_in_session = ? \
+               AND outbound_sequence IN ({sequence_placeholders})"
+        );
+        let mut select_params: Vec<crate::db::Value> = Vec::with_capacity(2 + sequences.len());
+        select_params.push(crate::db::Value::from(recipient.to_string()));
+        select_params.push(crate::db::Value::from(session.as_str().to_string()));
+        for sequence in sequences {
+            select_params.push(crate::db::Value::from(i64::from(*sequence)));
+        }
+
+        let tx = self.db.begin_immediate().await;
+        let mut tx = match tx {
+            Ok(tx) => tx,
+            Err(error) => {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::Other(error.to_string()),
+                );
+            }
+        };
+        let rows = tx.query(&select_sql, select_params).await;
+        let mut rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::Other(error.to_string()),
+                );
+            }
+        };
+        let mut row_ids = Vec::new();
+        let mut released = std::collections::HashSet::with_capacity(sequences.len());
+        loop {
+            let row = match rows.next().await {
+                Ok(row) => row,
+                Err(error) => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                        PendingStorageError::Other(error.to_string()),
+                    );
+                }
+            };
+            let Some(row) = row else {
+                break;
+            };
+            let row_id = match row.get::<String>(0) {
+                Ok(row_id) => row_id,
+                Err(error) => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                        PendingStorageError::Other(error.to_string()),
+                    );
+                }
+            };
+            let sequence = match row.get::<Option<i64>>(1) {
+                Ok(Some(sequence)) => sequence,
+                Ok(None) => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                        PendingStorageError::Other(
+                            "release_rows_for_outbound_sequences selected NULL outbound_sequence"
+                                .to_string(),
+                        ),
+                    );
+                }
+                Err(error) => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                        PendingStorageError::Other(error.to_string()),
+                    );
+                }
+            };
+            row_ids.push(row_id);
+            released.insert(
+                match u32::try_from(sequence) {
+                    Ok(sequence) => sequence,
+                    Err(error) => {
+                        return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                            PendingStorageError::Other(error.to_string()),
+                        );
+                    }
+                },
+            );
+        }
+        if row_ids.is_empty() {
+            if let Err(error) = tx.commit().await {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::Other(error.to_string()),
+                );
+            }
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
+                released,
+            );
+        }
+
+        let row_placeholders = std::iter::repeat_n("?", row_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let update_sql = format!(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL, \
+                                          claimed_at_ms = NULL \
+             WHERE row_id IN ({row_placeholders}) \
+               AND flushed_in_session = ? \
+               AND outbound_sequence IN ({sequence_placeholders})"
+        );
+        let mut update_params = row_ids
+            .into_iter()
+            .map(crate::db::Value::from)
+            .collect::<Vec<_>>();
+        update_params.push(crate::db::Value::from(session.as_str().to_string()));
+        for sequence in sequences {
+            update_params.push(crate::db::Value::from(i64::from(*sequence)));
+        }
+        if let Err(error) = tx.execute(&update_sql, update_params).await {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                PendingStorageError::Other(error.to_string()),
+            );
+        }
+        if let Err(error) = tx.commit().await {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                PendingStorageError::Other(error.to_string()),
+            );
+        }
+        waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
+            released,
+        )
+    }
+
     async fn record_pushed_at(
         &self,
         id: &PendingRowId,
