@@ -151,6 +151,35 @@ export function markMucCallSessionTerminatePending(options: {
   syncPendingEntries(entries.filter((candidate) => candidate.terminatePending));
 }
 
+/**
+ * Remove a terminate-pending mark without forgetting the cached session. A
+ * SUPERSEDED tab must not durably terminate a call its successor tab now
+ * owns: the mark would make the successor's reload reject the still-running
+ * call in `canResumeMucCallActivity` and queue a mixer terminate against it.
+ */
+export function unmarkMucCallSessionTerminatePending(options: {
+  roomJid: string;
+  sid: string;
+  selfFullJid?: string | null;
+}): void {
+  const roomJid = normalizeMucCallRoomJid(options.roomJid);
+  const selfFullJid = options.selfFullJid?.trim() ?? "";
+  const selfBare = normalizedBare(selfFullJid);
+  if (!roomJid || !selfFullJid || !selfBare) return;
+  const entries = readEntries(selfBare).map((candidate): CachedMucCallSession => {
+    if (
+      candidate.roomJid !== roomJid ||
+      candidate.sid !== options.sid ||
+      candidate.selfFullJid !== selfFullJid ||
+      !candidate.terminatePending
+    ) return candidate;
+    const { terminatePending: _dropped, ...rest } = candidate;
+    return rest;
+  });
+  writeEntries(selfBare, entries);
+  syncPendingEntries(entries.filter((entry) => entry.terminatePending));
+}
+
 export function forgetMucCallSession(options: {
   roomJid: string;
   selfFullJid?: string | null;

@@ -17,6 +17,38 @@ describe("connection notice copy", () => {
     });
   });
 
+  test("keeps ordinary offline guidance unchanged", () => {
+    const notice = getConnectionNoticeCopy({
+      status: { state: "offline", detail: "" },
+      queuedMessageCount: 2,
+      showReconnected: false,
+    });
+
+    expect(notice).toEqual({
+      tone: "offline",
+      shortLabel: "offline",
+      title: "Disconnected",
+      body: "You're offline. 2 queued messages will send once you're connected again.",
+    });
+  });
+
+  test("surfaces a reconnect affordance for superseded sessions", () => {
+    const notice = getConnectionNoticeCopy({
+      status: { state: "offline", detail: "This session was resumed in another tab.", kind: "superseded" },
+      queuedMessageCount: 2,
+      showReconnected: false,
+    });
+
+    expect(notice).toEqual({
+      tone: "offline",
+      shortLabel: "reconnect",
+      title: "Session resumed in another tab",
+      body: "This session was resumed in another tab. Reconnect to continue from this tab.",
+      actionLabel: "Reconnect",
+      actionKind: "recover-superseded",
+    });
+  });
+
   test("communicates a calm recovery once the connection returns", () => {
     const notice = getConnectionNoticeCopy({
       status: { state: "online", detail: "Connection resumed" },

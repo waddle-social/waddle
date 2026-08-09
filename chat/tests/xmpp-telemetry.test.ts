@@ -40,6 +40,7 @@ import {
 } from "../src/lib/calls/call-correlation";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
+import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
 import { ManualRoomJoinRetryTimer } from "./helpers/manual-room-join-retry-timer";
 
@@ -1472,6 +1473,64 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
     expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
+  });
+
+  test("own-resume conflict collateral reaches Faro as recoverable before terminal classification", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    const markers = new Map<string, string>([["former-stream", "new-client"]]);
+    const persistence = {
+      ...nullResumePersistence,
+      beginOwnResume: (previd: string, clientId: string) => { markers.set(previd, clientId); },
+      finishOwnResume: (previd: string, clientId: string) => {
+        if (markers.get(previd) === clientId) markers.delete(previd);
+      },
+      consumeOwnResume: (previd: string, clientId: string) => {
+        const owner = markers.get(previd);
+        if (!owner) return "absent";
+        if (owner === clientId) return "self";
+        markers.delete(previd);
+        return "foreign";
+      },
+    };
+    const client = new BrowserXmppClient(session(), persistence);
+    installInstrumentation(client);
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      get_resume_state: () => ({ previd: "former-stream", inboundH: 1, outboundH: 2 }),
+      set_on_error(cb: NonNullable<typeof onError>) { onError = cb; },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({ detail: "stream error", condition: "conflict" });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0]?.options?.context?.recoverable).toBe("true");
+
+    // With no exact active marker, the existing genuine-second-sign-in path
+    // remains terminal and reports unrecoverable telemetry.
+    const genuine = new BrowserXmppClient(session());
+    installInstrumentation(genuine);
+    let genuineError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const genuineXmpp = {
+      get_resume_state: () => ({ previd: "former-stream", inboundH: 1, outboundH: 2 }),
+      set_on_error(cb: NonNullable<typeof genuineError>) { genuineError = cb; },
+    };
+    const genuineInternal = genuine as unknown as {
+      xmpp: typeof genuineXmpp;
+      wireEvents: (xmpp: typeof genuineXmpp) => void;
+    };
+    genuineInternal.xmpp = genuineXmpp;
+    genuineInternal.wireEvents(genuineXmpp);
+    genuineError?.({ detail: "stream error", condition: "conflict" });
+
+    expect(stub.errors).toHaveLength(2);
+    expect(stub.errors[1]?.options?.context?.recoverable).toBe("false");
   });
 
   test("set_on_error bridge recovers stream condition from object detail", () => {

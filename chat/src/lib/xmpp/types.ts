@@ -9,6 +9,7 @@ import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 export interface XmppStatusSnapshot {
   state: "online" | "offline" | "reconnecting" | "error";
   detail: string;
+  kind?: "superseded";
 }
 
 /**

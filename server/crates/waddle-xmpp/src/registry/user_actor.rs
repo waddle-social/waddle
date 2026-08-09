@@ -193,9 +193,10 @@ pub struct UnregisterConnectionAndReportEmpty {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
-pub struct UnregisterConnectionOutcome {
-    pub removed: bool,
-    pub is_empty: bool,
+pub enum UnregisterConnectionOutcome {
+    Removed { is_empty: bool },
+    AlreadyAbsent { is_empty: bool },
+    RetainedTargetPresent,
 }
 
 impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
@@ -211,10 +212,15 @@ impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
             bare = %self.bare_jid,
             "Unregistering connection and checking emptiness"
         );
+        let target_present_before = self.connections.contains_key(&msg.jid);
         let removed = self.remove_resource_if_owner(&msg.jid, msg.owner.as_ref());
-        UnregisterConnectionOutcome {
-            removed,
-            is_empty: self.connections.is_empty(),
+        let is_empty = self.connections.is_empty();
+        if removed {
+            UnregisterConnectionOutcome::Removed { is_empty }
+        } else if target_present_before {
+            UnregisterConnectionOutcome::RetainedTargetPresent
+        } else {
+            UnregisterConnectionOutcome::AlreadyAbsent { is_empty }
         }
     }
 }
@@ -577,6 +583,45 @@ pub async fn health_check_or_wedge_kill(
     let _ = actor_ref.tell(ConflictCloseAllResources).await;
     actor_ref.kill();
     false
+}
+
+/// Cross-crate test controls, kept behind the existing `test-utils` feature.
+#[cfg(feature = "test-utils")]
+pub mod test_support {
+    use super::UserActor;
+    use std::sync::Arc;
+    use tokio::sync::{oneshot, Notify};
+
+    pub struct GateMailbox {
+        pub entered: Arc<Notify>,
+        pub release_rx: oneshot::Receiver<()>,
+    }
+
+    impl kameo::message::Message<GateMailbox> for UserActor {
+        type Reply = ();
+
+        async fn handle(
+            &mut self,
+            msg: GateMailbox,
+            _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+        ) -> Self::Reply {
+            msg.entered.notify_one();
+            let _ = msg.release_rx.await;
+        }
+    }
+
+    pub struct MailboxNoop;
+
+    impl kameo::message::Message<MailboxNoop> for UserActor {
+        type Reply = ();
+
+        async fn handle(
+            &mut self,
+            _msg: MailboxNoop,
+            _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+        ) -> Self::Reply {
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

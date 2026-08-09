@@ -25,7 +25,7 @@ use waddle_xmpp::protocol::CarbonKind;
 use waddle_xmpp::registry::{
     BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOutcome,
     ForceDetachRequest, OutboundStanza, PresenceState, RegisterUserResourceIfOwnerOrAbsent,
-    UnregisterUserResource, UserRegistryActor,
+    UserRegistryActor,
 };
 use waddle_xmpp::roster::{RosterItem, RosterVersion};
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
@@ -48,20 +48,24 @@ use super::relay::{
     RelayRemoteResourceForceDetachStatus, RelayRemoteResourceFrameReply,
     RelayRemoteResourceFrameStatus, RelayRemoteResourceRegistrationReply,
     RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUnregisterReply,
-    RelayRemoteResourceUpdateReply, RelayRemoteResourceUpdateStatus, RelayRemoteUserSideEffect,
-    RelayRemoteUserSideEffectReply, RelayRemoteUserSideEffectStatus,
-    RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelaySendEffect,
-    RelaySendFailure, RelayUnregisterRemoteUserResource, RelayUpdateRemoteUserResource,
+    RelayRemoteResourceUnregisterStatus, RelayRemoteResourceUpdateReply,
+    RelayRemoteResourceUpdateStatus, RelayRemoteUserSideEffect, RelayRemoteUserSideEffectReply,
+    RelayRemoteUserSideEffectStatus, RelayRouteRemoteResourceStanza,
+    RelayRouteRemoteResourceStanzaReply, RelaySendEffect, RelaySendFailure,
+    RelayUnregisterRemoteUserResource, RelayUpdateRemoteUserResource,
 };
 use super::trace_context::RelayTraceContext;
 use super::NodeId;
-use crate::config::ClusteringMessagingConfig;
+use crate::config::{
+    ClusteringMessagingConfig, ORDERED_RELAY_MAILBOX_TIMEOUT, ORDERED_RELAY_REPLY_TIMEOUT,
+    REMOTE_OWNER_REGISTER_REPLY_TIMEOUT, REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT,
+};
 use crate::server::routes::interpret::{
     FullJidDeliveryOutcome, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind,
 };
 use crate::server::routes::websocket::{interpret_loop::build_interpret_deps, WebSocketState};
-const ORDERED_DELIVERY_MAILBOX_TIMEOUT: Duration = Duration::from_secs(2);
-const ORDERED_DELIVERY_REPLY_TIMEOUT: Duration = Duration::from_secs(8);
+const ORDERED_DELIVERY_MAILBOX_TIMEOUT: Duration = ORDERED_RELAY_MAILBOX_TIMEOUT;
+const ORDERED_DELIVERY_REPLY_TIMEOUT: Duration = ORDERED_RELAY_REPLY_TIMEOUT;
 const ORDERED_RECEIVER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(6);
 const ORDERED_RECEIVER_EFFECT_TIMEOUT_MARGIN: Duration = Duration::from_millis(250);
 const MAX_ORDERED_RELAY_CHANNEL_LOCKS: usize = 4096;
@@ -76,8 +80,9 @@ mod validation;
 
 pub(crate) use delivery::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 pub use reassert::LocalMediaGrantReassertion;
+#[cfg(test)]
+pub(crate) use registration::retry_remote_resource_register_test;
 use registration::*;
-pub(crate) use types::RemoteResourceRegisterOutcome;
 use types::*;
 pub use types::{
     RemoteCarbonKind, RemotePresenceShow, RemotePresenceStateSnapshot,
@@ -85,7 +90,15 @@ pub use types::{
     RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
     RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
 };
+pub(crate) use types::{RemoteResourceRegisterOutcome, RemoteResourceUnregisterOutcome};
 use validation::*;
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct RemoteOwnerRetirementTestGate {
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
 
 pub struct OrderedRelayDeliveryServices {
     pub claim_store: Arc<dyn ClaimStore>,
@@ -105,9 +118,14 @@ pub struct OrderedRelayDeliveryBridge {
     sender_state: Mutex<OrderedRelaySenderState>,
     channel_locks: Mutex<HashMap<OrderedRelayChannel, Arc<Mutex<()>>>>,
     remote_socket_resources: Mutex<HashMap<jid::FullJid, RemoteSocketRegistration>>,
+    pending_remote_socket_unregistrations:
+        Mutex<HashMap<PendingRemoteSocketUnregisterKey, PendingRemoteSocketUnregister>>,
     remote_socket_generations: Mutex<HashMap<jid::FullJid, RemoteResourceSocketGeneration>>,
     remote_owner_resources: Mutex<HashMap<jid::FullJid, RemoteOwnerRegistration>>,
+    pending_remote_owner_retirements: Mutex<HashMap<jid::FullJid, RemoteOwnerRegistration>>,
     remote_owner_registration_locks: Mutex<HashMap<jid::FullJid, Arc<Mutex<()>>>>,
+    #[cfg(test)]
+    remote_owner_retirement_test_gate: OnceLock<Arc<RemoteOwnerRetirementTestGate>>,
     stop_token: CancellationToken,
     mailbox_timeout: Duration,
     reply_timeout: Duration,
@@ -121,9 +139,13 @@ impl OrderedRelayDeliveryBridge {
             sender_state: Mutex::new(OrderedRelaySenderState::default()),
             channel_locks: Mutex::new(HashMap::new()),
             remote_socket_resources: Mutex::new(HashMap::new()),
+            pending_remote_socket_unregistrations: Mutex::new(HashMap::new()),
             remote_socket_generations: Mutex::new(HashMap::new()),
             remote_owner_resources: Mutex::new(HashMap::new()),
+            pending_remote_owner_retirements: Mutex::new(HashMap::new()),
             remote_owner_registration_locks: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            remote_owner_retirement_test_gate: OnceLock::new(),
             stop_token,
             // WebSocket stanza dispatch has a 15s wedge backstop. Full-JID
             // ordered delivery must resolve before that backstop can cancel
@@ -175,6 +197,32 @@ impl OrderedRelayDeliveryBridge {
             .checked_sub(ORDERED_RECEIVER_EFFECT_TIMEOUT_MARGIN)
             .filter(|timeout| !timeout.is_zero())
             .unwrap_or_else(|| self.reply_timeout / 2)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_insert_remote_socket_registration(
+        &self,
+        jid: jid::FullJid,
+        owner: Arc<AtomicBool>,
+        user_owner: NodeId,
+    ) {
+        self.remote_socket_resources.lock().await.insert(
+            jid.clone(),
+            RemoteSocketRegistration {
+                registration_id: RemoteResourceRegistrationId::fresh(),
+                socket_generation: RemoteResourceSocketGeneration::next(None),
+                owner,
+                user_owner,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_pending_remote_socket_unregister_count(&self) -> usize {
+        self.pending_remote_socket_unregistrations
+            .lock()
+            .await
+            .len()
     }
 }
 

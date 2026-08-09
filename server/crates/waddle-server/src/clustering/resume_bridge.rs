@@ -103,6 +103,7 @@ impl ResumeStealBridge {
         }
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         let request = ForceDetachRequest {
+            origin: waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
             requester_bare_jid: requester_bare_jid.clone(),
             ack: ack_tx,
         };

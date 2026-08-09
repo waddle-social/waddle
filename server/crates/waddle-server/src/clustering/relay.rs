@@ -432,6 +432,9 @@ pub enum RelayRemoteResourceRegistrationStatus {
     Registered,
     StaleRegistration,
     NotOwner,
+    /// The authoritative owner's child actor is processing a short-lived
+    /// operation.  The socket node may retry this bounded transient.
+    Busy,
     Unavailable,
 }
 
@@ -440,7 +443,7 @@ pub struct RelayRemoteResourceRegistrationReply {
     pub status: RelayRemoteResourceRegistrationStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_register.v1")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_register.v2")]
 impl Message<RelayRegisterRemoteUserResource> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceRegistrationReply>;
 
@@ -472,10 +475,18 @@ pub struct RelayUnregisterRemoteUserResource {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayRemoteResourceUnregisterReply {
-    pub removed: bool,
+    pub status: RelayRemoteResourceUnregisterStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_unregister.v1")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteResourceUnregisterStatus {
+    Unregistered,
+    RecordedRetry,
+    NotRegistered,
+    Failed,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_unregister.v2")]
 impl Message<RelayUnregisterRemoteUserResource> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceUnregisterReply>;
 
@@ -660,6 +671,7 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
 pub struct RelayForceDetachRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub origin: waddle_xmpp::registry::ForceDetachOrigin,
     pub requester_bare_jid: jid::BareJid,
     /// Sender's W3C trace context (#1485), telemetry only: absent from
     /// an older node's encoding, defaulted on decode, and never read for
@@ -682,7 +694,7 @@ pub struct RelayForceDetachRemoteUserResourceReply {
     pub status: RelayRemoteResourceForceDetachStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_force_detach.v1")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_force_detach.v2")]
 impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayForceDetachRemoteUserResourceReply>;
 

@@ -3384,6 +3384,72 @@ describe("sender-less DM teardown retention", () => {
     await client.disconnect();
   });
 
+  test("a superseded tab reconnect does not flush a terminate for the successor-owned DM call", async () => {
+    const events = wireClientEvents();
+    const client = events.client as unknown as {
+      supersededByOwnResumeXmpp: Set<unknown>;
+      reconnectBlock: { kind: "superseded"; detail: string } | null;
+      loadModule: () => Promise<unknown>;
+      recoverSupersededSession: () => Promise<void>;
+      disconnect: () => Promise<void>;
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "dm-owned-by-successor",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+
+    client.supersededByOwnResumeXmpp.add(events.xmpp);
+    events.emitDisconnected();
+    await flushCallSideEffects();
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(client.reconnectBlock).toEqual({
+      kind: "superseded",
+      detail: "This session was resumed in another tab.",
+    });
+
+    const send_call_session_terminate = mock(async () => undefined);
+    const send_call_finish = mock(async () => undefined);
+    class StubConfig {
+      constructor(_url: string, _jid: string, _sessionId: string, _resource: string) {}
+    }
+    class StubClient {
+      private onSessionLifecycle?: (event: string) => void;
+
+      set_on_session_lifecycle(cb: (event: string) => void) {
+        this.onSessionLifecycle = cb;
+      }
+
+      set_on_disconnected(_cb: () => void) {}
+      set_on_error(_cb: (payload: unknown) => void) {}
+      async connect() {
+        this.onSessionLifecycle?.("fresh");
+      }
+      async send_call_session_terminate(peer: string, sid: string, reason: string) {
+        await send_call_session_terminate(peer, sid, reason);
+      }
+      async send_call_finish(peer: string, sid: string) {
+        await send_call_finish(peer, sid);
+      }
+    }
+    client.loadModule = async () => ({
+      WaddleConfig: StubConfig,
+      WaddleClient: StubClient,
+    });
+
+    await client.recoverSupersededSession();
+    await flushCallSideEffects();
+
+    expect(send_call_session_terminate).not.toHaveBeenCalled();
+    expect(send_call_finish).not.toHaveBeenCalled();
+    await client.disconnect();
+  });
+
   test("a pending terminate queued during an in-flight flush is drained by the same flush", async () => {
     // Call A's terminate is mid-send when call B's teardown replaces the
     // pending atom; B's own session-ready flush bounces off the in-flight

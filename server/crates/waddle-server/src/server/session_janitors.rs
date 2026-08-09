@@ -6635,6 +6635,34 @@ pub(crate) struct UserReaperSweepCounts {
     failed: bool,
 }
 
+async fn record_user_registry_convergence_status(
+    user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    counts: &mut UserReaperSweepCounts,
+) {
+    use waddle_xmpp::registry::RetryUserRegistryConvergence;
+
+    match user_registry
+        .ask(RetryUserRegistryConvergence)
+        .mailbox_timeout(REAPER_ASK_TIMEOUT)
+        .reply_timeout(REAPER_ASK_TIMEOUT)
+        .await
+    {
+        Ok((pending_unregisters, terminal_releases)) => {
+            if pending_unregisters > 0 || terminal_releases > 0 {
+                counts.failed = true;
+                warn!(
+                    pending_unregisters,
+                    terminal_releases, "user actor reaper: registry convergence remains pending"
+                );
+            }
+        }
+        Err(error) => {
+            counts.failed = true;
+            warn!(error = ?error, "user actor reaper: convergence retry ask failed");
+        }
+    }
+}
+
 /// Walk every registered `UserActor` and reap the ones that report zero
 /// connected resources (ADR-0017 Phase 1 Slice 2, Copilot review on PR #1177).
 ///
@@ -6656,6 +6684,7 @@ pub(crate) async fn sweep_empty_user_actors_once(
     use waddle_xmpp::registry::{ListUsers, ReapUserIfEmpty, UserCount};
     let mut counts = UserReaperSweepCounts::default();
     let user_registry = &websocket_state.deps.protocol.user_registry;
+    record_user_registry_convergence_status(user_registry, &mut counts).await;
     let users = match user_registry
         .ask(ListUsers)
         .mailbox_timeout(REAPER_ASK_TIMEOUT)
@@ -6695,6 +6724,11 @@ pub(crate) async fn sweep_empty_user_actors_once(
             }
         }
     }
+    // Reaping can retire the local actor before its exact durable claim
+    // release succeeds, which records new terminal convergence work during
+    // this same sweep. Re-check immediately so the retry is prompt and the
+    // sweep stays non-complete while ownership cleanup remains pending.
+    record_user_registry_convergence_status(user_registry, &mut counts).await;
     counts.remaining = match user_registry
         .ask(UserCount)
         .mailbox_timeout(REAPER_ASK_TIMEOUT)
@@ -7109,8 +7143,10 @@ mod room_dormancy_tests {
 mod user_reaper_tests {
     use super::{run_user_actor_reaper_sweep, sweep_empty_user_actors_once};
     use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use std::sync::Arc;
     use waddle_xmpp::registry::{
         ConnectionEntry, GetUser, RegisterUserResource, TrySendPeer, UserCount,
+        WireUserClusteringClaims,
     };
 
     fn full_jid(s: &str) -> jid::FullJid {
@@ -7123,6 +7159,114 @@ mod user_reaper_tests {
         msg.bodies
             .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
         waddle_xmpp::Stanza::Message(msg)
+    }
+
+    struct CountingReleaseFailureClaimStore {
+        inner: waddle_xmpp::ownership::InProcessClaimStore,
+        fail_release: std::sync::atomic::AtomicBool,
+        release_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl waddle_xmpp::ownership::ClaimStore for CountingReleaseFailureClaimStore {
+        async fn ensure_schema(&self) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn acquire(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+            me: &waddle_xmpp::ownership::NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.acquire(entity, me).await
+        }
+
+        async fn ensure_claimed(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+            me: &waddle_xmpp::ownership::NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.ensure_claimed(entity, me).await
+        }
+
+        async fn steal_stale(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+            observed: waddle_xmpp::ownership::ClaimEpoch,
+            staleness: waddle_xmpp::ownership::StalePredicate,
+            me: &waddle_xmpp::ownership::NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+
+        async fn steal_for_resume(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+            observed: waddle_xmpp::ownership::ClaimEpoch,
+            witness: waddle_xmpp::ownership::ResumeIdentityProof,
+            me: &waddle_xmpp::ownership::NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+
+        async fn current_claim(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+        ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.current_claim(entity).await
+        }
+
+        async fn fence(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+            me: &waddle_xmpp::ownership::NodeIdentity,
+            mine: waddle_xmpp::ownership::ClaimEpoch,
+        ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+
+        async fn release(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+            me: &waddle_xmpp::ownership::NodeIdentity,
+            mine: waddle_xmpp::ownership::ClaimEpoch,
+        ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+            self.release_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_release.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(waddle_xmpp::ownership::ClaimError::Backend(
+                    "injected user-claim release failure".to_string(),
+                ));
+            }
+            self.inner.release(entity, me, mine).await
+        }
+
+        async fn release_exact(
+            &self,
+            entity: &waddle_xmpp::ownership::Entity,
+            me: &waddle_xmpp::ownership::NodeIdentity,
+            mine: waddle_xmpp::ownership::ClaimEpoch,
+        ) -> Result<waddle_xmpp::ownership::ExactReleaseOutcome, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.release_exact(entity, me, mine).await
+        }
+
+        async fn release_many(
+            &self,
+            entities: &[waddle_xmpp::ownership::Entity],
+            me: &waddle_xmpp::ownership::NodeIdentity,
+        ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+            self.inner.release_many(entities, me).await
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7246,6 +7390,87 @@ mod user_reaper_tests {
         assert_eq!(counts.examined, 1);
         assert_eq!(counts.reaped, 0);
         assert_eq!(counts.remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_retries_terminal_claim_release_recorded_during_reap() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let jid = full_jid("carol@example.com/web");
+        let user_registry = &state.deps.protocol.user_registry;
+        let claim_store = Arc::new(CountingReleaseFailureClaimStore {
+            inner: waddle_xmpp::ownership::InProcessClaimStore::new(),
+            fail_release: std::sync::atomic::AtomicBool::new(true),
+            release_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        user_registry
+            .ask(WireUserClusteringClaims {
+                claim_store: claim_store.clone(),
+                node_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(
+                    waddle_xmpp::ownership::NodeIdentity::new("user-reaper-node", "test"),
+                ),
+            })
+            .await
+            .expect("wire custom claim store");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        user_registry
+            .ask(RegisterUserResource {
+                jid: jid.clone(),
+                entry: ConnectionEntry::new(tx),
+            })
+            .await
+            .expect("register");
+
+        drop(rx);
+        let actor = user_registry
+            .ask(GetUser {
+                bare_jid: jid.to_bare(),
+            })
+            .await
+            .expect("get user")
+            .expect("actor exists");
+        actor
+            .ask(TrySendPeer {
+                jid: jid.clone(),
+                stanza: sample_stanza(&jid),
+            })
+            .await
+            .expect("try send");
+
+        let counts = sweep_empty_user_actors_once(&state).await;
+        assert_eq!(counts.examined, 1);
+        assert_eq!(counts.reaped, 1);
+        assert_eq!(counts.remaining, 0);
+        assert!(
+            counts.failed,
+            "a reap-time claim-release failure must keep the sweep non-complete"
+        );
+        assert_eq!(
+            claim_store
+                .release_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the janitor must retry terminal release work again after the reap loop"
+        );
+
+        claim_store
+            .fail_release
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let retry_counts = sweep_empty_user_actors_once(&state).await;
+        assert_eq!(retry_counts.reaped, 0);
+        assert_eq!(retry_counts.remaining, 0);
+        assert!(
+            !retry_counts.failed,
+            "once the release backend recovers, the next sweep should fully converge"
+        );
+        assert_eq!(
+            claim_store
+                .release_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the deferred terminal release should clear on the next sweep"
+        );
     }
 }
 

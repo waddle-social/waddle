@@ -819,7 +819,7 @@ describe("device-less call controls", () => {
     );
     const shellStart = readyShellSource.indexOf('<div v-else class="chat-app-shell">');
     const promptMount = readyShellSource.indexOf("<CallAudioPlaybackPrompt />");
-    const desktopShell = readyShellSource.indexOf('<div class="chat-desktop-shell">');
+    const desktopShell = readyShellSource.indexOf('<div class="chat-desktop-shell relative">');
 
     expect(appShellSource).not.toContain("<CallAudioPlaybackPrompt />");
     expect(shellStart).toBeGreaterThanOrEqual(0);

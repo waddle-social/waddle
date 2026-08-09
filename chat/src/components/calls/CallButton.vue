@@ -93,7 +93,8 @@ function getSender(): CallWireSender | null {
 }
 
 function getInitiator(): string | undefined {
-  return (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
+  return connectionStore.selfFullJid ??
+    (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
 }
 
 async function startCall(media: CallMedia): Promise<void> {

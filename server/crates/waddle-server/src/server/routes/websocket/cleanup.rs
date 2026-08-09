@@ -13,12 +13,48 @@ use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 
+/// A force-detach may race a short, in-flight operation on the old
+/// `UserActor`.  Keep the resume handoff on its synchronous path for those
+/// brief windows rather than immediately handing it to the janitor.
+const FORCE_DETACH_BUSY_UNREGISTER_ATTEMPTS: usize = 3;
+
+fn force_detach_busy_unregister_backoff(attempt: usize) -> std::time::Duration {
+    std::time::Duration::from_millis(50 * (attempt as u64 + 1))
+}
+
+pub(super) async fn retry_force_detach_busy_unregister<F, Fut, E>(
+    mut unregister: F,
+) -> Result<waddle_xmpp::registry::UnregisterAndReleaseOutcome, E>
+where
+    F: FnMut() -> Fut,
+    Fut:
+        std::future::Future<Output = Result<waddle_xmpp::registry::UnregisterAndReleaseOutcome, E>>,
+{
+    for attempt in 0..FORCE_DETACH_BUSY_UNREGISTER_ATTEMPTS {
+        let outcome = unregister().await;
+        if matches!(
+            &outcome,
+            Ok(
+                waddle_xmpp::registry::UnregisterAndReleaseOutcome::RetryableFailure(
+                    waddle_xmpp::registry::user_registry::UnregisterAndReleaseRetryableFailure::UserActorBusy
+                )
+            )
+        ) && attempt + 1 < FORCE_DETACH_BUSY_UNREGISTER_ATTEMPTS
+        {
+            tokio::time::sleep(force_detach_busy_unregister_backoff(attempt)).await;
+            continue;
+        }
+        return outcome;
+    }
+    unreachable!("force-detach busy retry loop always returns")
+}
+
 #[cfg(feature = "clustering")]
 async fn unregister_remote_user_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
     owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
+) -> crate::clustering::route_bridge::RemoteResourceUnregisterOutcome {
     if let Some(bridge) = state
         .deps
         .app_state
@@ -26,10 +62,11 @@ async fn unregister_remote_user_resource_if_owner(
         .ordered_relay_delivery_bridge
         .as_ref()
     {
-        bridge
+        return bridge
             .unregister_remote_user_resource_if_owner(jid, owner)
             .await;
     }
+    crate::clustering::route_bridge::RemoteResourceUnregisterOutcome::NotRegistered
 }
 
 #[cfg(not(feature = "clustering"))]
@@ -37,7 +74,7 @@ async fn unregister_remote_user_resource_if_owner(
     _state: &WebSocketState,
     _jid: &FullJid,
     _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
+) -> () {
 }
 
 fn muji_reflection_rank(muji: &Muji) -> u8 {
@@ -322,6 +359,32 @@ pub(super) async fn cleanup_connection_shutdown(
     conn: &mut WsConnState,
     superseded: bool,
 ) -> ConnectionShutdownOutcome {
+    cleanup_connection_shutdown_inner(state, outbound_rx, conn, superseded, None).await
+}
+
+/// Force-detach cleanup has a stricter completion boundary than ordinary
+/// teardown: a cross-node resume waiter is acknowledged only after the actor
+/// registry has synchronously observed the resource removal. Stale-actor
+/// retirement is the exception: its already-running registry handler owns the
+/// removal and waits for this cleanup acknowledgement.
+pub(super) async fn cleanup_force_detach_connection_shutdown(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    conn: &mut WsConnState,
+    superseded: bool,
+    origin: waddle_xmpp::registry::ForceDetachOrigin,
+) -> ConnectionShutdownOutcome {
+    cleanup_connection_shutdown_inner(state, outbound_rx, conn, superseded, Some(origin)).await
+}
+
+async fn cleanup_connection_shutdown_inner(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    conn: &mut WsConnState,
+    superseded: bool,
+    force_detach_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
+) -> ConnectionShutdownOutcome {
+    let force_detach = force_detach_origin.is_some();
     // A superseded ordinary connection must not touch the replacement's
     // registry or MUC state. Terminal SM recovery is different: it only
     // promotes this task's already accepted delivery and leaves those shared
@@ -598,12 +661,18 @@ pub(super) async fn cleanup_connection_shutdown(
                     // fresh entry via `register_bound_connection_after_frame` →
                     // `mirror_register`, so pruning here does not affect resume.
                     // Owner-gated so a superseding newcomer is untouched.
-                    crate::server::dual_registration::mirror_unregister(
-                        &state.deps.protocol.user_registry,
-                        &jid,
-                        Some(std::sync::Arc::clone(owner)),
-                    )
-                    .await;
+                    if !force_detach {
+                        crate::server::dual_registration::mirror_unregister(
+                            &state.deps.protocol.user_registry,
+                            &jid,
+                            Some(std::sync::Arc::clone(owner)),
+                        )
+                        .await;
+                    }
+                    #[cfg(feature = "clustering")]
+                    let remote_unregister_outcome =
+                        unregister_remote_user_resource_if_owner(state, &jid, owner).await;
+                    #[cfg(not(feature = "clustering"))]
                     unregister_remote_user_resource_if_owner(state, &jid, owner).await;
                     outbound_rx.close();
                     // Second detach drain: anything that arrived
@@ -621,6 +690,87 @@ pub(super) async fn cleanup_connection_shutdown(
                         PendingRowDrainPolicy::PreserveForReplay,
                     )
                     .await;
+                    if force_detach_origin.is_some_and(force_detach_requires_actor_unregister) {
+                        let outcome = retry_force_detach_busy_unregister(|| async {
+                            state
+                                .deps
+                                .protocol
+                                .user_registry
+                                .ask(
+                                    waddle_xmpp::registry::user_registry::UnregisterAndReleaseIfEmptyWithoutPendingRecord {
+                                        jid: jid.clone(),
+                                        owner: Some(std::sync::Arc::clone(owner)),
+                                    },
+                                )
+                                .mailbox_timeout(std::time::Duration::from_secs(2))
+                                .reply_timeout(std::time::Duration::from_secs(2))
+                                .await
+                        })
+                        .await;
+                        match outcome {
+                            Ok(waddle_xmpp::registry::UnregisterAndReleaseOutcome::Released
+                            | waddle_xmpp::registry::UnregisterAndReleaseOutcome::RetainedLiveResources
+                            | waddle_xmpp::registry::UnregisterAndReleaseOutcome::AlreadyAbsent) => {}
+                            Ok(waddle_xmpp::registry::UnregisterAndReleaseOutcome::RetryableFailure(reason)) => {
+                                let recorded = state
+                                    .deps
+                                    .protocol
+                                    .user_registry
+                                    .ask(waddle_xmpp::registry::RecordPendingUserUnregister {
+                                        jid: jid.clone(),
+                                        owner: Some(std::sync::Arc::clone(owner)),
+                                    })
+                                    .mailbox_timeout(std::time::Duration::from_secs(2))
+                                    .reply_timeout(std::time::Duration::from_secs(2))
+                                    .await;
+                                match recorded {
+                                    Ok(()) => warn!(?reason, "force-detach UserActor unregister remained busy after bounded retries; recorded janitor retry"),
+                                    Err(record_error) => {
+                                        warn!(?reason, ?record_error, "force-detach UserActor unregister retry could not be recorded");
+                                        return ConnectionShutdownOutcome::NotPersisted;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                // The ask may have timed out before entering the actor OR after
+                                // its handler committed. Submit a second, ordered actor ask so
+                                // either case leaves an exact pending-unregister record before
+                                // this force-detach cleanup returns and its ack can be sent.
+                                let recorded = state
+                                    .deps
+                                    .protocol
+                                    .user_registry
+                                    .ask(waddle_xmpp::registry::RecordPendingUserUnregister {
+                                        jid: jid.clone(),
+                                        owner: Some(std::sync::Arc::clone(owner)),
+                                    })
+                                    .mailbox_timeout(std::time::Duration::from_secs(2))
+                                    .reply_timeout(std::time::Duration::from_secs(2))
+                                    .await;
+                                match recorded {
+                                    Ok(()) => warn!(?error, "force-detach UserActor unregister ask outcome was ambiguous; recorded janitor retry"),
+                                    Err(record_error) => {
+                                        // Do not claim a successful detach to the remote resume
+                                        // waiter when this actor is unavailable to retain the
+                                        // convergence obligation. The persisted snapshot remains
+                                        // available to its normal retry path.
+                                        warn!(?error, ?record_error, "force-detach UserActor unregister retry could not be recorded");
+                                        return ConnectionShutdownOutcome::NotPersisted;
+                                    }
+                                }
+                            }
+                        }
+                        #[cfg(feature = "clustering")]
+                        if !remote_unregister_outcome.permits_detached_force_ack() {
+                            warn!(
+                                jid = %jid,
+                                stream_id = %stream_id,
+                                ?remote_unregister_outcome,
+                                "force-detach remote owner unregister lacked cleanup proof"
+                            );
+                            return ConnectionShutdownOutcome::NotPersisted;
+                        }
+                    }
                     // Remove the routing entry only — the MUC occupant
                     // slot stays. On a successful resume we'll re-register
                     // the same FullJid and presence is preserved.
@@ -1313,6 +1463,33 @@ async fn promote_terminal_recovery_prefix(
     }
 }
 
+fn force_detach_requires_actor_unregister(
+    origin: waddle_xmpp::registry::ForceDetachOrigin,
+) -> bool {
+    matches!(
+        origin,
+        waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+    )
+}
+
+#[cfg(test)]
+mod force_detach_tests {
+    use super::*;
+
+    #[test]
+    fn only_cross_node_resume_reenters_the_registry() {
+        assert!(!force_detach_requires_actor_unregister(
+            waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
+        ));
+        assert!(!force_detach_requires_actor_unregister(
+            waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement
+        ));
+        assert!(force_detach_requires_actor_unregister(
+            waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+        ));
+    }
+}
+
 /// A session that enabled resumable SM but cannot prove a durable resume
 /// identity (pre-v11 row, or no authenticated session) still owns two
 /// things that must not vanish with it: the `<enabled/>` path published a
@@ -1925,32 +2102,47 @@ async fn acquire_remote_muc_cleanup_origin(
         waddle_xmpp::ownership::EntityType::UserActor,
         bare_jid.to_string(),
     );
-    match state
-        .deps
-        .protocol
-        .user_registry
-        .ask(waddle_xmpp::registry::GetOrCreateUser {
-            bare_jid: bare_jid.clone(),
-        })
-        .await
-    {
-        Ok(_) => Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-                entity.clone(),
-            ),
-            sender_entity: entity,
-            inbound_sequence: 0,
-            handoff: None,
-        }),
-        Err(error) => {
-            warn!(
-                jid = %jid,
-                error = ?error,
-                "failed to acquire UserActor claim for remote MUC cleanup"
-            );
-            None
+    // A resumed resource may still be registered under the old node while
+    // that node drains its force-detach cleanup.  Foreign ownership is a
+    // legitimate transient state, not a terminal one-shot failure.
+    for attempt in 0..3 {
+        match state
+            .deps
+            .protocol
+            .user_registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: bare_jid.clone(),
+            })
+            .mailbox_timeout(std::time::Duration::from_secs(2))
+            .reply_timeout(std::time::Duration::from_secs(2))
+            .await
+        {
+            Ok(_) => {
+                return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+                    kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+                        entity.clone(),
+                    ),
+                    sender_entity: entity,
+                    inbound_sequence: 0,
+                    handoff: None,
+                });
+            }
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::registry::UserRegistryError::ClaimHeldByAnotherNode(_),
+            )) if attempt < 2 => {
+                tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt + 1))).await;
+            }
+            Err(error) => {
+                warn!(
+                    jid = %jid,
+                    error = ?error,
+                    "failed to acquire UserActor claim for remote MUC cleanup"
+                );
+                return None;
+            }
         }
     }
+    None
 }
 
 #[cfg(feature = "clustering")]

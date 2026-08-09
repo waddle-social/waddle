@@ -134,6 +134,25 @@ function smConsumedKey(accountKey: string, ownerId: string): string {
   return `${smOwnerKey(accountKey, ownerId)}.consumed`;
 }
 
+function ownResumeKey(accountKey: string, previd: string): string {
+  return `waddle.chat.sm-resume.own-resume.${accountKey.length}:${accountKey}.${previd.length}:${previd}`;
+}
+
+function ownResumeAttemptKey(
+  accountKey: string,
+  previd: string,
+  ownerId: string,
+  ownerInstanceId: string,
+  clientId: string,
+): string {
+  return `${ownResumeKey(accountKey, previd)}.attempt.${ownerId.length}:${ownerId}.${ownerInstanceId.length}:${ownerInstanceId}.${clientId.length}:${clientId}`;
+}
+
+function readOwnResumePointer(accountKey: string, previd: string): { attemptKey: string } | null {
+  const raw = window.localStorage.getItem(ownResumeKey(accountKey, previd));
+  return raw ? JSON.parse(raw) as { attemptKey: string } : null;
+}
+
 function ownerTimerHarness() {
   const callbacks = new Map<number, () => void>();
   let nextId = 0;
@@ -166,11 +185,14 @@ function inMemoryPersistence(): ResumePersistence & {
   smSnapshot: () => PersistedSmResumeState | null;
   joinedRoomsSnapshot: () => string[];
   clearSmCount: () => number;
+  retainedOwnResumeCount: () => number;
 } {
   let catchup: PersistedReconnectCatchup | null = null;
   let sm: PersistedSmResumeState | null = null;
+  const ownResumes = new Map<string, string>();
   let joinedRooms: string[] = [];
   let smClears = 0;
+  let retainedOwnResumes = 0;
   return {
     dispose: () => undefined,
     loadCatchup: () => catchup,
@@ -184,6 +206,17 @@ function inMemoryPersistence(): ResumePersistence & {
     },
     saveSm: (state) => { sm = state; },
     clearSm: () => { smClears += 1; sm = null; },
+    beginOwnResume: (previd, clientId) => { ownResumes.set(previd, clientId); },
+    retainOwnResume: () => { retainedOwnResumes += 1; },
+    finishOwnResume: (previd, clientId) => {
+      if (ownResumes.get(previd) === clientId) ownResumes.delete(previd);
+    },
+    consumeOwnResume: (previd, clientId) => {
+      const owner = ownResumes.get(previd);
+      if (!owner) return "absent";
+      if (owner === clientId) return "self";
+      return "foreign";
+    },
     preparePagehideHandoff: () => undefined,
     loadJoinedRooms: () => [...joinedRooms],
     saveJoinedRooms: (rooms) => { joinedRooms = [...rooms]; },
@@ -192,6 +225,7 @@ function inMemoryPersistence(): ResumePersistence & {
     smSnapshot: () => sm,
     joinedRoomsSnapshot: () => [...joinedRooms],
     clearSmCount: () => smClears,
+    retainedOwnResumeCount: () => retainedOwnResumes,
   };
 }
 
@@ -524,7 +558,368 @@ describe("malformed persisted SM snapshots", () => {
   });
 });
 
+describe("own-resume marker lifecycle (#1389)", () => {
+  test.each(["resumed", "fresh"] as const)("the %s lifecycle gives the former stream the correct witness lifetime", async (lifecycle) => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({ previd: `former-${lifecycle}`, inboundH: 1, outboundH: 2 });
+    let lifecycleCallback: ((event: string) => void) | undefined;
+    class StubConfig {
+      constructor(..._args: unknown[]) {}
+      with_resume_state() {}
+    }
+    class StubClient {
+      set_on_session_lifecycle(callback: (event: string) => void) { lifecycleCallback = callback; }
+      async connect() { lifecycleCallback?.(lifecycle); }
+    }
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const state = client as unknown as {
+      loadModule: () => Promise<unknown>;
+      doConnect: () => Promise<void>;
+    };
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+
+    await state.doConnect();
+
+    // A former handle can receive its conflict after the new handle's
+    // `<resumed/>` callback, so only that success retains the exact witness.
+    // Fresh-bind fallback still clears it immediately.
+    expect(persistence.consumeOwnResume(`former-${lifecycle}`, "former-handle")).toBe(
+      lifecycle === "resumed" ? "foreign" : "absent",
+    );
+    expect(persistence.retainedOwnResumeCount()).toBe(lifecycle === "resumed" ? 1 : 0);
+  });
+
+  test("a failed resume connect clears its witness", async () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({ previd: "former-failed", inboundH: 1, outboundH: 2 });
+    class StubConfig {
+      constructor(..._args: unknown[]) {}
+      with_resume_state() {}
+    }
+    class StubClient {
+      async connect() { throw new Error("resume transport failed"); }
+    }
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const state = client as unknown as {
+      loadModule: () => Promise<unknown>;
+      doConnect: () => Promise<void>;
+    };
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+
+    await expect(state.doConnect()).rejects.toThrow("resume transport failed");
+    expect(persistence.consumeOwnResume("former-failed", "former-handle")).toBe("absent");
+  });
+
+  test("a timed-out resume attempt clears its witness before retrying", async () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({ previd: "former-timeout", inboundH: 1, outboundH: 2 });
+    class StubConfig {
+      constructor(..._args: unknown[]) {}
+      with_resume_state() {}
+    }
+    class StubClient {
+      async connect() {}
+      async disconnect() {}
+    }
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const state = client as unknown as {
+      loadModule: () => Promise<unknown>;
+      connectTimeoutMs: number;
+      reconnect: { clearTimer: () => void };
+    };
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+    state.connectTimeoutMs = 5;
+
+    await expect(client.connect()).rejects.toThrow("Reconnection timed out");
+    expect(persistence.consumeOwnResume("former-timeout", "former-handle")).toBe("absent");
+    state.reconnect.clearTimer();
+  });
+});
+
 describe("createLocalStorageResumePersistence — localStorage adapter", () => {
+  test("owns an expiring exact-previd resume witness without masking a different stream", () => {
+    const producer = createLocalStorageResumePersistence("alice@example.com", "resume-producer");
+    const observer = createLocalStorageResumePersistence("alice@example.com", "former-stream-owner");
+
+    producer.beginOwnResume("former-sm-stream", "resumer");
+    expect(observer.consumeOwnResume("another-sm-stream", "former")).toBe("absent");
+    expect(observer.consumeOwnResume("former-sm-stream", "former")).toBe("foreign");
+    // A same-previd stream can be handed off multiple times before suspended
+    // former documents receive their force-detach closes. Classification must
+    // not let the first old client consume the latest local witness.
+    expect(observer.consumeOwnResume("former-sm-stream", "another-former")).toBe("foreign");
+    producer.finishOwnResume("former-sm-stream", "resumer");
+    expect(observer.consumeOwnResume("former-sm-stream", "former")).toBe("absent");
+
+    producer.beginOwnResume("fresh-fallback-stream", "resumer");
+    producer.finishOwnResume("fresh-fallback-stream", "resumer");
+    expect(observer.consumeOwnResume("fresh-fallback-stream", "former")).toBe("absent");
+
+    const originalNow = Date.now;
+    try {
+      const createdAt = originalNow();
+      Date.now = () => createdAt;
+      producer.beginOwnResume("abandoned-stream", "resumer");
+      const abandonedAttemptKey = readOwnResumePointer("alice@example.com", "abandoned-stream")?.attemptKey;
+      Date.now = () => createdAt + 30_001;
+      // Creating another marker performs the bounded abandoned-page sweep.
+      producer.beginOwnResume("gc-trigger", "resumer");
+      expect(window.localStorage.getItem(ownResumeKey("alice@example.com", "abandoned-stream"))).toBeNull();
+      expect(abandonedAttemptKey ? window.localStorage.getItem(abandonedAttemptKey) : null).toBeNull();
+      // A page that vanishes without its normal cleanup cannot leave a
+      // permanent collision exemption behind.
+      expect(observer.consumeOwnResume("abandoned-stream", "former")).toBe("absent");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("an older local client accepts a later local resume marker for the same former stream", () => {
+    const first = createLocalStorageResumePersistence("alice@example.com", "first-local-owner");
+    const second = createLocalStorageResumePersistence("alice@example.com", "second-local-owner");
+    const third = createLocalStorageResumePersistence("alice@example.com", "third-local-owner");
+
+    // First resumed successfully and retains its own marker while awaiting
+    // the old close. Subsequent local resumptions replace that witness.
+    first.beginOwnResume("same-former-stream", "first-client");
+    second.beginOwnResume("same-former-stream", "second-client");
+    third.beginOwnResume("same-former-stream", "third-client");
+
+    // The first client must not treat the newer marker as its own merely
+    // because it once resumed the same `previd`.
+    expect(first.consumeOwnResume("same-former-stream", "first-client")).toBe("foreign");
+    // Both A and B can receive the delayed conflict after C has taken over
+    // this same XEP-0198 previd; neither may consume C's witness.
+    expect(second.consumeOwnResume("same-former-stream", "second-client")).toBe("foreign");
+  });
+
+  test("own-resume GC compare-deletes an expired marker when another tab refreshes the same previd", () => {
+    const account = "alice@example.com";
+    const previd = "shared-stream";
+    const key = ownResumeKey(account, previd);
+    const expiredAttemptKey = ownResumeAttemptKey(
+      account,
+      previd,
+      "old-owner",
+      "old-instance",
+      "old-client",
+    );
+    const freshAttemptKey = ownResumeAttemptKey(
+      account,
+      previd,
+      "new-owner",
+      "new-instance",
+      "new-client",
+    );
+    const expiredMarker = JSON.stringify({
+      ownerId: "old-owner",
+      ownerInstanceId: "old-instance",
+      clientId: "old-client",
+      startedAt: Date.now() - 60_000,
+      expiresAt: Date.now() - 1,
+    });
+    const freshMarker = JSON.stringify({
+      ownerId: "new-owner",
+      ownerInstanceId: "new-instance",
+      clientId: "new-client",
+      startedAt: Date.now(),
+      expiresAt: Date.now() + 30_000,
+    });
+    window.localStorage.setItem(key, JSON.stringify({ attemptKey: expiredAttemptKey }));
+    window.localStorage.setItem(expiredAttemptKey, expiredMarker);
+
+    const storage = window.localStorage;
+    const originalGetItem = storage.getItem.bind(storage);
+    let replacementInjected = false;
+    storage.getItem = ((requestedKey: string) => {
+      const value = originalGetItem(requestedKey);
+      if (requestedKey !== key || value !== JSON.stringify({ attemptKey: expiredAttemptKey })) return value;
+      if (!replacementInjected) {
+        replacementInjected = true;
+        return value;
+      }
+      storage.setItem(key, JSON.stringify({ attemptKey: freshAttemptKey }));
+      storage.setItem(freshAttemptKey, freshMarker);
+      return JSON.stringify({ attemptKey: freshAttemptKey });
+    }) as Storage["getItem"];
+
+    try {
+      createLocalStorageResumePersistence(account, "gc-race-owner");
+      expect(window.localStorage.getItem(key)).toBe(JSON.stringify({ attemptKey: freshAttemptKey }));
+      expect(window.localStorage.getItem(freshAttemptKey)).toBe(freshMarker);
+    } finally {
+      storage.getItem = originalGetItem;
+    }
+  });
+
+  test("a delayed retain cannot replace a newer active marker for the same previd", () => {
+    const account = "alice@example.com";
+    const previd = "shared-stream";
+    const first = createLocalStorageResumePersistence(account, "first-local-owner");
+    const second = createLocalStorageResumePersistence(account, "second-local-owner");
+    const observer = createLocalStorageResumePersistence(account, "observer-owner");
+
+    first.beginOwnResume(previd, "first-client");
+    const firstPointer = readOwnResumePointer(account, previd);
+    expect(firstPointer).not.toBeNull();
+    const firstAttemptKey = firstPointer!.attemptKey;
+    const firstAttemptRaw = window.localStorage.getItem(firstAttemptKey);
+    expect(firstAttemptRaw).not.toBeNull();
+
+    const storage = window.localStorage;
+    const originalGetItem = storage.getItem.bind(storage);
+    let firstAttemptReads = 0;
+    storage.getItem = ((requestedKey: string) => {
+      const value = originalGetItem(requestedKey);
+      if (requestedKey !== firstAttemptKey || value !== firstAttemptRaw) return value;
+      firstAttemptReads += 1;
+      if (firstAttemptReads === 2) {
+        second.beginOwnResume(previd, "second-client");
+      }
+      return value;
+    }) as Storage["getItem"];
+
+    try {
+      first.retainOwnResume(previd, "first-client");
+    } finally {
+      storage.getItem = originalGetItem;
+    }
+
+    const activePointer = readOwnResumePointer(account, previd);
+    expect(activePointer).not.toBeNull();
+    expect(activePointer?.attemptKey).not.toBe(firstAttemptKey);
+    expect(observer.consumeOwnResume(previd, "former-client")).toBe("foreign");
+    expect(first.consumeOwnResume(previd, "first-client")).toBe("foreign");
+    expect(second.consumeOwnResume(previd, "second-client")).toBe("self");
+  });
+
+  test("a failed retry restores the prior retained witness for the same client", () => {
+    const account = "alice@example.com";
+    const previd = "shared-stream";
+    const producer = createLocalStorageResumePersistence(account, "resume-producer");
+    const observer = createLocalStorageResumePersistence(account, "former-stream-owner");
+
+    producer.beginOwnResume(previd, "resumer");
+    producer.retainOwnResume(previd, "resumer");
+    const firstPointer = readOwnResumePointer(account, previd);
+    expect(firstPointer).not.toBeNull();
+
+    producer.beginOwnResume(previd, "resumer");
+    const retryPointer = readOwnResumePointer(account, previd);
+    expect(retryPointer).not.toBeNull();
+    expect(retryPointer?.attemptKey).not.toBe(firstPointer?.attemptKey);
+
+    producer.finishOwnResume(previd, "resumer");
+
+    expect(readOwnResumePointer(account, previd)?.attemptKey).toBe(firstPointer?.attemptKey);
+    expect(observer.consumeOwnResume(previd, "former-client")).toBe("foreign");
+  });
+
+  test("a failed retry's fallback restore never overwrites a newer tab's pointer", () => {
+    const account = "alice@example.com";
+    const previd = "shared-stream";
+    const producer = createLocalStorageResumePersistence(account, "resume-producer");
+    const competitor = createLocalStorageResumePersistence(account, "resume-competitor");
+
+    producer.beginOwnResume(previd, "resumer", "attempt-1");
+    producer.retainOwnResume(previd, "resumer", "attempt-1");
+    producer.beginOwnResume(previd, "resumer", "attempt-2");
+
+    // Interleave tab C's newer attempt while the finisher scans fallback
+    // attempts: the scan reads attempt keys other than the one being
+    // removed, which is exactly the window between the pointer currency
+    // check and the fallback write (codex 1668 round).
+    const ls = window.localStorage;
+    const originalGetItem = ls.getItem.bind(ls);
+    let injected = false;
+    let competitorPointer: { attemptKey: string } | null = null;
+    ls.getItem = (key: string) => {
+      const value = originalGetItem(key);
+      if (!injected && key.includes(".attempt.") && !key.includes("attempt-2")) {
+        injected = true;
+        competitor.beginOwnResume(previd, "competitor-client", "attempt-C");
+        competitorPointer = readOwnResumePointer(account, previd);
+      }
+      return value;
+    };
+    try {
+      producer.finishOwnResume(previd, "resumer", "attempt-2");
+    } finally {
+      ls.getItem = originalGetItem;
+    }
+
+    expect(injected).toBe(true);
+    expect(competitorPointer).not.toBeNull();
+    expect(readOwnResumePointer(account, previd)?.attemptKey).toBe(
+      competitorPointer!.attemptKey,
+    );
+    // The displaced counterpart of C's attempt still classifies as foreign
+    // (superseded recovery), not as its own terminal marker.
+    expect(producer.consumeOwnResume(previd, "resumer")).toBe("foreign");
+  });
+
+  test("same-timestamp retries remove only the exact explicit attempt marker", () => {
+    const account = "alice@example.com";
+    const previd = "shared-stream";
+    const producer = createLocalStorageResumePersistence(account, "resume-producer");
+    const observer = createLocalStorageResumePersistence(account, "former-stream-owner");
+    const originalNow = Date.now;
+
+    try {
+      Date.now = () => 1_700_000_000_000;
+      producer.beginOwnResume(previd, "resumer", "attempt-1");
+      producer.retainOwnResume(previd, "resumer", "attempt-1");
+      const firstPointer = readOwnResumePointer(account, previd);
+      expect(firstPointer).not.toBeNull();
+
+      producer.beginOwnResume(previd, "resumer", "attempt-2");
+      const retryPointer = readOwnResumePointer(account, previd);
+      expect(retryPointer).not.toBeNull();
+      expect(retryPointer?.attemptKey).not.toBe(firstPointer?.attemptKey);
+
+      producer.finishOwnResume(previd, "resumer", "attempt-2");
+
+      expect(readOwnResumePointer(account, previd)?.attemptKey).toBe(firstPointer?.attemptKey);
+      expect(firstPointer ? window.localStorage.getItem(firstPointer.attemptKey) : null).not.toBeNull();
+      expect(retryPointer ? window.localStorage.getItem(retryPointer.attemptKey) : null).toBeNull();
+      expect(observer.consumeOwnResume(previd, "former-client")).toBe("foreign");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("refreshes a successful resume witness beyond the initial attempt TTL", () => {
+    const producer = createLocalStorageResumePersistence("alice@example.com", "resume-producer");
+    const observer = createLocalStorageResumePersistence("alice@example.com", "former-stream-owner");
+    const originalNow = Date.now;
+    try {
+      const startedAt = originalNow();
+      Date.now = () => startedAt;
+      producer.beginOwnResume("former-sm-stream", "resumer");
+
+      // A resume success shortly before the original 30s attempt deadline
+      // keeps the former document's force-detach witness alive for 5 minutes.
+      Date.now = () => startedAt + 29_999;
+      producer.retainOwnResume("former-sm-stream", "resumer");
+      Date.now = () => startedAt + 30_001;
+      expect(observer.consumeOwnResume("former-sm-stream", "former")).toBe("foreign");
+
+      Date.now = () => startedAt + 330_000;
+      expect(observer.consumeOwnResume("former-sm-stream", "former")).toBe("absent");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test("ref-counts owner heartbeats and drains all live ownership on terminal disposal", () => {
     const timers = ownerTimerHarness();
     const baseline = resumeOwnerLifecycleSnapshotForTests();
@@ -1309,6 +1704,90 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       createLocalStorageResumePersistence("alice@example.com", "tab-a"),
     );
     expect(tabA.fullJid).toBe("alice@example.com/web-existing-resource");
+  });
+
+  test("explicit superseded recovery binds a fresh resource without replaying a successor-owned SM tail", async () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({
+      previd: "former-stream",
+      inboundH: 4,
+      outboundH: 9,
+      resource: "web-existing-resource",
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-owned-sm-tail'/>", sentAt: "2026-08-08T12:34:56.789Z" }],
+    });
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "dm-owned-sm-tail",
+      createdAt: "2026-08-08T12:34:56.789Z",
+      peerJid: "bob@example.com",
+      body: "hello from superseded recovery",
+    });
+
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const state = client as unknown as {
+      reconnectBlock: { kind: "superseded"; detail: string } | null;
+      loadModule: () => Promise<unknown>;
+    };
+    state.reconnectBlock = {
+      kind: "superseded",
+      detail: "This session was resumed in another tab.",
+    };
+
+    const boundResources: string[] = [];
+    const resumeCalls: string[] = [];
+    const drainedSends: Array<{ peerJid: string; id: string | null }> = [];
+    const listeners = new Map<string, Array<(payload: { id?: string }) => void>>();
+    let lifecycleCallback: ((event: string) => void) | undefined;
+    class StubConfig {
+      constructor(_url: string, _jid: string, _sessionId: string, resource: string) {
+        boundResources.push(resource);
+      }
+      with_resume_state() { resumeCalls.push("with_resume_state"); }
+      with_resume_state_with_max() { resumeCalls.push("with_resume_state_with_max"); }
+      with_resume_state_entries() { resumeCalls.push("with_resume_state_entries"); }
+      with_resume_state_entries_with_max() { resumeCalls.push("with_resume_state_entries_with_max"); }
+      with_fresh_stream_retry_state_entries() { resumeCalls.push("with_fresh_stream_retry_state_entries"); }
+    }
+    class StubClient {
+      set_on_session_lifecycle(callback: (event: string) => void) { lifecycleCallback = callback; }
+      on(event: string, callback: (payload: { id?: string }) => void) {
+        listeners.set(event, [...(listeners.get(event) ?? []), callback]);
+      }
+      async connect() {
+        lifecycleCallback?.("fresh");
+      }
+      async send_chat_message(peerJid: string, _body: string, opts: { id?: string }) {
+        const stanzaId = "dm-owned-sm-tail";
+        drainedSends.push({ peerJid, id: stanzaId });
+        for (const callback of listeners.get("message:acked") ?? []) {
+          callback({ id: stanzaId });
+        }
+        return stanzaId;
+      }
+    }
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+
+    try {
+      await client.recoverSupersededSession();
+      await flushMicrotasks();
+      await (client as unknown as {
+        flushQueuedDirectMessages: () => Promise<void | undefined>;
+      }).flushQueuedDirectMessages();
+
+      expect(boundResources).toHaveLength(1);
+      expect(boundResources[0]).not.toBe("web-existing-resource");
+      expect(client.fullJid).toBe(`alice@example.com/${boundResources[0]}`);
+      expect(resumeCalls).toEqual([]);
+      expect(drainedSends).toEqual([]);
+      expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id))
+        .toEqual(["dm-owned-sm-tail"]);
+      expect(persistence.smSnapshot()).toBeNull();
+    } finally {
+      removeQueuedMessage("alice@example.com", "dm-owned-sm-tail");
+    }
   });
 
   test("BrowserXmppClient does not persist lossy SM state while outbound stanzas are unacked", () => {

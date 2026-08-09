@@ -228,7 +228,10 @@ export function readRoomHasActiveCall(roomJid: string): {
 }
 
 function currentClientFullJid(): string {
-  return fullJidIdentityKey((connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid);
+  return fullJidIdentityKey(
+    connectionStore.selfFullJid ??
+    (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid,
+  );
 }
 
 function hasOwnerFullJid(

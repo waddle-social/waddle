@@ -328,6 +328,23 @@ pub(crate) enum RemoteResourceRegisterOutcome {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteResourceUnregisterOutcome {
+    NotRegistered,
+    Unregistered,
+    RecordedRetry,
+    Failed,
+}
+
+impl RemoteResourceUnregisterOutcome {
+    pub(crate) fn permits_detached_force_ack(self) -> bool {
+        matches!(
+            self,
+            Self::NotRegistered | Self::Unregistered | Self::RecordedRetry
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RemoteResourceOriginRefresh {
     Remote(RemoteResourceOriginSnapshot),
@@ -340,6 +357,19 @@ pub(super) struct RemoteSocketRegistration {
     pub(super) registration_id: RemoteResourceRegistrationId,
     pub(super) socket_generation: RemoteResourceSocketGeneration,
     pub(super) owner: Arc<AtomicBool>,
+    pub(super) user_owner: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct PendingRemoteSocketUnregisterKey {
+    pub(super) jid: jid::FullJid,
+    pub(super) registration_id: RemoteResourceRegistrationId,
+    pub(super) socket_generation: RemoteResourceSocketGeneration,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingRemoteSocketUnregister {
+    pub(super) key: PendingRemoteSocketUnregisterKey,
     pub(super) user_owner: NodeId,
 }
 

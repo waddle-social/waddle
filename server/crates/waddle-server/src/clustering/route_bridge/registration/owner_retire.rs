@@ -1,5 +1,5 @@
 use super::super::*;
-use super::owner::unregister_remote_owner_actor_entry;
+use super::owner::{unregister_remote_owner_actor_entry, RemoteOwnerActorUnregisterOutcome};
 
 impl OrderedRelayDeliveryBridge {
     pub(super) async fn retire_remote_owner_registration(
@@ -15,6 +15,7 @@ impl OrderedRelayDeliveryBridge {
             .force_detach_remote_user_resource(RelayForceDetachRemoteUserResource {
                 jid: jid.clone(),
                 registration_id: registration.registration_id,
+                origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
                 requester_bare_jid: jid.to_bare(),
                 trace: RelayTraceContext::default(),
             })
@@ -38,7 +39,10 @@ impl OrderedRelayDeliveryBridge {
                     ?error,
                     "clustered remote-resource replacement cleaning stale old-socket mirror"
                 );
-                if !unregister_remote_owner_actor_entry(services, jid, &registration.owner).await {
+                if matches!(
+                    unregister_remote_owner_actor_entry(services, jid, &registration.owner).await,
+                    RemoteOwnerActorUnregisterOutcome::Failed
+                ) {
                     return false;
                 }
                 services
@@ -67,7 +71,10 @@ impl OrderedRelayDeliveryBridge {
             );
             return false;
         }
-        if !unregister_remote_owner_actor_entry(services, jid, &registration.owner).await {
+        if matches!(
+            unregister_remote_owner_actor_entry(services, jid, &registration.owner).await,
+            RemoteOwnerActorUnregisterOutcome::Failed
+        ) {
             return false;
         }
         services
@@ -94,17 +101,10 @@ impl OrderedRelayDeliveryBridge {
         let Some(registration) = registration else {
             return;
         };
-        let actor_removed = services
-            .user_registry
-            .ask(UnregisterUserResource {
-                jid: jid.clone(),
-                owner: Some(registration.owner.clone()),
-            })
-            .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
-            .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
-            .await
-            .is_ok();
-        if !actor_removed {
+        if matches!(
+            unregister_remote_owner_actor_entry(&services, jid, &registration.owner).await,
+            RemoteOwnerActorUnregisterOutcome::Failed
+        ) {
             return;
         }
         services

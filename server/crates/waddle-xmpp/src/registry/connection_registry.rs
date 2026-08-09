@@ -23,8 +23,8 @@ mod state;
 mod subscriptions;
 
 pub use outbound::{
-    BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOutcome, ForceDetachRequest,
-    OutboundStanza, SendResult,
+    BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
+    ForceDetachRequest, OutboundStanza, SendResult,
 };
 pub use state::{LastActivityState, PresenceState};
 

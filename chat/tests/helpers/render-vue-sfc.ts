@@ -54,6 +54,47 @@ export async function renderVueComponentSource(
   return renderToString(app);
 }
 
+async function loadVueComponent(
+  path: string,
+  importMetaUrl: string,
+  options: { inlineTemplate?: boolean } = {},
+): Promise<unknown> {
+  const outDir = mkdtempSync(join(tmpdir(), "waddle-vue-sfc-"));
+  const moduleUrl = await compileSfcModule(
+    new URL(path, importMetaUrl),
+    outDir,
+    new Map(),
+    options,
+  );
+  return (await import(moduleUrl)).default;
+}
+
+export async function setupVueComponent(
+  path: string,
+  props: Record<string, unknown>,
+  importMetaUrl: string,
+  emit: (...args: unknown[]) => void = () => undefined,
+): Promise<Record<string, unknown>> {
+  const component = await loadVueComponent(path, importMetaUrl, { inlineTemplate: false }) as {
+    setup?: (
+      props: Record<string, unknown>,
+      context: {
+        emit: (...args: unknown[]) => void;
+        expose: () => void;
+        attrs: Record<string, unknown>;
+        slots: Record<string, unknown>;
+      },
+    ) => Record<string, unknown>;
+  };
+  if (!component.setup) throw new Error(`${path} has no setup function`);
+  return component.setup(props, {
+    emit,
+    expose: () => undefined,
+    attrs: {},
+    slots: {},
+  });
+}
+
 /**
  * Compiles `filename` (a `.vue` SFC) into an ESM module written under
  * `outDir`, returning its `file://` URL. `cache` dedupes shared child
@@ -63,6 +104,7 @@ async function compileSfcModule(
   filename: URL,
   outDir: string,
   cache: Map<string, string>,
+  options: { inlineTemplate?: boolean } = {},
 ): Promise<string> {
   const cached = cache.get(filename.pathname);
   if (cached) return cached;
@@ -71,7 +113,7 @@ async function compileSfcModule(
   const { descriptor } = parse(source, { filename: filename.pathname });
   const script = compileScript(descriptor, {
     id: filename.pathname,
-    inlineTemplate: true,
+    inlineTemplate: options.inlineTemplate ?? true,
   });
 
   const transpiled = ts.transpileModule(
@@ -88,7 +130,7 @@ async function compileSfcModule(
     },
   ).outputText;
 
-  const rewritten = await rewriteImports(transpiled, filename, outDir, cache);
+  const rewritten = await rewriteImports(transpiled, filename, outDir, cache, options);
   const modulePath = join(outDir, `sfc-${cache.size}.mjs`);
   const moduleUrl = pathToFileURL(modulePath).href;
   // Reserve the cache slot before writing so recursive imports see it.
@@ -102,11 +144,12 @@ async function rewriteImports(
   importer: URL,
   outDir: string,
   cache: Map<string, string>,
+  options: { inlineTemplate?: boolean } = {},
 ): Promise<string> {
   const specifiers = [...code.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
   let result = code;
   for (const specifier of specifiers) {
-    const resolved = await resolveModuleSpecifier(specifier, importer, outDir, cache);
+    const resolved = await resolveModuleSpecifier(specifier, importer, outDir, cache, options);
     result = result.replaceAll(`from "${specifier}"`, `from "${resolved}"`);
     result = result.replaceAll(`from '${specifier}'`, `from "${resolved}"`);
   }
@@ -118,14 +161,15 @@ async function resolveModuleSpecifier(
   importer: URL,
   outDir: string,
   cache: Map<string, string>,
+  options: { inlineTemplate?: boolean } = {},
 ): Promise<string> {
   if (specifier.startsWith("@/")) {
     const path = resolveSourcePath(new URL(`../../src/${specifier.slice(2)}`, import.meta.url).pathname);
-    return moduleUrlForPath(path, outDir, cache);
+    return moduleUrlForPath(path, outDir, cache, options);
   }
   if (specifier.startsWith(".")) {
     const path = resolveSourcePath(new URL(specifier, importer).pathname);
-    return moduleUrlForPath(path, outDir, cache);
+    return moduleUrlForPath(path, outDir, cache, options);
   }
   return import.meta.resolve(specifier);
 }
@@ -134,9 +178,10 @@ async function moduleUrlForPath(
   resolvedPath: string,
   outDir: string,
   cache: Map<string, string>,
+  options: { inlineTemplate?: boolean } = {},
 ): Promise<string> {
   if (resolvedPath.endsWith(".vue")) {
-    return compileSfcModule(pathToFileURL(resolvedPath), outDir, cache);
+    return compileSfcModule(pathToFileURL(resolvedPath), outDir, cache, options);
   }
   return pathToFileURL(resolvedPath).href;
 }

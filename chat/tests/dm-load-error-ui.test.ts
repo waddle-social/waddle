@@ -21,7 +21,12 @@ describe("DM load error UI contract", () => {
     expect(activeConversation).toContain("dmMessaging.loadErrorPeerJid.value === peer.peerJid");
     expect(activeConversation).toContain("activeActionError.value === dmMessaging.loadErrorMessage.value");
     expect(activeConversation).toContain('? "Try again"');
-    expect(sendOrchestration).toContain("void dmMessaging.loadMessages(peer.peerJid)");
+    // The retry affordance is an explicit user action: it first clears a
+    // superseded-session latch (own-resume conflict displaced this tab)
+    // and then reloads the active DM conversation.
+    expect(sendOrchestration).toContain("await xmppClient.value?.recoverSupersededSession()");
+    expect(sendOrchestration).toContain("activeDmPeer.value?.peerJid !== peerJid");
+    expect(sendOrchestration).toContain("await dmMessaging.loadMessages(peerJid)");
     expect(readyShell).toContain('@retry-load="retryActiveLoad"');
   });
 });

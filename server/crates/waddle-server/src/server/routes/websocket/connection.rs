@@ -245,15 +245,13 @@ async fn handle_xmpp_websocket(
     // registration succeeds, mirroring `pending_tx`'s own hand-off pattern.
     let mut force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>> =
         None;
-    // Set when this connection is asked (identity-matched) to force-detach
-    // for a cross-node resume. The ack is deliberately sent only AFTER
+    // Set when this connection is asked (identity-matched) to force-detach.
+    // The ack is deliberately sent only AFTER
     // `cleanup_connection_shutdown` below has run this connection's normal
-    // XEP-0198 detach-for-resume persistence — the asking node's
-    // `steal_for_resume` must never proceed until the detach-flush this
-    // node performs has actually landed.
-    let mut pending_force_detach_ack: Option<
-        tokio::sync::oneshot::Sender<waddle_xmpp::registry::ForceDetachOutcome>,
-    > = None;
+    // XEP-0198 detach-for-resume persistence — the asking lifecycle must
+    // never proceed until the detach-flush this node performs has actually
+    // landed.
+    let mut pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest> = Vec::new();
 
     // Track connection state
     let mut conn = WsConnState::new();
@@ -539,8 +537,9 @@ async fn handle_xmpp_websocket(
                 }
             }
 
-            // ADR-0017 Phase 3 Slice 6: a cross-node XEP-0198 resume
-            // live-steal handshake ask for this connection's own stream id.
+            // A force-detach request for this connection's own stream. Cross-node
+            // XEP-0198 resume uses the live-steal handshake; stale UserActor
+            // retirement uses the same safe connection-owned close path.
             // The identity check gates the destructive close itself (defense
             // in depth against a wrong-identity `previd` forcing a disconnect
             // before rejection) — a mismatch answers inline and this
@@ -553,11 +552,7 @@ async fn handle_xmpp_websocket(
                     Some(request) => {
                         let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
                         if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
-                            warn!(
-                                requester = %request.requester_bare_jid,
-                                bound = ?bound_bare,
-                                "Cross-node resume force-detach rejected: identity mismatch"
-                            );
+                            warn!("force-detach rejected: identity mismatch");
                             let _ = request
                                 .ack
                                 .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
@@ -567,30 +562,32 @@ async fn handle_xmpp_websocket(
                             // The old serving generation may no longer emit
                             // the optional `<conflict/>`. Still acknowledge
                             // only after normal detach persistence below.
-                            pending_force_detach_ack = Some(request.ack);
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut force_detach_rx,
+                                    bound_bare,
+                                ));
+                            }
                             break;
                         } else {
-                            info!(
-                                jid = ?conn.phase.bound_jid(),
-                                "Cross-node resume: force-detaching this session (<conflict/> close)"
-                            );
-                            if conn.has_committed_live_stream_open() {
-                                let _ = send_ws_text_frames_with_authority(
-                                    &mut ws_sender,
-                                    [build_conflict_stream_error(), websocket_stream_close_xml()],
-                                    "Failed to send conflict stream error",
-                                    (&admission_permit, &shutdown_token),
-                                )
-                                .await;
-                            }
-                            let _ = close_ws_connection(
+                            info!("force-detaching this session (<conflict/> close)");
+                            close_live_session_for_force_detach(
                                 &mut ws_sender,
-                                "Failed to send WebSocket close frame after conflict",
+                                &conn,
+                                &admission_permit,
+                                &shutdown_token,
                             )
                             .await;
                             // Deferred: acked only after this connection's own
                             // detach-for-resume cleanup below actually runs.
-                            pending_force_detach_ack = Some(request.ack);
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut force_detach_rx,
+                                    bound_bare,
+                                ));
+                            }
                             break;
                         }
                     }
@@ -758,8 +755,27 @@ async fn handle_xmpp_websocket(
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
-    let shutdown_outcome =
-        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
+    if !pending_force_detach.is_empty() {
+        if let Some(bound_bare) = conn.phase.bound_jid().map(|jid| jid.to_bare()) {
+            pending_force_detach.extend(drain_ready_force_detach_requests(
+                &mut force_detach_rx,
+                &bound_bare,
+            ));
+        }
+    }
+    let shutdown_outcome = if !pending_force_detach.is_empty() {
+        cleanup_force_detach_shutdown_with_late_waiter_service(
+            state.as_ref(),
+            &mut outbound_rx,
+            &mut conn,
+            superseded,
+            &mut force_detach_rx,
+            &mut pending_force_detach,
+        )
+        .await
+    } else {
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await
+    };
 
     // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
     // detach-for-resume persistence has actually run above — tell the
@@ -770,17 +786,7 @@ async fn handle_xmpp_websocket(
     // `steal_for_resume` against a snapshot that was never persisted (a
     // storage-error fallback, an ownership-race promotion, or any other
     // non-detach cleanup path).
-    if let Some(ack) = pending_force_detach_ack.take() {
-        let outcome = match shutdown_outcome {
-            cleanup::ConnectionShutdownOutcome::Detached => {
-                waddle_xmpp::registry::ForceDetachOutcome::Detached
-            }
-            cleanup::ConnectionShutdownOutcome::NotPersisted => {
-                waddle_xmpp::registry::ForceDetachOutcome::NotPersisted
-            }
-        };
-        let _ = ack.send(outcome);
-    }
+    ack_force_detach_requests(pending_force_detach, shutdown_outcome);
 
     info!("XMPP WebSocket connection closed");
 }
@@ -818,6 +824,298 @@ where
             "Node unavailable: peer did not accept the close frames in time; \
              proceeding to detach without them"
         );
+    }
+}
+
+/// Close a live stream displaced by a cross-node XEP-0198 resume.  The
+/// conflict wire frames are deliberately gated on a committed live stream;
+/// regardless of that gate the WebSocket transport is closed.
+async fn close_live_session_for_force_detach<S, E>(
+    ws_sender: &mut S,
+    conn: &WsConnState,
+    admission_permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown_token: &tokio_util::sync::CancellationToken,
+) where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    if conn.has_committed_live_stream_open() {
+        let _ = send_ws_text_frames_with_authority(
+            ws_sender,
+            [build_conflict_stream_error(), websocket_stream_close_xml()],
+            "Failed to send conflict stream error",
+            (admission_permit, shutdown_token),
+        )
+        .await;
+    }
+    let _ = close_ws_connection(
+        ws_sender,
+        "Failed to send WebSocket close frame after conflict",
+    )
+    .await;
+}
+
+fn force_detach_outcome_from_shutdown(
+    outcome: cleanup::ConnectionShutdownOutcome,
+) -> waddle_xmpp::registry::ForceDetachOutcome {
+    match outcome {
+        cleanup::ConnectionShutdownOutcome::Detached => {
+            waddle_xmpp::registry::ForceDetachOutcome::Detached
+        }
+        cleanup::ConnectionShutdownOutcome::NotPersisted => {
+            waddle_xmpp::registry::ForceDetachOutcome::NotPersisted
+        }
+    }
+}
+
+pub(super) fn drain_ready_force_detach_requests(
+    rx: &mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+    bound_bare: &jid::BareJid,
+) -> Vec<waddle_xmpp::registry::ForceDetachRequest> {
+    let mut drained = Vec::new();
+    let Some(receiver) = rx.as_mut() else {
+        return drained;
+    };
+    loop {
+        match receiver.try_recv() {
+            Ok(request) => {
+                if request.requester_bare_jid != *bound_bare {
+                    warn!("force-detach rejected while draining queue: identity mismatch");
+                    let _ = request
+                        .ack
+                        .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
+                    continue;
+                }
+                drained.push(request);
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                *rx = None;
+                break;
+            }
+        }
+    }
+    drained
+}
+
+/// Cross-node semantics are authoritative whenever ANY queued request carries
+/// that origin, regardless of queue order: a stale-retirement request drained
+/// ahead of a cross-node-resume one must not make cleanup skip the synchronous
+/// cross-node unregister fence while both waiters are acknowledged from the
+/// same outcome — the remote resumer would race the still-pending removal and
+/// reject a valid resume.
+pub(super) fn authoritative_force_detach_origin(
+    requests: &[waddle_xmpp::registry::ForceDetachRequest],
+) -> Option<waddle_xmpp::registry::ForceDetachOrigin> {
+    requests
+        .iter()
+        .any(|request| request.origin == waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume)
+        .then_some(waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume)
+        .or_else(|| requests.first().map(|request| request.origin))
+}
+
+pub(super) fn release_stale_force_detach_waiters_before_cross_node_cleanup(
+    requests: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
+    primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
+) {
+    if primary_origin != Some(waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume) {
+        return;
+    }
+
+    let mut remaining = Vec::with_capacity(requests.len());
+    for request in requests.drain(..) {
+        if request.origin == waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
+        {
+            // A queued stale-retirement waiter already owns the UserRegistry
+            // actor turn. Answer it before the cross-node cleanup's
+            // synchronous unregister ask so that actor can finish its exact
+            // removal work instead of timing the ask out behind itself.
+            let _ = request
+                .ack
+                .send(waddle_xmpp::registry::ForceDetachOutcome::NotPersisted);
+            continue;
+        }
+        remaining.push(request);
+    }
+    *requests = remaining;
+}
+
+async fn cleanup_force_detach_shutdown_with_late_waiter_service(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    conn: &mut WsConnState,
+    superseded: bool,
+    force_detach_rx: &mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+    pending_force_detach: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
+) -> cleanup::ConnectionShutdownOutcome {
+    let primary_force_detach_origin = authoritative_force_detach_origin(pending_force_detach);
+    release_stale_force_detach_waiters_before_cross_node_cleanup(
+        pending_force_detach,
+        primary_force_detach_origin,
+    );
+
+    let Some(origin) = primary_force_detach_origin else {
+        return cleanup_connection_shutdown(state, outbound_rx, conn, superseded).await;
+    };
+
+    let late_waiter_task = conn
+        .phase
+        .bound_jid()
+        .map(|jid| jid.to_bare())
+        .and_then(|bound_bare| {
+            start_late_force_detach_waiter_service(force_detach_rx, bound_bare, origin)
+        });
+
+    let shutdown_outcome = cleanup::cleanup_force_detach_connection_shutdown(
+        state,
+        outbound_rx,
+        conn,
+        superseded,
+        origin,
+    )
+    .await;
+
+    if let Some((cancel, task)) = late_waiter_task {
+        cancel.cancel();
+        match task.await {
+            Ok(mut late_requests) => pending_force_detach.append(&mut late_requests),
+            Err(error) => {
+                warn!(?error, "late force-detach waiter service task failed");
+            }
+        }
+    }
+
+    shutdown_outcome
+}
+
+fn start_late_force_detach_waiter_service(
+    force_detach_rx: &mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+    bound_bare: jid::BareJid,
+    primary_origin: waddle_xmpp::registry::ForceDetachOrigin,
+) -> Option<(
+    tokio_util::sync::CancellationToken,
+    tokio::task::JoinHandle<Vec<waddle_xmpp::registry::ForceDetachRequest>>,
+)> {
+    let receiver = force_detach_rx.take()?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_task = cancel.clone();
+    Some((
+        cancel,
+        tokio::spawn(async move {
+            service_late_force_detach_waiters_during_cross_node_cleanup(
+                receiver,
+                bound_bare,
+                primary_origin,
+                cancel_task,
+            )
+            .await
+        }),
+    ))
+}
+
+async fn service_late_force_detach_waiters_during_cross_node_cleanup(
+    mut receiver: mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>,
+    bound_bare: jid::BareJid,
+    primary_origin: waddle_xmpp::registry::ForceDetachOrigin,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Vec<waddle_xmpp::registry::ForceDetachRequest> {
+    let mut pending = Vec::new();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                drain_late_force_detach_waiters_during_cross_node_cleanup(
+                    &mut receiver,
+                    &bound_bare,
+                    primary_origin,
+                    &mut pending,
+                );
+                return pending;
+            }
+            request = receiver.recv() => {
+                let Some(request) = request else {
+                    return pending;
+                };
+                handle_late_force_detach_waiter_during_cross_node_cleanup(
+                    request,
+                    &bound_bare,
+                    primary_origin,
+                    &mut pending,
+                );
+            }
+        }
+    }
+}
+
+fn drain_late_force_detach_waiters_during_cross_node_cleanup(
+    receiver: &mut mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>,
+    bound_bare: &jid::BareJid,
+    primary_origin: waddle_xmpp::registry::ForceDetachOrigin,
+    pending: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok(request) => handle_late_force_detach_waiter_during_cross_node_cleanup(
+                request,
+                bound_bare,
+                primary_origin,
+                pending,
+            ),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
+        }
+    }
+}
+
+fn handle_late_force_detach_waiter_during_cross_node_cleanup(
+    request: waddle_xmpp::registry::ForceDetachRequest,
+    bound_bare: &jid::BareJid,
+    primary_origin: waddle_xmpp::registry::ForceDetachOrigin,
+    pending: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
+) {
+    if request.requester_bare_jid != *bound_bare {
+        warn!("force-detach rejected during cleanup: identity mismatch");
+        let _ = request
+            .ack
+            .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
+        return;
+    }
+
+    if primary_origin == waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+        && request.origin == waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
+    {
+        // While the cross-node cleanup is synchronously re-entering the
+        // UserRegistry actor, a newly queued stale-retirement request already
+        // owns that same actor turn and must be released immediately.
+        let _ = request
+            .ack
+            .send(waddle_xmpp::registry::ForceDetachOutcome::NotPersisted);
+        return;
+    }
+
+    if primary_origin != waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+        && request.origin == waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+    {
+        // The running cleanup skipped the synchronous actor-unregister fence
+        // a cross-node resume REQUIRES. Handing this stronger waiter the
+        // weaker cleanup's Detached would let the remote takeover race the
+        // still-pending owner retirement — answer NotPersisted so the
+        // resumer's bounded retry re-asks once the retirement settles.
+        let _ = request
+            .ack
+            .send(waddle_xmpp::registry::ForceDetachOutcome::NotPersisted);
+        return;
+    }
+
+    pending.push(request);
+}
+
+fn ack_force_detach_requests(
+    requests: Vec<waddle_xmpp::registry::ForceDetachRequest>,
+    shutdown_outcome: cleanup::ConnectionShutdownOutcome,
+) {
+    let outcome = force_detach_outcome_from_shutdown(shutdown_outcome);
+    for request in requests {
+        let _ = request.ack.send(outcome);
     }
 }
 
@@ -1537,8 +1835,11 @@ mod tests {
         transport_xml::websocket_stream_open_xml,
     };
     use super::*;
+    use jid::BareJid;
     use std::pin::Pin;
+    use std::str::FromStr;
     use std::task::{Context, Poll};
+    use tokio::sync::oneshot;
     use waddle_xmpp::stream_management::SmSessionRegistry;
 
     #[derive(Default)]
@@ -1710,6 +2011,226 @@ mod tests {
         assert!(
             closing_sender.closed,
             "the transport closes after RFC 7395 close"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_detach_writes_conflict_then_framing_close_only_for_committed_stream() {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.begin_server_stream_open_response();
+        conn.commit_server_stream_open_response();
+        let mut sender = UpgradeCloseSink::default();
+
+        close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown).await;
+
+        assert_eq!(
+            sender.sent,
+            vec![
+                Message::Text(build_conflict_stream_error().into()),
+                Message::Text(websocket_stream_close_xml().into()),
+            ]
+        );
+        assert!(sender.closed, "force-detach completes the WebSocket close");
+    }
+
+    #[tokio::test]
+    async fn force_detach_suppresses_conflict_before_live_stream_commit() {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.begin_server_stream_open_response();
+        let mut sender = UpgradeCloseSink::default();
+
+        close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown).await;
+
+        assert!(sender.sent.is_empty());
+        assert!(sender.closed);
+    }
+
+    #[tokio::test]
+    async fn late_stale_force_detach_waiter_is_released_during_cross_node_cleanup() {
+        let bare_jid = BareJid::from_str("late-stale@example.com").expect("valid bare jid");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut rx = Some(rx);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let (cancel, task) = start_late_force_detach_waiter_service(
+            &mut rx,
+            bare_jid.clone(),
+            waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+        )
+        .expect("late waiter service task");
+
+        tx.send(waddle_xmpp::registry::ForceDetachRequest {
+            origin: waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+            requester_bare_jid: bare_jid,
+            ack: ack_tx,
+        })
+        .await
+        .expect("send stale waiter");
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), ack_rx)
+                .await
+                .expect("stale waiter ack completes")
+                .expect("stale waiter ack"),
+            waddle_xmpp::registry::ForceDetachOutcome::NotPersisted
+        );
+
+        cancel.cancel();
+        assert!(
+            task.await.expect("late waiter task joins").is_empty(),
+            "stale retirements should be answered inline, not buffered"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_owner_managed_force_detach_waiter_is_preserved_for_final_ack() {
+        let bare_jid = BareJid::from_str("late-owner@example.com").expect("valid bare jid");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut rx = Some(rx);
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        let (cancel, task) = start_late_force_detach_waiter_service(
+            &mut rx,
+            bare_jid.clone(),
+            waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+        )
+        .expect("late waiter service task");
+
+        tx.send(waddle_xmpp::registry::ForceDetachRequest {
+            origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+            requester_bare_jid: bare_jid,
+            ack: ack_tx,
+        })
+        .await
+        .expect("send owner-managed waiter");
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut ack_rx)
+                .await
+                .is_err(),
+            "owner-managed cleanup must remain pending until final shutdown outcome"
+        );
+
+        cancel.cancel();
+        let pending = task.await.expect("late waiter task joins");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].origin,
+            waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement
+        );
+    }
+
+    #[tokio::test]
+    async fn late_force_detach_identity_mismatch_is_rejected_during_cross_node_cleanup() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut rx = Some(rx);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let (cancel, task) = start_late_force_detach_waiter_service(
+            &mut rx,
+            BareJid::from_str("bound@example.com").expect("valid bound bare jid"),
+            waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+        )
+        .expect("late waiter service task");
+
+        tx.send(waddle_xmpp::registry::ForceDetachRequest {
+            origin: waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+            requester_bare_jid: BareJid::from_str("mismatch@example.com")
+                .expect("valid mismatched bare jid"),
+            ack: ack_tx,
+        })
+        .await
+        .expect("send mismatched waiter");
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), ack_rx)
+                .await
+                .expect("mismatched waiter ack completes")
+                .expect("mismatched waiter ack"),
+            waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch
+        );
+
+        cancel.cancel();
+        assert!(
+            task.await.expect("late waiter task joins").is_empty(),
+            "mismatched requests must not survive into final ack handling"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_stale_force_detach_waiter_is_collected_during_stale_retirement_origin() {
+        let bare_jid = BareJid::from_str("late-stale-primary@example.com").expect("valid bare jid");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut rx = Some(rx);
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        let (cancel, task) = start_late_force_detach_waiter_service(
+            &mut rx,
+            bare_jid.clone(),
+            waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+        )
+        .expect("late waiter service task");
+
+        tx.send(waddle_xmpp::registry::ForceDetachRequest {
+            origin: waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+            requester_bare_jid: bare_jid,
+            ack: ack_tx,
+        })
+        .await
+        .expect("send late stale waiter");
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut ack_rx)
+                .await
+                .is_err(),
+            "late stale retirement during stale-retirement cleanup must remain pending for final ack"
+        );
+
+        cancel.cancel();
+        let pending = task.await.expect("late waiter task joins");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].origin,
+            waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
+        );
+    }
+
+    #[tokio::test]
+    async fn late_owner_managed_force_detach_waiter_is_collected_during_owner_managed_origin() {
+        let bare_jid = BareJid::from_str("late-owner-primary@example.com").expect("valid bare jid");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut rx = Some(rx);
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        let (cancel, task) = start_late_force_detach_waiter_service(
+            &mut rx,
+            bare_jid.clone(),
+            waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+        )
+        .expect("late waiter service task");
+
+        tx.send(waddle_xmpp::registry::ForceDetachRequest {
+            origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+            requester_bare_jid: bare_jid,
+            ack: ack_tx,
+        })
+        .await
+        .expect("send late owner-managed waiter");
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut ack_rx)
+                .await
+                .is_err(),
+            "late owner-managed retirement during owner-managed cleanup must remain pending for final ack"
+        );
+
+        cancel.cancel();
+        let pending = task.await.expect("late waiter task joins");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].origin,
+            waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement
         );
     }
 

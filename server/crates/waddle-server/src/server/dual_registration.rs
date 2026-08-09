@@ -44,16 +44,38 @@ use jid::FullJid;
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use tracing::warn;
+use waddle_xmpp::registry::user_registry::CHILD_ACTOR_TIMEOUT;
 use waddle_xmpp::registry::{
     ConnectionEntry, RegisterUserResource, UnregisterUserResource, UserRegistryActor,
     UserRegistryError,
 };
 
-/// Upper bound on how long the fail-closed register `ask` may wait for the
-/// `UserRegistryActor` (mailbox enqueue and handler reply). Sized well above
-/// normal in-process actor latency but small enough that a wedged actor fails
-/// the bind quickly rather than hanging it — the client simply reconnects.
-const BIND_REGISTER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Upper bound on registry mailbox admission for the fail-closed register
+/// mirror. A wedged registry still fails the bind quickly rather than holding
+/// the connection setup indefinitely.
+const BIND_REGISTER_MAILBOX_TIMEOUT: Duration = CHILD_ACTOR_TIMEOUT;
+
+/// `RegisterUserResource` can serially spend one child-actor budget draining
+/// a pending unregister before it spends another registering the replacement.
+const BIND_REGISTER_CHILD_OPERATION_COUNT: u32 = 2;
+
+/// Each nested child ask spends TWO bounded phases on a congested actor:
+/// mailbox admission and then the reply itself, each capped by
+/// [`CHILD_ACTOR_TIMEOUT`]. Budgeting only the reply phase made a fully
+/// congested handler (~8 s) overrun the 4.25 s floor, so the outer ask
+/// timed out and rolled back while the entered handler continued.
+const BIND_REGISTER_CHILD_PHASES: u32 = 2;
+
+/// Scheduling allowance after the registry handler's bounded child work.
+const BIND_REGISTER_REPLY_TIMEOUT_MARGIN: Duration = Duration::from_millis(250);
+
+/// The authoritative register reply must outlive the handler's complete
+/// bounded path, otherwise a child overload becomes an outer transport timeout
+/// and bypasses the resumable-registration `Busy` retry.
+const BIND_REGISTER_REPLY_TIMEOUT: Duration = CHILD_ACTOR_TIMEOUT
+    .saturating_mul(BIND_REGISTER_CHILD_OPERATION_COUNT)
+    .saturating_mul(BIND_REGISTER_CHILD_PHASES)
+    .saturating_add(BIND_REGISTER_REPLY_TIMEOUT_MARGIN);
 
 /// Upper bound on how long a best-effort unregister mirror may wait to enqueue
 /// onto the `UserRegistryActor` mailbox before the caller gives up and logs.
@@ -65,6 +87,10 @@ const MIRROR_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) enum MirrorRegisterOutcome {
     Registered,
     ForeignOwner,
+    /// The child actor accepted neither a register nor a terminal failure;
+    /// callers that are completing an XEP-0198 handoff may retry this bounded
+    /// transient before failing session initialization.
+    Busy,
     Failed,
 }
 
@@ -111,13 +137,25 @@ pub(crate) async fn mirror_register_outcome(
             jid: jid.clone(),
             entry,
         })
-        .mailbox_timeout(BIND_REGISTER_TIMEOUT)
-        .reply_timeout(BIND_REGISTER_TIMEOUT)
+        .mailbox_timeout(BIND_REGISTER_MAILBOX_TIMEOUT)
+        .reply_timeout(BIND_REGISTER_REPLY_TIMEOUT)
         .await
     {
         Ok(()) => MirrorRegisterOutcome::Registered,
         Err(SendError::HandlerError(UserRegistryError::ClaimHeldByAnotherNode(_))) => {
             MirrorRegisterOutcome::ForeignOwner
+        }
+        Err(SendError::HandlerError(UserRegistryError::UserActorBusy(_))) => {
+            MirrorRegisterOutcome::Busy
+        }
+        // A resumable detach can time out releasing its last claim and leave
+        // the exact release converging in inventory; an immediate same-node
+        // resume then sees ClaimUnavailable. That is release-convergence, not
+        // a terminal condition — map it to Busy so the resume registration
+        // loop applies its bounded retry (mirrors the remote-owner mapping)
+        // instead of rolling back a valid resumed session.
+        Err(SendError::HandlerError(UserRegistryError::ClaimUnavailable(_))) => {
+            MirrorRegisterOutcome::Busy
         }
         Err(error) => {
             warn!(

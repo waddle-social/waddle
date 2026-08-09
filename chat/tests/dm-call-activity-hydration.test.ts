@@ -5,7 +5,7 @@ import {
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 
 function session(): WaddleSession {
   return {
@@ -34,6 +34,7 @@ describe("DM call activity hydration", () => {
     };
     const consumedStates: NonNullable<typeof sm>[] = [];
     const persistence: ResumePersistence = {
+      ...nullResumePersistence,
       dispose: () => undefined,
       loadCatchup: () => null,
       saveCatchup: () => undefined,
@@ -67,6 +68,7 @@ describe("DM call activity hydration", () => {
     let sm: ReturnType<ResumePersistence["loadSm"]> = null;
     const savedStates: NonNullable<typeof sm>[] = [];
     const persistence: ResumePersistence = {
+      ...nullResumePersistence,
       dispose: () => undefined,
       loadCatchup: () => null,
       saveCatchup: () => undefined,
@@ -111,6 +113,7 @@ describe("DM call activity hydration", () => {
     let sm: ReturnType<ResumePersistence["loadSm"]> = null;
     const savedStates: NonNullable<typeof sm>[] = [];
     const persistence: ResumePersistence = {
+      ...nullResumePersistence,
       dispose: () => undefined,
       loadCatchup: () => null,
       saveCatchup: () => undefined,

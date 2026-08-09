@@ -662,6 +662,7 @@ impl UserLocalClaims {
             let owner = entry.carbons_handle();
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let request = ForceDetachRequest {
+                origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
                 requester_bare_jid: bare_jid.clone(),
                 ack,
             };
@@ -1072,6 +1073,7 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
 mod tests {
     use super::*;
     use kameo::actor::Spawn;
+    use waddle_xmpp::registry::ForceDetachOrigin;
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry as _};
 
     fn test_session(stream_id: &str, jid: &str) -> DetachedSession {
@@ -1407,6 +1409,7 @@ mod tests {
             let expected_bare = bare_jid.clone();
             async move {
                 let request = force_detach_rx.recv().await.expect("force-detach request");
+                assert_eq!(request.origin, ForceDetachOrigin::OwnerManagedRetirement);
                 assert_eq!(request.requester_bare_jid, expected_bare);
                 let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
             }

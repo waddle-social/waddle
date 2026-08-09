@@ -342,6 +342,7 @@ impl OrderedRelayDeliveryBridge {
             {
                 crate::server::dual_registration::MirrorRegisterOutcome::Registered => {}
                 crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner
+                | crate::server::dual_registration::MirrorRegisterOutcome::Busy
                 | crate::server::dual_registration::MirrorRegisterOutcome::Failed => {
                     return RemoteResourceOriginRefresh::Failed;
                 }

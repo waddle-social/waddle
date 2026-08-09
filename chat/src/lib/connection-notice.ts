@@ -7,6 +7,8 @@ export interface ConnectionNoticeCopy {
   shortLabel: string;
   title: string;
   body: string;
+  actionLabel?: string;
+  actionKind?: "recover-superseded";
 }
 
 interface ConnectionNoticeInput {
@@ -56,6 +58,16 @@ export function getConnectionNoticeCopy({
   }
 
   if (status.state === "offline") {
+    if (status.kind === "superseded") {
+      return {
+        tone: "offline",
+        shortLabel: "reconnect",
+        title: "Session resumed in another tab",
+        body: `${status.detail.trim() || "This session was resumed in another tab."} Reconnect to continue from this tab.`,
+        actionLabel: "Reconnect",
+        actionKind: "recover-superseded",
+      };
+    }
     return {
       tone: "offline",
       shortLabel: "offline",

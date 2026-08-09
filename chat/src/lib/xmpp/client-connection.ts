@@ -304,6 +304,10 @@ type ResumeStateSource = {
 export class ResumeStateStore {
   private stateValue: XmppResumeState | null = null;
   private handleValue: XmppResumeStateHandle | null = null;
+  private ownResumePrevid: string | null = null;
+  private ownResumeClientId: string | null = null;
+  private ownResumeAttemptId: string | null = null;
+  private ownResumeRetainedPostSuccess = false;
   private disposed = false;
 
   constructor(private readonly persistence: ResumePersistence) {}
@@ -347,9 +351,63 @@ export class ResumeStateStore {
     this.persistence.clearSm();
   }
 
+  /**
+   * An explicit fresh bind must not inherit the prior resume handle, witness,
+   * or persisted POD snapshot. Used when this tab was superseded and is
+   * intentionally starting a distinct concurrent session instead of trying to
+   * reclaim the displaced stream.
+   */
+  resetForFreshBind(): void {
+    if (this.disposed) return;
+    this.finishActiveOwnResume({ preserveRetainedSuccessWitness: true });
+    this.stateValue = null;
+    this.setHandle(null);
+    this.persistence.clearSm();
+  }
+
+  /**
+   * Witness one exact cross-document resume attempt. The persisted witness is
+   * intentionally separate from the POD snapshot: `doConnect` consumes that
+   * snapshot before the new handle is connected, while the old document needs
+   * this narrow proof to classify its force-detach close.
+   */
+  beginOwnResume(previd: string): void {
+    if (this.disposed || !previd) return;
+    this.ownResumeClientId = createResumeClientId();
+    this.ownResumeAttemptId = this.ownResumeClientId;
+    this.ownResumePrevid = previd;
+    this.ownResumeRetainedPostSuccess = false;
+    this.persistence.beginOwnResume(previd, this.ownResumeClientId, this.ownResumeAttemptId);
+  }
+
+  retainOwnResume(previd: string): void {
+    if (
+      this.disposed
+      || !previd
+      || this.ownResumePrevid !== previd
+      || !this.ownResumeClientId
+      || !this.ownResumeAttemptId
+    ) return;
+    this.ownResumeRetainedPostSuccess = true;
+    this.persistence.retainOwnResume(previd, this.ownResumeClientId, this.ownResumeAttemptId);
+  }
+
+  finishOwnResume(previd: string): void {
+    if (this.disposed || !previd || this.ownResumePrevid !== previd || !this.ownResumeClientId) return;
+    this.finishActiveOwnResume({ preserveRetainedSuccessWitness: false });
+  }
+
+  /** Consume a witness only when this exact conflicting handle exposes it. */
+  consumeOwnResumeConflict(source: ResumeStateSource): boolean {
+    if (this.disposed) return false;
+    const previd = source.get_resume_state?.()?.previd;
+    return !!previd && this.persistence.consumeOwnResume(previd, this.ownResumeClientId ?? "") === "foreign";
+  }
+
   /** Full teardown: state, handle, persisted SM slot, and retained-room list. */
   clearAll(): void {
     if (this.disposed) return;
+    this.finishActiveOwnResume({ preserveRetainedSuccessWitness: true });
     this.stateValue = null;
     this.setHandle(null);
     this.persistence.clearSm();
@@ -404,6 +462,7 @@ export class ResumeStateStore {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.finishActiveOwnResume({ preserveRetainedSuccessWitness: true });
     this.stateValue = null;
     const handle = this.handleValue;
     this.handleValue = null;
@@ -414,6 +473,38 @@ export class ResumeStateStore {
     }
     this.persistence.dispose();
   }
+
+  /**
+   * A witness retained after a SUCCESSFUL resume exists for the benefit of
+   * the suspended former document: it classifies that tab's delayed
+   * force-detach `<conflict/>` as superseded instead of a terminal new
+   * sign-in. Owner disposal (client replacement, provider unmount, clearAll)
+   * must therefore leave it to its TTL/GC instead of deleting it — only an
+   * unfinished attempt is cleared synchronously.
+   */
+  private finishActiveOwnResume(
+    opts: { preserveRetainedSuccessWitness: boolean } = {
+      preserveRetainedSuccessWitness: false,
+    },
+  ): void {
+    const preserve = opts.preserveRetainedSuccessWitness && this.ownResumeRetainedPostSuccess;
+    if (
+      !preserve
+      && this.ownResumePrevid
+      && this.ownResumeClientId
+      && this.ownResumeAttemptId
+    ) {
+      this.persistence.finishOwnResume(this.ownResumePrevid, this.ownResumeClientId, this.ownResumeAttemptId);
+    }
+    this.ownResumePrevid = null;
+    this.ownResumeClientId = null;
+    this.ownResumeAttemptId = null;
+    this.ownResumeRetainedPostSuccess = false;
+  }
+}
+
+function createResumeClientId(): string {
+  return globalThis.crypto.randomUUID();
 }
 
 type OfflineSendQueueDeps = {
@@ -425,6 +516,7 @@ type OfflineSendQueueDeps = {
   /** Why a send is being queued right now ("offline", "reconnecting", …). */
   enqueueReason: () => string;
   emitStatus: (snapshot: XmppStatusSnapshot) => void;
+  currentStatus?: () => XmppStatusSnapshot | null;
   /** Known nick → bare-JID mentions for a room, merged into queued room sends. */
   roomMemberJids: (roomJid: string) => Record<string, string>;
   sendDirect: (
@@ -445,6 +537,12 @@ type OfflineSendQueueDeps = {
  * `messageAcked` / `messageDeliveryFailed` telemetry hooks, and the
  * per-conversation flush coalescing promises.
  */
+/** Grace before reclaiming successor-owned replay rows (see
+ *  `scheduleSuccessorReplayConvergence`): a live successor's resume replay
+ *  and SM acks complete within seconds of its bind; ninety covers slow
+ *  networks without leaving a dead successor's rows stuck until reload. */
+const SUCCESSOR_REPLAY_CONVERGENCE_MS = 90_000;
+
 export class OfflineSendQueue {
   private readonly inflightQueuedIds = new Set<string>();
   private readonly resumeReplayQueuedIds = new Set<string>();
@@ -529,6 +627,46 @@ export class OfflineSendQueue {
     // returns, and a synchronous emit would fire into zero listeners.
     const seedGeneration = this.generation;
     queueMicrotask(() => this.emitQueueDepthForGeneration(seedGeneration));
+  }
+
+  /**
+   * Bounded successor-ownership fallback (codex 1668 round): after this tab's
+   * explicit superseded recovery, ids in `resumeReplayQueuedIds` belong to the
+   * successor tab that resumed the stream. A LIVE successor replays and acks
+   * within seconds — its ack deletes the shared persisted row, so nothing is
+   * left to converge. If the row still exists after the grace window, the
+   * successor died (or never delivered): release the id back to this tab's
+   * flushable set and re-drive the queue. The grace bound keeps the race with
+   * a slow-but-live successor inside the at-least-once contract.
+   */
+  scheduleSuccessorReplayConvergence(): void {
+    if (this.resumeReplayQueuedIds.size === 0) return;
+    const owned = [...this.resumeReplayQueuedIds];
+    const generation = this.generation;
+    setTimeout(() => {
+      if (generation !== this.generation) return;
+      const persistedEntries = listQueuedMessages(this.deps.queueScope());
+      const persisted = new Map(persistedEntries.map((entry) => [entry.id, entry]));
+      let released = false;
+      const roomsToFlush = new Set<string>();
+      for (const id of owned) {
+        if (!this.resumeReplayQueuedIds.delete(id)) continue;
+        this.inflightQueuedIds.delete(id);
+        const entry = persisted.get(id);
+        if (!entry) continue;
+        // Successor never acknowledged the row: this tab owns it again.
+        released = true;
+        if (entry.kind === "room") roomsToFlush.add(entry.roomJid);
+      }
+      if (!released) return;
+      this.emitQueueDepth();
+      if (this.deps.canUseConnectedSession()) {
+        void this.flushDirect();
+        for (const roomJid of roomsToFlush) {
+          if (this.deps.roomIsReady(roomJid)) void this.flushRoom(roomJid);
+        }
+      }
+    }, SUCCESSOR_REPLAY_CONVERGENCE_MS);
   }
 
   /** Stop the stuck-queue heartbeat; called from the client's
@@ -809,6 +947,11 @@ export class OfflineSendQueue {
     // drains on join, not on reconnect. Only report a degraded status
     // when the session itself is unusable.
     if (this.deps.canUseConnectedSession()) return;
+    const currentStatus = this.deps.currentStatus?.();
+    if (currentStatus?.kind === "superseded") {
+      this.deps.emitStatus(currentStatus);
+      return;
+    }
     const queueCount = countQueuedMessages(this.deps.queueScope());
     this.deps.emitStatus({
       state: browserOffline() ? "offline" : "reconnecting",

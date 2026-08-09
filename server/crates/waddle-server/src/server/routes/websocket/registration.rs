@@ -7,6 +7,35 @@ use super::{
     },
 };
 
+/// A resume can briefly observe the previous node's `UserActor` while its
+/// force-detach cleanup drains.  Bound retries keep that handoff from turning
+/// an otherwise-valid XEP-0198 resume into a terminal session-init failure.
+const RESUME_REGISTRATION_BUSY_ATTEMPTS: usize = 3;
+
+fn resume_registration_busy_backoff(attempt: usize) -> std::time::Duration {
+    std::time::Duration::from_millis(50 * (attempt as u64 + 1))
+}
+
+pub(super) async fn retry_resumed_registration_busy<F, Fut>(
+    mut register: F,
+) -> crate::server::dual_registration::MirrorRegisterOutcome
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = crate::server::dual_registration::MirrorRegisterOutcome>,
+{
+    for attempt in 0..RESUME_REGISTRATION_BUSY_ATTEMPTS {
+        let outcome = register().await;
+        if outcome == crate::server::dual_registration::MirrorRegisterOutcome::Busy
+            && attempt + 1 < RESUME_REGISTRATION_BUSY_ATTEMPTS
+        {
+            tokio::time::sleep(resume_registration_busy_backoff(attempt)).await;
+            continue;
+        }
+        return outcome;
+    }
+    unreachable!("resume registration busy retry loop always returns")
+}
+
 pub(super) enum RegistrationAfterFrame {
     Unchanged,
     Registered(SmRegistrationFinalization),
@@ -352,17 +381,29 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         .connection_registry
         .entry_if_owner(&jid, &owner)
     {
-        let mirror_outcome = crate::server::dual_registration::mirror_register_outcome(
-            &state.deps.protocol.user_registry,
-            jid.clone(),
-            entry.clone(),
-        )
-        .await;
+        let mirror_outcome = if resumed {
+            retry_resumed_registration_busy(|| {
+                crate::server::dual_registration::mirror_register_outcome(
+                    &state.deps.protocol.user_registry,
+                    jid.clone(),
+                    entry.clone(),
+                )
+            })
+            .await
+        } else {
+            crate::server::dual_registration::mirror_register_outcome(
+                &state.deps.protocol.user_registry,
+                jid.clone(),
+                entry.clone(),
+            )
+            .await
+        };
         let registered = match mirror_outcome {
             crate::server::dual_registration::MirrorRegisterOutcome::Registered => true,
             crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner => {
                 register_remote_clustered_resource(state, &jid, entry, owner.clone()).await
             }
+            crate::server::dual_registration::MirrorRegisterOutcome::Busy => false,
             crate::server::dual_registration::MirrorRegisterOutcome::Failed => false,
         };
         if !registration_authoritative(permit, shutdown) {

@@ -37,6 +37,7 @@ import EventsPane from "@/components/community/EventsPane.vue";
 import ChatAppModals from "@/components/chat/ChatAppModals.vue";
 import ChatMobileDrawers from "@/components/chat/ChatMobileDrawers.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
+import SupersededRecoveryBanner from "@/components/chat/SupersededRecoveryBanner.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ExtensionRouteRail from "@/components/chat/ExtensionRouteRail.vue";
 import ExtensionRouteView from "@/components/chat/ExtensionRouteView.vue";
@@ -400,7 +401,8 @@ function getMucCallSender(): RawIqSender | null {
 }
 
 function getSelfFullJid(): string | undefined {
-  return (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
+  return connectionStore.selfFullJid ??
+    (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
 }
 
 function getExpectedMixerJid(): string | undefined {
@@ -554,16 +556,72 @@ onUnmounted(() => {
   disconnectMessageToolbarLifecycle?.();
   disconnectMessageToolbarLifecycle = null;
 });
+
+/**
+ * Superseded recovery outside the conversation surface: `ContentArea` owns
+ * the connection banner, but dashboard / feed / events / threads / unread /
+ * settings are sibling branches that render no recovery affordance while the
+ * sticky superseded latch rejects every automatic reconnect. Surface the
+ * explicit Reconnect action at the shell level for exactly those branches.
+ */
+const supersededOutsideConversation = computed(() => {
+  if (messaging.xmppStatus.value.kind !== "superseded") return false;
+  return (
+    ui.activePage.value === "dashboard"
+    || ui.activeCommunitySurface.value === "feed"
+    || ui.activeCommunitySurface.value === "events"
+    || ui.activePage.value === "threads"
+    || ui.activePage.value === "unread"
+    || ui.activePage.value === "settings"
+  );
+});
+
+/**
+ * Open right-side panels hide `ContentArea`'s own banner: ANY active right
+ * panel (thread, pinned, extension) hides the content pane on mobile via
+ * the desktop-split class, and a nested thread hides it entirely on both.
+ * Whenever the desktop split still shows ContentArea, the shell banner is
+ * `md:hidden` to avoid doubling it there.
+ */
+const supersededThreadStackDepth = computed(() =>
+  activeRightPanel.value === "thread" ? activeThreadStack.value.length : 0,
+);
+const supersededContentPaneObscured = computed(() => activeRightPanel.value !== null);
+const supersededBannerVisible = computed(() =>
+  messaging.xmppStatus.value.kind === "superseded"
+  && (supersededOutsideConversation.value || supersededContentPaneObscured.value),
+);
+const supersededBannerClass = computed(() =>
+  !supersededOutsideConversation.value
+  && supersededContentPaneObscured.value
+  && supersededThreadStackDepth.value < 2
+    ? "md:hidden"
+    : "",
+);
+
+async function recoverSupersededFromShell() {
+  await xmppClient.value?.recoverSupersededSession();
+}
 </script>
 
 <template>
-  <AdminView
-    v-if="ui.activePage.value === 'admin'"
-    :xmpp-client="xmppClient"
-    :active-panel="adminPanelFromUrl"
-    @navigate="onAdminNavigate"
-    @back="onAdminBack"
-  />
+  <div v-if="ui.activePage.value === 'admin'" class="flex h-full min-h-0 flex-col">
+    <!-- The admin route bypasses the chat shell entirely, so the superseded
+         recovery affordance must render here as well or the sticky latch
+         leaves the tab without any reconnect action. -->
+    <SupersededRecoveryBanner
+      v-if="messaging.xmppStatus.value.kind === 'superseded'"
+      :detail="messaging.xmppStatus.value.detail"
+      @recover="recoverSupersededFromShell"
+    />
+    <AdminView
+      class="min-h-0 flex-1"
+      :xmpp-client="xmppClient"
+      :active-panel="adminPanelFromUrl"
+      @navigate="onAdminNavigate"
+      @back="onAdminBack"
+    />
+  </div>
   <div v-else class="chat-app-shell">
     <CallAudioPlaybackPrompt />
     <ChatMobileDrawers
@@ -618,7 +676,7 @@ onUnmounted(() => {
     />
 
     <!-- Desktop layout -->
-    <div class="chat-desktop-shell">
+    <div class="chat-desktop-shell relative">
       <!-- Icon rail: waddle switcher -->
       <div class="chat-desktop-rail-slot">
         <WaddlesSidebar
@@ -743,6 +801,20 @@ onUnmounted(() => {
         />
       </div>
 
+      <!-- Superseded recovery: `.chat-desktop-shell` is a horizontal flex
+           row, so an in-flow banner would become a side column squeezing the
+           active page. Pin it across the full shell width instead; its own
+           background/border keep it readable over any surface. -->
+      <div
+        v-if="supersededBannerVisible"
+        class="absolute inset-x-0 top-0 z-40"
+        :class="supersededBannerClass"
+      >
+        <SupersededRecoveryBanner
+          :detail="messaging.xmppStatus.value.detail"
+          @recover="recoverSupersededFromShell"
+        />
+      </div>
       <!-- Main content -->
       <HomeDashboard
         v-if="ui.activePage.value === 'dashboard'"

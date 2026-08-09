@@ -5,6 +5,7 @@ import type { AppState } from "@/lib/chat-ui";
 
 interface ConnectionStore {
   client: BrowserXmppClient | null;
+  selfFullJid: string | null;
   appState: AppState;
   session: WaddleSession | null;
   appError: string;
@@ -18,6 +19,7 @@ interface ConnectionStore {
 
 export const connectionStore: ConnectionStore = shallowReactive({
   client: null,
+  selfFullJid: null,
   appState: "loading" as AppState,
   session: null as WaddleSession | null,
   appError: "",
