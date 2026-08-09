@@ -66,8 +66,8 @@ function getClientJoiner(): ((roomJid: string) => Promise<void>) | null {
 }
 
 function getSelfFullJid(): string | undefined {
-  const client = connectionStore.client as unknown as { fullJid?: string } | null;
-  return client?.fullJid;
+  return connectionStore.selfFullJid ??
+    (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
 }
 
 function getExpectedMixerJid(): string | undefined {

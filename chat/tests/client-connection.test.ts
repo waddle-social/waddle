@@ -16,7 +16,7 @@ import {
   type XmppResumeState,
 } from "../src/lib/xmpp/client-connection";
 import { listQueuedMessages } from "../src/lib/outbound-queue-store";
-import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
 
 const SCOPE = "alice@example.com";
@@ -551,7 +551,14 @@ describe("ReconnectScheduler", () => {
 function createRecordingPersistence() {
   let saved: XmppResumeState | null = null;
   const calls: string[] = [];
+  const ownResumeCalls: Array<{
+    method: "begin" | "retain" | "finish";
+    previd: string;
+    clientId: string;
+    attemptId?: string;
+  }> = [];
   const persistence: ResumePersistence = {
+    ...nullResumePersistence,
     dispose: () => undefined,
     loadCatchup: () => null,
     saveCatchup: () => undefined,
@@ -569,13 +576,22 @@ function createRecordingPersistence() {
       calls.push("clearSm");
       saved = null;
     },
+    beginOwnResume: (previd, clientId, attemptId) => {
+      ownResumeCalls.push({ method: "begin", previd, clientId, attemptId });
+    },
+    retainOwnResume: (previd, clientId, attemptId) => {
+      ownResumeCalls.push({ method: "retain", previd, clientId, attemptId });
+    },
+    finishOwnResume: (previd, clientId, attemptId) => {
+      ownResumeCalls.push({ method: "finish", previd, clientId, attemptId });
+    },
     preparePagehideHandoff: () => calls.push("preparePagehideHandoff"),
     loadJoinedRooms: () => [],
     saveJoinedRooms: () => undefined,
     clearJoinedRooms: () => calls.push("clearJoinedRooms"),
     clearAutoJoinBlocks: () => calls.push("clearAutoJoinBlocks"),
   };
-  return { persistence, calls, getSaved: () => saved };
+  return { persistence, calls, ownResumeCalls, getSaved: () => saved };
 }
 
 describe("ResumeStateStore", () => {
@@ -684,6 +700,97 @@ describe("ResumeStateStore", () => {
       "clearSm",
       "clearJoinedRooms",
       "clearAutoJoinBlocks",
+    ]);
+  });
+
+  test("each own-resume attempt gets a fresh client marker and terminal cleanup uses the active attempt", () => {
+    const { persistence, ownResumeCalls } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+
+    store.beginOwnResume("p4");
+    store.retainOwnResume("p4");
+    store.beginOwnResume("p4");
+    store.retainOwnResume("p4");
+    // The second attempt was retained after a SUCCESSFUL resume: it is the
+    // suspended former document's only proof that its delayed conflict was
+    // superseded, so a fresh bind must leave it to its TTL instead of
+    // deleting it (codex 1668 round: disposal previously erased it and the
+    // former tab latched the terminal new-sign-in state).
+    store.resetForFreshBind();
+    store.beginOwnResume("p5");
+    store.clearAll();
+    store.beginOwnResume("p6");
+    store.dispose();
+
+    expect(ownResumeCalls).toHaveLength(8);
+    expect(ownResumeCalls[0]?.method).toBe("begin");
+    expect(ownResumeCalls[1]).toEqual({
+      method: "retain",
+      previd: "p4",
+      clientId: ownResumeCalls[0]!.clientId,
+      attemptId: ownResumeCalls[0]!.attemptId,
+    });
+    expect(ownResumeCalls[2]?.method).toBe("begin");
+    expect(ownResumeCalls[2]?.clientId).not.toBe(ownResumeCalls[0]?.clientId);
+    expect(ownResumeCalls[2]?.attemptId).not.toBe(ownResumeCalls[0]?.attemptId);
+    expect(ownResumeCalls[3]).toEqual({
+      method: "retain",
+      previd: "p4",
+      clientId: ownResumeCalls[2]!.clientId,
+      attemptId: ownResumeCalls[2]!.attemptId,
+    });
+    // No finish for the retained p4 witness: it outlives the fresh bind.
+    expect(ownResumeCalls[4]).toEqual({
+      method: "begin",
+      previd: "p5",
+      clientId: ownResumeCalls[4]!.clientId,
+      attemptId: ownResumeCalls[4]!.attemptId,
+    });
+    // p5 was never retained (unfinished attempt): clearAll deletes it.
+    expect(ownResumeCalls[5]).toEqual({
+      method: "finish",
+      previd: "p5",
+      clientId: ownResumeCalls[4]!.clientId,
+      attemptId: ownResumeCalls[4]!.attemptId,
+    });
+    expect(ownResumeCalls[6]).toEqual({
+      method: "begin",
+      previd: "p6",
+      clientId: ownResumeCalls[6]!.clientId,
+      attemptId: ownResumeCalls[6]!.attemptId,
+    });
+    // p6 unfinished: dispose deletes it synchronously.
+    expect(ownResumeCalls[7]).toEqual({
+      method: "finish",
+      previd: "p6",
+      clientId: ownResumeCalls[6]!.clientId,
+      attemptId: ownResumeCalls[6]!.attemptId,
+    });
+  });
+
+  test("an explicit finishOwnResume still deletes a retained success witness", () => {
+    const { persistence, ownResumeCalls } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+
+    store.beginOwnResume("p7");
+    store.retainOwnResume("p7");
+    store.finishOwnResume("p7");
+
+    expect(ownResumeCalls.map((call) => call.method)).toEqual([
+      "begin",
+      "retain",
+      "finish",
+    ]);
+    // And the retained flag does not leak into the next attempt: an
+    // unfinished follow-up attempt is still cleared by dispose.
+    store.beginOwnResume("p8");
+    store.dispose();
+    expect(ownResumeCalls.map((call) => call.method)).toEqual([
+      "begin",
+      "retain",
+      "finish",
+      "begin",
+      "finish",
     ]);
   });
 });

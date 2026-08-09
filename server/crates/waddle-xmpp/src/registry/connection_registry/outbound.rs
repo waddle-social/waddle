@@ -122,21 +122,42 @@ impl OutboundStanza {
     }
 }
 
+/// Why the connection task is being asked to force-detach its live stream.
+///
+/// The connection's cleanup owns the normal actor-registry mirror.  The
+/// exception is stale-actor retirement: its `UserRegistryActor` handler is
+/// already waiting for this request's acknowledgement and will atomically
+/// remove the retired actor after that acknowledgement.  Asking that same
+/// registry from the connection cleanup would therefore deadlock the actor's
+/// single-message turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ForceDetachOrigin {
+    /// A cross-node XEP-0198 resume is replacing a still-live stream.
+    CrossNodeResume,
+    /// A `UserRegistryActor` is retiring a stale actor before claim reuse.
+    RegistryStaleActorRetirement,
+    /// An external lifecycle owner will remove its own registry mirrors after
+    /// the connection task acknowledges the detach.
+    OwnerManagedRetirement,
+}
+
 /// A request to force-detach a live connection from its own connection task.
 /// Introduced for cross-node XEP-0198 resume (ADR-0017 Phase 3 Slice 6,
-/// element 8's "live, owned elsewhere" branch) and also used by clustered
-/// `UserActor` owner demotion/retirement before a stale user claim is reused.
+/// element 8's "live, owned elsewhere" branch) plus owner-managed retirement
+/// flows that must let the connection task perform the destructive close while
+/// the caller retains authority over any subsequent registry bookkeeping.
 /// Delivered through [`ConnectionEntry::force_detach_tx`] into the owning
 /// connection's own select loop, so the destructive detach-flush +
 /// `<conflict/>` close runs on the connection's own task (never from an
 /// external task reaching into its state directly).
 #[derive(Debug)]
 pub struct ForceDetachRequest {
-    /// The bare JID the cross-node resume requester authenticated as.
-    /// Compared against this connection's own bound JID (defense in depth:
-    /// the caller — `ResumeStealBridge` — already checked this against the
-    /// registry's reverse index before sending, but the identity check must
-    /// gate the destructive close itself, not just an earlier lookup).
+    /// The lifecycle operation that owns the actor-registry bookkeeping.
+    pub origin: ForceDetachOrigin,
+    /// The bare JID whose live resource is being retired. Compared against
+    /// this connection's own bound JID so the destructive close is always
+    /// identity-gated, including on the cross-node resume path that already
+    /// checked the registry's reverse index before sending.
     pub requester_bare_jid: jid::BareJid,
     /// Answered exactly once, after the connection either force-detaches
     /// (identity matched) or declines (identity mismatch).

@@ -1,5 +1,8 @@
 use super::super::{
-    cleanup::{cleanup_connection_shutdown, cleanup_muc_presence_for_jid},
+    cleanup::{
+        cleanup_connection_shutdown, cleanup_force_detach_connection_shutdown,
+        cleanup_muc_presence_for_jid,
+    },
     frame::{handle_xmpp_frame, settle_inbound_dispatch},
     frame_backstop::InboundDisposition,
     handlers::{self, presence::handle_muc_join},
@@ -22,10 +25,14 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use jid::{BareJid, FullJid};
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify, Semaphore};
+use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
 use waddle_xmpp::{
+    ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity},
     protocol::{Blocklist, ConnectionPhase, InboundEvent},
-    registry::{DeliveryKind, OutboundStanza},
+    registry::{
+        ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+        GetUser, OutboundStanza, RegisterUserResource, UserRegistryError, WireUserClusteringClaims,
+    },
     stream_management::{SmSessionRegistry, SM_NS},
     telemetry::attributes::SmEvictionPath,
     Stanza,
@@ -906,6 +913,681 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
         resumed_frame.attr("h"),
         Some("1"),
         "the timed-out second stanza must remain outside the server acknowledgement"
+    );
+}
+
+/// The force-detach cleanup path must not acknowledge `Detached` if its
+/// synchronous unregister ask is transport-ambiguous and the ordered
+/// pending-unregister record cannot be submitted.  A remote resume retry can
+/// still discover the persisted snapshot, but the old node never reports an
+/// untracked actor-tree cleanup as complete.
+#[tokio::test]
+async fn force_detach_cleanup_returns_not_persisted_when_unregister_retry_cannot_be_recorded() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "force-detach-unavailable@example.com/web"
+        .parse()
+        .expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session =
+        Some(create_test_session(state.as_ref(), "force-detach-unavailable").await);
+    conn.registry_owner = Some(owner);
+    conn.sm_state
+        .enable("force-detach-ambiguous".to_string(), true, Some(300));
+
+    // Both the original synchronous ask and its ordered retry-record ask
+    // fail, exercising the pre-handler transport-failure branch.
+    state.deps.protocol.user_registry.kill();
+    state.deps.protocol.user_registry.wait_for_shutdown().await;
+
+    let outcome = cleanup_force_detach_connection_shutdown(
+        state.as_ref(),
+        &mut rx,
+        &mut conn,
+        false,
+        waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session("force-detach-ambiguous")
+            .await
+            .expect("registry lookup")
+            .is_some(),
+        "the persisted snapshot is retained for the remote resume retry path"
+    );
+}
+
+/// Cross-node force-detach must not acknowledge `Detached` when the
+/// sender-side relay cannot prove the remote owner either converged its
+/// unregister or recorded a janitor retry. A local `AlreadyAbsent`
+/// actor outcome on this node is not enough.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn force_detach_cleanup_returns_not_persisted_when_remote_owner_unregister_proof_is_missing()
+{
+    use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
+    use crate::clustering::{ClusteringHandles, NodeId};
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use tokio_util::sync::CancellationToken;
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    let clustering = ClusteringHandles {
+        ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+        ..Default::default()
+    };
+    let state = create_test_websocket_state_with_clustering(
+        clustering,
+        Arc::new(InMemorySmSessionRegistry::new().with_persistence(Arc::new(
+            waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+        ))),
+    )
+    .await;
+
+    let jid: FullJid = "force-detach-remote-proof@example.com/web"
+        .parse()
+        .expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    bridge
+        .test_insert_remote_socket_registration(
+            jid.clone(),
+            Arc::clone(&owner),
+            NodeId::new("missing-owner-node".to_string()),
+        )
+        .await;
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session =
+        Some(create_test_session(state.as_ref(), "force-detach-remote-proof").await);
+    conn.registry_owner = Some(owner);
+    // Enable resumable SM through the real frame path so the enable-time
+    // registry claim exists — a directly-mutated `sm_state` never publishes
+    // it, and the detach-time store then fails before the proof gate runs.
+    let enable_responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let stream_id = Element::from_str(&enable_responses[0])
+        .expect("enabled xml")
+        .attr("id")
+        .expect("stream id")
+        .to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+
+    let outcome = cleanup_force_detach_connection_shutdown(
+        state.as_ref(),
+        &mut rx,
+        &mut conn,
+        false,
+        waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert_eq!(
+        bridge.test_pending_remote_socket_unregister_count().await,
+        1,
+        "sender-side relay failure must retain a retryable remote unregister obligation"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session(&stream_id)
+            .await
+            .expect("registry lookup")
+            .is_some(),
+        "the persisted snapshot is retained until remote-owner cleanup is proved"
+    );
+}
+
+/// Stale-actor retirement owns the actor-tree removal in the waiting
+/// `UserRegistryActor` turn, so the connection cleanup must still report a
+/// successful detach even if the registry itself is unavailable. Re-entering
+/// the registry here would incorrectly degrade to `NotPersisted`.
+#[tokio::test]
+async fn stale_actor_force_detach_cleanup_detaches_without_registry_reentry() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "stale-force-detach@example.com/web".parse().expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session =
+        Some(create_test_session(state.as_ref(), "stale-force-detach").await);
+    conn.registry_owner = Some(owner);
+    conn.sm_state
+        .enable("stale-force-detach-stream".to_string(), true, Some(300));
+
+    state.deps.protocol.user_registry.kill();
+    state.deps.protocol.user_registry.wait_for_shutdown().await;
+
+    let outcome = cleanup_force_detach_connection_shutdown(
+        state.as_ref(),
+        &mut rx,
+        &mut conn,
+        false,
+        waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        super::super::cleanup::ConnectionShutdownOutcome::Detached
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session("stale-force-detach-stream")
+            .await
+            .expect("registry lookup")
+            .is_some(),
+        "the detach snapshot must persist without depending on a registry re-entry"
+    );
+}
+
+/// A short child-actor critical section during a cross-node resume must be
+/// retried synchronously, so a successful second ask reaches `Released`
+/// instead of taking the janitor fallback.
+#[tokio::test]
+async fn force_detach_busy_unregister_retries_until_the_child_clears() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let outcome = super::super::cleanup::retry_force_detach_busy_unregister({
+        let attempts = Arc::clone(&attempts);
+        move || {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                let outcome = if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    waddle_xmpp::registry::UnregisterAndReleaseOutcome::RetryableFailure(
+                        waddle_xmpp::registry::user_registry::UnregisterAndReleaseRetryableFailure::UserActorBusy,
+                    )
+                } else {
+                    waddle_xmpp::registry::UnregisterAndReleaseOutcome::Released
+                };
+                Ok::<_, ()>(outcome)
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(
+        outcome,
+        Ok(waddle_xmpp::registry::UnregisterAndReleaseOutcome::Released)
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn force_detach_busy_unregister_stops_after_three_attempts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let outcome = super::super::cleanup::retry_force_detach_busy_unregister({
+        let attempts = Arc::clone(&attempts);
+        move || {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(
+                    waddle_xmpp::registry::UnregisterAndReleaseOutcome::RetryableFailure(
+                        waddle_xmpp::registry::user_registry::UnregisterAndReleaseRetryableFailure::UserActorBusy,
+                    ),
+                )
+            }
+        }
+    })
+    .await;
+
+    assert!(matches!(
+        outcome,
+        Ok(waddle_xmpp::registry::UnregisterAndReleaseOutcome::RetryableFailure(
+            waddle_xmpp::registry::user_registry::UnregisterAndReleaseRetryableFailure::UserActorBusy
+        ))
+    ));
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+/// A real force-detach can encounter a full old-node UserActor mailbox while
+/// a short operation is in flight.  Releasing that operation during the
+/// bounded retry window must prune the actor synchronously, without leaving a
+/// janitor pending-unregister record behind.
+#[tokio::test]
+async fn force_detach_busy_child_retries_and_converges_without_janitor() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "force-detach-busy@example.com/web".parse().expect("jid");
+    let bare_jid = jid.to_bare();
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("registered entry");
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry,
+        })
+        .await
+        .expect("mirror into UserActor");
+
+    let actor = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get UserActor")
+        .expect("UserActor exists");
+    let entered = Arc::new(Notify::new());
+    let (release_tx, release_rx) = oneshot::channel();
+    actor
+        .tell(
+            waddle_xmpp::registry::user_actor::test_support::GateMailbox {
+                entered: Arc::clone(&entered),
+                release_rx,
+            },
+        )
+        .await
+        .expect("queue mailbox gate");
+    entered.notified().await;
+
+    let mut saw_mailbox_full = false;
+    for _ in 0..128 {
+        let sent = actor
+            .tell(waddle_xmpp::registry::user_actor::test_support::MailboxNoop)
+            .try_send();
+        if matches!(sent, Err(kameo::error::SendError::MailboxFull(_))) {
+            saw_mailbox_full = true;
+            break;
+        }
+        sent.expect("mailbox filler should enqueue or report full");
+    }
+    assert!(saw_mailbox_full, "child mailbox must be busy before detach");
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session =
+        Some(create_test_session(state.as_ref(), "force-detach-busy").await);
+    conn.registry_owner = Some(owner);
+    conn.sm_state
+        .enable("force-detach-busy".to_string(), true, Some(300));
+
+    let cleanup_state = Arc::clone(&state);
+    let cleanup = tokio::spawn(async move {
+        cleanup_force_detach_connection_shutdown(
+            cleanup_state.as_ref(),
+            &mut rx,
+            &mut conn,
+            false,
+            waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+        )
+        .await
+    });
+    // The first child ask observes the full mailbox immediately.  Release
+    // before its 50ms retry backoff expires so the second bounded ask drains
+    // the queued no-ops and removes the exact owner.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    release_tx.send(()).expect("release mailbox gate");
+
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), cleanup)
+            .await
+            .expect("bounded retry must not hang")
+            .expect("cleanup task joins"),
+        super::super::cleanup::ConnectionShutdownOutcome::Detached
+    );
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .user_registry
+            .ask(waddle_xmpp::registry::user_registry::test_support::PendingUnregisterCount,)
+            .await
+            .expect("pending unregister count"),
+        0,
+        "a successful bounded retry must not leave janitor work behind"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .user_registry
+            .ask(GetUser { bare_jid })
+            .await
+            .expect("get UserActor after detach")
+            .is_none(),
+        "successful force-detach prunes the now-empty UserActor"
+    );
+}
+
+/// When a cross-node force-detach is already shutting this connection down,
+/// a stale-actor retirement request can queue behind it and block the
+/// `UserRegistryActor` turn waiting on that second acknowledgement. The
+/// connection must therefore release the stale-retirement waiter before its
+/// cross-node cleanup re-enters the registry, or the synchronous unregister
+/// ask times out behind the waiting actor turn.
+#[tokio::test]
+async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup() {
+    let state = create_test_websocket_state().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let shared_identity = SharedNodeIdentity::new(NodeIdentity::new("node-this", "epoch-old"));
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(WireUserClusteringClaims {
+            claim_store,
+            node_identity: shared_identity.clone(),
+        })
+        .await
+        .expect("wire rotating identity");
+
+    let old_jid: FullJid = "queued-force-detach@example.com/old"
+        .parse()
+        .expect("old jid");
+    let new_jid: FullJid = "queued-force-detach@example.com/new"
+        .parse()
+        .expect("new jid");
+    let bare_jid = old_jid.to_bare();
+
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(old_jid.clone(), old_tx);
+    let old_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&old_jid)
+        .expect("registered entry");
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(RegisterUserResource {
+            jid: old_jid.clone(),
+            entry: old_entry.clone(),
+        })
+        .await
+        .expect("mirror old resource");
+    let mut force_detach_rx = Some(
+        old_entry
+            .take_force_detach_rx()
+            .expect("connection task owns receiver"),
+    );
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(old_jid.clone(), false);
+    conn.authenticated_session =
+        Some(create_test_session(state.as_ref(), "queued-force-detach").await);
+    conn.registry_owner = Some(owner);
+    conn.sm_state
+        .enable("queued-force-detach-stream".to_string(), true, Some(300));
+
+    let (crossnode_ack_tx, crossnode_ack_rx) = oneshot::channel();
+    old_entry
+        .force_detach_sender()
+        .try_send(ForceDetachRequest {
+            origin: ForceDetachOrigin::CrossNodeResume,
+            requester_bare_jid: bare_jid.clone(),
+            ack: crossnode_ack_tx,
+        })
+        .expect("queue cross-node detach");
+
+    shared_identity
+        .rotate(NodeIdentity::new("node-this", "epoch-new"))
+        .await;
+    let state_for_register = Arc::clone(&state);
+    let register_task = tokio::spawn(async move {
+        let (new_tx, _new_rx) = mpsc::channel::<OutboundStanza>(4);
+        state_for_register
+            .deps
+            .protocol
+            .user_registry
+            .ask(RegisterUserResource {
+                jid: new_jid,
+                entry: ConnectionEntry::new(new_tx),
+            })
+            .await
+    });
+
+    let primary = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        force_detach_rx.as_mut().expect("receiver").recv(),
+    )
+    .await
+    .expect("cross-node detach received")
+    .expect("primary request");
+    assert_eq!(primary.origin, ForceDetachOrigin::CrossNodeResume);
+
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let drained = super::super::connection::drain_ready_force_detach_requests(
+                &mut force_detach_rx,
+                &bare_jid,
+            );
+            if !drained.is_empty() {
+                break drained;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stale detach queued behind cross-node");
+    assert_eq!(drained.len(), 1, "exactly one stale waiter should queue");
+    assert_eq!(
+        drained[0].origin,
+        ForceDetachOrigin::RegistryStaleActorRetirement
+    );
+
+    let mut pending_force_detach = vec![primary];
+    pending_force_detach.extend(drained);
+    super::super::connection::release_stale_force_detach_waiters_before_cross_node_cleanup(
+        &mut pending_force_detach,
+        Some(ForceDetachOrigin::CrossNodeResume),
+    );
+
+    let register_outcome = tokio::time::timeout(std::time::Duration::from_secs(1), register_task)
+        .await
+        .expect("stale-retirement waiter must be released")
+        .expect("register task joins");
+    assert!(
+        matches!(
+            register_outcome,
+            Ok(())
+                | Err(kameo::error::SendError::HandlerError(
+                    UserRegistryError::ClaimHeldByAnotherNode(_)
+                        | UserRegistryError::UserActorBusy(_)
+                ))
+        ),
+        "stale-retirement release should avoid a terminal retirement failure: {register_outcome:?}"
+    );
+
+    let cleanup_outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        cleanup_force_detach_connection_shutdown(
+            state.as_ref(),
+            &mut old_rx,
+            &mut conn,
+            false,
+            ForceDetachOrigin::CrossNodeResume,
+        ),
+    )
+    .await
+    .expect("cross-node cleanup must not time out behind stale waiter");
+    assert_eq!(
+        cleanup_outcome,
+        super::super::cleanup::ConnectionShutdownOutcome::Detached
+    );
+
+    let crossnode_outcome = match cleanup_outcome {
+        super::super::cleanup::ConnectionShutdownOutcome::Detached => ForceDetachOutcome::Detached,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted => {
+            ForceDetachOutcome::NotPersisted
+        }
+    };
+    for request in pending_force_detach {
+        let _ = request.ack.send(crossnode_outcome);
+    }
+
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), crossnode_ack_rx)
+            .await
+            .expect("cross-node waiter completes")
+            .expect("cross-node ack"),
+        ForceDetachOutcome::Detached
+    );
+}
+
+/// Codex 1668 round: a stale-retirement request drained AHEAD of a
+/// cross-node-resume one must not demote cleanup to stale-retirement
+/// semantics — cross-node is authoritative for the whole set, and the
+/// stale waiter is released early so its registry turn can finish.
+#[tokio::test]
+async fn cross_node_origin_is_authoritative_when_stale_retirement_queues_first() {
+    let bare_jid = BareJid::from_str("reversed-order@example.com").expect("valid bare jid");
+    let (stale_ack_tx, mut stale_ack_rx) = oneshot::channel();
+    let (crossnode_ack_tx, mut crossnode_ack_rx) = oneshot::channel();
+    let mut pending_force_detach = vec![
+        ForceDetachRequest {
+            origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+            requester_bare_jid: bare_jid.clone(),
+            ack: stale_ack_tx,
+        },
+        ForceDetachRequest {
+            origin: ForceDetachOrigin::CrossNodeResume,
+            requester_bare_jid: bare_jid,
+            ack: crossnode_ack_tx,
+        },
+    ];
+
+    let origin = super::super::connection::authoritative_force_detach_origin(&pending_force_detach);
+    assert_eq!(
+        origin,
+        Some(ForceDetachOrigin::CrossNodeResume),
+        "any queued cross-node request must make cross-node semantics authoritative"
+    );
+
+    super::super::connection::release_stale_force_detach_waiters_before_cross_node_cleanup(
+        &mut pending_force_detach,
+        origin,
+    );
+    assert_eq!(
+        pending_force_detach.len(),
+        1,
+        "the stale-retirement waiter at index 0 must be released early"
+    );
+    assert_eq!(
+        pending_force_detach[0].origin,
+        ForceDetachOrigin::CrossNodeResume
+    );
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut stale_ack_rx)
+            .await
+            .expect("stale waiter must be acknowledged before cross-node cleanup")
+            .expect("stale ack"),
+        ForceDetachOutcome::NotPersisted
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut crossnode_ack_rx)
+            .await
+            .is_err(),
+        "the cross-node waiter must stay queued for the real cleanup outcome"
+    );
+}
+
+#[tokio::test]
+async fn owner_managed_force_detach_waiter_stays_queued_during_cross_node_cleanup() {
+    let bare_jid = BareJid::from_str("owner-managed@example.com").expect("valid bare jid");
+    let (crossnode_ack_tx, mut crossnode_ack_rx) = oneshot::channel();
+    let (owner_managed_ack_tx, mut owner_managed_ack_rx) = oneshot::channel();
+    let mut pending_force_detach = vec![
+        ForceDetachRequest {
+            origin: ForceDetachOrigin::CrossNodeResume,
+            requester_bare_jid: bare_jid.clone(),
+            ack: crossnode_ack_tx,
+        },
+        ForceDetachRequest {
+            origin: ForceDetachOrigin::OwnerManagedRetirement,
+            requester_bare_jid: bare_jid,
+            ack: owner_managed_ack_tx,
+        },
+    ];
+
+    super::super::connection::release_stale_force_detach_waiters_before_cross_node_cleanup(
+        &mut pending_force_detach,
+        Some(ForceDetachOrigin::CrossNodeResume),
+    );
+
+    assert_eq!(pending_force_detach.len(), 2);
+    assert_eq!(
+        pending_force_detach[1].origin,
+        ForceDetachOrigin::OwnerManagedRetirement
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            &mut owner_managed_ack_rx
+        )
+        .await
+        .is_err(),
+        "owner-managed cleanup must stay queued until its owning lifecycle finishes"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut crossnode_ack_rx)
+            .await
+            .is_err(),
+        "the primary cross-node request must remain queued too"
     );
 }
 

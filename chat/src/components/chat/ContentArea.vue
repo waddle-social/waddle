@@ -544,6 +544,11 @@ const updateNoticeBody = computed(() =>
     : "A newer version is ready. Refresh to load it.",
 );
 
+async function handleConnectionNoticeAction() {
+  if (connectionNotice.value?.actionKind !== "recover-superseded") return;
+  await props.xmppClient?.recoverSupersededSession();
+}
+
 async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   if (await virtualTimelineRef.value?.scrollToPinnedEdge(mode)) return true;
   await nextTick();
@@ -746,25 +751,36 @@ function dayDividerLabel(createdAt: string): string {
       class="border-b border-border/80 animate-fade-in"
       :class="connectionStatusClasses.banner"
     >
-      <div class="chat-message-lane flex items-start gap-3 px-[var(--chat-content-inline)] py-3">
-        <div
-          class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border"
-          :class="connectionStatusClasses.iconWrap"
+      <div class="chat-message-lane flex flex-col gap-3 px-[var(--chat-content-inline)] py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex min-w-0 items-start gap-3">
+          <div
+            class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border"
+            :class="connectionStatusClasses.iconWrap"
+          >
+            <component
+              :is="connectionStatusIcon"
+              class="h-4 w-4"
+              :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
+            />
+          </div>
+          <div class="flex min-w-0 flex-col gap-0.5">
+            <p class="type-control">
+              {{ connectionNotice.title }}
+            </p>
+            <p class="type-caption chat-copy-measure" :class="connectionStatusClasses.body">
+              {{ connectionNotice.body }}
+            </p>
+          </div>
+        </div>
+        <button
+          v-if="connectionNotice.actionLabel"
+          type="button"
+          class="type-control inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
+          @click="handleConnectionNoticeAction"
         >
-          <component
-            :is="connectionStatusIcon"
-            class="h-4 w-4"
-            :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
-          />
-        </div>
-        <div class="flex min-w-0 flex-col gap-0.5">
-          <p class="type-control">
-            {{ connectionNotice.title }}
-          </p>
-          <p class="type-caption chat-copy-measure" :class="connectionStatusClasses.body">
-            {{ connectionNotice.body }}
-          </p>
-        </div>
+          <RefreshCw class="h-3.5 w-3.5" />
+          <span>{{ connectionNotice.actionLabel }}</span>
+        </button>
       </div>
     </div>
     <div

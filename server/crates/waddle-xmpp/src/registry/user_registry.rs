@@ -5,7 +5,7 @@
 //! DashMap-based lookup portion of `ConnectionRegistry` for user-level
 //! concerns (Phase 2 of the actor-model migration).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +19,9 @@ use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use super::connection_registry::{ConnectionEntry, ForceDetachOutcome, ForceDetachRequest};
+use super::connection_registry::{
+    ConnectionEntry, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+};
 use super::user_actor::delivery::GetConnectionEntry;
 use super::user_actor::{
     GetResources, RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
@@ -31,8 +33,33 @@ use crate::ownership::{
     SharedNodeIdentity, StalePredicate,
 };
 
-const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound for one child-actor operation issued from a registry handler.
+///
+/// Server-side callers whose reply waits encompass registry handlers derive
+/// their budgets from this value, because registration may first drain one
+/// pending child unregister and then issue its own child register ask.
+pub const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Bound convergence retry work to keep one registry mailbox turn within the
+/// caller budgets that drive janitor sweeps. Each pending-unregister retry can
+/// spend a full [`CHILD_ACTOR_TIMEOUT`] on a wedged child actor, so processing
+/// more than two in one turn would exceed the server reaper's 5-second ask
+/// timeout before any other registry work can run.
+const CONVERGENCE_RETRY_BATCH_LIMIT: usize = 2;
+/// Durable claim releases talk to the clustered claim store, so they need a
+/// much shorter cutoff than the child-actor timeout. Two pending-unregister
+/// retries plus two timed-out releases still fit within the janitor's
+/// 5-second ask budget.
+const CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Upper bound on waiting for stale-retirement force-detach
+/// acknowledgements before the retirement finalizes anyway. Long enough for
+/// a socket mid-stanza to finish its cleanup handshake; short enough that a
+/// wedged socket cannot pin the stale entry (and every registration retry
+/// behind it) indefinitely.
+const STALE_RETIREMENT_ACK_TIMEOUT: Duration = Duration::from_secs(4);
+const STALE_RETIREMENT_RETRY_DELAY: Duration = Duration::from_millis(50);
+const STALE_RETIREMENT_MAX_QUEUE_RETRIES: u8 = 3;
 /// A locally-held UserActor ownership lease. The `owner` is captured at
 /// acquisition time rather than read back from `SharedNodeIdentity` on
 /// release, because self-fence rotates the shared identity while old local
@@ -55,10 +82,40 @@ struct UserEntry {
     resources: HashMap<FullJid, ConnectionEntry>,
 }
 
+/// An exact durable ownership fence whose release failed after its local
+/// actor was retired.  Keeping the original owner and epoch is essential:
+/// releasing a freshly reacquired claim would be unsafe.
+#[derive(Clone)]
+struct TerminalUserClaimRelease {
+    bare_jid: BareJid,
+    claim: UserClaimLease,
+}
+
+/// One stale-retirement retry unit. Keeping the handler input typed avoids
+/// open-coded tuple plumbing as the queue is selected and processed.
+#[derive(Clone)]
+struct PendingStaleUserRetirement {
+    bare_jid: BareJid,
+}
+
+/// A resource removal that could not enter the child actor before its owner
+/// disconnected.  The registry retries this exact owner-gated removal from
+/// the janitor rather than leaving the full-JID slot occupied forever.
+#[derive(Clone)]
+struct PendingUserUnregister {
+    jid: FullJid,
+    owner: Option<Arc<AtomicBool>>,
+}
+
 enum UserEntryClaimStatus {
     Current,
     ProvenStale,
     ValidationUnavailable,
+}
+
+enum StaleRetirementQueueResult {
+    Queued,
+    Saturated,
 }
 
 /// Server-wide registry that maps bare JIDs to their `UserActor`.
@@ -71,6 +128,12 @@ pub struct UserRegistryActor {
     poisoned_users: HashSet<BareJid>,
     claim_store: Arc<dyn ClaimStore>,
     node_identity: SharedNodeIdentity,
+    terminal_claim_releases: Vec<TerminalUserClaimRelease>,
+    pending_unregisters: Vec<PendingUserUnregister>,
+    pending_stale_retirements: HashSet<BareJid>,
+    prioritized_stale_retirements: VecDeque<BareJid>,
+    stale_retirement_queue_retries: HashMap<BareJid, u8>,
+    stale_retirement_retry_scheduled: bool,
 }
 
 impl UserRegistryActor {
@@ -82,6 +145,40 @@ impl UserRegistryActor {
             poisoned_users: HashSet::new(),
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
+            terminal_claim_releases: Vec::new(),
+            pending_unregisters: Vec::new(),
+            pending_stale_retirements: HashSet::new(),
+            prioritized_stale_retirements: VecDeque::new(),
+            stale_retirement_queue_retries: HashMap::new(),
+            stale_retirement_retry_scheduled: false,
+        }
+    }
+
+    fn schedule_pending_stale_retirement_retry(&mut self, actor_ref: &ActorRef<Self>) {
+        if self.stale_retirement_retry_scheduled || self.pending_stale_retirements.is_empty() {
+            return;
+        }
+        self.stale_retirement_retry_scheduled = true;
+        std::mem::drop(
+            actor_ref
+                .tell(RetryPendingStaleUserRetirements)
+                .send_after(STALE_RETIREMENT_RETRY_DELAY),
+        );
+    }
+
+    fn kick_stale_retirement_if_pending(&mut self, bare_jid: &BareJid, actor_ref: &ActorRef<Self>) {
+        if self.pending_stale_retirements.contains(bare_jid) {
+            self.prioritize_pending_stale_retirement(bare_jid);
+            self.schedule_pending_stale_retirement_retry(actor_ref);
+        }
+    }
+
+    fn prioritize_pending_stale_retirement(&mut self, bare_jid: &BareJid) {
+        if self.pending_stale_retirements.contains(bare_jid)
+            && !self.prioritized_stale_retirements.contains(bare_jid)
+        {
+            self.prioritized_stale_retirements
+                .push_back(bare_jid.clone());
         }
     }
 
@@ -203,13 +300,148 @@ impl UserRegistryActor {
         &mut self,
         bare_jid: BareJid,
     ) -> Result<ActorRef<UserActor>, UserRegistryError> {
+        if !self
+            .converge_terminal_claim_releases_before_acquire(&bare_jid)
+            .await
+        {
+            return Err(UserRegistryError::ClaimUnavailable(bare_jid));
+        }
         let claim = self.acquire_user_claim(&bare_jid).await?;
         let Some(_publication_guard) = self.node_identity.guard_if_current(&claim.owner).await
         else {
-            self.release_user_claim(&bare_jid, &claim).await;
+            let _ = self.release_user_claim(&bare_jid, &claim).await;
             return Err(UserRegistryError::ClaimUnavailable(bare_jid));
         };
         Ok(self.spawn_user_actor(bare_jid, claim))
+    }
+
+    /// A timed-out release can still commit after its future is dropped.
+    /// Demand-side self-reacquisition must therefore converge every pending
+    /// exact fence for this bare JID before publishing a new actor.
+    async fn converge_terminal_claim_releases_before_acquire(
+        &mut self,
+        bare_jid: &BareJid,
+    ) -> bool {
+        let pending = std::mem::take(&mut self.terminal_claim_releases);
+        let (matching, retained): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|release| release.bare_jid == *bare_jid);
+        self.terminal_claim_releases = retained;
+
+        let mut matching = VecDeque::from(matching);
+        while let Some(release) = matching.pop_front() {
+            if !self
+                .release_user_claim(&release.bare_jid, &release.claim)
+                .await
+            {
+                self.terminal_claim_releases.extend(matching);
+                return false;
+            }
+        }
+        true
+    }
+
+    fn cancel_terminal_claim_release(&mut self, bare_jid: &BareJid) {
+        self.terminal_claim_releases
+            .retain(|release| release.bare_jid != *bare_jid);
+    }
+
+    fn remember_terminal_claim_release(&mut self, bare_jid: &BareJid, claim: &UserClaimLease) {
+        if !self.terminal_claim_releases.iter().any(|release| {
+            release.bare_jid == *bare_jid
+                && release.claim.owner == claim.owner
+                && release.claim.epoch == claim.epoch
+        }) {
+            self.terminal_claim_releases.push(TerminalUserClaimRelease {
+                bare_jid: bare_jid.clone(),
+                claim: claim.clone(),
+            });
+        }
+    }
+
+    fn remember_pending_unregister(&mut self, jid: FullJid, owner: Option<Arc<AtomicBool>>) {
+        // Owner tokens identify an exact resource incarnation.  A timeout can
+        // record the same conditional removal both in the ask handler and in
+        // its caller's fallback, so collapse records only when those pointer
+        // identities match as well.
+        if self.pending_unregisters.iter().any(|pending| {
+            pending.jid == jid
+                && match (&pending.owner, &owner) {
+                    (None, None) => true,
+                    (Some(pending_owner), Some(owner)) => Arc::ptr_eq(pending_owner, owner),
+                    _ => false,
+                }
+        }) {
+            return;
+        }
+        self.pending_unregisters
+            .push(PendingUserUnregister { jid, owner });
+    }
+
+    /// Retry the one pending removal that can affect the current resource
+    /// before registering its replacement.
+    ///
+    /// A registry handler must not serially await an unbounded number of old
+    /// owner tokens: an owner-gated record that no longer matches the current
+    /// entry cannot remove a later replacement, so the janitor can converge it
+    /// independently. A single unowned record is the exception because it can
+    /// remove any entry; it takes priority and is deduplicated by
+    /// [`Self::remember_pending_unregister`]. Otherwise, at most one
+    /// owner-gated record can match the one current full-JID entry. This keeps
+    /// registration bounded to one drain ask plus one register ask.
+    async fn drain_pending_unregisters_for(&mut self, jid: &FullJid) {
+        let current_owner = self
+            .users
+            .get(&jid.to_bare())
+            .and_then(|user| user.resources.get(jid))
+            .map(ConnectionEntry::carbons_handle);
+        let pending = std::mem::take(&mut self.pending_unregisters);
+        let mut matching_owner_pending = None;
+        let mut unowned_pending = None;
+        for pending_unregister in pending {
+            if pending_unregister.jid != *jid {
+                self.pending_unregisters.push(pending_unregister);
+                continue;
+            }
+
+            if pending_unregister.owner.is_none() && unowned_pending.is_none() {
+                unowned_pending = Some(pending_unregister);
+            } else if matching_owner_pending.is_none()
+                && current_owner.as_ref().is_some_and(|current_owner| {
+                    pending_unregister
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| Arc::ptr_eq(owner, current_owner))
+                })
+            {
+                matching_owner_pending = Some(pending_unregister);
+            } else {
+                self.pending_unregisters.push(pending_unregister);
+            }
+        }
+
+        // An unowned removal can evict any later replacement, so process it
+        // first regardless of insertion order. Its owner-gated predecessor is
+        // safe to leave for janitor convergence after the unowned removal.
+        let pending_unregister = if let Some(unowned_pending) = unowned_pending {
+            if let Some(owner_pending) = matching_owner_pending {
+                self.pending_unregisters.push(owner_pending);
+            }
+            unowned_pending
+        } else if let Some(matching_owner_pending) = matching_owner_pending {
+            matching_owner_pending
+        } else {
+            return;
+        };
+        let retry_jid = pending_unregister.jid.clone();
+        let retry_owner = pending_unregister.owner.clone();
+        if matches!(
+            self.unregister_and_release_if_empty(pending_unregister.jid, pending_unregister.owner)
+                .await,
+            UnregisterAndReleaseOutcome::RetryableFailure(_)
+        ) {
+            self.remember_pending_unregister(retry_jid, retry_owner);
+        }
     }
 
     #[tracing::instrument(
@@ -217,23 +449,42 @@ impl UserRegistryActor {
         skip_all,
         fields(otel.status_code = tracing::field::Empty)
     )]
-    async fn release_user_claim(&self, bare_jid: &BareJid, claim: &UserClaimLease) {
+    async fn release_user_claim(&mut self, bare_jid: &BareJid, claim: &UserClaimLease) -> bool {
         let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
-        if let Err(error) = self
-            .claim_store
-            .release(&entity, &claim.owner, claim.epoch)
-            .await
+        match tokio::time::timeout(
+            CLAIM_RELEASE_TIMEOUT,
+            self.claim_store.release(&entity, &claim.owner, claim.epoch),
+        )
+        .await
         {
-            // Release is best-effort for actor cleanup, but a backend failure
-            // leaves ownership behind and must remain visible in trace queries.
-            crate::telemetry::mark_span_error();
-            error!(
-                jid = %bare_jid,
-                owner = %claim.owner.node_id,
-                epoch = claim.epoch.0,
-                %error,
-                "failed to release UserActor ownership claim"
-            );
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                // Release is best-effort for actor cleanup, but a backend
+                // failure leaves ownership behind and must remain visible in
+                // trace queries.
+                crate::telemetry::mark_span_error();
+                error!(
+                    jid = %bare_jid,
+                    owner = %claim.owner.node_id,
+                    epoch = claim.epoch.0,
+                    %error,
+                    "failed to release UserActor ownership claim"
+                );
+                self.remember_terminal_claim_release(bare_jid, claim);
+                false
+            }
+            Err(_elapsed) => {
+                crate::telemetry::mark_span_error();
+                warn!(
+                    jid = %bare_jid,
+                    owner = %claim.owner.node_id,
+                    epoch = claim.epoch.0,
+                    timeout_ms = CLAIM_RELEASE_TIMEOUT.as_millis() as u64,
+                    "timed out releasing UserActor ownership claim; deferring retry"
+                );
+                self.remember_terminal_claim_release(bare_jid, claim);
+                false
+            }
         }
     }
 
@@ -258,11 +509,29 @@ impl UserRegistryActor {
             return UserEntryClaimStatus::ProvenStale;
         }
         let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
-        match self
-            .claim_store
-            .fence(&entity, &entry.claim.owner, entry.claim.epoch)
-            .await
+        // Strict bound: this await runs inside the single global registry
+        // actor turn, and a saturated control-plane pool can hold a bare
+        // `fence()` for ~SQLx's 30 s acquisition timeout — long enough for
+        // every unrelated bind to miss its mailbox window. A timed-out check
+        // reports ValidationUnavailable and retries on a later sweep.
+        let fence = match tokio::time::timeout(
+            CLAIM_RELEASE_TIMEOUT,
+            self.claim_store
+                .fence(&entity, &entry.claim.owner, entry.claim.epoch),
+        )
+        .await
         {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                warn!(
+                    jid = %bare_jid,
+                    "stale-retirement claim fence timed out; deferring validation to a \
+                     later sweep instead of holding the registry turn"
+                );
+                return UserEntryClaimStatus::ValidationUnavailable;
+            }
+        };
+        match fence {
             Ok(true) => UserEntryClaimStatus::Current,
             Ok(false) => {
                 warn!(
@@ -329,6 +598,40 @@ impl UserRegistryActor {
         Ok(None)
     }
 
+    async fn existing_user_actor_for_register(
+        &mut self,
+        bare_jid: &BareJid,
+        actor_ref: &ActorRef<Self>,
+    ) -> Result<Option<ActorRef<UserActor>>, UserRegistryError> {
+        let Some(entry) = self.users.get(bare_jid).cloned() else {
+            self.clear_pending_stale_retirement(bare_jid);
+            return Ok(None);
+        };
+        if !entry.actor_ref.is_alive() {
+            crate::telemetry::mark_span_error();
+            error!(jid = %bare_jid, "Detected dead UserActor; failing fast");
+            return Err(self.mark_actor_state_lost(bare_jid).await);
+        }
+        if self.pending_stale_retirements.contains(bare_jid) {
+            self.schedule_pending_stale_retirement_retry(actor_ref);
+            return Err(UserRegistryError::UserActorBusy(bare_jid.clone()));
+        }
+        match self
+            .validate_existing_user_entry_claim(bare_jid, &entry)
+            .await
+        {
+            UserEntryClaimStatus::Current => Ok(Some(entry.actor_ref)),
+            UserEntryClaimStatus::ValidationUnavailable => {
+                Err(UserRegistryError::ClaimUnavailable(bare_jid.clone()))
+            }
+            UserEntryClaimStatus::ProvenStale => {
+                self.pending_stale_retirements.insert(bare_jid.clone());
+                self.schedule_pending_stale_retirement_retry(actor_ref);
+                Err(UserRegistryError::UserActorBusy(bare_jid.clone()))
+            }
+        }
+    }
+
     #[tracing::instrument(
         name = "xmpp.user_registry.force_detach_stale",
         skip_all,
@@ -380,6 +683,7 @@ impl UserRegistryActor {
             };
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let request = ForceDetachRequest {
+                origin: ForceDetachOrigin::RegistryStaleActorRetirement,
                 requester_bare_jid: bare_jid.clone(),
                 ack,
             };
@@ -433,11 +737,280 @@ impl UserRegistryActor {
 
     async fn mark_actor_state_lost(&mut self, bare_jid: &BareJid) -> UserRegistryError {
         if let Some(entry) = self.users.remove(bare_jid) {
-            self.release_user_claim(bare_jid, &entry.claim).await;
+            let _ = self.release_user_claim(bare_jid, &entry.claim).await;
         }
         self.poisoned_users.insert(bare_jid.clone());
         metrics::record_actor_restart("user_actor", "detected_dead_actor_fail_fast");
         UserRegistryError::UserActorStateLost(bare_jid.clone())
+    }
+
+    /// Remove one resource and retire an empty user actor.  The whole
+    /// operation is serialized by this registry actor, so a successful
+    /// `Released` result is a real liveness fence rather than a best-effort
+    /// mirror acknowledgement.
+    async fn unregister_and_release_if_empty(
+        &mut self,
+        jid: FullJid,
+        owner: Option<Arc<AtomicBool>>,
+    ) -> UnregisterAndReleaseOutcome {
+        let bare_jid = jid.to_bare();
+        if self.poisoned_users.contains(&bare_jid) {
+            if !self.users.contains_key(&bare_jid) {
+                return UnregisterAndReleaseOutcome::AlreadyAbsent;
+            }
+            return UnregisterAndReleaseOutcome::RetryableFailure(
+                UnregisterAndReleaseRetryableFailure::UserActorStateLost,
+            );
+        }
+        let Some(entry) = self.users.get(&bare_jid).cloned() else {
+            return UnregisterAndReleaseOutcome::AlreadyAbsent;
+        };
+        if !entry.actor_ref.is_alive() {
+            let _ = self.mark_actor_state_lost(&bare_jid).await;
+            return UnregisterAndReleaseOutcome::AlreadyAbsent;
+        }
+        let unregister = match entry
+            .actor_ref
+            .ask(UnregisterConnectionAndReportEmpty {
+                jid: jid.clone(),
+                owner,
+            })
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
+                return UnregisterAndReleaseOutcome::RetryableFailure(
+                    UnregisterAndReleaseRetryableFailure::UserActorBusy,
+                );
+            }
+            Err(_) => {
+                let _ = self.mark_actor_state_lost(&bare_jid).await;
+                return UnregisterAndReleaseOutcome::AlreadyAbsent;
+            }
+        };
+
+        match unregister {
+            super::user_actor::UnregisterConnectionOutcome::Removed { is_empty } => {
+                if let Some(user) = self.users.get_mut(&bare_jid) {
+                    user.resources.remove(&jid);
+                }
+                if !is_empty {
+                    return UnregisterAndReleaseOutcome::RetainedLiveResources;
+                }
+            }
+            super::user_actor::UnregisterConnectionOutcome::AlreadyAbsent { is_empty } => {
+                if let Some(user) = self.users.get_mut(&bare_jid) {
+                    user.resources.remove(&jid);
+                }
+                if !is_empty {
+                    return UnregisterAndReleaseOutcome::RetainedLiveResources;
+                }
+            }
+            super::user_actor::UnregisterConnectionOutcome::RetainedTargetPresent => {
+                return UnregisterAndReleaseOutcome::RetainedLiveResources;
+            }
+        }
+        if let Some(entry) = self.users.remove(&bare_jid) {
+            if entry.claim.owner == self.node_identity.current() {
+                let _ = self.release_user_claim(&bare_jid, &entry.claim).await;
+            } else {
+                // Stale-actor retirement runs after a local identity rotation
+                // or a lost fence. The old lease may already belong to a
+                // different live owner, so this janitor convergence must not
+                // release it while pruning our local mirror.
+                debug!(jid = %bare_jid, "retired stale UserActor without releasing an old claim");
+            }
+        }
+        self.poisoned_users.remove(&bare_jid);
+        self.clear_pending_stale_retirement(&bare_jid);
+        UnregisterAndReleaseOutcome::Released
+    }
+
+    fn clear_pending_stale_retirement(&mut self, bare_jid: &BareJid) {
+        self.pending_stale_retirements.remove(bare_jid);
+        self.prioritized_stale_retirements
+            .retain(|pending| pending != bare_jid);
+        self.stale_retirement_queue_retries.remove(bare_jid);
+    }
+
+    fn finalize_stale_actor_retirement(&mut self, bare_jid: &BareJid) {
+        // The ack waiter fires exactly once per queued retirement; the entry
+        // may legitimately be gone already (dead actor path, RemoveUser).
+        if !self.pending_stale_retirements.contains(bare_jid) {
+            return;
+        }
+        self.retire_stale_user_without_releasing_claim(bare_jid);
+    }
+
+    fn retire_stale_user_without_releasing_claim(&mut self, bare_jid: &BareJid) {
+        if let Some(entry) = self.users.remove(bare_jid) {
+            entry.actor_ref.kill();
+        }
+        self.clear_pending_stale_retirement(bare_jid);
+    }
+
+    fn issue_stale_retirement_force_detach(
+        &self,
+        bare_jid: &BareJid,
+        entry: &UserEntry,
+    ) -> (
+        StaleRetirementQueueResult,
+        Vec<tokio::sync::oneshot::Receiver<ForceDetachOutcome>>,
+    ) {
+        let mut saturated = false;
+        let mut acks = Vec::new();
+        let mut jids = entry.resources.keys().cloned().collect::<Vec<_>>();
+        jids.sort();
+        for jid in jids {
+            let Some(resource) = entry.resources.get(&jid) else {
+                continue;
+            };
+            let (ack, ack_rx) = tokio::sync::oneshot::channel();
+            let request = ForceDetachRequest {
+                origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+                requester_bare_jid: bare_jid.clone(),
+                ack,
+            };
+            match resource.force_detach_sender().try_send(request) {
+                Ok(()) => acks.push(ack_rx),
+                Err(error) => match error {
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        warn!(
+                            jid = %jid,
+                            "stale UserActor resource force-detach receiver is closed; demoting stale actor"
+                        );
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                        saturated = true;
+                        warn!(
+                            jid = %jid,
+                            "stale UserActor resource force-detach queue is full; retrying asynchronously"
+                        );
+                    }
+                },
+            }
+        }
+        (
+            if saturated {
+                StaleRetirementQueueResult::Saturated
+            } else {
+                StaleRetirementQueueResult::Queued
+            },
+            acks,
+        )
+    }
+
+    async fn retry_pending_stale_retirement_work(&mut self, registry_ref: &ActorRef<Self>) {
+        let Some(pending) = self.next_pending_stale_retirement() else {
+            return;
+        };
+        self.retry_one_pending_stale_retirement(pending, registry_ref)
+            .await;
+    }
+
+    fn next_pending_stale_retirement(&mut self) -> Option<PendingStaleUserRetirement> {
+        while let Some(bare_jid) = self.prioritized_stale_retirements.pop_front() {
+            if self.pending_stale_retirements.contains(&bare_jid) {
+                return Some(PendingStaleUserRetirement { bare_jid });
+            }
+        }
+        self.pending_stale_retirements
+            .iter()
+            .next()
+            .cloned()
+            .map(|bare_jid| PendingStaleUserRetirement { bare_jid })
+    }
+
+    async fn retry_one_pending_stale_retirement(
+        &mut self,
+        pending: PendingStaleUserRetirement,
+        registry_ref: &ActorRef<Self>,
+    ) {
+        let bare_jid = pending.bare_jid;
+        let Some(entry) = self.users.get(&bare_jid).cloned() else {
+            self.clear_pending_stale_retirement(&bare_jid);
+            return;
+        };
+        if !entry.actor_ref.is_alive() {
+            self.retire_stale_user_without_releasing_claim(&bare_jid);
+            return;
+        }
+        match self
+            .validate_existing_user_entry_claim(&bare_jid, &entry)
+            .await
+        {
+            UserEntryClaimStatus::Current => {
+                self.clear_pending_stale_retirement(&bare_jid);
+            }
+            UserEntryClaimStatus::ValidationUnavailable => {}
+            UserEntryClaimStatus::ProvenStale => {
+                if entry.resources.is_empty() {
+                    self.retire_stale_user_without_releasing_claim(&bare_jid);
+                } else {
+                    match self.issue_stale_retirement_force_detach(&bare_jid, &entry) {
+                        (StaleRetirementQueueResult::Queued, acks) => {
+                            self.stale_retirement_queue_retries.remove(&bare_jid);
+                            debug!(
+                                jid = %bare_jid,
+                                resources = entry.resources.len(),
+                                acks = acks.len(),
+                                "queued stale UserActor force-detach requests; awaiting \
+                                 acknowledgements before retiring the stale actor mirror"
+                            );
+                            // Queue admission is not closure proof: a socket
+                            // mid-stanza would keep processing under a killed
+                            // actor while a replacement publishes. Await the
+                            // detach acknowledgements OUTSIDE the registry
+                            // turn (bounded, so a wedged socket cannot pin
+                            // the retirement forever), then finalize via a
+                            // self-message; the entry stays pending so
+                            // registration retries observe Busy meanwhile.
+                            let registry = registry_ref.clone();
+                            let finalize_jid = bare_jid.clone();
+                            tokio::spawn(async move {
+                                let _ = tokio::time::timeout(
+                                    STALE_RETIREMENT_ACK_TIMEOUT,
+                                    join_all(acks),
+                                )
+                                .await;
+                                let _ = registry
+                                    .tell(FinalizeStaleActorRetirement {
+                                        bare_jid: finalize_jid,
+                                    })
+                                    .await;
+                            });
+                        }
+                        (StaleRetirementQueueResult::Saturated, _) => {
+                            let retries = self
+                                .stale_retirement_queue_retries
+                                .entry(bare_jid.clone())
+                                .or_default();
+                            *retries = retries.saturating_add(1);
+                            if *retries >= STALE_RETIREMENT_MAX_QUEUE_RETRIES {
+                                warn!(
+                                    jid = %bare_jid,
+                                    retries = *retries,
+                                    "stale UserActor force-detach remained saturated; demoting stale actor"
+                                );
+                                self.retire_stale_user_without_releasing_claim(&bare_jid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn take_retry_batch<T>(inventory: &mut Vec<T>) -> Vec<T> {
+        if inventory.len() <= CONVERGENCE_RETRY_BATCH_LIMIT {
+            return std::mem::take(inventory);
+        }
+        let mut batch = std::mem::take(inventory);
+        let remainder = batch.split_off(CONVERGENCE_RETRY_BATCH_LIMIT);
+        *inventory = remainder;
+        batch
     }
 }
 
@@ -463,6 +1036,25 @@ pub enum UserRegistryError {
     ClaimUnavailable(BareJid),
     #[error("stale user actor {0} could not be retired before claim reuse")]
     StaleUserActorRetirementFailed(BareJid),
+}
+
+/// A closed, typed explanation for a retryable force-detach convergence
+/// failure.  These are deliberately not transport error strings: janitors
+/// need to distinguish liveness from protocol ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnregisterAndReleaseRetryableFailure {
+    UserActorBusy,
+    UserActorStateLost,
+}
+
+/// Result of atomically pruning a resource and, if it was the last one,
+/// releasing the UserActor ownership claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum UnregisterAndReleaseOutcome {
+    Released,
+    RetainedLiveResources,
+    AlreadyAbsent,
+    RetryableFailure(UnregisterAndReleaseRetryableFailure),
 }
 
 /// Wire the real, clustering-backed claim store/identity into an
@@ -584,7 +1176,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
     async fn handle(
         &mut self,
         msg: RegisterUserResource,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let bare_jid = msg.jid.to_bare();
         let mirrored_entry = msg.entry.clone();
@@ -592,8 +1184,14 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
 
+        self.drain_pending_unregisters_for(&msg.jid).await;
+        if self.poisoned_users.contains(&bare_jid) {
+            return Err(UserRegistryError::UserActorStateLost(bare_jid));
+        }
+
+        self.kick_stale_retirement_if_pending(&bare_jid, ctx.actor_ref());
         let user_actor = if let Some(actor_ref) = self
-            .existing_user_actor_for_current_claim(&bare_jid)
+            .existing_user_actor_for_register(&bare_jid, ctx.actor_ref())
             .await?
         {
             actor_ref
@@ -614,6 +1212,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
                 if let Some(user) = self.users.get_mut(&bare_jid) {
                     user.resources.insert(msg.jid.clone(), mirrored_entry);
                 }
+                self.cancel_terminal_claim_release(&bare_jid);
             }
             Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
                 return Err(UserRegistryError::UserActorBusy(bare_jid));
@@ -643,7 +1242,7 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
     async fn handle(
         &mut self,
         msg: RegisterUserResourceIfOwnerOrAbsent,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let bare_jid = msg.jid.to_bare();
         let mirrored_entry = msg.entry.clone();
@@ -651,8 +1250,14 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
 
+        self.drain_pending_unregisters_for(&msg.jid).await;
+        if self.poisoned_users.contains(&bare_jid) {
+            return Err(UserRegistryError::UserActorStateLost(bare_jid));
+        }
+
+        self.kick_stale_retirement_if_pending(&bare_jid, ctx.actor_ref());
         let user_actor = if let Some(actor_ref) = self
-            .existing_user_actor_for_current_claim(&bare_jid)
+            .existing_user_actor_for_register(&bare_jid, ctx.actor_ref())
             .await?
         {
             actor_ref
@@ -675,6 +1280,7 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
                     if let Some(user) = self.users.get_mut(&bare_jid) {
                         user.resources.insert(msg.jid.clone(), mirrored_entry);
                     }
+                    self.cancel_terminal_claim_release(&bare_jid);
                 }
                 Ok(registered)
             }
@@ -705,49 +1311,196 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let bare_jid = msg.jid.to_bare();
-        let resource_jid = msg.jid.clone();
-        if self.poisoned_users.contains(&bare_jid) {
-            return Err(UserRegistryError::UserActorStateLost(bare_jid));
-        }
-
-        let Some(entry) = self.users.get(&bare_jid).cloned() else {
-            return Ok(());
-        };
-        if !entry.actor_ref.is_alive() {
-            return Err(self.mark_actor_state_lost(&bare_jid).await);
-        }
-
-        let unregister = match entry
-            .actor_ref
-            .ask(UnregisterConnectionAndReportEmpty {
-                jid: msg.jid,
-                owner: msg.owner,
-            })
-            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
-            .reply_timeout(CHILD_ACTOR_TIMEOUT)
+        let retry_jid = msg.jid.clone();
+        let retry_owner = msg.owner.clone();
+        match self
+            .unregister_and_release_if_empty(msg.jid, msg.owner)
             .await
         {
-            Ok(outcome) => outcome,
-            Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
-                return Err(UserRegistryError::UserActorBusy(bare_jid));
+            UnregisterAndReleaseOutcome::Released
+            | UnregisterAndReleaseOutcome::RetainedLiveResources
+            | UnregisterAndReleaseOutcome::AlreadyAbsent => Ok(()),
+            UnregisterAndReleaseOutcome::RetryableFailure(reason) => {
+                self.remember_pending_unregister(retry_jid, retry_owner);
+                Err(match reason {
+                    UnregisterAndReleaseRetryableFailure::UserActorBusy => {
+                        UserRegistryError::UserActorBusy(bare_jid)
+                    }
+                    UnregisterAndReleaseRetryableFailure::UserActorStateLost => {
+                        UserRegistryError::UserActorStateLost(bare_jid)
+                    }
+                })
             }
-            Err(_) => return Err(self.mark_actor_state_lost(&bare_jid).await),
-        };
+        }
+    }
+}
 
-        if unregister.removed {
-            if let Some(user) = self.users.get_mut(&bare_jid) {
-                user.resources.remove(&resource_jid);
+/// Force-detach-only variant of [`UnregisterUserResource`].  It is an ask so
+/// the resume-steal acknowledgement cannot run ahead of registry convergence.
+pub struct UnregisterAndReleaseIfEmpty {
+    pub jid: FullJid,
+    pub owner: Option<Arc<AtomicBool>>,
+}
+
+impl kameo::message::Message<UnregisterAndReleaseIfEmpty> for UserRegistryActor {
+    type Reply = UnregisterAndReleaseOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: UnregisterAndReleaseIfEmpty,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let retry_jid = msg.jid.clone();
+        let retry_owner = msg.owner.clone();
+        let outcome = self
+            .unregister_and_release_if_empty(msg.jid, msg.owner)
+            .await;
+        if matches!(outcome, UnregisterAndReleaseOutcome::RetryableFailure(_)) {
+            self.remember_pending_unregister(retry_jid, retry_owner);
+        }
+        outcome
+    }
+}
+
+/// Force-detach retry variant of [`UnregisterAndReleaseIfEmpty`].
+///
+/// The caller owns the retry budget and records the pending-unregister only
+/// after every bounded synchronous attempt has returned a retryable failure.
+/// Recording each short-lived `UserActorBusy` result would unnecessarily
+/// leave janitor inventory behind after a later retry has already converged.
+pub struct UnregisterAndReleaseIfEmptyWithoutPendingRecord {
+    pub jid: FullJid,
+    pub owner: Option<Arc<AtomicBool>>,
+}
+
+impl kameo::message::Message<UnregisterAndReleaseIfEmptyWithoutPendingRecord>
+    for UserRegistryActor
+{
+    type Reply = UnregisterAndReleaseOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: UnregisterAndReleaseIfEmptyWithoutPendingRecord,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.unregister_and_release_if_empty(msg.jid, msg.owner)
+            .await
+    }
+}
+
+/// Retry actor-owned convergence inventories.  The registry entry is checked
+/// in this handler immediately before every durable release, which prevents a
+/// stale terminal retry from releasing a same-node self-reacquisition. Each
+/// mailbox turn processes only a bounded batch so a large retry backlog cannot
+/// monopolize the registry and time out the janitor's ask budget.
+pub struct RetryUserRegistryConvergence;
+
+/// Finalize an asynchronously queued stale-actor retirement once its
+/// force-detach acknowledgements settled (or their bounded wait elapsed).
+/// Sent by the ack-waiter task the retirement spawned; a no-op when the
+/// retirement is no longer pending.
+pub struct FinalizeStaleActorRetirement {
+    pub bare_jid: BareJid,
+}
+
+impl kameo::message::Message<FinalizeStaleActorRetirement> for UserRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: FinalizeStaleActorRetirement,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.finalize_stale_actor_retirement(&msg.bare_jid);
+    }
+}
+
+impl kameo::message::Message<RetryUserRegistryConvergence> for UserRegistryActor {
+    type Reply = (usize, usize);
+
+    async fn handle(
+        &mut self,
+        _msg: RetryUserRegistryConvergence,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let pending = Self::take_retry_batch(&mut self.pending_unregisters);
+        let mut pending_remaining = self.pending_unregisters.len();
+        for pending_unregister in pending {
+            let retry_jid = pending_unregister.jid.clone();
+            let retry_owner = pending_unregister.owner.clone();
+            if matches!(
+                self.unregister_and_release_if_empty(
+                    pending_unregister.jid,
+                    pending_unregister.owner
+                )
+                .await,
+                UnregisterAndReleaseOutcome::RetryableFailure(_)
+            ) {
+                self.remember_pending_unregister(retry_jid, retry_owner);
+                pending_remaining += 1;
             }
         }
 
-        if unregister.is_empty {
-            if let Some(entry) = self.users.remove(&bare_jid) {
-                self.release_user_claim(&bare_jid, &entry.claim).await;
+        // Pending-unregister retries still run inline because they already
+        // have strict child-actor timeouts; only the claim-store release path
+        // needs an extra cutoff to keep janitor turns bounded.
+        let releases = Self::take_retry_batch(&mut self.terminal_claim_releases);
+        let mut releases_remaining = self.terminal_claim_releases.len();
+        for release in releases {
+            // A live entry is the authority for retention, even when its
+            // claim epoch happens to be identical after self-reacquisition.
+            if self.users.contains_key(&release.bare_jid) {
+                continue;
             }
-            self.poisoned_users.remove(&bare_jid);
+            if !self
+                .release_user_claim(&release.bare_jid, &release.claim)
+                .await
+            {
+                releases_remaining += 1;
+            }
         }
+        (pending_remaining, releases_remaining)
+    }
+}
 
-        Ok(())
+pub struct RetryPendingStaleUserRetirements;
+
+impl kameo::message::Message<RetryPendingStaleUserRetirements> for UserRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: RetryPendingStaleUserRetirements,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.stale_retirement_retry_scheduled = false;
+        self.retry_pending_stale_retirement_work(ctx.actor_ref())
+            .await;
+        if !self.pending_stale_retirements.is_empty() {
+            self.schedule_pending_stale_retirement_retry(ctx.actor_ref());
+        }
+    }
+}
+
+/// Persist a force-detach removal for janitor convergence when the caller's
+/// preceding ask timed out before it could observe whether the handler ran.
+/// This is intentionally a separate actor message: submitting it after the
+/// original ask preserves mailbox order, so it covers both pre-handler and
+/// post-handler reply-loss cases without guessing which occurred.
+pub struct RecordPendingUserUnregister {
+    pub jid: FullJid,
+    pub owner: Option<Arc<AtomicBool>>,
+}
+
+impl kameo::message::Message<RecordPendingUserUnregister> for UserRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RecordPendingUserUnregister,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.remember_pending_unregister(msg.jid, msg.owner);
     }
 }
 
@@ -770,7 +1523,7 @@ impl kameo::message::Message<RemoveUser> for UserRegistryActor {
         let removed = removed_entry.is_some();
         let cleared_poison = self.poisoned_users.remove(&msg.bare_jid);
         if let Some(entry) = removed_entry {
-            self.release_user_claim(&msg.bare_jid, &entry.claim).await;
+            let _ = self.release_user_claim(&msg.bare_jid, &entry.claim).await;
         }
         if removed {
             debug!(jid = %msg.bare_jid, "Removed user from registry");
@@ -950,7 +1703,7 @@ impl kameo::message::Message<ReapUserIfEmpty> for UserRegistryActor {
         };
         if count == 0 {
             if let Some(entry) = self.users.remove(&msg.bare_jid) {
-                self.release_user_claim(&msg.bare_jid, &entry.claim).await;
+                let _ = self.release_user_claim(&msg.bare_jid, &entry.claim).await;
             }
             debug!(jid = %msg.bare_jid, "Reaped empty UserActor");
             true
@@ -984,6 +1737,26 @@ impl kameo::message::Message<UserCount> for UserRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.users.len()
+    }
+}
+
+/// Cross-crate test controls, kept behind the existing `test-utils` feature.
+#[cfg(feature = "test-utils")]
+pub mod test_support {
+    use super::UserRegistryActor;
+
+    pub struct PendingUnregisterCount;
+
+    impl kameo::message::Message<PendingUnregisterCount> for UserRegistryActor {
+        type Reply = usize;
+
+        async fn handle(
+            &mut self,
+            _msg: PendingUnregisterCount,
+            _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+        ) -> Self::Reply {
+            self.pending_unregisters.len()
+        }
     }
 }
 

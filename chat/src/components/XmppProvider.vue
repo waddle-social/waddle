@@ -42,6 +42,11 @@ async function bootstrap() {
   if (auth.appState.value === "ready" && auth.session.value) {
     await bootstrapCoordinator.replace(generation, () => {
       const client = new BrowserXmppClient(auth.session.value!);
+      connectionStore.selfFullJid = client.fullJid;
+      client.setFullJidHandler((fullJid) => {
+        if (connectionStore.client !== client) return;
+        connectionStore.selfFullJid = fullJid;
+      });
       // Wire Faro telemetry hooks before any handlers are set — the
       // primary setStatusHandler below is unaffected, but the telemetry
       // `onStatus` hook fires alongside it. Safe to install even when
@@ -64,6 +69,7 @@ async function bootstrap() {
   // session without unmounting this provider. Never leave that old socket or
   // its status handler alive after publishing the non-ready auth state.
   if (bootstrapCoordinator.detachIfCurrent(generation)) {
+    connectionStore.selfFullJid = null;
     $xmppStatus.set(OFFLINE_SNAPSHOT);
   }
 }
@@ -82,6 +88,7 @@ connectionStore.logout = async () => {
   // Logical ownership releases before the first await in `dispose`; retain
   // best-effort physical close without letting a stalled socket delay logout.
   bootstrapCoordinator.detach();
+  connectionStore.selfFullJid = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);
   await auth.logout();
   syncStoreFromAuth();
@@ -105,6 +112,7 @@ onUnmounted(() => {
   bootstrapCoordinator.detach();
   disposePageLifecycle?.();
   disposePageLifecycle = null;
+  connectionStore.selfFullJid = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);
 });
 </script>

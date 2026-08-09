@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createSSRApp, h } from "vue";
+import { createSSRApp, h, nextTick, shallowReactive } from "vue";
 import { parse, compileScript } from "vue/compiler-sfc";
 import { renderToString } from "vue/server-renderer";
 import ts from "typescript";
@@ -47,6 +47,7 @@ afterEach(() => {
   $callCamEnabled.set(true);
   $callUiMode.set("split");
   connectionStore.client = null;
+  connectionStore.selfFullJid = null;
   connectionStore.session = null;
 });
 
@@ -3625,6 +3626,76 @@ describe("CallActivityDock rendering", () => {
       media: { audio: true, video: true },
       join: liveKitJoinFor(),
       initiator: "alice@example.com/web",
+    });
+  });
+
+  test("shell reconnect uses the reactively published regenerated full JID", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-resume-regenerated",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor("alice@example.com/recovered"),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const selected: unknown[][] = [];
+    const shellConnectionStore = shallowReactive({
+      client: { fullJid: "alice@example.com/web" },
+      selfFullJid: "alice@example.com/web",
+      session: null,
+    });
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui: { activeCommunitySurface: { value: null } },
+          connectionStore: shellConnectionStore,
+          waddles: { mucServiceJid: { value: "" } },
+          selfDomain: { value: "" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: (...args: unknown[]) => {
+            selected.push(args);
+          },
+          selectChannel: () => undefined,
+          selectChannelByRoomJid: () => undefined,
+        },
+      }),
+    );
+
+    shellConnectionStore.selfFullJid = "alice@example.com/recovered";
+    await nextTick();
+    setupBindingFunction(bindings, "reconnectDmFromDock")(
+      "bob@example.com",
+      { audio: true, video: true },
+    );
+
+    expect(selected).toEqual([["bob@example.com"]]);
+    expect($callState.get()).toEqual({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-resume-regenerated",
+      media: { audio: true, video: true },
+      join: liveKitJoinFor("alice@example.com/recovered"),
+      initiator: "alice@example.com/recovered",
     });
   });
 

@@ -43,6 +43,7 @@ const JOINED_ROOMS_PREFIX = "waddle.chat.joined-rooms";
 const AUTO_JOIN_BLOCKS_PREFIX = "waddle.chat.auto-join-blocks";
 const OWNER_LEASE_PREFIX = `${SM_PREFIX}.owner-lease`;
 const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
+const OWN_RESUME_PREFIX = `${SM_PREFIX}.own-resume`;
 
 type PersistedSeenCursor = {
   timestamp: string;
@@ -109,6 +110,26 @@ type OwnerHandoff = {
 };
 
 /**
+ * A short-lived, cross-document witness that this browser is resuming one
+ * exact former XEP-0198 stream. It exists solely to distinguish the
+ * force-detach close delivered to that former local stream from a genuine
+ * second sign-in.
+ */
+type OwnResumeMarker = {
+  ownerId: string;
+  ownerInstanceId: string;
+  clientId: string;
+  startedAt: number;
+  expiresAt: number;
+};
+
+type OwnResumeMarkerPointer = {
+  attemptKey: string;
+};
+
+type OwnResumeConflictMarker = "absent" | "self" | "foreign";
+
+/**
  * Fallback resumption window for older persisted PODs that predate
  * `maxResumeSeconds`. This mirrors Waddle server's default XEP-0198
  * max, so old snapshots fail closed instead of lingering for hours.
@@ -118,6 +139,8 @@ const SM_SAVED_AT_FUTURE_SKEW_MS = 60_000;
 const OWNER_LEASE_TTL_MS = 45_000;
 const OWNER_HEARTBEAT_MS = 15_000;
 const OWNER_HANDOFF_TTL_MS = OWNER_LEASE_TTL_MS;
+const OWN_RESUME_MARKER_TTL_MS = 30_000;
+const OWN_RESUME_MARKER_POST_SUCCESS_TTL_MS = 5 * 60_000;
 const MAX_SM_OWNER_SLOTS = 64;
 const liveOwnerInstances = new Map<string, string>();
 
@@ -177,6 +200,14 @@ export interface ResumePersistence {
   consumeSm(): PersistedSmResumeState | null;
   saveSm(state: PersistedSmResumeState): void;
   clearSm(): void;
+  /** Start the short, precise cross-document own-resume witness. */
+  beginOwnResume(previd: string, clientId: string, attemptId?: string): void;
+  /** Extend this attempt's exact-previd witness after a successful resume. */
+  retainOwnResume(previd: string, clientId: string, attemptId?: string): void;
+  /** Clear this owner's witness once its attempt has reached a terminal outcome. */
+  finishOwnResume(previd: string, clientId: string, attemptId?: string): void;
+  /** Classify a live witness for this exact former stream without consuming it. */
+  consumeOwnResume(previd: string, clientId: string): OwnResumeConflictMarker;
   preparePagehideHandoff(): void;
   loadJoinedRooms(): string[];
   saveJoinedRooms(roomJids: readonly string[]): void;
@@ -196,6 +227,10 @@ export const nullResumePersistence: ResumePersistence = {
   consumeSm: () => null,
   saveSm: () => undefined,
   clearSm: () => undefined,
+  beginOwnResume: () => undefined,
+  retainOwnResume: () => undefined,
+  finishOwnResume: () => undefined,
+  consumeOwnResume: () => "absent",
   preparePagehideHandoff: () => undefined,
   loadJoinedRooms: () => [],
   saveJoinedRooms: () => undefined,
@@ -225,8 +260,11 @@ export function createLocalStorageResumePersistence(
   // account. Length prefixes keep account and owner enumeration disjoint.
   const smAccountKeyPrefix = `${SM_PREFIX}.${accountKey.length}:${accountKey}`;
   const smKey = `${smAccountKeyPrefix}.${owner.ownerId.length}:${owner.ownerId}`;
+  const ownResumeKeyPrefix = `${OWN_RESUME_PREFIX}.${accountKey.length}:${accountKey}.`;
+  const ownResumeKey = (previd: string) => `${ownResumeKeyPrefix}${previd.length}:${previd}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
   const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
+  gcOwnResumeMarkers(ownResumeKeyPrefix);
 
   return {
     dispose() {
@@ -305,6 +343,53 @@ export function createLocalStorageResumePersistence(
       if (disposed) return;
       removeSmEnvelopeIfOwned(smKey, owner);
       removeSmConsumedMarkerIfOwned(`${smKey}.consumed`, owner);
+    },
+    beginOwnResume(previd, clientId, attemptId) {
+      if (disposed || !previd) return;
+      gcOwnResumeMarkers(ownResumeKeyPrefix);
+      const key = ownResumeKey(previd);
+      const startedAt = Date.now();
+      const attemptKey = ownResumeMarkerAttemptKey(key, owner, clientId, attemptId ?? randomClaimId());
+      // Publish the pointer only once the marker it references exists: a
+      // quota failure on the (larger) marker with a still-succeeding pointer
+      // write would shadow an earlier retained witness behind a dangling
+      // reference, turning a recoverable supersession into a terminal
+      // new-sign-in classification.
+      if (!writeJson(attemptKey, {
+        ownerId: owner.ownerId,
+        ownerInstanceId: owner.instanceId,
+        clientId,
+        startedAt,
+        expiresAt: startedAt + OWN_RESUME_MARKER_TTL_MS,
+      }, "own-resume")) return;
+      writeJson(key, { attemptKey }, "own-resume");
+    },
+    retainOwnResume(previd, clientId, attemptId) {
+      if (disposed || !previd) return;
+      const attemptKey = attemptId
+        ? ownResumeMarkerAttemptKey(ownResumeKey(previd), owner, clientId, attemptId)
+        : currentOwnResumeAttemptKey(ownResumeKey(previd), owner, clientId);
+      if (!attemptKey) return;
+      refreshOwnResumeMarkerIfOwned(
+        attemptKey,
+        owner,
+        clientId,
+        OWN_RESUME_MARKER_POST_SUCCESS_TTL_MS,
+      );
+    },
+    finishOwnResume(previd, clientId, attemptId) {
+      if (disposed || !previd) return;
+      const key = ownResumeKey(previd);
+      const attemptKey = attemptId
+        ? ownResumeMarkerAttemptKey(key, owner, clientId, attemptId)
+        : currentOwnResumeAttemptKey(key, owner, clientId);
+      if (!attemptKey) return;
+      removeOwnResumeMarkerIfOwned(attemptKey, owner, clientId);
+      restoreOwnResumePointerAfterAttemptRemoval(key, attemptKey);
+    },
+    consumeOwnResume(previd, clientId) {
+      if (disposed || !previd) return "absent";
+      return consumeOwnResumeMarker(ownResumeKey(previd), clientId);
     },
     preparePagehideHandoff() {
       if (disposed) return;
@@ -831,6 +916,241 @@ function removeSmConsumedMarkerIfOwned(key: string, owner: ResumeOwner): void {
   removeJsonIfOwned(key, isPersistedSmConsumedMarker, owner, "sm-consumed");
 }
 
+function removeOwnResumeMarkerIfOwned(key: string, owner: ResumeOwner, clientId: string): void {
+  const s = storage();
+  if (!s) return;
+  try {
+    const raw = s.getItem(key);
+    if (!raw) return;
+    const marker: unknown = JSON.parse(raw);
+    if (
+      !isOwnResumeMarker(marker)
+      || marker.ownerId !== owner.ownerId
+      || marker.ownerInstanceId !== owner.instanceId
+      || marker.clientId !== clientId
+    ) return;
+    if (s.getItem(key) === raw) s.removeItem(key);
+  } catch (err) {
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "resume-persistence compare-delete failed (own-resume)",
+      storage_area: "own-resume",
+    });
+  }
+}
+
+function restoreOwnResumePointerAfterAttemptRemoval(key: string, attemptKey: string): void {
+  const s = storage();
+  if (!s) return;
+  try {
+    const raw = s.getItem(key);
+    if (!raw) return;
+    const pointer: unknown = JSON.parse(raw);
+    if (!isOwnResumeMarkerPointer(pointer) || pointer.attemptKey !== attemptKey) return;
+    if (s.getItem(key) !== raw) return;
+    const fallbackAttemptKey = latestOwnResumeAttempt(key, attemptKey)?.attemptKey ?? null;
+    // Compare-and-write discipline: the attempt scan above can interleave
+    // with another tab publishing a NEWER pointer for the same previd.
+    // Overwriting it with an older retained marker would make the newer
+    // attempt's displaced counterpart read its own marker and latch the
+    // terminal new-sign-in state. Re-check currency immediately before the
+    // write and stand down if anything replaced the observed pointer.
+    if (s.getItem(key) !== raw) return;
+    if (fallbackAttemptKey) {
+      writeJson(key, { attemptKey: fallbackAttemptKey }, "own-resume");
+    } else {
+      s.removeItem(key);
+    }
+  } catch (err) {
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "resume-persistence compare-delete failed (own-resume)",
+      storage_area: "own-resume",
+    });
+  }
+}
+
+function consumeOwnResumeMarker(key: string, clientId: string): OwnResumeConflictMarker {
+  const s = storage();
+  if (!s) return "absent";
+  try {
+    const raw = s.getItem(key);
+    if (!raw) return "absent";
+    const pointer: unknown = JSON.parse(raw);
+    if (
+      !isOwnResumeMarkerPointer(pointer)
+      || !pointer.attemptKey.startsWith(`${key}.attempt.`)
+    ) return "absent";
+    const markerRaw = s.getItem(pointer.attemptKey);
+    if (!markerRaw) return "absent";
+    const parsed: unknown = JSON.parse(markerRaw);
+    if (!isOwnResumeMarker(parsed) || ownResumeMarkerExpired(parsed)) return "absent";
+    if (parsed.clientId === clientId) return "self";
+    return "foreign";
+  } catch (err) {
+    reportError("storage.read", err, {
+      recoverable: true,
+      detail: "resume-persistence consume failed (own-resume)",
+      storage_area: "own-resume",
+    });
+    return "absent";
+  }
+}
+
+/**
+ * A successful resume can outlive the short connect-attempt window when a
+ * suspended former document receives its force-detach close late. Refresh
+ * only the per-attempt marker this resume owns; the active per-`previd`
+ * pointer stays untouched so a late lifecycle callback cannot replace a
+ * newer local handoff for the same XEP-0198 stream id.
+ */
+function refreshOwnResumeMarkerIfOwned(
+  key: string,
+  owner: ResumeOwner,
+  clientId: string,
+  ttlMs: number,
+): void {
+  const s = storage();
+  if (!s) return;
+  try {
+    const raw = s.getItem(key);
+    if (!raw) return;
+    const marker: unknown = JSON.parse(raw);
+    if (
+      !isOwnResumeMarker(marker)
+      || marker.ownerId !== owner.ownerId
+      || marker.ownerInstanceId !== owner.instanceId
+      || marker.clientId !== clientId
+      || s.getItem(key) !== raw
+    ) return;
+    writeJson(key, { ...marker, expiresAt: Date.now() + ttlMs }, "own-resume");
+  } catch (err) {
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "resume-persistence refresh failed (own-resume)",
+      storage_area: "own-resume",
+    });
+  }
+}
+
+function ownResumeMarkerExpired(marker: OwnResumeMarker): boolean {
+  return marker.expiresAt <= Date.now();
+}
+
+function latestOwnResumeAttempt(
+  key: string,
+  excludeAttemptKey?: string,
+): { attemptKey: string; marker: OwnResumeMarker } | null {
+  let latest: { attemptKey: string; marker: OwnResumeMarker } | null = null;
+  for (const attemptKey of storageKeysWithPrefix(`${key}.attempt.`)) {
+    if (attemptKey === excludeAttemptKey) continue;
+    const marker = readJson<OwnResumeMarker>(attemptKey, isOwnResumeMarker, "own-resume");
+    if (!marker || ownResumeMarkerExpired(marker)) continue;
+    if (!latest || marker.startedAt > latest.marker.startedAt) {
+      latest = { attemptKey, marker };
+    }
+  }
+  return latest;
+}
+
+function currentOwnResumeAttemptKey(
+  key: string,
+  owner: ResumeOwner,
+  clientId: string,
+): string | null {
+  const s = storage();
+  if (!s) return null;
+  try {
+    const raw = s.getItem(key);
+    if (!raw) return null;
+    const pointer: unknown = JSON.parse(raw);
+    if (!isOwnResumeMarkerPointer(pointer)) return null;
+    const marker = readJson<OwnResumeMarker>(pointer.attemptKey, isOwnResumeMarker, "own-resume");
+    if (
+      !marker
+      || ownResumeMarkerExpired(marker)
+      || marker.ownerId !== owner.ownerId
+      || marker.ownerInstanceId !== owner.instanceId
+      || marker.clientId !== clientId
+    ) return null;
+    return pointer.attemptKey;
+  } catch (err) {
+    reportError("storage.read", err, {
+      recoverable: true,
+      detail: "resume-persistence read failed (own-resume)",
+      storage_area: "own-resume",
+    });
+    return null;
+  }
+}
+
+/** Bound abandoned-page marker storage; a missing terminal callback must not leak keys. */
+function gcOwnResumeMarkers(keyPrefix: string): void {
+  const s = storage();
+  if (!s) return;
+  for (const key of storageKeysWithPrefix(keyPrefix)) {
+    let raw: string | null;
+    try {
+      raw = s.getItem(key);
+    } catch (err) {
+      reportError("storage.read", err, {
+        recoverable: true,
+        detail: "resume-persistence read failed (own-resume)",
+        storage_area: "own-resume",
+      });
+      continue;
+    }
+    if (!raw) continue;
+
+    let remove = false;
+    let restoreFromAttemptKey: string | null = null;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (isOwnResumeMarker(parsed)) {
+        remove = ownResumeMarkerExpired(parsed);
+      } else if (isOwnResumeMarkerPointer(parsed)) {
+        if (!parsed.attemptKey.startsWith(`${key}.attempt.`)) {
+          remove = true;
+        } else {
+          const marker = readJson<OwnResumeMarker>(parsed.attemptKey, isOwnResumeMarker, "own-resume");
+          if (!marker || ownResumeMarkerExpired(marker)) {
+            // A pointer whose attempt died (an abandoned retry past its
+            // 30 s TTL) may still shadow a RETAINED earlier witness — the
+            // explicit finish path restores that fallback and GC must do
+            // the same, or the live retained marker becomes unreachable and
+            // the displaced tab latches the terminal new-sign-in state.
+            restoreFromAttemptKey = parsed.attemptKey;
+          }
+        }
+      } else {
+        remove = true;
+      }
+    } catch (err) {
+      reportError("storage.read", err, {
+        recoverable: true,
+        detail: "resume-persistence read failed (own-resume)",
+        storage_area: "own-resume",
+      });
+      remove = true;
+    }
+    if (restoreFromAttemptKey) {
+      restoreOwnResumePointerAfterAttemptRemoval(key, restoreFromAttemptKey);
+      continue;
+    }
+    if (!remove) continue;
+
+    try {
+      if (s.getItem(key) === raw) s.removeItem(key);
+    } catch (err) {
+      reportError("storage.write", err, {
+        recoverable: true,
+        detail: "resume-persistence compare-delete failed (own-resume)",
+        storage_area: "own-resume",
+      });
+    }
+  }
+}
+
 function removeJsonIfOwned<T extends { ownerId?: string; instanceId?: string; ownerInstanceId?: string }>(
   key: string,
   validate: (value: unknown) => value is T,
@@ -953,11 +1273,12 @@ function removeKeysWithPrefix(prefix: string, kind: string): void {
   for (const key of storageKeysWithPrefix(prefix)) removeKey(key, kind);
 }
 
-function writeJson(key: string, value: unknown, kind: string): void {
+function writeJson(key: string, value: unknown, kind: string): boolean {
   const s = storage();
-  if (!s) return;
+  if (!s) return false;
   try {
     s.setItem(key, JSON.stringify(value));
+    return true;
   } catch (err) {
     const name = err instanceof Error ? err.name : "";
     const errorKind = name === "QuotaExceededError" ? "storage.quota" : "storage.write";
@@ -966,6 +1287,7 @@ function writeJson(key: string, value: unknown, kind: string): void {
       detail: `resume-persistence write failed (${kind})`,
       storage_area: kind,
     });
+    return false;
   }
 }
 
@@ -1078,6 +1400,31 @@ function isOwnerHandoff(value: unknown): value is OwnerHandoff {
     typeof candidate.instanceId === "string" &&
     typeof candidate.expiresAt === "number"
   );
+}
+
+function isOwnResumeMarkerPointer(value: unknown): value is OwnResumeMarkerPointer {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.attemptKey === "string";
+}
+
+function isOwnResumeMarker(value: unknown): value is OwnResumeMarker {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.ownerId === "string"
+    && typeof candidate.ownerInstanceId === "string"
+    && typeof candidate.clientId === "string"
+    && Number.isFinite(candidate.startedAt)
+    && Number.isFinite(candidate.expiresAt);
+}
+
+function ownResumeMarkerAttemptKey(
+  key: string,
+  owner: ResumeOwner,
+  clientId: string,
+  attemptId: string,
+): string {
+  return `${key}.attempt.${owner.ownerId.length}:${owner.ownerId}.${owner.instanceId.length}:${owner.instanceId}.${clientId.length}:${clientId}.${attemptId.length}:${attemptId}`;
 }
 
 function isPersistedSmConsumedMarker(value: unknown): value is PersistedSmConsumedMarker {

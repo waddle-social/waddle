@@ -432,6 +432,54 @@ pub struct ClusteringBootstrapConfig {
     pub port: u16,
 }
 
+/// Receiver-side cap for ordered-relay mailbox admission.
+pub(crate) const ORDERED_RELAY_MAILBOX_TIMEOUT: Duration = Duration::from_secs(2);
+/// Receiver-side cap for ordinary ordered-relay replies.
+pub(crate) const ORDERED_RELAY_REPLY_TIMEOUT: Duration = Duration::from_secs(8);
+/// A remote-owner registration drains at most one current-affecting pending
+/// unregister before issuing its child register ask.
+const REMOTE_OWNER_REGISTER_CHILD_OPERATION_COUNT: u32 = 2;
+/// After the owner-local register succeeds, the handler still re-reads the
+/// `UserActor` and validates the owner-gated `ConnectionEntry` before it can
+/// safely reply `Registered`.
+const REMOTE_OWNER_REGISTER_POST_REGISTRATION_ASK_COUNT: u32 = 2;
+const REMOTE_OWNER_REGISTER_REPLY_TIMEOUT_MARGIN: Duration = Duration::from_millis(250);
+/// Reply budget for the owner-local `UserRegistryActor` admission ask issued
+/// from `register_remote_user_resource_on_owner_locked`.
+/// Each nested child ask spends TWO bounded phases on a congested actor —
+/// mailbox admission and the reply — each capped by `CHILD_ACTOR_TIMEOUT`.
+const REMOTE_OWNER_REGISTER_CHILD_PHASES: u32 = 2;
+pub(crate) const REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT: Duration =
+    waddle_xmpp::registry::user_registry::CHILD_ACTOR_TIMEOUT
+        .saturating_mul(REMOTE_OWNER_REGISTER_CHILD_OPERATION_COUNT)
+        .saturating_mul(REMOTE_OWNER_REGISTER_CHILD_PHASES)
+        .saturating_add(REMOTE_OWNER_REGISTER_REPLY_TIMEOUT_MARGIN);
+/// Reply budget for the owner-local post-registration currentness checks:
+/// `GetUser` on the registry plus `GetConnectionEntry` on the child actor.
+pub(crate) const REMOTE_OWNER_REGISTER_POST_REGISTRATION_REPLY_TIMEOUT: Duration =
+    ORDERED_RELAY_MAILBOX_TIMEOUT
+        .saturating_mul(REMOTE_OWNER_REGISTER_POST_REGISTRATION_ASK_COUNT)
+        .saturating_mul(2);
+/// Reply floor for a remote-resource register relay ask. It must cover the
+/// nested owner-local registry admission mailbox window (spent BEFORE that
+/// ask's reply budget starts — the explicit first term below) plus that
+/// admission ask's bounded reply budget AND the two bounded post-registration
+/// asks that prove the mirrored resource is now current before replying
+/// `Registered`. Dropping the admission term makes the sum expire before an
+/// otherwise-bounded handler finishes whenever the registry mailbox consumes
+/// part of its window, and the socket's idempotent retry budget collapses
+/// with it.
+///
+/// This floor intentionally excludes displaced-mirror retirement work. That
+/// pre-registration path runs under the same per-JID lock, but it cannot keep
+/// stretching the fixed reply floor every time another bounded cleanup step is
+/// discovered; owner-managed retirement must instead surface a prompt typed
+/// transient (the same "Busy immediately, retry the idempotent register"
+/// design the socket side already uses elsewhere).
+pub(crate) const REMOTE_OWNER_REGISTER_REPLY_TIMEOUT: Duration = ORDERED_RELAY_MAILBOX_TIMEOUT
+    .saturating_add(REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT)
+    .saturating_add(REMOTE_OWNER_REGISTER_POST_REGISTRATION_REPLY_TIMEOUT);
+
 /// kameo `messaging::Config` limits plus the ADR element-5 timeout hierarchy.
 ///
 /// Invariants enforced at parse time: `reply_timeout <= request_timeout`,
@@ -442,7 +490,14 @@ pub struct ClusteringBootstrapConfig {
 /// is the binding bound; any `reply_timeout` above it is dead configuration.
 /// `mailbox_timeout`/`reply_timeout` are per-ask parameters, applied by every
 /// relay ask (`clustering::relay::RelayHandle`); Phase 4's delivery asks
-/// inherit the same wiring.
+/// inherit the same wiring. Remote-resource registration raises its relay
+/// reply wait to [`REMOTE_OWNER_REGISTER_REPLY_TIMEOUT`] because the owner
+/// handler performs a nested `UserRegistryActor` ask whose mailbox admission
+/// alone can spend [`ORDERED_RELAY_MAILBOX_TIMEOUT`] before its own reply
+/// budget starts, so that effective mailbox and reply combination must fit
+/// under `request_timeout` as well. Displaced-mirror retirement is not part of
+/// this fixed floor; that path must return a prompt retryable typed status
+/// instead of holding the relay reply open across extra cleanup work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusteringMessagingConfig {
     pub request_timeout: Duration,
@@ -682,6 +737,19 @@ impl ClusteringConfig {
                 mailbox_timeout.as_millis(),
                 reply_timeout.as_millis(),
                 request_timeout.as_millis()
+            ));
+        }
+        let remote_register_mailbox_timeout = mailbox_timeout.min(ORDERED_RELAY_MAILBOX_TIMEOUT);
+        let remote_register_reply_timeout = reply_timeout
+            .min(ORDERED_RELAY_REPLY_TIMEOUT)
+            .max(REMOTE_OWNER_REGISTER_REPLY_TIMEOUT);
+        if remote_register_mailbox_timeout + remote_register_reply_timeout > request_timeout {
+            return Err(format!(
+                "WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({}) must cover the remote-resource \
+                 registration mailbox ({}) + reply ({}) timeout budget",
+                request_timeout.as_millis(),
+                remote_register_mailbox_timeout.as_millis(),
+                remote_register_reply_timeout.as_millis(),
             ));
         }
         if max_concurrent_streams == 0 {
@@ -1703,6 +1771,59 @@ mod tests {
         assert!(err.contains("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS"));
         assert!(err.contains("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS"));
         assert!(err.contains("sequential"));
+    }
+
+    #[test]
+    fn clustering_rejects_request_timeout_below_remote_registration_budget() {
+        let request_timeout = Duration::from_millis(1000)
+            .saturating_add(REMOTE_OWNER_REGISTER_REPLY_TIMEOUT)
+            .saturating_sub(Duration::from_millis(1))
+            .as_millis()
+            .to_string();
+        let err = ClusteringConfig::from_vars([
+            // The fixed floor covers only the nested register admission plus
+            // the post-registration currentness proof. Displaced-mirror
+            // retirement must surface a prompt retryable typed status instead
+            // of inflating this budget, so one millisecond below the exact
+            // floor must still fail for the documented pieces only.
+            (
+                "WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS",
+                request_timeout.as_str(),
+            ),
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "1000"),
+            ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "1000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("remote-resource registration"));
+    }
+
+    #[test]
+    fn clustering_remote_registration_budget_stays_scoped_to_register_and_currentness_proof() {
+        assert_eq!(
+            REMOTE_OWNER_REGISTER_REPLY_TIMEOUT,
+            ORDERED_RELAY_MAILBOX_TIMEOUT
+                .saturating_add(REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT)
+                .saturating_add(REMOTE_OWNER_REGISTER_POST_REGISTRATION_REPLY_TIMEOUT),
+            "the floor is exactly the nested admission window plus the admission-ask \
+             reply and post-registration budgets"
+        );
+    }
+
+    #[test]
+    fn clustering_accepts_request_timeout_at_exact_remote_registration_budget() {
+        let request_timeout = Duration::from_millis(1000)
+            .saturating_add(REMOTE_OWNER_REGISTER_REPLY_TIMEOUT)
+            .as_millis()
+            .to_string();
+        ClusteringConfig::from_vars([
+            (
+                "WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS",
+                request_timeout.as_str(),
+            ),
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "1000"),
+            ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "1000"),
+        ])
+        .expect("the exact remote-resource registration budget floor must be accepted");
     }
 
     #[test]

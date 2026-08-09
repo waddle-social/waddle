@@ -153,7 +153,12 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
   function retryActiveLoad() {
     const peer = activeDmPeer.value;
     if (!isActiveDirectDmSurface() || !peer) return;
-    void dmMessaging.loadMessages(peer.peerJid);
+    const peerJid = peer.peerJid;
+    void (async () => {
+      await xmppClient.value?.recoverSupersededSession();
+      if (!isActiveDirectDmSurface() || activeDmPeer.value?.peerJid !== peerJid) return;
+      await dmMessaging.loadMessages(peerJid);
+    })();
   }
 
   function ensureActiveMessageLoaded(messageId: string) {

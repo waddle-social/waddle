@@ -169,8 +169,10 @@ async fn test_unregister_and_report_empty_is_atomic_per_user_actor() {
         .ask(UnregisterConnectionAndReportEmpty { jid, owner: None })
         .await
         .expect("unregister+check");
-    assert!(outcome.removed);
-    assert!(outcome.is_empty);
+    assert_eq!(
+        outcome,
+        UnregisterConnectionOutcome::Removed { is_empty: true }
+    );
 }
 
 /// Owner-gated unregister mirrors the DashMap `unregister_if_owner`: a lagging
@@ -229,8 +231,9 @@ async fn test_unregister_is_owner_gated() {
         })
         .await
         .expect("owned unregister");
-    assert!(
-        outcome.removed && outcome.is_empty,
+    assert_eq!(
+        outcome,
+        UnregisterConnectionOutcome::Removed { is_empty: true },
         "matching-owner unregister must remove the resource"
     );
 }

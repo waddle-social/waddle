@@ -150,6 +150,7 @@ const visibleManagedMucDomain = computed(() =>
 );
 const visibleSelfFullJid = computed(() =>
   props.selfFullJid ??
+  connectionStore.selfFullJid ??
   (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid ??
   null
 );

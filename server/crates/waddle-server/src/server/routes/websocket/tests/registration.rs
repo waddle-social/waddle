@@ -86,6 +86,158 @@ async fn ensure_state_machine_initializes_sm_in_ready_phase() {
     assert_eq!(sm.phase().bound_jid(), Some(&jid));
 }
 
+/// A resumed registration treats a transient busy child actor as recoverable
+/// while it drains force-detach cleanup, rather than failing session init.
+#[tokio::test]
+async fn resumed_registration_retries_a_transient_busy_mirror() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let outcome = super::super::registration::retry_resumed_registration_busy({
+        let attempts = Arc::clone(&attempts);
+        move || {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    crate::server::dual_registration::MirrorRegisterOutcome::Busy
+                } else {
+                    crate::server::dual_registration::MirrorRegisterOutcome::Registered
+                }
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(
+        outcome,
+        crate::server::dual_registration::MirrorRegisterOutcome::Registered
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn resumed_registration_busy_retry_is_bounded() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::super::registration::retry_resumed_registration_busy({
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    crate::server::dual_registration::MirrorRegisterOutcome::Busy
+                }
+            }
+        }),
+    )
+    .await
+    .expect("bounded retries must not hang");
+
+    assert_eq!(
+        outcome,
+        crate::server::dual_registration::MirrorRegisterOutcome::Busy
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+/// A child actor can remain occupied beyond its own two-second ask budget.
+/// The registry must then return the typed `UserActorBusy` reply, rather than
+/// letting the enclosing mirror ask time out and turn it into a terminal
+/// `Failed` outcome before the XEP-0198 retry loop sees it. Several stale,
+/// owner-gated pending unregister records are harmless to the current owner;
+/// they must not extend the registration handler's bounded reply path.
+#[tokio::test]
+async fn resumed_registration_retries_when_child_stays_busy_for_two_and_a_half_seconds() {
+    use kameo::actor::Spawn;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::{oneshot, Notify};
+    use waddle_xmpp::registry::user_actor::test_support::GateMailbox;
+    use waddle_xmpp::registry::user_registry::RecordPendingUserUnregister;
+    use waddle_xmpp::registry::{
+        ConnectionEntry, GetUser, RegisterUserResource, UserRegistryActor,
+    };
+
+    let registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let jid: FullJid = "busy-resume@example.com/web".parse().expect("jid");
+    let (seed_tx, _seed_rx) = mpsc::channel(1);
+    registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry: ConnectionEntry::new(seed_tx),
+        })
+        .await
+        .expect("seed actor resource");
+
+    for _ in 0..3 {
+        registry
+            .ask(RecordPendingUserUnregister {
+                jid: jid.clone(),
+                owner: Some(Arc::new(AtomicBool::new(false))),
+            })
+            .await
+            .expect("record unrelated stale owner");
+    }
+
+    let user = registry
+        .ask(GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .await
+        .expect("get user")
+        .expect("seeded user actor");
+    let entered = Arc::new(Notify::new());
+    let (release_tx, release_rx) = oneshot::channel();
+    user.tell(GateMailbox {
+        entered: Arc::clone(&entered),
+        release_rx,
+    })
+    .await
+    .expect("queue child gate");
+    entered.notified().await;
+
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        let _ = release_tx.send(());
+    });
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let outcome = super::super::registration::retry_resumed_registration_busy({
+        let registry = registry.clone();
+        let jid = jid.clone();
+        let attempts = Arc::clone(&attempts);
+        move || {
+            let registry = registry.clone();
+            let jid = jid.clone();
+            let attempts = Arc::clone(&attempts);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let (tx, _rx) = mpsc::channel(1);
+                crate::server::dual_registration::mirror_register_outcome(
+                    &registry,
+                    jid,
+                    ConnectionEntry::new(tx),
+                )
+                .await
+            }
+        }
+    })
+    .await;
+    release.await.expect("release task");
+
+    assert_eq!(
+        outcome,
+        crate::server::dual_registration::MirrorRegisterOutcome::Registered,
+        "the first typed Busy outcome must reach the retry loop"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "a terminal outer timeout would bypass the Busy retry"
+    );
+}
+
 #[tokio::test]
 async fn register_bound_connection_after_frame_registers_ready_connection_once() {
     let state = create_test_websocket_state().await;

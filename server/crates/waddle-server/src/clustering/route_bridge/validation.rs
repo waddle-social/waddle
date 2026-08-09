@@ -379,6 +379,11 @@ pub(super) fn ask_error_allows_target_refresh(error: &RelayAskError) -> bool {
     }
 }
 
+/// Provably-uncommitted proof that the remote reference cannot act on this
+/// ask: a definitive no-effect stale-ref reply, or a lookup that resolved
+/// nothing at all. Callers whose safety only needs "nothing committed AND a
+/// successor supersedes the reference" (replacement retirement, forwarder
+/// mirror cleanup) may act on this immediately.
 pub(super) fn ask_error_proves_remote_resource_ref_stale(error: &RelayAskError) -> bool {
     matches!(
         error,
@@ -389,6 +394,35 @@ pub(super) fn ask_error_proves_remote_resource_ref_stale(error: &RelayAskError) 
                 ..
             }
     )
+}
+
+/// Only a definitive no-effect stale-ref reply DEFINITIVELY proves the remote
+/// reference is gone. `RelayAskError::NotFound` is NOT definitive:
+/// `relay.rs` maps repeated `Ok(None)` lookups and transient lookup errors to
+/// it within a finite backoff budget, so a partition or slow Kademlia round
+/// produces the same error while the owner process is still alive and still
+/// holding mirrors. Callers that would drop a durable cleanup obligation must
+/// use this predicate (plus their own persistence policy for lookup misses).
+pub(super) fn ask_error_definitively_proves_remote_resource_ref_stale(
+    error: &RelayAskError,
+) -> bool {
+    matches!(
+        error,
+        RelayAskError::Send {
+            failure: RelaySendFailure::StaleRef,
+            effect: RelaySendEffect::NoEffect,
+            ..
+        }
+    )
+}
+
+/// A lookup that cannot resolve the owner at all. One occurrence is
+/// ambiguous (see above); a long consecutive streak across the retry
+/// backoff schedule is the practical signal that the owner incarnation is
+/// gone for good (node ids are freshly generated per process start, so a
+/// restarted owner can never satisfy the old reference).
+pub(super) fn ask_error_is_owner_lookup_miss(error: &RelayAskError) -> bool {
+    matches!(error, RelayAskError::NotFound { .. })
 }
 
 pub(super) fn outcome_for_ask_error(

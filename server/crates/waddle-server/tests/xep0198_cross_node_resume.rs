@@ -244,6 +244,56 @@ struct FakeAsker {
     asks_seen: std::sync::atomic::AtomicUsize,
 }
 
+/// Models the force-detach transport ambiguity relevant to UserActor
+/// convergence: the old node persisted the detached snapshot, but the remote
+/// ask timed out before the requester received its acknowledgement.  The
+/// next bounded loop iteration must discover the early snapshot rather than
+/// wedging on the stale foreign owner.
+struct PersistThenUnreachableAsker {
+    owner_registry: Arc<InMemorySmSessionRegistry>,
+    owner_bare_jid: BareJid,
+    live_session: AsyncMutex<Option<DetachedSession>>,
+    asks_seen: std::sync::atomic::AtomicUsize,
+}
+
+impl PersistThenUnreachableAsker {
+    fn new(
+        owner_registry: Arc<InMemorySmSessionRegistry>,
+        owner_bare_jid: BareJid,
+        session: DetachedSession,
+    ) -> Self {
+        Self {
+            owner_registry,
+            owner_bare_jid,
+            live_session: AsyncMutex::new(Some(session)),
+            asks_seen: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteResumeAsker for PersistThenUnreachableAsker {
+    async fn ask_remote_detach(
+        &self,
+        _node_id: &str,
+        _stream_id: &str,
+        requester_bare_jid: &BareJid,
+    ) -> RemoteResumeAskOutcome {
+        self.asks_seen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if *requester_bare_jid != self.owner_bare_jid {
+            return RemoteResumeAskOutcome::IdentityMismatch;
+        }
+        if let Some(session) = self.live_session.lock().await.take() {
+            self.owner_registry
+                .store_session(session)
+                .await
+                .expect("old node persists before losing the detach reply");
+        }
+        RemoteResumeAskOutcome::Unreachable
+    }
+}
+
 impl FakeAsker {
     fn new(
         owner_registry: Arc<InMemorySmSessionRegistry>,
@@ -562,6 +612,47 @@ async fn live_handshake_via_asker_falls_through_to_detached_path() {
         asker.asks_seen.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "exactly one ask was needed"
+    );
+}
+
+/// The old node can persist a detachable XEP-0198 snapshot yet lose the
+/// force-detach reply while its UserActor cleanup continues.  The resuming
+/// node treats that ask as transient and, on the next bounded iteration,
+/// steals the now-visible snapshot rather than wedging on the foreign owner.
+#[tokio::test]
+async fn remote_ask_unreachable_after_early_persist_retries_to_cross_node_resume() {
+    let _guard = serial_lock().lock().await;
+    let Some(db) = clean_db().await else {
+        return;
+    };
+    let (bare, full) = alice_jid();
+    let (registry_a, identity_a) = node_registry(&db, node_identity(), None).await;
+    let entity = Entity::new(EntityType::SmSession, "stream-early-persist".to_string());
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+    claim_store
+        .ensure_claimed(&entity, &identity_a.current())
+        .await
+        .expect("node A holds the still-live stream claim");
+
+    let asker = Arc::new(PersistThenUnreachableAsker::new(
+        Arc::clone(&registry_a),
+        bare.clone(),
+        detached_session("stream-early-persist", &full),
+    ));
+    let (registry_b, _identity_b) = node_registry(&db, node_identity(), Some(asker.clone())).await;
+
+    let outcome = registry_b
+        .attempt_cross_node_resume("stream-early-persist", &bare, HANDSHAKE_BUDGET)
+        .await
+        .expect("bounded retry must complete");
+    let CrossNodeResumeOutcome::Claimed(resumed) = outcome else {
+        panic!("expected resume after early persistence and lost ask reply, got {outcome:?}");
+    };
+    assert_eq!(resumed.jid, full);
+    assert_eq!(
+        asker.asks_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the retry discovers persisted state before making a second remote ask"
     );
 }
 

@@ -124,6 +124,7 @@ async fn forward_remote_resource_force_detach(
         .force_detach_remote_user_resource(RelayForceDetachRemoteUserResource {
             jid: jid.clone(),
             registration_id,
+            origin: request.origin,
             requester_bare_jid: request.requester_bare_jid,
             trace: RelayTraceContext::default(),
         })

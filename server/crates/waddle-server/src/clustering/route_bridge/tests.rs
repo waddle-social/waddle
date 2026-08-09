@@ -134,11 +134,11 @@ impl AllowlistStore for StaticAllowlist {
     }
 }
 
-fn origin_identity() -> NodeIdentity {
+pub(super) fn origin_identity() -> NodeIdentity {
     NodeIdentity::new("origin-node", "origin-epoch")
 }
 
-fn receiver_identity() -> NodeIdentity {
+pub(super) fn receiver_identity() -> NodeIdentity {
     NodeIdentity::new("receiver-node", "receiver-epoch")
 }
 
@@ -277,14 +277,14 @@ async fn signed_envelope_for_services(
     sign_envelope(envelope_for_services(services).await, keypair)
 }
 
-fn test_peer_id() -> String {
+pub(super) fn test_peer_id() -> String {
     Keypair::generate_ed25519()
         .public()
         .to_peer_id()
         .to_string()
 }
 
-async fn services_with_claims(
+pub(super) async fn services_with_claims(
     origin_owner: NodeIdentity,
     target_owner: NodeIdentity,
     receiver: NodeIdentity,

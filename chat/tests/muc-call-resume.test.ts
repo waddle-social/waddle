@@ -11,8 +11,10 @@ import {
 } from "../src/lib/calls/muc-call-live-participants";
 import {
   clearAllMucCallSessionCacheForTests,
+  markMucCallSessionTerminatePending,
   readMucCallSession,
   rememberMucCallSession,
+  unmarkMucCallSessionTerminatePending,
 } from "../src/lib/calls/muc-call-session-cache";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 
@@ -126,6 +128,36 @@ describe("canResumeMucCallActivity", () => {
         selfFullJid: SELF_FULL_JID,
       }),
     ).toBe(false);
+  });
+
+  test("a superseded tab's unmark restores the successor's resume (codex 1668 round)", () => {
+    rememberMucCallSession({
+      roomJid: ROOM_JID,
+      sid: "sid-superseded",
+      selfFullJid: SELF_FULL_JID,
+      media: AUDIO_CALL,
+      join: forgeLiveKitJoin({ identity: SELF_FULL_JID, secondsFromNow: 600 }),
+    });
+    // The superseded tab's generic sender-less teardown marked the shared
+    // entry terminate-pending against the full JID the successor now owns.
+    markMucCallSessionTerminatePending({
+      roomJid: ROOM_JID,
+      sid: "sid-superseded",
+      selfFullJid: SELF_FULL_JID,
+      media: AUDIO_CALL,
+    });
+    expect(
+      canResumeMucCallActivity({ roomJid: ROOM_JID, selfFullJid: SELF_FULL_JID }),
+    ).toBe(false);
+
+    unmarkMucCallSessionTerminatePending({
+      roomJid: ROOM_JID,
+      sid: "sid-superseded",
+      selfFullJid: SELF_FULL_JID,
+    });
+    expect(
+      canResumeMucCallActivity({ roomJid: ROOM_JID, selfFullJid: SELF_FULL_JID }),
+    ).toBe(true);
   });
 
   test("returns true when cached join is fresh and identity matches", () => {
