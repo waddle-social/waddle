@@ -3150,6 +3150,259 @@ async fn janitor_redrives_released_rows_before_promoting_remainder() {
     );
 }
 
+/// Fail the first `fails` inserts whose Transient payload carries `fail_id`,
+/// keeping the backend usable otherwise. Models a per-stanza durable-storage
+/// failure that recovers on a later retry.
+struct FailCountedInsertsForMessageIdPendingStorage {
+    inner: waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage,
+    fail_id: &'static str,
+    remaining_failures: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
+    for FailCountedInsertsForMessageIdPendingStorage
+{
+    async fn insert(
+        &self,
+        row: waddle_xmpp::pending_delivery::PendingRow,
+    ) -> Result<
+        waddle_xmpp::pending_delivery::InsertOutcome,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        if matches!(
+            &row.payload,
+            waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                if message.id.as_ref().is_some_and(|id| id.0 == self.fail_id)
+        ) {
+            let remaining = self
+                .remaining_failures
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if remaining > 0 {
+                self.remaining_failures
+                    .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+                return Err(
+                    waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                        "simulated per-stanza insert failure".to_string(),
+                    ),
+                );
+            }
+        }
+        self.inner.insert(row).await
+    }
+
+    async fn list(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.list(recipient).await
+    }
+
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.claim_for_session(recipient, session).await
+    }
+
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .claim_batch_for_session(recipient, session, after, limit)
+            .await
+    }
+
+    async fn delete_claimed(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_claimed(session).await
+    }
+
+    async fn delete_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_row(id).await
+    }
+
+    async fn release_claim(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_claim(session).await
+    }
+
+    async fn release_row(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_row(id).await
+    }
+
+    async fn record_pushed_at(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.record_pushed_at(id, sequence).await
+    }
+
+    async fn delete_acked_in_window(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        to_inclusive: u32,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner
+            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .await
+    }
+
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[waddle_xmpp::pending_delivery::SmSessionId],
+        claimed_before_ms: i64,
+    ) -> Result<
+        Vec<(
+            waddle_xmpp::pending_delivery::PendingRowId,
+            waddle_xmpp::pending_delivery::SmSessionId,
+        )>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_orphaned_claims(live_sessions, claimed_before_ms)
+            .await
+    }
+
+    async fn count(
+        &self,
+        recipient: &BareJid,
+    ) -> Result<u32, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.count(recipient).await
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_older_than(cutoff).await
+    }
+
+    async fn scrub_for_tombstone(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.scrub_for_tombstone(target).await
+    }
+}
+
+/// Codex 1669 round 9: an early prefix entry whose durable insert fails must
+/// keep every LATER entry queued behind it. Batch promotion previously
+/// retained only the failed entry while later successes were already
+/// inserted (and re-driven) ahead of its retry, inverting the stream's
+/// accepted FIFO order at the storage layer.
+#[tokio::test]
+async fn terminal_prefix_storage_failure_keeps_later_entries_behind_the_failed_one() {
+    let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    let pending_storage: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        Arc::new(FailCountedInsertsForMessageIdPendingStorage {
+            inner:
+                waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::unlimited(),
+            fail_id: "prefix-first",
+            remaining_failures: std::sync::atomic::AtomicU32::new(1),
+        });
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        Arc::clone(&sm_registry),
+        pending_storage,
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/prefix-fifo".parse().expect("jid");
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+    let old_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), old_tx);
+
+    let mut old_conn = WsConnState::new();
+    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    old_conn.registry_owner = Some(old_owner);
+    let _ = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut old_conn,
+    )
+    .await;
+    old_conn.publish_pending_sm_enable(state.as_ref());
+    for id in ["prefix-first", "prefix-second"] {
+        let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+        message.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+        message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), format!("body of {id}"));
+        waddle_xmpp::xep::xep0334::add_hint(
+            &mut message,
+            waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+        );
+        let _ = old_conn.sm_state.record_outbound(
+            waddle_xmpp::parser::stanza_to_string(message).expect("serialize message"),
+            SmEvictionPath::Batch,
+        );
+    }
+    old_conn.begin_terminal_sm_recovery();
+
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("list pending rows");
+    let ids: Vec<Option<String>> = rows
+        .iter()
+        .map(|row| match &row.payload {
+            waddle_xmpp::pending_delivery::PendingPayload::Transient(message) => {
+                message.id.as_ref().map(|id| id.0.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            Some("prefix-first".to_string()),
+            Some("prefix-second".to_string())
+        ],
+        "the retried first entry must be inserted BEFORE the later entry — later \
+         entries stay queued behind a storage failure instead of overtaking it"
+    );
+}
+
 /// Regression: a terminal reflush that aborts before claiming any row must
 /// still re-open the replacement session's once-only offline-flush gate so the
 /// released backlog can be retried on the next live flush trigger.

@@ -2450,14 +2450,13 @@ async fn partial_storage_failure_retries_only_failed_stanzas_without_duplicates(
     )
     .await;
 
-    // Stanzas 1 & 3 landed in pending storage...
+    // Only stanza 1 landed: promotion stops at the first storage failure
+    // (codex 1669 round 9) so stanza 3 cannot be inserted AHEAD of stanza
+    // 2's retry and invert the stream's accepted FIFO order.
     let rows = pending.list(&bare("alice@example.com")).await.unwrap();
-    assert_eq!(
-        transient_bodies(&rows),
-        vec!["msg-1".to_string(), "msg-3".to_string()]
-    );
-    // ...and their durable sm_unacked rows are gone; only the failed
-    // stanza's row survives for the retry.
+    assert_eq!(transient_bodies(&rows), vec!["msg-1".to_string()]);
+    // ...and only the promoted stanza's durable row is gone; the failed
+    // stanza and everything behind it survive for the ordered retry.
     let stream_id = SmSessionId::new("stream-partial");
     let surviving: Vec<u32> = sm_storage
         .list_unacked(&stream_id)
@@ -2468,12 +2467,12 @@ async fn partial_storage_failure_retries_only_failed_stanzas_without_duplicates(
         .collect();
     assert_eq!(
         surviving,
-        vec![2],
-        "successfully promoted stanzas' durable rows must be deleted after tick 1"
+        vec![2, 3],
+        "the failed stanza AND the entries behind it must survive tick 1"
     );
 
-    // Tick 2: janitor drains the reinserted session — it must retry
-    // ONLY the failed stanza.
+    // Tick 2: janitor drains the reinserted session — it retries the
+    // failed stanza and the tail behind it, in order.
     let drained = sm_registry.drain_expired().await.unwrap();
     assert_eq!(drained.len(), 1);
     let retry_sequences: Vec<u32> = drained[0]
@@ -2483,11 +2482,12 @@ async fn partial_storage_failure_retries_only_failed_stanzas_without_duplicates(
         .collect();
     assert_eq!(
         retry_sequences,
-        vec![2],
-        "the reinserted session must retain only the failed stanza"
+        vec![2, 3],
+        "the reinserted session must retain the failed stanza and its tail"
     );
 
-    // Storage recovers: retry queues stanza 2 exactly once.
+    // Storage recovers: the retry queues stanzas 2 and 3 exactly once, in
+    // the stream's accepted order.
     flaky.disarm();
     promote_displaced_sessions(
         drained,

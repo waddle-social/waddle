@@ -172,7 +172,17 @@ pub async fn promote_session_unacked(
             ?outcome,
             "Q6 promotion: per-stanza outcome"
         );
+        let failed_storage = matches!(outcome, PromotedOutcome::StorageFailure);
         summary.record(entry.sequence, &outcome);
+        if failed_storage {
+            // Stop at the first durable-storage failure: promoting later
+            // entries would insert their rows AHEAD of this one's retry and
+            // invert the stream's accepted FIFO order at the storage layer
+            // (RFC 6120 §10.1 in-order processing). Everything after this
+            // entry stays unrecorded, so the partial-failure retry paths
+            // retain it behind the failed entry.
+            break;
+        }
     }
 
     debug!(

@@ -729,6 +729,7 @@ struct TerminalRecoverySessionResult {
     session: waddle_xmpp::stream_management::DetachedSession,
     released_pending_rows: bool,
     queued_pending_rows: bool,
+    release_failed_pending_rows: bool,
 }
 
 /// Row-recovery facts a terminal cleanup carries into
@@ -802,7 +803,8 @@ async fn promote_terminal_recovery(
         vec![recovery.session],
         TerminalRowRecovery {
             released_rows: row_release.released_rows || recovery.released_pending_rows,
-            release_failed_known_rows: row_release.release_failed_known_rows,
+            release_failed_known_rows: row_release.release_failed_known_rows
+                || recovery.release_failed_pending_rows,
             ownership_unknown: row_release.ownership_unknown,
             queued_pending_rows: recovery.queued_pending_rows,
         },
@@ -844,10 +846,21 @@ fn preferred_live_pending_flush_target(
             .protocol
             .connection_registry
             .get_entry(&resource)
-            .map(|entry| LivePendingFlushTarget {
-                resource,
-                owner: std::sync::Arc::clone(&entry.carbons_enabled),
-                sm_session: entry.sm_stream_id(),
+            .and_then(|entry| {
+                // The availability snapshot above and this entry lookup are
+                // two reads: the resource can go unavailable/negative or a
+                // silent same-FullJID replacement can register in between.
+                // Revalidate on the entry actually adopted, otherwise the
+                // flush would owner-gate successfully against a resource
+                // that RFC 6121/XEP-0160 exclude from offline delivery.
+                if !entry.is_presence_available() || entry.presence_priority() < 0 {
+                    return None;
+                }
+                Some(LivePendingFlushTarget {
+                    resource,
+                    owner: std::sync::Arc::clone(&entry.carbons_enabled),
+                    sm_session: entry.sm_stream_id(),
+                })
             })
     })
 }
@@ -862,10 +875,25 @@ fn preferred_live_pending_flush_target(
 /// queue is bare-JID scoped and persists until approval/denial; fresh sessions
 /// already deliver it on their own initial available presence, and live
 /// subscription traffic bypasses this cleanup path entirely.
+/// Result of a terminal re-drive attempt, so callers can keep FIFO: while an
+/// earlier released/queued row could NOT be enqueued to a live target, later
+/// recovery traffic must not be promoted directly to that same target.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalRedriveOutcome {
+    /// Rows were flushed (or none remained) — later promotion may proceed.
+    Settled,
+    /// No eligible live resource exists; later promotion also lands in
+    /// durable storage behind the earlier rows, preserving order.
+    NoLiveTarget,
+    /// A live target exists but unclaimed rows remain (flush aborted or
+    /// deferred) — promoting later traffic directly would overtake them.
+    Aborted,
+}
+
 pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     state: &WebSocketState,
     recipient: &BareJid,
-) {
+) -> TerminalRedriveOutcome {
     let blocking_storage: &std::sync::Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
         &state.deps.protocol.blocking_storage;
     // A same-FullJID replacement can race the owner-gated send below. Retry
@@ -873,9 +901,10 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     // consumed its initial offline-flush CAS, which is exactly why terminal
     // recovery drives this path directly. The bound prevents cleanup from
     // chasing an unbounded stream of reconnects.
+    let mut last_attempt_left_rows = false;
     for _ in 0..2 {
         let Some(target) = preferred_live_pending_flush_target(state, recipient) else {
-            return;
+            return TerminalRedriveOutcome::NoLiveTarget;
         };
         let resolver = crate::pending_delivery::MamArchiveResolver {
             mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
@@ -900,7 +929,8 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             .connection_registry
             .entry_if_owner(&target.resource, &target.owner)
             .is_some();
-        if target_still_current && terminal_reflush_left_retryable_rows(state, recipient).await {
+        last_attempt_left_rows = terminal_reflush_left_retryable_rows(state, recipient).await;
+        if target_still_current && last_attempt_left_rows {
             if let Some(entry) = state
                 .deps
                 .protocol
@@ -921,8 +951,17 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             );
         }
         if target_still_current {
-            return;
+            return if last_attempt_left_rows {
+                TerminalRedriveOutcome::Aborted
+            } else {
+                TerminalRedriveOutcome::Settled
+            };
         }
+    }
+    if last_attempt_left_rows {
+        TerminalRedriveOutcome::Aborted
+    } else {
+        TerminalRedriveOutcome::Settled
     }
 }
 
@@ -1037,14 +1076,9 @@ async fn terminal_recovery_session(
             }
             (true, None) => (false, false),
         };
-    if queued_pending_rows {
-        // A replacement can bind and spend its once-only offline flush while
-        // the prefix inserts above are still in flight; its snapshot-based
-        // classification then leaves the fresh rows stranded. Re-drive them
-        // NOW, before the incremental overflow promotion below can deliver
-        // later traffic directly to that replacement and invert FIFO.
-        redrive_terminal_pending_rows_to_live_resource(state, &detached.jid.to_bare()).await;
-    }
+    // Per-item re-drives inside the prefix promotion already covered freshly
+    // queued rows (and halted the prefix on an aborted re-drive, which also
+    // clears `promote_incrementally` via `settled`).
     let drain_outcome = drain_outbound_into_terminal_recovery(
         state,
         conn,
@@ -1073,6 +1107,7 @@ async fn terminal_recovery_session(
         session: detached,
         released_pending_rows: drain_outcome.released_pending_rows,
         queued_pending_rows,
+        release_failed_pending_rows: drain_outcome.release_failed_pending_rows,
     }
 }
 
@@ -1108,10 +1143,18 @@ struct TerminalPrefixPromotion {
     queued_rows: bool,
 }
 
+/// Promote the recorded prefix ONE entry at a time, stopping at the first
+/// storage failure so every later entry stays queued BEHIND the failed one —
+/// batch promotion retained only the failed entry, and the queued-row
+/// re-drive then delivered a later success before the retry could re-promote
+/// the earlier failure, inverting the stream's accepted FIFO order. Per-item
+/// promotion also re-checks tombstones per entry and re-drives each freshly
+/// queued row before the next entry can be delivered live, mirroring the
+/// overflow drain's contract.
 async fn promote_terminal_recovery_prefix(
     state: &WebSocketState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
-    blocklist: &waddle_xmpp::protocol::session_state::Blocklist,
+    _blocklist: &waddle_xmpp::protocol::session_state::Blocklist,
     recent_tombstones: &[waddle_xmpp::stream_management::RecentTombstoneRecord],
 ) -> TerminalPrefixPromotion {
     if detached.unacked_stanzas.is_empty() {
@@ -1120,38 +1163,77 @@ async fn promote_terminal_recovery_prefix(
             queued_rows: false,
         };
     }
-    let summary = crate::sm_promotion::promote_session_unacked(
-        detached,
-        &state.deps.protocol.connection_registry,
-        &state.deps.protocol.user_registry,
-        &state.deps.protocol.pending_delivery_storage,
-        blocklist,
-        state.deps.auth_state.xmpp_domain.as_str(),
-        recent_tombstones,
-    )
-    .await;
-    crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
-        &state.deps.protocol.sm_session_registry,
-        &state.deps.protocol.pending_delivery_storage,
-        recent_tombstones,
-        "terminal recovery prefix promotion",
-    )
-    .await;
-    let queued_rows = summary.queued > 0;
-    if summary.has_storage_failure() {
-        let completed: std::collections::HashSet<u32> =
-            summary.promoted_sequences.into_iter().collect();
-        detached
-            .unacked_stanzas
-            .retain(|entry| !completed.contains(&entry.sequence));
-        return TerminalPrefixPromotion {
-            settled: false,
-            queued_rows,
-        };
+    let entries = std::mem::take(&mut detached.unacked_stanzas);
+    let mut retained = Vec::new();
+    let mut queued_rows = false;
+    let mut halted = false;
+    for entry in entries {
+        if halted {
+            retained.push(entry);
+            continue;
+        }
+        let blocklist =
+            match super::replay::load_terminal_recovery_blocklist(state, &detached.jid.to_bare())
+                .await
+            {
+                Ok(blocklist) => blocklist,
+                Err(error) => {
+                    warn!(
+                        stream_id = %detached.stream_id,
+                        jid = %detached.jid,
+                        %error,
+                        "terminal recovery prefix could not refresh blocklist; retaining the \
+                         remaining prefix for retry"
+                    );
+                    retained.push(entry);
+                    halted = true;
+                    continue;
+                }
+            };
+        let item_tombstones = crate::sm_promotion::recent_tombstones_for_promotion(
+            &state.deps.protocol.sm_session_registry,
+            "terminal recovery prefix promotion",
+        )
+        .unwrap_or_else(|_| recent_tombstones.to_vec());
+        let summary = crate::sm_promotion::promote_terminal_overflow_entry(
+            detached,
+            entry.clone(),
+            crate::sm_promotion::TerminalOverflowPromotionDeps {
+                registry: &state.deps.protocol.connection_registry,
+                user_registry: &state.deps.protocol.user_registry,
+                pending_storage: &state.deps.protocol.pending_delivery_storage,
+                blocklist: &blocklist,
+                server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                recent_tombstones: &item_tombstones,
+            },
+        )
+        .await;
+        crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+            &state.deps.protocol.sm_session_registry,
+            &state.deps.protocol.pending_delivery_storage,
+            &item_tombstones,
+            "terminal recovery prefix promotion",
+        )
+        .await;
+        if summary.has_storage_failure() {
+            retained.push(entry);
+            halted = true;
+            continue;
+        }
+        if summary.queued > 0 {
+            queued_rows = true;
+            if redrive_terminal_pending_rows_to_live_resource(state, &detached.jid.to_bare()).await
+                == TerminalRedriveOutcome::Aborted
+            {
+                // The queued row could not reach the live target; promoting
+                // later entries directly would overtake it.
+                halted = true;
+            }
+        }
     }
-    detached.unacked_stanzas.clear();
+    detached.unacked_stanzas = retained;
     TerminalPrefixPromotion {
-        settled: true,
+        settled: !halted && detached.unacked_stanzas.is_empty(),
         queued_rows,
     }
 }

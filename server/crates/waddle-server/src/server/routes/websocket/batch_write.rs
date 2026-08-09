@@ -227,6 +227,13 @@ where
                 SendWindowOutcome::Recovered => {}
                 SendWindowOutcome::DeferredCapExhausted => {
                     conn.begin_terminal_sm_recovery();
+                    // The client's inbound `h` already advanced for the
+                    // stanzas these responses answer (frame.rs handles before
+                    // this writer runs), so the current frame and the batch
+                    // tail are accepted work: record them into the terminal
+                    // recovery inventory instead of dropping them — cleanup
+                    // promotes them alongside the recorded prefix.
+                    record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
                     return BatchWriteOutcome::DeferredCapExhausted;
                 }
                 SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
@@ -532,12 +539,19 @@ where
     S: Sink<Message, Error = E> + Unpin,
     E: std::fmt::Display,
 {
-    while conn
+    // Service every parked SM request, not only one sitting at the queue
+    // front: ordinary frames parked ahead of an `<r/>` must not keep it
+    // charged against deferred capacity, or a near-full queue terminalizes
+    // before the client's recovering `<a/>` can be read. Answering early is
+    // sound — `h` counts only stanzas already handled, and the parked
+    // ordinary frames ahead of the request are by definition not yet
+    // handled.
+    while let Some(index) = conn
         .deferred_inbound
-        .front()
-        .is_some_and(|text| is_client_sm_request(text.as_str()))
+        .iter()
+        .position(|text| is_client_sm_request(text.as_str()))
     {
-        conn.deferred_inbound.pop_front();
+        conn.deferred_inbound.remove(index);
         if !batch_authoritative(authority) {
             return Err(SendWindowOutcome::AuthorityRevoked);
         }

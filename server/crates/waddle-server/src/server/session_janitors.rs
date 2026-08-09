@@ -224,12 +224,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             &state.deps.protocol.sm_session_registry,
             drained,
         );
-        while let Some(pending_session) = promotion_batch.pop() {
-            let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
-                &state.deps.protocol.sm_session_registry,
-                pending_session,
-            );
-            let mut session = promotion_guard.session().clone();
+        while let Some(mut pending_session) = promotion_batch.pop() {
             // Repeat row-ownership discovery on every pass (PR #1669 round 8):
             // this session's replay queue can contain copies of durable
             // sequence-bound pending rows (a terminal-recovery session
@@ -240,9 +235,18 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             // collides with the Archived uniqueness key.
             let row_release = crate::sm_promotion::release_row_backed_replay_copies(
                 &state.deps.protocol.pending_delivery_storage,
-                &mut session,
+                &mut pending_session,
             )
             .await;
+            // The guard is created AFTER reconciliation so a cancellation or
+            // a failed confirm_drained restores the reconciled queue — the
+            // pre-reconciliation clone would put the released rows' replay
+            // copies back and duplicate them on the next retry.
+            let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                &state.deps.protocol.sm_session_registry,
+                pending_session,
+            );
+            let session = promotion_guard.session().clone();
             if row_release.released_rows {
                 // Re-drive BEFORE promoting the remaining queue: promotion can
                 // deliver later traffic straight to a live replacement, and a
@@ -300,6 +304,39 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                         .await
                     {
                         promotion_guard.complete();
+                    }
+                    // Dead-lettering discards the replay queue, but the rows
+                    // the dead stream still claims must go back to ordinary
+                    // redelivery — and a live replacement whose once-only
+                    // offline flush is spent needs the re-drive, otherwise
+                    // the durable rows sit pending until another bind.
+                    let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(
+                        session.stream_id.clone(),
+                    );
+                    match state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_claim(&session_id)
+                        .await
+                    {
+                        Ok(_) => {
+                            routes::websocket::redrive_terminal_pending_rows_to_live_resource(
+                                state,
+                                &session.jid.to_bare(),
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            sweep_failed = true;
+                            warn!(
+                                jid = %session.jid,
+                                stream_id = %session.stream_id,
+                                %error,
+                                "SM janitor: dead-letter release_claim failed; rows remain \
+                                 claimed for the claim-expiry janitor"
+                            );
+                        }
                     }
                     continue;
                 }

@@ -30,6 +30,11 @@ pub(super) struct TerminalDrainOutcome {
     /// rows; the caller must recheck live routing afterwards in case a
     /// replacement bound mid-drain with its offline flush already spent.
     pub(super) queued_pending_rows: bool,
+    /// A row-backed channel entry's `release_row` failed: its replay copy
+    /// was dropped (promoting it would duplicate the still-claimed row) and
+    /// the row is only freed later by the settled promotion's
+    /// `release_claim` — cleanup must re-drive it after that.
+    pub(super) release_failed_pending_rows: bool,
 }
 
 struct TerminalDrainedFrame {
@@ -42,6 +47,7 @@ struct TerminalDrainedRecordResult {
     retained: Option<waddle_xmpp::stream_management::DetachedUnackedStanza>,
     released_pending_row: bool,
     queued_pending_row: bool,
+    release_failed_pending_row: bool,
 }
 
 /// Drain `outbound_rx` of all immediately-available
@@ -152,6 +158,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     let mut retain_overflow_for_retry = false;
     let mut released_pending_rows = false;
     let mut queued_pending_rows = false;
+    let mut release_failed_pending_rows = false;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
         let receipt_at = outbound_stanza
             .pending_row_original_receipt_at
@@ -174,17 +181,25 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                 )
                 .await;
                 released_pending_rows |= result.released_pending_row;
-                if result.queued_pending_row {
-                    queued_pending_rows = true;
+                release_failed_pending_rows |= result.release_failed_pending_row;
+                if result.queued_pending_row || result.released_pending_row {
+                    queued_pending_rows |= result.queued_pending_row;
                     // Re-drive BEFORE the next frame: each single-item
                     // promotion takes a fresh online-resource snapshot, so a
                     // later frame could otherwise deliver live ahead of this
-                    // just-queued row and invert the stream's FIFO order.
-                    redrive_terminal_pending_rows_to_live_resource(
+                    // just-queued (or just-released) row and invert the
+                    // stream's FIFO order. An aborted re-drive stops direct
+                    // promotion of the remaining tail — it is retained for
+                    // the janitor behind the stuck row instead.
+                    if super::cleanup::redrive_terminal_pending_rows_to_live_resource(
                         state,
                         &terminal.session.jid.to_bare(),
                     )
-                    .await;
+                    .await
+                        == super::cleanup::TerminalRedriveOutcome::Aborted
+                    {
+                        retain_overflow_for_retry = true;
+                    }
                 }
                 if let Some(entry) = result.retained {
                     retain_overflow_for_retry = true;
@@ -220,13 +235,18 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                     )
                     .await;
                     released_pending_rows |= result.released_pending_row;
-                    if result.queued_pending_row {
-                        queued_pending_rows = true;
-                        redrive_terminal_pending_rows_to_live_resource(
+                    release_failed_pending_rows |= result.release_failed_pending_row;
+                    if result.queued_pending_row || result.released_pending_row {
+                        queued_pending_rows |= result.queued_pending_row;
+                        if super::cleanup::redrive_terminal_pending_rows_to_live_resource(
                             state,
                             &terminal.session.jid.to_bare(),
                         )
-                        .await;
+                        .await
+                            == super::cleanup::TerminalRedriveOutcome::Aborted
+                        {
+                            retain_overflow_for_retry = true;
+                        }
                     }
                     if let Some(entry) = result.retained {
                         retain_overflow_for_retry = true;
@@ -241,6 +261,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
         retained_overflow,
         released_pending_rows,
         queued_pending_rows,
+        release_failed_pending_rows,
     }
 }
 
@@ -380,28 +401,30 @@ async fn record_drained_terminal_xml(
         PendingRowDrainPolicy::ReleaseForTerminalRecovery
     ) {
         if let Some(row_id) = pending_row_id {
-            let released_pending_row = match state
+            let (released_pending_row, release_failed_pending_row) = match state
                 .deps
                 .protocol
                 .pending_delivery_storage
                 .release_row(&row_id)
                 .await
             {
-                Ok(released) => released > 0,
+                Ok(released) => (released > 0, false),
                 Err(error) => {
                     warn!(
                         row_id = %row_id,
                         %error,
                         "pending_delivery release_row (terminal recovery drain) failed; \
-                         claim-expiry janitor will recover the row"
+                         the settled promotion's release_claim frees the row and cleanup \
+                         re-drives it"
                     );
-                    false
+                    (false, true)
                 }
             };
             return TerminalDrainedRecordResult {
                 retained: None,
                 released_pending_row,
                 queued_pending_row: false,
+                release_failed_pending_row,
             };
         }
     }
@@ -425,6 +448,7 @@ async fn record_drained_terminal_xml(
             retained: None,
             released_pending_row: false,
             queued_pending_row: false,
+            release_failed_pending_row: false,
         };
     }
     let entry = waddle_xmpp::stream_management::DetachedUnackedStanza {
@@ -440,6 +464,7 @@ async fn record_drained_terminal_xml(
             retained: Some(entry),
             released_pending_row: false,
             queued_pending_row: false,
+            release_failed_pending_row: false,
         };
     }
     let Some(_blocklist) = terminal.blocklist else {
@@ -447,6 +472,7 @@ async fn record_drained_terminal_xml(
             retained: Some(entry),
             released_pending_row: false,
             queued_pending_row: false,
+            release_failed_pending_row: false,
         };
     };
     let refreshed_blocklist = match load_terminal_recovery_blocklist(
@@ -467,6 +493,7 @@ async fn record_drained_terminal_xml(
                 retained: Some(entry),
                 released_pending_row: false,
                 queued_pending_row: false,
+                release_failed_pending_row: false,
             };
         }
     };
@@ -510,12 +537,14 @@ async fn record_drained_terminal_xml(
             retained: Some(entry),
             released_pending_row: false,
             queued_pending_row: summary.queued > 0,
+            release_failed_pending_row: false,
         };
     }
     TerminalDrainedRecordResult {
         retained: None,
         released_pending_row: false,
         queued_pending_row: summary.queued > 0,
+        release_failed_pending_row: false,
     }
 }
 

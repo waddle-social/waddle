@@ -1607,6 +1607,106 @@ async fn send_window_pause_answers_parked_client_request_before_cap_exhaustion()
     );
 }
 
+/// Codex 1669 round 9: a parked client `<r/>` must be serviced even when
+/// ordinary frames precede it in the deferred queue — leaving it charged
+/// against deferred capacity lets a near-full queue terminalize before the
+/// client's recovering `<a/>` can be read.
+#[tokio::test]
+async fn send_window_pause_answers_parked_client_request_behind_ordinary_frames() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("parked-request-behind".to_string(), true, Some(300));
+    conn.deferred_inbound.extend(
+        (0..30).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("ahead{i}")))),
+    );
+    conn.deferred_inbound
+        .push_back(axum::extract::ws::Utf8Bytes::from(SmRequest::to_xml()));
+    conn.deferred_inbound.extend(
+        (0..33).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("behind{i}")))),
+    );
+
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(
+        (0..8)
+            .map(|i| Message::Text(message_with_id(&format!("during-pause{i}")).into()))
+            .chain(std::iter::once(ack_frame(8)))
+            .collect(),
+    );
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        (1..=9).map(countable_message).collect(),
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(conn.sm_state.last_acked, 8);
+    assert!(!conn.sm_recovery_required);
+    assert!(
+        sink_texts(&sink).contains(&SmAck::new(0).to_xml()),
+        "the paused batch must answer a parked client <r/> that is NOT at the queue front"
+    );
+    assert!(
+        !conn
+            .deferred_inbound
+            .iter()
+            .any(|text| text.as_str().contains("urn:xmpp:sm:3") && text.as_str().contains("<r")),
+        "the serviced request must no longer occupy deferred capacity"
+    );
+}
+
+/// Codex 1669 round 9: cap exhaustion mid-batch must not drop the current
+/// countable frame and the batch tail — the client's inbound `h` already
+/// advanced for the stanzas these responses answer, so they are accepted
+/// work and belong in the terminal recovery inventory.
+#[tokio::test]
+async fn deferred_cap_exhaustion_retains_current_frame_and_batch_tail() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("exhaustion-retains-tail".to_string(), true, Some(300));
+    conn.deferred_inbound.extend(
+        (0..56).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("parked{i}")))),
+    );
+
+    let mut sink = CollectSink::default();
+    // The reader never produces the recovering ack: the pause exhausts the
+    // reserved headroom and terminalizes on an early frame of the batch.
+    let mut reader = reader_with(
+        (0..64)
+            .map(|i| Message::Text(message_with_id(&format!("no-ack{i}")).into()))
+            .collect(),
+    );
+
+    let batch: Vec<String> = (1..=12).map(countable_message).collect();
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        batch.clone(),
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::DeferredCapExhausted));
+    assert!(conn.sm_recovery_required);
+    let recorded_total = conn.sm_state.queue_len() + conn.terminal_sm_recovery.queue_len();
+    assert_eq!(
+        recorded_total,
+        batch.len(),
+        "every countable frame of the batch must be recorded (live prefix + terminal \
+         inventory), not dropped at exhaustion"
+    );
+}
+
 /// Recovered pauses replenish their local ack-search allowance, but a giant
 /// batch cannot use repeated seven-frame interleaving to retain more than the
 /// absolute pause-time ceiling. The sixth ack remains behind seven ordinary
