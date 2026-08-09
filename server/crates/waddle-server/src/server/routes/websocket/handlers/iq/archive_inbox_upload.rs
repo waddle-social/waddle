@@ -918,4 +918,38 @@ mod inbox_rsm_tests {
         );
         assert!(set.is_some());
     }
+
+    /// The ceiling makes paging mandatory, so the advertised cursor must
+    /// actually continue the window: page two starts after page one's last
+    /// entry and the response reports the continued first index.
+    #[test]
+    fn inbox_after_cursor_continues_past_the_ceiling() {
+        let all = entries(INBOX_QUERY_MAX_PAGE + 40);
+        let (page_one, set_one) = apply_inbox_rsm(all.clone(), None);
+        let set_one = set_one.expect("truncated first page advertises paging");
+        let after = set_one.last.expect("page one carries a last cursor");
+
+        let (page_two, set_two) = apply_inbox_rsm(
+            all,
+            Some(&RsmRequest {
+                after: Some(after),
+                ..RsmRequest::default()
+            }),
+        );
+        assert_eq!(
+            page_two.len(),
+            40,
+            "page two must continue past the ceiling instead of repeating page one"
+        );
+        assert_ne!(
+            page_one.first().map(|entry| entry.partner.clone()),
+            page_two.first().map(|entry| entry.partner.clone())
+        );
+        let set_two = set_two.expect("paged continuation carries a set");
+        assert_eq!(
+            set_two.first_index,
+            Some(u32::try_from(INBOX_QUERY_MAX_PAGE).expect("index fits")),
+            "the continuation reports its real window offset"
+        );
+    }
 }
