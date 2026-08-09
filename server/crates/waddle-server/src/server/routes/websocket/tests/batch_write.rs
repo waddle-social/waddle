@@ -1562,6 +1562,51 @@ async fn send_window_headroom_replenishes_for_second_pause_in_one_batch() {
     assert!(!conn.sm_recovery_required);
 }
 
+/// A paused batch must service a parked client `<r/>` at the front of the
+/// deferred queue before charging the last reserved slots. Otherwise the
+/// pause can terminalize with the recovering `<a/>` still unread behind a
+/// request we already had enough information to answer inline.
+#[tokio::test]
+async fn send_window_pause_answers_parked_client_request_before_cap_exhaustion() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("parked-client-request".to_string(), true, Some(300));
+    conn.deferred_inbound
+        .push_back(axum::extract::ws::Utf8Bytes::from(SmRequest::to_xml()));
+    conn.deferred_inbound.extend(
+        (0..63).map(|i| axum::extract::ws::Utf8Bytes::from(message_with_id(&format!("parked{i}")))),
+    );
+
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(
+        (0..8)
+            .map(|i| Message::Text(message_with_id(&format!("during-pause{i}")).into()))
+            .chain(std::iter::once(ack_frame(8)))
+            .collect(),
+    );
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        (1..=9).map(countable_message).collect(),
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(conn.sm_state.last_acked, 8);
+    assert_eq!(conn.deferred_inbound.len(), 71);
+    assert!(!conn.sm_recovery_required);
+    assert!(
+        sink_texts(&sink).contains(&SmAck::new(0).to_xml()),
+        "the paused batch must answer the parked client <r/> inline"
+    );
+}
+
 /// Recovered pauses replenish their local ack-search allowance, but a giant
 /// batch cannot use repeated seven-frame interleaving to retain more than the
 /// absolute pause-time ceiling. The sixth ack remains behind seven ordinary

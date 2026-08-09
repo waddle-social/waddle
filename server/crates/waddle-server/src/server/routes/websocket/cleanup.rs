@@ -725,6 +725,11 @@ enum TerminalRouteRemoval {
     Attempted(Option<(bool, std::sync::Arc<std::sync::atomic::AtomicBool>)>),
 }
 
+struct TerminalRecoverySessionResult {
+    session: waddle_xmpp::stream_management::DetachedSession,
+    released_pending_rows: bool,
+}
+
 async fn promote_terminal_recovery(
     state: &WebSocketState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
@@ -752,7 +757,7 @@ async fn promote_terminal_recovery(
                 .map(|entry| (entry.is_presence_available(), std::sync::Arc::clone(owner)))
         })?
     });
-    let recovery_session = terminal_recovery_session(
+    let recovery = terminal_recovery_session(
         state,
         outbound_rx,
         conn,
@@ -761,12 +766,13 @@ async fn promote_terminal_recovery(
         terminal_route_removed.is_some(),
     )
     .await;
+    let released_terminal_rows = released_terminal_rows || recovery.released_pending_rows;
     refuse_detach_without_principal(
         state,
         outbound_rx,
         jid,
         conn,
-        vec![recovery_session],
+        vec![recovery.session],
         released_terminal_rows,
         TerminalRouteRemoval::Attempted(terminal_route_removed),
     )
@@ -782,28 +788,59 @@ async fn release_terminally_promoted_pending_rows(
     state: &WebSocketState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
 ) -> bool {
-    let sequences = detached
+    let sequences: std::collections::HashSet<u32> = detached
         .unacked_stanzas
         .iter()
         .map(|entry| entry.sequence)
-        .collect();
+        .collect::<std::collections::HashSet<u32>>();
     let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone());
+    let sequence_bound_rows = match state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&detached.jid.to_bare())
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|row| {
+                row.flushed_in_session.as_ref() == Some(&session_id)
+                    && row
+                        .outbound_sequence
+                        .is_some_and(|sequence| sequences.contains(&sequence))
+            })
+            .filter_map(|row| row.outbound_sequence)
+            .collect::<std::collections::HashSet<u32>>(),
+        Err(error) => {
+            warn!(
+                stream_id = %detached.stream_id,
+                jid = %detached.jid,
+                %error,
+                "terminal recovery could not preflight sequence-bound pending rows; release failures may still leave replay entries promotable"
+            );
+            std::collections::HashSet::new()
+        }
+    };
     let outcome = state
         .deps
         .protocol
         .pending_delivery_storage
         .release_rows_for_outbound_sequences(&detached.jid.to_bare(), &session_id, &sequences)
         .await;
+    let mut replay_sequences_to_strip = outcome.released.clone();
+    if outcome.error.is_some() {
+        replay_sequences_to_strip.extend(sequence_bound_rows.iter().copied());
+    }
     detached
         .unacked_stanzas
-        .retain(|entry| !outcome.released.contains(&entry.sequence));
+        .retain(|entry| !replay_sequences_to_strip.contains(&entry.sequence));
     if let Some(error) = outcome.error {
         if outcome.released.is_empty() {
             warn!(
                 stream_id = %detached.stream_id,
                 jid = %detached.jid,
                 %error,
-                "terminal recovery could not release sequence-bound pending rows; keeping their replay entries for retry"
+                "terminal recovery could not release sequence-bound pending rows; stripped any row-backed replay copies so cleanup can only re-drive the durable rows after claim cleanup"
             );
         } else {
             warn!(
@@ -811,11 +848,11 @@ async fn release_terminally_promoted_pending_rows(
                 jid = %detached.jid,
                 released = outcome.released.len(),
                 %error,
-                "terminal recovery partially released sequence-bound pending rows; stripped released replay entries and kept the rest for retry"
+                "terminal recovery partially released sequence-bound pending rows; stripped every matching replay copy so unreleased durable rows wait for claim cleanup instead of being promoted again"
             );
         }
     }
-    !outcome.released.is_empty()
+    !replay_sequences_to_strip.is_empty()
 }
 
 #[derive(Clone)]
@@ -907,7 +944,7 @@ async fn reflush_terminally_released_pending_rows_to_live_resource(
             .connection_registry
             .entry_if_owner(&target.resource, &target.owner)
             .is_some();
-        if outcome.deferred_transient > 0 {
+        if target_still_current && terminal_reflush_left_retryable_rows(state, recipient).await {
             if let Some(entry) = state
                 .deps
                 .protocol
@@ -929,6 +966,32 @@ async fn reflush_terminally_released_pending_rows_to_live_resource(
         }
         if target_still_current {
             return;
+        }
+    }
+}
+
+/// Terminal reflush must re-open the replacement session's once-only offline
+/// flush gate whenever retryable rows remain unclaimed. This catches not only
+/// transient archive failures (`deferred_transient > 0`) but also early aborts
+/// before a row is ever claimed (e.g. blocklist/claim-storage failures), which
+/// otherwise leave a live replacement with a spent CAS and no janitor that can
+/// flush the bare-JID backlog.
+async fn terminal_reflush_left_retryable_rows(state: &WebSocketState, recipient: &BareJid) -> bool {
+    match state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(recipient)
+        .await
+    {
+        Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                error = %error,
+                "terminal cleanup could not inspect pending_delivery after live reflush; rearming replacement flush conservatively"
+            );
+            true
         }
     }
 }
@@ -973,17 +1036,16 @@ async fn terminal_recovery_session(
     mut detached: waddle_xmpp::stream_management::DetachedSession,
     detached_snapshot: waddle_xmpp::stream_management::DetachedSessionSnapshot,
     can_promote_incrementally: bool,
-) -> waddle_xmpp::stream_management::DetachedSession {
+) -> TerminalRecoverySessionResult {
     outbound_rx.close();
     conn.ensure_terminal_sm_recovery();
-    let blocklist = match state
-        .deps
-        .protocol
-        .blocking_storage
-        .list_blocked_jid_entries(&detached.jid.to_bare())
-        .await
+    let blocklist = match super::replay::load_terminal_recovery_blocklist(
+        state,
+        &detached.jid.to_bare(),
+    )
+    .await
     {
-        Ok(jids) => Some(waddle_xmpp::protocol::session_state::Blocklist::new(jids)),
+        Ok(blocklist) => Some(blocklist),
         Err(error) => {
             warn!(
                 stream_id = %detached.stream_id,
@@ -1012,7 +1074,7 @@ async fn terminal_recovery_session(
         }
         (true, None) => false,
     };
-    let retained_overflow = drain_outbound_into_terminal_recovery(
+    let drain_outcome = drain_outbound_into_terminal_recovery(
         state,
         conn,
         outbound_rx,
@@ -1025,8 +1087,8 @@ async fn terminal_recovery_session(
         },
     )
     .await;
-    let retained_len = retained_overflow.len();
-    for (offset, mut stanza) in retained_overflow.into_iter().enumerate() {
+    let retained_len = drain_outcome.retained_overflow.len();
+    for (offset, mut stanza) in drain_outcome.retained_overflow.into_iter().enumerate() {
         stanza.sequence = detached
             .outbound_count
             .wrapping_add(u32::try_from(offset + 1).unwrap_or(u32::MAX));
@@ -1035,7 +1097,10 @@ async fn terminal_recovery_session(
     detached.outbound_count = detached
         .outbound_count
         .wrapping_add(u32::try_from(retained_len).unwrap_or(u32::MAX));
-    detached
+    TerminalRecoverySessionResult {
+        session: detached,
+        released_pending_rows: drain_outcome.released_pending_rows,
+    }
 }
 
 fn append_terminal_recovery_backlog(
@@ -1132,6 +1197,13 @@ async fn refuse_detach_without_principal(
         }),
         TerminalRouteRemoval::Attempted(removed) => removed,
     };
+    if released_terminal_rows {
+        // Preserve FIFO when terminal recovery released an earlier
+        // pending_delivery row but still has later unacked traffic to
+        // promote: drive the released prefix back onto any live replacement
+        // before promotion can enqueue the tail.
+        reflush_terminally_released_pending_rows_to_live_resource(state, &jid.to_bare()).await;
+    }
     // Keep this stream's claim live throughout every promotion. The claim
     // janitor uses SM liveness/fences, and deferring it before the locally
     // held batch is registered would let a sweep release the fence midway.
@@ -1157,9 +1229,6 @@ async fn refuse_detach_without_principal(
     };
     if !retrying {
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
-    }
-    if released_terminal_rows {
-        reflush_terminally_released_pending_rows_to_live_resource(state, &jid.to_bare()).await;
     }
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     if let Some((was_presence_available, owner)) = terminal_removed {

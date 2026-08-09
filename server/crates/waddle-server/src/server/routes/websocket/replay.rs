@@ -23,10 +23,20 @@ pub(super) struct TerminalDrainContext<'a> {
     pub(super) promote_incrementally: bool,
 }
 
+pub(super) struct TerminalDrainOutcome {
+    pub(super) retained_overflow: Vec<waddle_xmpp::stream_management::DetachedUnackedStanza>,
+    pub(super) released_pending_rows: bool,
+}
+
 struct TerminalDrainedFrame {
     xml: String,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
+}
+
+struct TerminalDrainedRecordResult {
+    retained: Option<waddle_xmpp::stream_management::DetachedUnackedStanza>,
+    released_pending_row: bool,
 }
 
 /// Drain `outbound_rx` of all immediately-available
@@ -127,7 +137,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     pending_row_policy: PendingRowDrainPolicy,
     terminal: TerminalDrainContext<'_>,
-) -> Vec<waddle_xmpp::stream_management::DetachedUnackedStanza> {
+) -> TerminalDrainOutcome {
     let principal_session = conn.authenticated_session.clone();
     let principal = principal_session
         .as_ref()
@@ -135,6 +145,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     let deps = build_interpret_deps(state, principal);
     let mut retained_overflow = Vec::new();
     let mut retain_overflow_for_retry = false;
+    let mut released_pending_rows = false;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
         let receipt_at = outbound_stanza
             .pending_row_original_receipt_at
@@ -143,7 +154,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
         match outbound_stanza.kind {
             DeliveryKind::DirectFrame => {
                 let xml = stanza_to_xml(&outbound_stanza.stanza);
-                let retained = record_drained_terminal_xml(
+                let result = record_drained_terminal_xml(
                     state,
                     conn,
                     TerminalDrainedFrame {
@@ -156,7 +167,8 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                     retain_overflow_for_retry,
                 )
                 .await;
-                if let Some(entry) = retained {
+                released_pending_rows |= result.released_pending_row;
+                if let Some(entry) = result.retained {
                     retain_overflow_for_retry = true;
                     retained_overflow.push(entry);
                 }
@@ -176,7 +188,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                 let mut row_id_for_first = pending_row_id.clone();
                 for xml in drive.frames {
                     let row_for_this = row_id_for_first.take();
-                    let retained = record_drained_terminal_xml(
+                    let result = record_drained_terminal_xml(
                         state,
                         conn,
                         TerminalDrainedFrame {
@@ -189,7 +201,8 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         retain_overflow_for_retry,
                     )
                     .await;
-                    if let Some(entry) = retained {
+                    released_pending_rows |= result.released_pending_row;
+                    if let Some(entry) = result.retained {
                         retain_overflow_for_retry = true;
                         retained_overflow.push(entry);
                     }
@@ -198,7 +211,10 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
         }
     }
     conn.warn_terminal_recovery_drops_once();
-    retained_overflow
+    TerminalDrainOutcome {
+        retained_overflow,
+        released_pending_rows,
+    }
 }
 
 /// Helper: record a single drained XML frame into the per-connection
@@ -326,7 +342,7 @@ async fn record_drained_terminal_xml(
     pending_row_policy: PendingRowDrainPolicy,
     terminal: &TerminalDrainContext<'_>,
     retain_overflow_for_retry: bool,
-) -> Option<waddle_xmpp::stream_management::DetachedUnackedStanza> {
+) -> TerminalDrainedRecordResult {
     let TerminalDrainedFrame {
         xml,
         original_receipt_at,
@@ -337,21 +353,28 @@ async fn record_drained_terminal_xml(
         PendingRowDrainPolicy::ReleaseForTerminalRecovery
     ) {
         if let Some(row_id) = pending_row_id {
-            if let Err(error) = state
+            let released_pending_row = match state
                 .deps
                 .protocol
                 .pending_delivery_storage
                 .release_row(&row_id)
                 .await
             {
-                warn!(
-                    row_id = %row_id,
-                    %error,
-                    "pending_delivery release_row (terminal recovery drain) failed; \
-                     claim-expiry janitor will recover the row"
-                );
-            }
-            return None;
+                Ok(released) => released > 0,
+                Err(error) => {
+                    warn!(
+                        row_id = %row_id,
+                        %error,
+                        "pending_delivery release_row (terminal recovery drain) failed; \
+                         claim-expiry janitor will recover the row"
+                    );
+                    false
+                }
+            };
+            return TerminalDrainedRecordResult {
+                retained: None,
+                released_pending_row,
+            };
         }
     }
     if !conn.terminal_sm_recovery.enabled || !is_countable_stanza(&xml) {
@@ -370,7 +393,10 @@ async fn record_drained_terminal_xml(
                 );
             }
         }
-        return None;
+        return TerminalDrainedRecordResult {
+            retained: None,
+            released_pending_row: false,
+        };
     }
     let entry = waddle_xmpp::stream_management::DetachedUnackedStanza {
         sequence: terminal.session.outbound_count.wrapping_add(1),
@@ -381,10 +407,36 @@ async fn record_drained_terminal_xml(
     // back into it: success promotes incrementally, while a failed/blocked
     // prefix keeps the bounded receiver tail with the synthetic session.
     if !terminal.promote_incrementally || retain_overflow_for_retry {
-        return Some(entry);
+        return TerminalDrainedRecordResult {
+            retained: Some(entry),
+            released_pending_row: false,
+        };
     }
-    let Some(blocklist) = terminal.blocklist else {
-        return Some(entry);
+    let Some(_blocklist) = terminal.blocklist else {
+        return TerminalDrainedRecordResult {
+            retained: Some(entry),
+            released_pending_row: false,
+        };
+    };
+    let refreshed_blocklist = match load_terminal_recovery_blocklist(
+        state,
+        &terminal.session.jid.to_bare(),
+    )
+    .await
+    {
+        Ok(blocklist) => blocklist,
+        Err(error) => {
+            warn!(
+                stream_id = %terminal.session.stream_id,
+                jid = %terminal.session.jid,
+                %error,
+                "terminal recovery could not refresh blocklist for overflow promotion; retaining terminal overflow for retry"
+            );
+            return TerminalDrainedRecordResult {
+                retained: Some(entry),
+                released_pending_row: false,
+            };
+        }
     };
     // The terminal prefix already settled, so each overflow frame is its own
     // promotion window. Re-read recent tombstones per item, then re-scrub
@@ -403,7 +455,7 @@ async fn record_drained_terminal_xml(
             registry: &state.deps.protocol.connection_registry,
             user_registry: &state.deps.protocol.user_registry,
             pending_storage: &state.deps.protocol.pending_delivery_storage,
-            blocklist,
+            blocklist: &refreshed_blocklist,
             server_domain: state.deps.auth_state.xmpp_domain.as_str(),
             recent_tombstones: &recent_tombstones,
         },
@@ -422,9 +474,33 @@ async fn record_drained_terminal_xml(
             storage_failed = summary.storage_failed,
             "terminal recovery overflow promotion failed durable storage; retaining for retry"
         );
-        return Some(entry);
+        return TerminalDrainedRecordResult {
+            retained: Some(entry),
+            released_pending_row: false,
+        };
     }
-    None
+    TerminalDrainedRecordResult {
+        retained: None,
+        released_pending_row: false,
+    }
+}
+
+pub(super) async fn load_terminal_recovery_blocklist(
+    state: &WebSocketState,
+    recipient: &jid::BareJid,
+) -> Result<
+    waddle_xmpp::protocol::session_state::Blocklist,
+    waddle_xmpp::xep::xep0191::BlockingStorageError,
+> {
+    let blocked = state
+        .deps
+        .protocol
+        .blocking_storage
+        .list_blocked_jid_entries(recipient)
+        .await?;
+    Ok(waddle_xmpp::protocol::session_state::Blocklist::new(
+        blocked,
+    ))
 }
 
 /// Accumulated result of [`drive_interpret_loop`]: everything the

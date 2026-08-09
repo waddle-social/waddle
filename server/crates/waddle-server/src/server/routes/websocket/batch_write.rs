@@ -17,7 +17,7 @@ use super::state::WsConnState;
 use super::stream_management::{apply_sm_ack, is_countable_stanza};
 use super::*;
 use futures::FutureExt as _;
-use waddle_xmpp::stream_management::SmRequest;
+use waddle_xmpp::stream_management::{SmAck, SmRequest};
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
 /// How the writer records countable frames into XEP-0198 bookkeeping.
@@ -382,6 +382,11 @@ where
         if conn.sm_state.send_window_recovered() {
             return SendWindowOutcome::Recovered;
         }
+        if let Err(outcome) =
+            service_paused_sm_requests_from_deferred(sender, conn, authority).await
+        {
+            return outcome;
+        }
         if conn.deferred_inbound.len() >= deferred_cap_for_pause {
             return SendWindowOutcome::DeferredCapExhausted;
         }
@@ -461,6 +466,24 @@ where
                             return outcome;
                         }
                     }
+                } else if is_client_sm_request(text.as_str()) {
+                    if !batch_authoritative(authority) {
+                        return SendWindowOutcome::AuthorityRevoked;
+                    }
+                    if let Err(outcome) = send_window_message(
+                        sender,
+                        Message::Text(
+                            SmAck::new(conn.sm_state.get_inbound_count())
+                                .to_xml()
+                                .into(),
+                        ),
+                        "Failed to answer client SM <r/> during send-window pause",
+                        authority,
+                    )
+                    .await
+                    {
+                        return outcome;
+                    }
                 } else {
                     conn.deferred_inbound.push_back(text);
                 }
@@ -495,6 +518,42 @@ where
             }
         }
     }
+}
+
+async fn service_paused_sm_requests_from_deferred<S, E>(
+    sender: &mut S,
+    conn: &mut WsConnState,
+    authority: Option<(
+        &crate::clustering::NodeAdmissionPermit,
+        &tokio_util::sync::CancellationToken,
+    )>,
+) -> Result<(), SendWindowOutcome>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    while conn
+        .deferred_inbound
+        .front()
+        .is_some_and(|text| is_client_sm_request(text.as_str()))
+    {
+        conn.deferred_inbound.pop_front();
+        if !batch_authoritative(authority) {
+            return Err(SendWindowOutcome::AuthorityRevoked);
+        }
+        send_window_message(
+            sender,
+            Message::Text(
+                SmAck::new(conn.sm_state.get_inbound_count())
+                    .to_xml()
+                    .into(),
+            ),
+            "Failed to answer deferred client SM <r/> during send-window pause",
+            authority,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool {
@@ -715,4 +774,9 @@ fn parse_sm_ack_h(frame: &str) -> Option<u32> {
         Some(SmStanza::Ack(ack)) => Some(ack.h),
         _ => None,
     }
+}
+
+fn is_client_sm_request(frame: &str) -> bool {
+    SmStanza::is_client_nonza_candidate(frame)
+        && matches!(SmStanza::parse(frame), Some(SmStanza::Request))
 }
