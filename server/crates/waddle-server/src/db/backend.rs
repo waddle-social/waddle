@@ -558,6 +558,21 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Execute a batch of SQL statements inside the transaction using the
+    /// already-pinned connection, so the whole batch participates in the
+    /// caller's commit/rollback boundary.
+    pub async fn execute_batch(&mut self, sql: &str) -> Result<(), DatabaseError> {
+        match &mut self.inner {
+            TransactionInner::Sqlite(tx) => {
+                sqlx::raw_sql(sql).execute(&mut **tx).await?;
+            }
+            TransactionInner::Postgres(tx) => {
+                sqlx::raw_sql(sql).execute(&mut **tx).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Commit the transaction. Drops without commit roll back automatically.
     pub async fn commit(self) -> Result<(), DatabaseError> {
         match self.inner {
@@ -565,5 +580,235 @@ impl<'a> Transaction<'a> {
             TransactionInner::Postgres(tx) => tx.commit().await?,
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::{Database, DatabaseConfig};
+
+    use super::*;
+
+    fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+        let mut url = url::Url::parse(database_url).expect("parse postgres url");
+        let retained: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "options")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+            .append_pair("options", &format!("-c search_path={schema}"));
+        url.to_string()
+    }
+
+    fn unique_postgres_schema_name(prefix: &str) -> String {
+        format!("waddle_test_{prefix}_{}", uuid::Uuid::new_v4().simple())
+    }
+
+    async fn drop_postgres_schema(admin: &sqlx::PgPool, schema: &str) {
+        let drop_schema = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
+        sqlx::query(&drop_schema)
+            .execute(admin)
+            .await
+            .expect("drop isolated postgres schema");
+    }
+
+    async fn isolated_postgres_test_db(
+        name: &str,
+        schema_prefix: &str,
+    ) -> Option<(Database, sqlx::PgPool, String)> {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!(
+                "skipping: WADDLE_TEST_POSTGRES_URL not set \
+                 (postgres-backed transaction execute_batch foundation)"
+            );
+            return None;
+        };
+
+        let admin = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect postgres admin pool");
+        let schema = unique_postgres_schema_name(schema_prefix);
+        let create_schema = format!("CREATE SCHEMA {schema}");
+        sqlx::query(&create_schema)
+            .execute(&admin)
+            .await
+            .expect("create isolated postgres schema");
+
+        let scoped_url = postgres_url_with_search_path(&database_url, &schema);
+        let db = match Database::from_config(
+            name,
+            &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url),
+        )
+        .await
+        {
+            Ok(db) => db,
+            Err(error) => {
+                drop_postgres_schema(&admin, &schema).await;
+                panic!("open isolated postgres database: {error}");
+            }
+        };
+
+        Some((db, admin, schema))
+    }
+
+    async fn read_transaction_batch_rows(db: &Database, table: &str) -> Vec<(i64, String)> {
+        let conn = db.guard().await.expect("acquire read guard");
+        let mut rows = conn
+            .query(&format!("SELECT id, value FROM {table} ORDER BY id"), ())
+            .await
+            .expect("query execute_batch rows");
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.expect("iterate execute_batch rows") {
+            values.push((
+                row.get::<i64>(0).expect("row id"),
+                row.get::<String>(1).expect("row value"),
+            ));
+        }
+        values
+    }
+
+    async fn assert_transaction_batch_table_absent(db: &Database, table: &str) {
+        let conn = db.guard().await.expect("acquire read guard");
+        let result = conn
+            .query(&format!("SELECT id, value FROM {table}"), ())
+            .await;
+        assert!(
+            result.is_err(),
+            "uncommitted batch-created table {table} must not survive transaction drop"
+        );
+    }
+
+    async fn read_transaction_batch_rows_in_tx(
+        tx: &mut Transaction<'_>,
+        table: &str,
+    ) -> Vec<(i64, String)> {
+        let mut rows = tx
+            .query(&format!("SELECT id, value FROM {table} ORDER BY id"), ())
+            .await
+            .expect("query execute_batch rows in transaction");
+        let mut values = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .expect("iterate execute_batch rows in transaction")
+        {
+            values.push((
+                row.get::<i64>(0).expect("row id"),
+                row.get::<String>(1).expect("row value"),
+            ));
+        }
+        values
+    }
+
+    async fn assert_execute_batch_commit_atomicity(
+        db: &Database,
+        table: &str,
+        begin_immediate: bool,
+    ) {
+        let mut tx = if begin_immediate {
+            db.begin_immediate()
+                .await
+                .expect("begin immediate execute_batch commit tx")
+        } else {
+            db.begin().await.expect("begin execute_batch commit tx")
+        };
+        tx.execute_batch(&format!(
+            "CREATE TABLE {table} (id BIGINT PRIMARY KEY, value TEXT NOT NULL UNIQUE);\
+             INSERT INTO {table} (id, value) VALUES (1, 'alpha');\
+             INSERT INTO {table} (id, value) VALUES (2, 'beta');"
+        ))
+        .await
+        .expect("execute commit batch");
+        assert_eq!(
+            read_transaction_batch_rows_in_tx(&mut tx, table).await,
+            vec![(1, "alpha".to_string()), (2, "beta".to_string())]
+        );
+        tx.commit().await.expect("commit execute_batch tx");
+
+        assert_eq!(
+            read_transaction_batch_rows(db, table).await,
+            vec![(1, "alpha".to_string()), (2, "beta".to_string())]
+        );
+    }
+
+    async fn assert_execute_batch_rollback_atomicity(
+        db: &Database,
+        table: &str,
+        begin_immediate: bool,
+    ) {
+        {
+            let mut tx = if begin_immediate {
+                db.begin_immediate()
+                    .await
+                    .expect("begin immediate execute_batch rollback tx")
+            } else {
+                db.begin().await.expect("begin execute_batch rollback tx")
+            };
+            tx.execute_batch(&format!(
+                "CREATE TABLE {table} (id BIGINT PRIMARY KEY, value TEXT NOT NULL UNIQUE);\
+                 INSERT INTO {table} (id, value) VALUES (1, 'alpha');"
+            ))
+            .await
+            .expect("execute rollback batch");
+            assert_eq!(
+                read_transaction_batch_rows_in_tx(&mut tx, table).await,
+                vec![(1, "alpha".to_string())]
+            );
+        }
+
+        assert_transaction_batch_table_absent(db, table).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_execute_batch_commits_atomically_on_sqlite() {
+        let db = Database::in_memory("transaction-execute-batch-sqlite-commit")
+            .await
+            .expect("open sqlite test database");
+        assert_execute_batch_commit_atomicity(&db, "tx_execute_batch_commit", true).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_execute_batch_rolls_back_atomically_on_sqlite() {
+        let db = Database::in_memory("transaction-execute-batch-sqlite-rollback")
+            .await
+            .expect("open sqlite test database");
+        assert_execute_batch_rollback_atomicity(&db, "tx_execute_batch_rollback", true).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_execute_batch_commits_atomically_on_postgres() {
+        let Some((db, admin, schema)) = isolated_postgres_test_db(
+            "transaction-execute-batch-postgres-commit",
+            "tx_batch_commit",
+        )
+        .await
+        else {
+            return;
+        };
+
+        assert_execute_batch_commit_atomicity(&db, "tx_execute_batch_commit", false).await;
+
+        drop(db);
+        drop_postgres_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_execute_batch_rolls_back_atomically_on_postgres() {
+        let Some((db, admin, schema)) = isolated_postgres_test_db(
+            "transaction-execute-batch-postgres-rollback",
+            "tx_batch_rollback",
+        )
+        .await
+        else {
+            return;
+        };
+
+        assert_execute_batch_rollback_atomicity(&db, "tx_execute_batch_rollback", false).await;
+
+        drop(db);
+        drop_postgres_schema(&admin, &schema).await;
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::info;
 use waddle_server::{config, config::ServerConfig, db, server, telemetry};
 
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     migration_runner
         .run(db_pool.global())
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
+        .context("Failed to run migrations")?;
 
     info!("Database initialized and migrations complete");
 

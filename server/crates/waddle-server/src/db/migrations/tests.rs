@@ -1,5 +1,8 @@
 use super::*;
-use crate::db::{Database, DatabaseConfig, DatabaseDriver};
+use crate::db::{
+    migration_checksum, Database, DatabaseConfig, DatabaseDriver, DatabaseError,
+    MigrationLedgerError, MigrationNamespace, WADDLE_NAMESPACE_START,
+};
 
 #[tokio::test]
 async fn test_migration_runner_global() {
@@ -104,24 +107,17 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
         .unwrap();
     let conn = db.guard().await.unwrap();
 
-    conn.execute(
-        r#"
-            CREATE TABLE IF NOT EXISTS _migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            "#,
-        (),
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
+    seed_applied_migrations(
+        &conn,
+        waddle::all()
+            .into_iter()
+            .filter(|migration| migration.version == 1001),
+        DatabaseDriver::Sqlite,
     )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO _migrations (version, description) VALUES (1001, 'Hard-cut per-waddle schema with bare-JID principals')",
-        (),
-    )
-    .await
-    .unwrap();
+    .await;
     conn.execute(
         r#"
             CREATE TABLE channels (
@@ -188,36 +184,17 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         .unwrap();
     let conn = db.guard().await.unwrap();
 
-    conn.execute(
-        r#"
-            CREATE TABLE IF NOT EXISTS _migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            "#,
-        (),
-    )
-    .await
-    .unwrap();
-    for (version, description) in [
-        (1, "Hard-cut auth broker schema with roster pre-approval"),
-        (
-            2,
-            "Add user_avatar_source provenance table for OIDC user-managed avatar guard",
-        ),
-        (
-            3,
-            "Add user_avatar_fetch_state for startup-backfill throttle",
-        ),
-    ] {
-        conn.execute(
-            "INSERT INTO _migrations (version, description) VALUES (?, ?)",
-            (version, description),
-        )
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
         .await
         .unwrap();
-    }
+    seed_applied_migrations(
+        &conn,
+        global::all()
+            .into_iter()
+            .filter(|migration| migration.version < 4),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
     // Materialise the V0003 shape so V0004's ALTER has a target.
     conn.execute(
         r#"
@@ -342,24 +319,15 @@ async fn test_has_pending_migrations() {
 }
 
 #[tokio::test]
-async fn test_incompatible_history_forces_hard_cut_reapply() {
+async fn incompatible_history_fails_closed_without_changing_the_ledger() {
     let db = Database::in_memory("test-incompatible-history")
         .await
         .unwrap();
     let conn = db.guard().await.unwrap();
 
-    conn.execute(
-        r#"
-            CREATE TABLE IF NOT EXISTS _migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            "#,
-        (),
-    )
-    .await
-    .unwrap();
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
     conn.execute(
         "INSERT INTO _migrations (version, description) VALUES (1, 'legacy initial schema')",
         (),
@@ -368,39 +336,39 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
     .unwrap();
     drop(conn);
 
-    let runner = MigrationRunner::global();
-    let applied = runner.run(&db).await.unwrap();
-    assert_eq!(
-        applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
-    );
+    let error = MigrationRunner::global().run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::DescriptionMismatch {
+            version: 1,
+            ..
+        })
+    ));
 
-    let applied_again = runner.run(&db).await.unwrap();
-    assert!(applied_again.is_empty());
-
-    let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1007));
+    let conn = db.guard().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT version, description FROM _migrations ORDER BY version",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    assert_eq!(row.get::<String>(1).unwrap(), "legacy initial schema");
+    assert!(rows.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
-async fn test_incompatible_history_recreates_existing_owned_tables() {
+async fn incompatible_history_leaves_existing_owned_tables_untouched() {
     let db = Database::in_memory("test-incompatible-existing-tables")
         .await
         .unwrap();
     let conn = db.guard().await.unwrap();
 
-    conn.execute(
-        r#"
-            CREATE TABLE IF NOT EXISTS _migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            "#,
-        (),
-    )
-    .await
-    .unwrap();
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
     conn.execute(
         "INSERT INTO _migrations (version, description) VALUES (1, 'legacy initial schema')",
         (),
@@ -422,12 +390,14 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
     .unwrap();
     drop(conn);
 
-    let runner = MigrationRunner::global();
-    let applied = runner.run(&db).await.unwrap();
-    assert_eq!(
-        applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
-    );
+    let error = MigrationRunner::global().run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::DescriptionMismatch {
+            version: 1,
+            ..
+        })
+    ));
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -443,7 +413,648 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     let has_approved: i64 = row.get(0).unwrap();
-    assert_eq!(has_approved, 1);
+    assert_eq!(has_approved, 0);
+
+    let mut rows = conn
+        .query("SELECT description FROM _migrations WHERE version = 1", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "legacy initial schema");
+}
+
+#[tokio::test]
+async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
+    let db = Database::in_memory("sqlite-migration-ledger-adoption")
+        .await
+        .unwrap();
+    let conn = db.guard().await.unwrap();
+    let first = migration_by_version(1001);
+    conn.execute_batch(first.sql_for(DatabaseDriver::Sqlite))
+        .await
+        .unwrap();
+    conn.execute(
+        r#"
+            CREATE TABLE _migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO _migrations (version, description) VALUES (?, ?)",
+        crate::db_params![first.version, first.description.as_str()],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let runner = MigrationRunner::waddle();
+    assert_eq!(
+        runner.run(&db).await.unwrap(),
+        vec![1002, 1003, 1004, 1005, 1006, 1007]
+    );
+    let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
+    assert_eq!(
+        migration_ledger_checksum(&db, 1001).await.as_deref(),
+        Some(expected_checksum.as_str())
+    );
+    assert!(runner.run(&db).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_single_runner_refuses_to_reapply_global_initial_migration_when_schema_exists_but_ledger_is_empty(
+) {
+    let db = Database::in_memory("sqlite-schema-without-ledger-global")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute("DELETE FROM _migrations", ()).await.unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Global,
+            ref table,
+        }) if table == "users"
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, 0);
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+    assert!(sqlite_table_exists(&db, "users").await);
+    assert!(sqlite_table_exists(&db, "channels").await);
+}
+
+#[tokio::test]
+async fn sqlite_single_runner_refuses_to_reapply_waddle_initial_migration_when_only_waddle_ledger_rows_are_missing(
+) {
+    let db = Database::in_memory("sqlite-schema-without-ledger-waddle")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let global_before = migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        "DELETE FROM _migrations WHERE version >= ?",
+        crate::db_params![WADDLE_NAMESPACE_START],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Waddle,
+            ref table,
+        }) if table == "channels"
+    ));
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await,
+        global_before
+    );
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Waddle).await,
+        0
+    );
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+    assert!(sqlite_table_exists(&db, "users").await);
+    assert!(sqlite_table_exists(&db, "channels").await);
+}
+
+#[tokio::test]
+async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pending_migrations() {
+    let db = Database::in_memory("sqlite-ledger-pure-adoption-single")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    assert_eq!(runner.migrations.len(), 18);
+    runner.run(&db).await.unwrap();
+
+    let conn = db.guard().await.unwrap();
+    conn.execute("ALTER TABLE _migrations DROP COLUMN checksum", ())
+        .await
+        .unwrap();
+    drop(conn);
+
+    assert!(runner.run(&db).await.unwrap().is_empty());
+    assert_eq!(migration_ledger_row_count(&db).await, 18);
+    assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
+    assert!(runner.run(&db).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_owned_ledger_version_fails_closed_without_changes() {
+    let db = Database::in_memory("unknown-migration-ledger-version")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+    let before = migration_ledger_row_count(&db).await;
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
+        crate::db_params![12_i64, "future migration", "future-checksum"],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 12, .. })
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, before + 1);
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+}
+
+#[tokio::test]
+async fn ledger_aware_old_binary_fails_closed_against_newer_ledger() {
+    let db = Database::in_memory("old-binary-migration-ledger")
+        .await
+        .unwrap();
+    MigrationRunner::single().run(&db).await.unwrap();
+    let old_binary = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .filter(|migration| migration.version < 11)
+            .chain(waddle::all())
+            .collect(),
+    );
+
+    let error = old_binary.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 11, .. })
+    ));
+}
+
+#[tokio::test]
+async fn checksum_mismatch_fails_closed_without_applying_migrations() {
+    let db = Database::in_memory("checksum-mismatch-migration-ledger")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+    let before = migration_ledger_row_count(&db).await;
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        "UPDATE _migrations SET checksum = ? WHERE version = ?",
+        crate::db_params!["wrong-checksum", 1_i64],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::ChecksumMismatch { version: 1, .. })
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, before);
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+}
+
+#[tokio::test]
+async fn missing_checksum_after_adoption_fails_closed() {
+    let db = Database::in_memory("missing-checksum-migration-ledger")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        "UPDATE _migrations SET checksum = NULL WHERE version = ?",
+        crate::db_params![1_i64],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::MissingChecksum { version: 1 })
+    ));
+    assert_eq!(migration_ledger_checksum(&db, 1).await, None);
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+}
+
+#[tokio::test]
+async fn gap_in_an_owned_namespace_fails_closed() {
+    let db = Database::in_memory("gap-migration-ledger").await.unwrap();
+    let conn = db.guard().await.unwrap();
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
+    seed_applied_migrations(
+        &conn,
+        global::all()
+            .into_iter()
+            .filter(|migration| matches!(migration.version, 1 | 3)),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
+    drop(conn);
+
+    let schema_before = sqlite_schema_object_count(&db).await;
+
+    let error = MigrationRunner::single().run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::VersionGap {
+            namespace: MigrationNamespace::Global,
+            missing: 2,
+            applied_after: 3,
+        })
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, 2);
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+}
+
+#[tokio::test]
+async fn waddle_runner_ignores_unowned_global_ledger_rows() {
+    let db = Database::in_memory("namespace-owned-migration-ledger")
+        .await
+        .unwrap();
+    MigrationRunner::single().run(&db).await.unwrap();
+    let waddle_runner = MigrationRunner::waddle();
+    assert!(waddle_runner.run(&db).await.unwrap().is_empty());
+
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        "UPDATE _migrations SET checksum = ? WHERE version = ?",
+        crate::db_params!["wrong-global-checksum", 1_i64],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    assert!(waddle_runner.run(&db).await.unwrap().is_empty());
+    assert!(matches!(
+        MigrationRunner::single().run(&db).await.unwrap_err(),
+        DatabaseError::MigrationLedger(MigrationLedgerError::ChecksumMismatch { version: 1, .. })
+    ));
+}
+
+#[tokio::test]
+async fn single_runner_is_idempotent_with_a_stable_ledger() {
+    let db = Database::in_memory("idempotent-migration-ledger")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    let first = runner.run(&db).await.unwrap();
+    let count = migration_ledger_row_count(&db).await;
+    assert!(!first.is_empty());
+    assert!(runner.run(&db).await.unwrap().is_empty());
+    assert_eq!(migration_ledger_row_count(&db).await, count);
+}
+
+#[tokio::test]
+async fn migration_apply_error_names_the_failing_migration_and_preserves_its_source() {
+    let db = Database::in_memory("migration-apply-error-context")
+        .await
+        .expect("open in-memory database");
+    let runner = MigrationRunner::new(vec![Migration {
+        version: 42,
+        description: "invalid migration for error context".to_string(),
+        sql_sqlite: "THIS IS NOT VALID SQL;",
+        sql_postgres: "THIS IS NOT VALID SQL;",
+    }]);
+
+    let error = runner
+        .run(&db)
+        .await
+        .expect_err("invalid migration must fail");
+    assert!(matches!(
+        &error,
+        DatabaseError::MigrationApply { version: 42, .. }
+    ));
+    assert!(error.to_string().contains("migration v42"));
+    let source = std::error::Error::source(&error)
+        .expect("MigrationApply must retain the database error source chain");
+    assert!(source.to_string().contains("Internal database error"));
+    assert!(
+        std::error::Error::source(source).is_some(),
+        "MigrationApply must retain the underlying sqlx error beneath DatabaseError::Internal"
+    );
+}
+
+#[tokio::test]
+async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger adoption)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_adoption");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    let first = migration_by_version(1001);
+    conn.execute_batch(first.sql_for(DatabaseDriver::Postgres))
+        .await
+        .expect("create V1001 schema");
+    conn.execute(
+        r#"
+            CREATE TABLE _migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        (),
+    )
+    .await
+    .expect("create pre-ledger migrations table");
+    conn.execute(
+        "INSERT INTO _migrations (version, description) VALUES (?, ?)",
+        crate::db_params![first.version, first.description.as_str()],
+    )
+    .await
+    .expect("seed pre-ledger migration");
+    drop(conn);
+
+    let runner = MigrationRunner::waddle();
+    assert_eq!(
+        runner.run(&db).await.expect("adopt and run migrations"),
+        vec![1002, 1003, 1004, 1005, 1006, 1007]
+    );
+    let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
+    assert_eq!(
+        migration_ledger_checksum(&db, 1001).await.as_deref(),
+        Some(expected_checksum.as_str())
+    );
+    assert!(runner
+        .run(&db)
+        .await
+        .expect("second migration run")
+        .is_empty());
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_single_runner_refuses_to_reapply_global_initial_migration_when_schema_exists_but_ledger_is_empty(
+) {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres schema without ledger global)"
+        );
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_missing_global");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.expect("initial single migration run");
+
+    let schema_before = postgres_schema_object_count(&db).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute("DELETE FROM _migrations", ())
+        .await
+        .expect("delete all migration ledger rows");
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Global,
+            ref table,
+        }) if table == "users"
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, 0);
+    assert_eq!(postgres_schema_object_count(&db).await, schema_before);
+    assert!(postgres_table_exists(&db, "users").await);
+    assert!(postgres_table_exists(&db, "channels").await);
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_single_runner_refuses_to_reapply_waddle_initial_migration_when_only_waddle_ledger_rows_are_missing(
+) {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres schema without ledger waddle)"
+        );
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_missing_waddle");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.expect("initial single migration run");
+
+    let schema_before = postgres_schema_object_count(&db).await;
+    let global_before = migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(
+        "DELETE FROM _migrations WHERE version >= ?",
+        crate::db_params![WADDLE_NAMESPACE_START],
+    )
+    .await
+    .expect("delete waddle migration ledger rows");
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::SchemaWithoutLedger {
+            namespace: MigrationNamespace::Waddle,
+            ref table,
+        }) if table == "channels"
+    ));
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Global).await,
+        global_before
+    );
+    assert_eq!(
+        migration_ledger_namespace_row_count(&db, MigrationNamespace::Waddle).await,
+        0
+    );
+    assert_eq!(postgres_schema_object_count(&db).await, schema_before);
+    assert!(postgres_table_exists(&db, "users").await);
+    assert!(postgres_table_exists(&db, "channels").await);
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pending_migrations() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres pure migration ledger adoption)"
+        );
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_pure_adoption");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let runner = MigrationRunner::single();
+    assert_eq!(runner.migrations.len(), 18);
+    runner.run(&db).await.expect("initial single migration run");
+
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute("ALTER TABLE _migrations DROP COLUMN checksum", ())
+        .await
+        .expect("drop checksum column");
+    drop(conn);
+
+    assert!(runner
+        .run(&db)
+        .await
+        .expect("pure adoption rerun")
+        .is_empty());
+    assert_eq!(migration_ledger_row_count(&db).await, 18);
+    assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
+    assert!(runner
+        .run(&db)
+        .await
+        .expect("third single migration run")
+        .is_empty());
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_migration_runner_blocks_until_the_advisory_lock_is_released() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger lock)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_lock");
+    let (db_a, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let db_b = open_postgres_database_in_schema(&database_url, &schema, "ledger-lock-b", 10).await;
+    let mut lock_tx = db_a.begin().await.expect("start lock transaction");
+    lock_tx
+        .query(
+            "SELECT pg_advisory_xact_lock(?)",
+            crate::db_params![super::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY],
+        )
+        .await
+        .expect("take migration advisory lock");
+
+    let local = tokio::task::LocalSet::new();
+    let mut run = local.spawn_local(async move {
+        let runner = MigrationRunner::single();
+        runner.run(&db_b).await
+    });
+    local
+        .run_until(async {
+            wait_for_postgres_advisory_waiter(
+                &admin,
+                super::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
+            )
+            .await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut run)
+                    .await
+                    .is_err(),
+                "migration runner must block while another transaction holds its advisory lock"
+            );
+        })
+        .await;
+    lock_tx
+        .commit()
+        .await
+        .expect("release migration advisory lock");
+    let applied = local
+        .run_until(&mut run)
+        .await
+        .expect("migration runner task")
+        .expect("migration runner result");
+    assert!(!applied.is_empty());
+
+    drop(db_a);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_concurrent_migration_runners_record_one_complete_ledger() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger race)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_race");
+    let (db_a, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let db_b = open_postgres_database_in_schema(&database_url, &schema, "ledger-race-b", 10).await;
+    let expected: Vec<i64> = MigrationRunner::single()
+        .migrations
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    let first_runner = MigrationRunner::single();
+    let second_runner = MigrationRunner::single();
+    let (first, second) = tokio::join!(first_runner.run(&db_a), second_runner.run(&db_b));
+    let first = first.expect("first migration runner");
+    let second = second.expect("second migration runner");
+    assert!(
+        (first == expected && second.is_empty()) || (second == expected && first.is_empty()),
+        "the advisory lock must let exactly one runner apply the full catalog"
+    );
+    assert_eq!(
+        migration_ledger_row_count(&db_a).await,
+        expected.len() as i64
+    );
+    for migration in MigrationRunner::single().migrations {
+        let expected_checksum = migration_checksum(&migration, DatabaseDriver::Postgres);
+        assert_eq!(
+            migration_ledger_checksum(&db_a, migration.version)
+                .await
+                .as_deref(),
+            Some(expected_checksum.as_str()),
+            "migration v{} must be recorded once with its active-dialect checksum",
+            migration.version
+        );
+    }
+
+    drop(db_b);
+    drop(db_a);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_migration_runner_succeeds_with_a_single_connection_pool() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (single connection migration pool)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_pool_one");
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect postgres admin pool");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create isolated postgres schema");
+    let db = open_postgres_database_in_schema(&database_url, &schema, "ledger-pool-one", 1).await;
+
+    assert!(!MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("run migrations with one pooled connection")
+        .is_empty());
+
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
 }
 
 // --- Postgres dialect validation (no live DB required) ---
@@ -552,6 +1163,86 @@ fn all_migrations_have_non_empty_postgres_sql() {
 }
 
 #[test]
+fn migration_catalog_obeys_namespace_boundary() {
+    assert_eq!(WADDLE_NAMESPACE_START, 1000);
+
+    for migration in global::all() {
+        assert!(
+            migration.version < WADDLE_NAMESPACE_START,
+            "global migration v{} must stay below the waddle namespace boundary",
+            migration.version
+        );
+        assert_eq!(
+            MigrationNamespace::of(migration.version),
+            MigrationNamespace::Global
+        );
+    }
+
+    for migration in waddle::all() {
+        assert!(
+            migration.version >= WADDLE_NAMESPACE_START,
+            "waddle migration v{} must stay inside the waddle namespace",
+            migration.version
+        );
+        assert_eq!(
+            MigrationNamespace::of(migration.version),
+            MigrationNamespace::Waddle
+        );
+    }
+}
+
+#[test]
+fn sentinel_tables_match_first_migration_sql() {
+    for (namespace, catalog) in [
+        (MigrationNamespace::Global, global::all()),
+        (MigrationNamespace::Waddle, waddle::all()),
+    ] {
+        let sentinel = MigrationRunner::sentinel_table(namespace);
+        let first = catalog
+            .into_iter()
+            .min_by_key(|migration| migration.version)
+            .expect("namespace catalog is non-empty");
+        for sql in [first.sql_sqlite, first.sql_postgres] {
+            assert!(
+                sql.contains(&format!("CREATE TABLE {sentinel} (")),
+                "{namespace} sentinel table {sentinel} must be created by that \
+                 namespace's first migration (v{}); the SchemaWithoutLedger \
+                 guard depends on it",
+                first.version
+            );
+        }
+    }
+}
+
+#[test]
+fn db_public_exports_expose_migration_foundation() {
+    assert_eq!(MigrationNamespace::of(-5), MigrationNamespace::Global);
+    assert_eq!(MigrationNamespace::of(1001), MigrationNamespace::Waddle);
+
+    let checksum = migration_checksum(
+        &Migration {
+            version: 1234,
+            description: "test export".to_string(),
+            sql_sqlite: "SELECT 1;",
+            sql_postgres: "SELECT 2;",
+        },
+        DatabaseDriver::Sqlite,
+    );
+    assert_eq!(checksum.len(), 64);
+
+    let database_error: DatabaseError = MigrationLedgerError::ChecksumMismatch {
+        version: 1001,
+        expected: "expected".to_string(),
+        found: "found".to_string(),
+    }
+    .into();
+    assert_eq!(
+        database_error.to_string(),
+        "migration startup is refusing to continue rather than repairing the ledger: migration v1001 checksum expected expected, found found"
+    );
+}
+
+#[test]
 fn postgres_channel_pin_permission_migration_is_hot_patch_safe() {
     assert!(
         waddle::V1002_ADD_CHANNEL_PIN_PERMISSION_POSTGRES.contains("ADD COLUMN IF NOT EXISTS"),
@@ -604,7 +1295,12 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
         .await
         .expect("create migration table");
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 6)).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 6),
+        DatabaseDriver::Postgres,
+    )
+    .await;
     conn.execute(
         r#"
         CREATE TABLE upload_slots (
@@ -690,7 +1386,12 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
         .await
         .unwrap();
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 7)).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 7),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
     conn.execute(
         r#"
         CREATE TABLE upload_slots (
@@ -806,8 +1507,13 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
         .await
         .unwrap();
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 8)).await;
-    seed_applied_migrations(&conn, waddle::all()).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 8),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
+    seed_applied_migrations(&conn, waddle::all(), DatabaseDriver::Sqlite).await;
     conn.execute(
         r#"
         CREATE TABLE upload_slots (
@@ -876,8 +1582,13 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
         .await
         .unwrap();
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 10)).await;
-    seed_applied_migrations(&conn, waddle::all()).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 10),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
+    seed_applied_migrations(&conn, waddle::all(), DatabaseDriver::Sqlite).await;
     for statement in [
         "CREATE TABLE clustering_isr_tokens (sm_id TEXT PRIMARY KEY)",
         "CREATE INDEX clustering_isr_tokens_created_at_sm_id ON clustering_isr_tokens (sm_id)",
@@ -921,8 +1632,13 @@ async fn sqlite_v0011_adds_auth_context_reference_to_existing_sessions() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
         .await
         .expect("create migration table");
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 11)).await;
-    seed_applied_migrations(&conn, waddle::all()).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 11),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
+    seed_applied_migrations(&conn, waddle::all(), DatabaseDriver::Sqlite).await;
     create_legacy_session_schema(&conn).await;
     conn.execute(
         "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -991,8 +1707,13 @@ async fn postgres_v0011_adds_auth_context_reference_to_existing_sessions() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
         .await
         .expect("create migration table");
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 11)).await;
-    seed_applied_migrations(&conn, waddle::all()).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 11),
+        DatabaseDriver::Postgres,
+    )
+    .await;
+    seed_applied_migrations(&conn, waddle::all(), DatabaseDriver::Postgres).await;
     create_legacy_session_schema(&conn).await;
     conn.execute(
         "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -1053,7 +1774,12 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
         .await
         .expect("create migration table");
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 7)).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 7),
+        DatabaseDriver::Postgres,
+    )
+    .await;
     conn.execute(
         r#"
         CREATE TABLE upload_slots (
@@ -1193,8 +1919,13 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
     conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
         .await
         .expect("create migration table");
-    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 8)).await;
-    seed_applied_migrations(&conn, waddle::all()).await;
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 8),
+        DatabaseDriver::Postgres,
+    )
+    .await;
+    seed_applied_migrations(&conn, waddle::all(), DatabaseDriver::Postgres).await;
     conn.execute(
         r#"
         CREATE TABLE upload_slots (
@@ -1288,6 +2019,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
     seed_applied_migrations(
         &conn,
         waddle::all().into_iter().filter(|m| m.version < 1003),
+        DatabaseDriver::Postgres,
     )
     .await;
     conn.execute(
@@ -1380,15 +2112,165 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
 async fn seed_applied_migrations(
     conn: &crate::db::ConnectionGuard,
     migrations: impl IntoIterator<Item = Migration>,
+    driver: DatabaseDriver,
 ) {
     for migration in migrations {
+        let checksum = migration_checksum(&migration, driver);
         conn.execute(
-            "INSERT INTO _migrations (version, description) VALUES (?, ?)",
-            crate::db_params![migration.version, migration.description],
+            "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
+            crate::db_params![migration.version, migration.description, checksum],
         )
         .await
         .expect("seed applied migration row");
     }
+}
+
+fn migration_by_version(version: i64) -> Migration {
+    MigrationRunner::single()
+        .migrations
+        .into_iter()
+        .find(|migration| migration.version == version)
+        .expect("migration exists in the catalog")
+}
+
+async fn migration_ledger_row_count(db: &Database) -> i64 {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM _migrations", ())
+        .await
+        .expect("query migration ledger count");
+    let row = rows
+        .next()
+        .await
+        .expect("read migration ledger count")
+        .expect("migration ledger count row");
+    row.get(0).expect("decode migration ledger count")
+}
+
+async fn migration_ledger_checksum(db: &Database, version: i64) -> Option<String> {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT checksum FROM _migrations WHERE version = ?",
+            crate::db_params![version],
+        )
+        .await
+        .expect("query migration ledger checksum");
+    let row = rows
+        .next()
+        .await
+        .expect("read migration ledger checksum")
+        .expect("migration ledger checksum row");
+    row.get(0).expect("decode migration ledger checksum")
+}
+
+async fn assert_all_migration_checksums(db: &Database, driver: DatabaseDriver) {
+    for migration in MigrationRunner::single().migrations {
+        let expected_checksum = migration_checksum(&migration, driver);
+        assert_eq!(
+            migration_ledger_checksum(db, migration.version)
+                .await
+                .as_deref(),
+            Some(expected_checksum.as_str()),
+            "migration v{} must be recorded with its active-dialect checksum",
+            migration.version
+        );
+    }
+}
+
+async fn migration_ledger_namespace_row_count(db: &Database, namespace: MigrationNamespace) -> i64 {
+    let conn = db.guard().await.expect("database guard");
+    let predicate = match namespace {
+        MigrationNamespace::Global => "version < 1000",
+        MigrationNamespace::Waddle => "version >= 1000",
+    };
+    let mut rows = conn
+        .query(
+            &format!("SELECT COUNT(*) FROM _migrations WHERE {predicate}"),
+            (),
+        )
+        .await
+        .expect("query namespace migration ledger count");
+    let row = rows
+        .next()
+        .await
+        .expect("read namespace migration ledger count")
+        .expect("namespace migration ledger count row");
+    row.get(0).expect("decode namespace migration ledger count")
+}
+
+async fn sqlite_schema_object_count(db: &Database) -> i64 {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'index')",
+            (),
+        )
+        .await
+        .expect("query SQLite schema object count");
+    let row = rows
+        .next()
+        .await
+        .expect("read SQLite schema object count")
+        .expect("SQLite schema object count row");
+    row.get(0).expect("decode SQLite schema object count")
+}
+
+async fn sqlite_table_exists(db: &Database, table: &str) -> bool {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            crate::db_params![table],
+        )
+        .await
+        .expect("query sqlite table existence");
+    let row = rows
+        .next()
+        .await
+        .expect("read sqlite table existence")
+        .expect("sqlite table existence row");
+    let count: i64 = row.get(0).expect("decode sqlite table existence");
+    count == 1
+}
+
+async fn postgres_schema_object_count(db: &Database) -> i64 {
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) \
+             FROM information_schema.tables \
+             WHERE table_schema = current_schema()",
+            (),
+        )
+        .await
+        .expect("query postgres schema object count");
+    let row = rows
+        .next()
+        .await
+        .expect("read postgres schema object count")
+        .expect("postgres schema object count row");
+    row.get(0).expect("decode postgres schema object count")
+}
+
+async fn postgres_table_exists(db: &Database, table: &str) -> bool {
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) \
+             FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = ?",
+            crate::db_params![table],
+        )
+        .await
+        .expect("query postgres table existence");
+    let row = rows
+        .next()
+        .await
+        .expect("read postgres table existence")
+        .expect("postgres table existence row");
+    let count: i64 = row.get(0).expect("decode postgres table existence");
+    count == 1
 }
 
 /// The historical-upgrade fixtures record V0001 as applied. Their focused
@@ -1633,14 +2515,28 @@ async fn open_isolated_postgres_database(
         .await
         .expect("create isolated postgres schema");
 
-    let scoped_url = postgres_url_with_search_path(database_url, schema);
-    let db = Database::from_config(
+    let db = open_postgres_database_in_schema(
+        database_url,
+        schema,
         "isolated-postgres-migration-test",
-        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url),
+        10,
     )
-    .await
-    .expect("open isolated postgres database");
+    .await;
     (db, admin)
+}
+
+async fn open_postgres_database_in_schema(
+    database_url: &str,
+    schema: &str,
+    name: &str,
+    pool_size: u32,
+) -> Database {
+    let scoped_url = postgres_url_with_search_path(database_url, schema);
+    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url);
+    config.pool_size = pool_size;
+    Database::from_config(name, &config)
+        .await
+        .expect("open isolated postgres database")
 }
 
 async fn drop_postgres_schema(admin: &sqlx::PgPool, schema: &str) {
@@ -1649,6 +2545,36 @@ async fn drop_postgres_schema(admin: &sqlx::PgPool, schema: &str) {
         .execute(admin)
         .await
         .expect("drop isolated postgres schema");
+}
+
+async fn wait_for_postgres_advisory_waiter(admin: &sqlx::PgPool, key: i64) {
+    let waiter = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            // Postgres exposes a single-bigint advisory key with its high
+            // 32 bits in `classid`, low 32 bits in `objid`, and `objsubid = 1`.
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) \
+                 FROM pg_locks \
+                 WHERE locktype = 'advisory' \
+                   AND granted = false \
+                   AND objsubid = 1 \
+                   AND ((classid::bigint << 32) | objid::bigint) = $1",
+            )
+            .bind(key)
+            .fetch_one(admin)
+            .await
+            .expect("query postgres advisory lock waiters");
+            if count > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(
+        waiter.is_ok(),
+        "migration runner must show an ungranted advisory waiter in pg_locks"
+    );
 }
 
 fn unique_postgres_schema_name(prefix: &str) -> String {
