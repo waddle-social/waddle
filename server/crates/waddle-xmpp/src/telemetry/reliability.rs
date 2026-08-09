@@ -9,7 +9,9 @@
 //! translated `xmpp_<rest>_total` series never collided with the legacy
 //! scrape during the dual-emit release.
 
-use super::attributes::{Janitor, PushRetryReason, PushSuppressReason, SweepOutcome};
+use super::attributes::{
+    Janitor, PushRetryReason, PushSuppressReason, SmEvictionPath, SweepOutcome,
+};
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
 /// the single `counter_add!` call site (and therefore the single
@@ -64,11 +66,23 @@ macro_rules! reliability_counters {
     };
 }
 
-reliability_counters! {
-    increment increment_sm_unacked_evicted,
+fn add_sm_unacked_evicted(count: u64, path: SmEvictionPath) {
+    crate::counter_add!(
         "xmpp.sm.unacked_evicted",
         "{stanza}",
-        "XEP-0198 unacked stanzas evicted from an attached session replay window.";
+        "XEP-0198 unacked stanzas evicted from an attached replay window, by path.",
+        count,
+        path,
+    );
+}
+
+/// Increment an attached-stream replay-window eviction for the
+/// enumerated outbound path that caused it.
+pub fn increment_sm_unacked_evicted(path: SmEvictionPath) {
+    add_sm_unacked_evicted(1, path);
+}
+
+reliability_counters! {
     add add_sm_promotion_storage_failed,
         "xmpp.sm.promotion_storage_failed",
         "{stanza}",
@@ -189,6 +203,9 @@ reliability_counters! {
 /// tick" alert must keep its absent series.
 pub fn register_reliability_counters() {
     register_table_counters();
+    for path in SmEvictionPath::ALL {
+        add_sm_unacked_evicted(0, path);
+    }
     add_push_candidate_created(0);
     add_push_candidate_coalesced(0);
     add_push_outbox_published(0);
@@ -426,6 +443,10 @@ mod tests {
 
     /// The counters `register_reliability_counters` zeroes that carry
     /// no attributes, beyond the macro table.
+    const REGISTERED_SM_COUNTERS: &[&str] = &["xmpp.sm.unacked_evicted"];
+
+    /// The counters `register_reliability_counters` zeroes that carry
+    /// no attributes, beyond the macro table.
     const REGISTERED_PUSH_COUNTERS: &[&str] = &[
         "xmpp.push.candidate_created",
         "xmpp.push.candidate_coalesced",
@@ -438,6 +459,7 @@ mod tests {
         TABLE_COUNTER_NAMES
             .iter()
             .copied()
+            .chain(REGISTERED_SM_COUNTERS.iter().copied())
             .chain(REGISTERED_PUSH_COUNTERS.iter().copied())
             .chain(["xmpp.push.outbox_retry_scheduled", "xmpp.push.suppressed"])
             .chain([
@@ -472,6 +494,14 @@ mod tests {
         let guard = setup().await;
         register_reliability_counters();
 
+        for path in SmEvictionPath::ALL {
+            assert_eq!(
+                guard.counter_sum("xmpp.sm.unacked_evicted", &[("path", path.value())]),
+                Some(0),
+                "sm eviction path {} not registered",
+                path.value()
+            );
+        }
         for reason in PushRetryReason::ALL {
             assert_eq!(
                 guard.counter_sum(
@@ -528,6 +558,7 @@ mod tests {
         let guard = setup().await;
         register_reliability_counters();
         increment_sm_drain_timeout();
+        increment_sm_unacked_evicted(SmEvictionPath::Batch);
         increment_pending_delivery_unresolved_poison_pill();
         increment_push_outbox_dead_lettered();
         increment_delivery_terminal_error_drop();
@@ -548,6 +579,11 @@ mod tests {
             .counter_shape("xmpp.sm.drain_timeout")
             .expect("registered counter must export as a u64 sum");
         assert!(monotonic);
+        assert_eq!(
+            guard.counter_sum("xmpp.sm.unacked_evicted", &[("path", "batch")]),
+            Some(1),
+            "path-labeled sm eviction counter double-counted"
+        );
     }
 
     /// The janitor heartbeat is a `== 0` alert: a pre-registered
@@ -624,11 +660,6 @@ mod tests {
         let cases: &[EmitCase] = &[
             // Stream-management family.
             EmitCase {
-                otel: "xmpp.sm.unacked_evicted",
-                expected: 1,
-                emit: increment_sm_unacked_evicted,
-            },
-            EmitCase {
                 otel: "xmpp.sm.promotion_storage_failed",
                 expected: 3,
                 emit: || add_sm_promotion_storage_failed(3),
@@ -667,11 +698,6 @@ mod tests {
                 otel: "xmpp.sm.send_window_pause_timeouts",
                 expected: 1,
                 emit: increment_sm_send_window_pause_timeout,
-            },
-            EmitCase {
-                otel: "xmpp.sm.detached_unacked_evicted",
-                expected: 1,
-                emit: increment_sm_detached_unacked_evicted,
             },
             // Push family (reason-carrying helpers asserted separately below).
             EmitCase {
@@ -784,6 +810,8 @@ mod tests {
         for case in cases {
             (case.emit)();
         }
+        increment_sm_unacked_evicted(SmEvictionPath::Batch);
+        increment_sm_detached_unacked_evicted();
         increment_push_outbox_retry_scheduled(super::PushRetryReason::Unknown);
         increment_push_suppressed(PushSuppressReason::WaddleDnd);
 
@@ -795,6 +823,14 @@ mod tests {
                 case.otel
             );
         }
+        assert_eq!(
+            guard.counter_sum("xmpp.sm.unacked_evicted", &[("path", "batch")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.sm.detached_unacked_evicted", &[]),
+            Some(1)
+        );
         // The two reason-carrying helpers keep the label shape the alias
         // recording rules preserve.
         assert_eq!(
@@ -812,5 +848,50 @@ mod tests {
                 "typed pipeline sample missing or wrong for {stage}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sm_eviction_registration_exports_exact_path_samples() {
+        let guard = setup().await;
+        register_reliability_counters();
+
+        let mut samples = guard
+            .counter_samples("xmpp.sm.unacked_evicted")
+            .expect("sm eviction counter must export");
+        samples.sort_by(|left, right| left.1.cmp(&right.1));
+
+        assert_eq!(
+            samples,
+            vec![
+                (0, vec![("path".to_string(), "batch".to_string())]),
+                (0, vec![("path".to_string(), "detach_drain".to_string())]),
+                (0, vec![("path".to_string(), "direct_outbound".to_string())]),
+                (0, vec![("path".to_string(), "replay_tail".to_string())]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_eviction_helpers_emit_exact_path_samples() {
+        let guard = setup().await;
+        increment_sm_unacked_evicted(SmEvictionPath::Batch);
+        increment_sm_unacked_evicted(SmEvictionPath::DetachDrain);
+        increment_sm_unacked_evicted(SmEvictionPath::DirectOutbound);
+        increment_sm_unacked_evicted(SmEvictionPath::ReplayTail);
+
+        let mut samples = guard
+            .counter_samples("xmpp.sm.unacked_evicted")
+            .expect("sm eviction counter must export");
+        samples.sort_by(|left, right| left.1.cmp(&right.1));
+
+        assert_eq!(
+            samples,
+            vec![
+                (1, vec![("path".to_string(), "batch".to_string())]),
+                (1, vec![("path".to_string(), "detach_drain".to_string())]),
+                (1, vec![("path".to_string(), "direct_outbound".to_string())]),
+                (1, vec![("path".to_string(), "replay_tail".to_string())]),
+            ]
+        );
     }
 }

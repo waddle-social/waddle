@@ -693,6 +693,14 @@ async fn inbox_last_message_for_entry(
 
 /// Apply RSM `<max/>` paging to a sorted inbox list and produce the
 /// matching `<set/>` response with `first`/`last`/`count`.
+/// Server-side ceiling on one XEP-0430 result page. XEP-0059 §2.1 lets the
+/// server return a partial set with an RSM `<set/>` regardless of what the
+/// client asked for; an unbounded inbox (one countable `<message/>` per
+/// conversation plus `<fin/>`) could otherwise exceed the terminal-recovery
+/// window when a send-window pause exhausts mid-response, permanently losing
+/// the acknowledged query's tail.
+const INBOX_QUERY_MAX_PAGE: usize = 512;
+
 fn apply_inbox_rsm(
     entries: Vec<waddle_xmpp::inbox::InboxEntry>,
     rsm: Option<&waddle_xmpp::xep::xep0059::RsmRequest>,
@@ -703,17 +711,63 @@ fn apply_inbox_rsm(
     use waddle_xmpp::xep::xep0059::RsmResponse;
 
     let total = u32::try_from(entries.len()).unwrap_or(u32::MAX);
-    let max = rsm.and_then(|r| r.max).map(|m| m as usize);
+    let requested = rsm.and_then(|r| r.max).map(|m| m as usize);
+    let effective = requested.map_or(INBOX_QUERY_MAX_PAGE, |max| max.min(INBOX_QUERY_MAX_PAGE));
 
-    let page: Vec<_> = match max {
-        Some(max) if max < entries.len() => entries.into_iter().take(max).collect(),
-        _ => entries,
+    // Cursors resolve BEFORE the ceiling. The server-enforced ceiling makes
+    // paging mandatory for large inboxes, so a follow-up `<after>` request
+    // must actually continue from the advertised cursor — slicing from index
+    // zero would repeat page one forever and leave everything past the
+    // ceiling unreachable.
+    let window_start: usize = match rsm {
+        Some(request) => {
+            if let Some(after) = request.after.as_deref() {
+                entries
+                    .iter()
+                    .position(|entry| inbox_rsm_cursor(entry) == after)
+                    .map_or(entries.len(), |index| index + 1)
+            } else if let Some(index) = request.index {
+                (index as usize).min(entries.len())
+            } else {
+                0
+            }
+        }
+        None => 0,
+    };
+    let window_end: usize = match rsm.and_then(|request| request.before.as_deref()) {
+        // XEP-0059 §2.3: an empty <before/> asks for the LAST page.
+        Some("") => entries.len(),
+        Some(before) => entries
+            .iter()
+            .position(|entry| inbox_rsm_cursor(entry) == before)
+            .unwrap_or(entries.len()),
+        None => entries.len(),
+    };
+    let window_start = window_start.min(window_end);
+    let window: Vec<_> = entries
+        .into_iter()
+        .skip(window_start)
+        .take(window_end - window_start)
+        .collect();
+    let truncated = effective < window.len();
+    // XEP-0059 §2.3: ANY `<before/>` request pages BACKWARD — the page is
+    // the final `effective` entries immediately preceding the cursor (the
+    // empty form being the special case "last page"). Forward truncation
+    // applies only to `<after/>`/index/plain requests.
+    let backward = rsm.is_some_and(|request| request.before.is_some());
+    let (first_index, page): (usize, Vec<_>) = if backward && truncated {
+        let skip = window.len().saturating_sub(effective);
+        (window_start + skip, window.into_iter().skip(skip).collect())
+    } else if truncated {
+        (window_start, window.into_iter().take(effective).collect())
+    } else {
+        (window_start, window)
     };
 
-    // Carry RSM response only when the client asked for paging; the
-    // empty case is still meaningful (signals "page complete" with
-    // total=count).
-    if rsm.is_none() {
+    // Carry an RSM response whenever the client asked for paging OR the
+    // server truncated on its own ceiling — a partial set without `<set/>`
+    // would read as complete.
+    if rsm.is_none() && !truncated {
         return (page, None);
     }
 
@@ -721,7 +775,7 @@ fn apply_inbox_rsm(
     let last = page.last().map(inbox_rsm_cursor);
     let response = RsmResponse {
         first,
-        first_index: Some(0),
+        first_index: Some(u32::try_from(first_index).unwrap_or(u32::MAX)),
         last,
         count: Some(total),
     };
@@ -803,4 +857,129 @@ async fn handle_inbox_mark_read_iq(
     }
 
     vec![iq_to_xml(build_mark_read_result(iq))]
+}
+
+#[cfg(test)]
+mod inbox_rsm_tests {
+    use super::{apply_inbox_rsm, INBOX_QUERY_MAX_PAGE};
+    use waddle_xmpp::xep::xep0059::RsmRequest;
+
+    fn entries(count: usize) -> Vec<waddle_xmpp::inbox::InboxEntry> {
+        (0..count)
+            .map(|index| {
+                waddle_xmpp::inbox::InboxEntry::new(
+                    format!("peer{index}@example.com")
+                        .parse()
+                        .expect("valid bare jid"),
+                    waddle_xmpp::inbox::ConversationKind::Direct,
+                    format!("anchor-{index}"),
+                    1_700_000_000_000 + index as i64,
+                )
+            })
+            .collect()
+    }
+
+    /// XEP-0430 + XEP-0059 §2.1: the server may return a partial set, but a
+    /// partial set MUST carry an RSM `<set/>` so the client can page. The
+    /// ceiling keeps one response page well under the terminal-recovery
+    /// window so an exhausted send pause cannot strand an acknowledged
+    /// query's unbounded tail.
+    #[test]
+    fn inbox_pages_are_bounded_by_the_server_ceiling() {
+        let (page, set) = apply_inbox_rsm(entries(INBOX_QUERY_MAX_PAGE + 100), None);
+        assert_eq!(page.len(), INBOX_QUERY_MAX_PAGE);
+        let set = set.expect("server-side truncation must advertise RSM paging");
+        assert_eq!(
+            set.count,
+            Some(u32::try_from(INBOX_QUERY_MAX_PAGE + 100).expect("count fits"))
+        );
+
+        let (page, set) = apply_inbox_rsm(entries(3), None);
+        assert_eq!(page.len(), 3);
+        assert!(set.is_none(), "a complete un-paged set stays bare");
+
+        let (page, _) = apply_inbox_rsm(
+            entries(20),
+            Some(&RsmRequest {
+                max: Some(10),
+                ..RsmRequest::default()
+            }),
+        );
+        assert_eq!(page.len(), 10);
+
+        let (page, set) = apply_inbox_rsm(
+            entries(INBOX_QUERY_MAX_PAGE + 5),
+            Some(&RsmRequest {
+                max: Some(u32::MAX),
+                ..RsmRequest::default()
+            }),
+        );
+        assert_eq!(
+            page.len(),
+            INBOX_QUERY_MAX_PAGE,
+            "a client max above the ceiling is clamped"
+        );
+        assert!(set.is_some());
+    }
+
+    /// The ceiling makes paging mandatory, so the advertised cursor must
+    /// actually continue the window: page two starts after page one's last
+    /// entry and the response reports the continued first index.
+    #[test]
+    fn inbox_after_cursor_continues_past_the_ceiling() {
+        let all = entries(INBOX_QUERY_MAX_PAGE + 40);
+        let (page_one, set_one) = apply_inbox_rsm(all.clone(), None);
+        let set_one = set_one.expect("truncated first page advertises paging");
+        let after = set_one.last.expect("page one carries a last cursor");
+
+        let (page_two, set_two) = apply_inbox_rsm(
+            all,
+            Some(&RsmRequest {
+                after: Some(after),
+                ..RsmRequest::default()
+            }),
+        );
+        assert_eq!(
+            page_two.len(),
+            40,
+            "page two must continue past the ceiling instead of repeating page one"
+        );
+        assert_ne!(
+            page_one.first().map(|entry| entry.partner.clone()),
+            page_two.first().map(|entry| entry.partner.clone())
+        );
+        let set_two = set_two.expect("paged continuation carries a set");
+        assert_eq!(
+            set_two.first_index,
+            Some(u32::try_from(INBOX_QUERY_MAX_PAGE).expect("index fits")),
+            "the continuation reports its real window offset"
+        );
+    }
+
+    /// XEP-0059 §2.3: a nonempty `<before/>` pages BACKWARD — the final
+    /// `max` entries immediately preceding the cursor, not the window's
+    /// forward prefix.
+    #[test]
+    fn inbox_before_cursor_returns_the_page_immediately_preceding_it() {
+        let all = entries(10);
+        let cursor = super::inbox_rsm_cursor(&all[8]);
+        let (page, set) = apply_inbox_rsm(
+            all,
+            Some(&RsmRequest {
+                max: Some(2),
+                before: Some(cursor),
+                ..RsmRequest::default()
+            }),
+        );
+        let partners: Vec<String> = page.iter().map(|entry| entry.partner.to_string()).collect();
+        assert_eq!(
+            partners,
+            vec![
+                "peer6@example.com".to_string(),
+                "peer7@example.com".to_string()
+            ],
+            "backward paging returns the entries immediately preceding the cursor"
+        );
+        assert_eq!(set.expect("set").first_index, Some(6));
+    }
 }

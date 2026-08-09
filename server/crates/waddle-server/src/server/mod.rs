@@ -12,7 +12,7 @@ mod http;
 pub(crate) mod process_metrics;
 pub(crate) mod profile_publish_route;
 mod room_registry_gauge;
-mod session_janitors;
+pub(crate) mod session_janitors;
 mod state;
 pub(crate) mod state_inventory;
 pub(crate) mod state_inventory_metrics;

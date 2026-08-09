@@ -195,7 +195,9 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
     });
 }
 
-async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
+/// One SM-expiry sweep pass. `pub(crate)` so regression tests can drive the
+/// janitor's retry convergence directly instead of waiting on the interval.
+pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
     async {
         let mut sweep_failed = false;
         let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
@@ -222,12 +224,170 @@ async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             &state.deps.protocol.sm_session_registry,
             drained,
         );
-        while let Some(pending_session) = promotion_batch.pop() {
+        while let Some(mut pending_session) = promotion_batch.pop() {
+            // Repeat row-ownership discovery on every pass (PR #1669 round 8):
+            // this session's replay queue can contain copies of durable
+            // sequence-bound pending rows (a terminal-recovery session
+            // reinserted after a storage failure, or a flush stanza that was
+            // unacked at expiry). Release those rows back to ordinary
+            // redelivery and strip the copies BEFORE promotion; promoting a
+            // copy whose row still exists duplicates a Transient payload or
+            // collides with the Archived uniqueness key.
+            let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+                &state.deps.protocol.sm_session_registry,
+                &state.deps.protocol.pending_delivery_storage,
+                &mut pending_session,
+            )
+            .await;
+            // The guard is created AFTER reconciliation so a cancellation or
+            // a failed confirm_drained restores the reconciled queue — the
+            // pre-reconciliation clone would put the released rows' replay
+            // copies back and duplicate them on the next retry.
             let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
                 &state.deps.protocol.sm_session_registry,
                 pending_session,
             );
             let session = promotion_guard.session().clone();
+            // Ordering barrier for retried sessions: a previous cleanup can
+            // have QUEUED earlier rows whose re-drive aborted (their SM
+            // sequences were pruned, so this pass cannot rediscover them
+            // from the replay queue). Any unflushed backlog for the user
+            // must reach a live replacement BEFORE this session's replay
+            // promotes later traffic to it — re-drive unconditionally when
+            // rows were released this pass or any unflushed rows remain.
+            let has_unflushed_backlog = match state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(&session.jid.to_bare())
+                .await
+            {
+                Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
+                Err(_) => false,
+            };
+            let released_redrive_aborted = (row_release.released_rows || has_unflushed_backlog)
+                && routes::websocket::redrive_terminal_pending_rows_to_live_resource(
+                    state,
+                    &session.jid.to_bare(),
+                )
+                .await
+                    == routes::websocket::TerminalRedriveOutcome::Aborted;
+            // Promotion must wait while an earlier row is still pending at a
+            // live replacement: an aborted re-drive (rows released but not
+            // enqueued) or a failed sequence release (rows still claimed
+            // until release_claim) would both let later replay traffic
+            // overtake the earlier row. Defer the whole session to the next
+            // pass; the dead-letter cap still bounds repeated failures.
+            if row_release.ownership_unknown
+                || released_redrive_aborted
+                || row_release.release_failed_known_rows
+            {
+                sweep_failed = true;
+                let attempts = match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .record_promotion_failure(&session.stream_id)
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(record_error) => {
+                        warn!(
+                            jid = %session.jid,
+                            %record_error,
+                            "SM janitor: row-ownership discovery failed and \
+                             record_promotion_failure also failed; preserving \
+                             session state for retry"
+                        );
+                        if crate::sm_promotion::reinsert_failed_session_for_retry(
+                            &state.deps.protocol.sm_session_registry,
+                            session.clone(),
+                        )
+                        .await
+                        {
+                            promotion_guard.complete();
+                        }
+                        continue;
+                    }
+                };
+                if attempts >= max_promotion_attempts_from_env() {
+                    waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
+                    error!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        attempts,
+                        "SM janitor: row reconciliation has repeatedly failed; \
+                         dead-lettering the durable row to break the retry loop"
+                    );
+                    if state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .confirm_drained(&session.stream_id)
+                        .await
+                    {
+                        promotion_guard.complete();
+                        // Dead-lettering discards the replay queue, but the
+                        // rows the dead stream still claims must go back to
+                        // ordinary redelivery — and a live replacement whose
+                        // once-only offline flush is spent needs the
+                        // re-drive. Gated on the confirmed drain: with the
+                        // guard still armed the retained session retries,
+                        // and releasing its rows now would let that retry
+                        // re-promote a row a replacement meanwhile consumed.
+                        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(
+                            session.stream_id.clone(),
+                        );
+                        match state
+                            .deps
+                            .protocol
+                            .pending_delivery_storage
+                            .release_claim(&session_id)
+                            .await
+                        {
+                            Ok(_) => {
+                                routes::websocket::redrive_terminal_pending_rows_to_live_resource(
+                                    state,
+                                    &session.jid.to_bare(),
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                sweep_failed = true;
+                                warn!(
+                                    jid = %session.jid,
+                                    stream_id = %session.stream_id,
+                                    %error,
+                                    "SM janitor: dead-letter release_claim failed; rows remain \
+                                     claimed for the claim-expiry janitor"
+                                );
+                            }
+                        }
+                    } else {
+                        sweep_failed = true;
+                    }
+                    continue;
+                }
+                warn!(
+                    jid = %session.jid,
+                    attempts,
+                    ownership_unknown = row_release.ownership_unknown,
+                    release_failed = row_release.release_failed_known_rows,
+                    redrive_aborted = released_redrive_aborted,
+                    "SM janitor: row reconciliation cannot settle ahead of promotion; \
+                     SKIPPING this session so replay traffic cannot overtake or \
+                     duplicate its durable rows. Retried on the next janitor pass."
+                );
+                if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    &state.deps.protocol.sm_session_registry,
+                    session.clone(),
+                )
+                .await
+                {
+                    promotion_guard.complete();
+                }
+                continue;
+            }
             let blocklist = match state
                 .deps
                 .protocol
@@ -570,21 +730,47 @@ async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                     }
                 }
             }
-            if let Err(error) = state
+            let (claim_released, freed_rows) = match state
                 .deps
                 .protocol
                 .pending_delivery_storage
                 .release_claim(&session_id)
                 .await
             {
-                sweep_failed = true;
-                warn!(
-                    jid = %session.jid,
-                    stream_id = %session.stream_id,
-                    error = %error,
-                    "SM janitor: pending_delivery release_claim failed; \
-                     rows remain claimed and will be released by claim-expiry janitor"
-                );
+                Ok(freed) => (true, freed),
+                Err(error) => {
+                    sweep_failed = true;
+                    warn!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        error = %error,
+                        "SM janitor: pending_delivery release_claim failed; \
+                         rows remain claimed and will be released by claim-expiry janitor"
+                    );
+                    (false, 0)
+                }
+            };
+            // `freed_rows > 0` re-drives rows whose release-failure fact was
+            // recorded only in a previous pass's connection-local state (for
+            // example a receiver-tail release_row failure before the retry
+            // was reinserted): whenever settling this stream frees claimed
+            // rows, they need the re-drive regardless of which pass learned
+            // about them first.
+            if claim_released
+                && (row_release.release_failed_known_rows || freed_rows > 0 || summary.queued > 0)
+            {
+                // Rows the release_claim above just freed (their sequence
+                // release had failed), and rows this promotion freshly queued
+                // while a replacement raced it, have no future trigger if a
+                // live resource already spent its once-only offline flush —
+                // re-drive them now. With release_claim failed the rows are
+                // still claimed and a flush would be a no-op; the claim-expiry
+                // janitor recovers them on its own schedule.
+                routes::websocket::redrive_terminal_pending_rows_to_live_resource(
+                    state,
+                    &session.jid.to_bare(),
+                )
+                .await;
             }
         }
         if !retry_pending_sm_ownership(state).await {

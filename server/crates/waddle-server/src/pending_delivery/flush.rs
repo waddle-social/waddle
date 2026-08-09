@@ -331,7 +331,15 @@ where
                     }
                 }
             } else {
-                registry.send_to(resource, stanza).await
+                // Non-SM path: gate at the actual send too. An ungated
+                // send_to would let a silent same-FullJID replacement that
+                // registered mid-flush receive the row — and the delete-on-
+                // Sent below would then erase the durable copy for a session
+                // the flush was never planned for.
+                match owner {
+                    Some(owner) => registry.send_to_if_owner(resource, owner, stanza).await,
+                    None => registry.send_to(resource, stanza).await,
+                }
             };
             match push_result {
                 SendResult::Sent => {

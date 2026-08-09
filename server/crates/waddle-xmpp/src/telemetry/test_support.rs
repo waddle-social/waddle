@@ -33,6 +33,9 @@ use opentelemetry_sdk::trace::{
 };
 use tracing_subscriber::prelude::*;
 
+/// One exported `u64` counter value and its complete attribute set.
+pub type CounterSample = (u64, Vec<(String, String)>);
+
 /// Install a thread-scoped tracing subscriber backed by an in-memory OTel
 /// span exporter.
 ///
@@ -366,6 +369,28 @@ impl MetricsTestGuard {
             attribute_counts.extend(sum.data_points().map(|point| point.attributes().count()));
         });
         shape
+    }
+
+    /// Every exported `u64` counter sample for `name`, with its full
+    /// attribute set. Tests use this to pin exact labeled sample
+    /// shapes, not just aggregate sums.
+    pub fn counter_samples(&self, name: &str) -> Option<Vec<CounterSample>> {
+        let mut samples = None;
+        self.each_metric(name, |metric| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                return;
+            };
+            let entry = samples.get_or_insert_with(Vec::new);
+            for point in sum.data_points() {
+                let mut attributes: Vec<(String, String)> = point
+                    .attributes()
+                    .map(|kv| (kv.key.as_str().to_string(), kv.value.to_string()))
+                    .collect();
+                attributes.sort();
+                entry.push((point.value(), attributes));
+            }
+        });
+        samples
     }
 
     /// Visit every exported batch of the named metric.

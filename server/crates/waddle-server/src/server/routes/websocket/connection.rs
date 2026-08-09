@@ -14,7 +14,7 @@ use super::{
         send_ws_text_frames_with_authority, AuthoritySendOutcome,
     },
     session_init::build_internal_server_error_stream_error,
-    state::{InboundFrameTerminal, WsConnState},
+    state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
     stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
     transport_xml::{
@@ -152,6 +152,10 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 /// breaks into the same detach-for-resume path a keepalive close uses.
 /// Matches the batch writer's inline pause deadline.
 const SEND_WINDOW_LOOP_PAUSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+/// Bounded deferred-frame work per connection-loop turn. This clears a
+/// full normal parking budget promptly without letting one client monopolize
+/// the executor while its deferred queue is non-empty.
+const DEFERRED_INBOUND_DRAIN_CHUNK: usize = 8;
 
 /// Budget for writing the system-shutdown stream error + close frames
 /// to one peer during graceful shutdown (issue #1091). Deliberately
@@ -280,7 +284,7 @@ async fn handle_xmpp_websocket(
     // belong to the newcomer now.
     let mut superseded = false;
 
-    loop {
+    'connection: loop {
         // Loop-level XEP-0198 send-window gate (issue #1219). When the
         // outstanding unacked count has latched the pause, stop draining the
         // outbound mpsc (its `recv()` arm is guarded below): producers then
@@ -335,12 +339,10 @@ async fn handle_xmpp_websocket(
         // socket ahead of the dispatcher must be processed in arrival
         // order BEFORE the socket is polled again — so the socket arm
         // below is gated on the queue being empty, and an
-        // always-ready arm processes one deferred frame per
+        // always-ready arm processes a bounded ordered chunk per
         // iteration. Deferred processing stays a select arm (not a
-        // pre-select loop) so the outbound channel and the keepalive
-        // timer keep getting polled between deferred frames — a
-        // client streaming frames mid-flood must not be able to
-        // starve routed stanzas or dead-peer detection.
+        // pre-select loop), and yields between chunks, so a client
+        // streaming frames mid-flood cannot monopolize the executor.
         let deferred_pending = !conn.deferred_inbound.is_empty();
         tokio::select! {
             biased;
@@ -370,33 +372,36 @@ async fn handle_xmpp_websocket(
                 break;
             }
 
-            // Process one drain-deferred inbound frame.
+            // Process a bounded drain-deferred inbound chunk.
             _ = std::future::ready(()), if deferred_pending => {
-                let Some(text) = conn.deferred_inbound.pop_front() else {
-                    continue;
-                };
-                if !handle_inbound_text(
-                    &text,
-                    &domain,
-                    &state,
-                    &mut conn,
-                    RegistrationChannels {
-                        pending_tx: &mut pending_tx,
-                        force_detach_rx: &mut force_detach_rx,
-                    },
-                    ConnectionIo {
-                        sender: &mut ws_sender,
-                        receiver: &mut ws_receiver,
-                    },
-                    FrameAuthority {
-                        permit: &admission_permit,
-                        shutdown: &shutdown_token,
-                    },
-                )
-                .await
-                {
-                    break;
+                for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
+                    let Some(text) = conn.deferred_inbound.pop_front() else {
+                        break;
+                    };
+                    if !handle_inbound_text(
+                        &text,
+                        &domain,
+                        &state,
+                        &mut conn,
+                        RegistrationChannels {
+                            pending_tx: &mut pending_tx,
+                            force_detach_rx: &mut force_detach_rx,
+                        },
+                        ConnectionIo {
+                            sender: &mut ws_sender,
+                            receiver: &mut ws_receiver,
+                        },
+                        FrameAuthority {
+                            permit: &admission_permit,
+                            shutdown: &shutdown_token,
+                        },
+                    )
+                    .await
+                    {
+                        break 'connection;
+                    }
                 }
+                tokio::task::yield_now().await;
             }
 
             // Handle inbound WebSocket messages from the client
@@ -715,7 +720,9 @@ async fn handle_xmpp_websocket(
         }
     }
     if superseded {
-        super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
+        if !conn.sm_recovery_required {
+            super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
+        }
     } else {
         if shutdown_token.is_cancelled() || admission_permit.revalidate().is_err() {
             let dropped = discard_deferred_inbound(&mut conn);
@@ -1180,7 +1187,9 @@ async fn handle_inbound_text(
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
         }
-        BatchWriteOutcome::TransportClosed => return false,
+        BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
+            return false;
+        }
         BatchWriteOutcome::AuthorityRevoked => {
             // No further frame was recorded or written. Any `<enable/>`
             // response that did reach the socket returned Continue and must
@@ -1289,7 +1298,7 @@ where
     .await
     {
         BatchWriteOutcome::Continue => true,
-        BatchWriteOutcome::TransportClosed => false,
+        BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => false,
         BatchWriteOutcome::AuthorityRevoked => false,
     }
 }
@@ -1305,6 +1314,15 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
     }
     if !conn.sm_inbound_completion.has_unhandled_hole() {
         while conn.sm_inbound_completion.has_pending() {
+            if terminal_recovery_recording_is_full(conn) {
+                warn!(
+                    cap = TERMINAL_RECOVERY_QUEUE_CAP,
+                    recorded = conn.terminal_sm_recovery.queue_len(),
+                    pending = conn.sm_inbound_completion.pending_count(),
+                    "Stopped ordered-relay handoff recording after terminal SM recovery cap; sender replay remains conservative"
+                );
+                break;
+            }
             let Some(completion) = handoff_rx.recv().await else {
                 break;
             };
@@ -1319,6 +1337,15 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
     while conn.sm_inbound_completion.has_pending()
         && drained < ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS
     {
+        if terminal_recovery_recording_is_full(conn) {
+            warn!(
+                cap = TERMINAL_RECOVERY_QUEUE_CAP,
+                recorded = conn.terminal_sm_recovery.queue_len(),
+                pending = conn.sm_inbound_completion.pending_count(),
+                "Stopped ordered-relay handoff recording after terminal SM recovery cap; sender replay remains conservative"
+            );
+            break;
+        }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
@@ -1398,7 +1425,34 @@ async fn process_deferred_inbound_after_transport_loss(
         }
         return;
     }
+    if conn.sm_recovery_required {
+        // Terminal recovery deliberately invalidates resume, so the client
+        // never learns a handled count covering these still-parked stanzas
+        // and, per XEP-0198, resends them after the failed resume. Executing
+        // them here would run routing and non-idempotent IQ mutations a
+        // second time on that resend; discarding is lossless because nothing
+        // parked was ever handled or counted.
+        let dropped = discard_deferred_inbound(conn);
+        if dropped > 0 {
+            warn!(
+                dropped,
+                "Dropping unhandled deferred inbound frames after terminal SM recovery; \
+                 sender replays them after the deliberately failed resume"
+            );
+        }
+        return;
+    }
     while let Some(text) = conn.deferred_inbound.pop_front() {
+        if terminal_recovery_recording_is_full(conn) {
+            let dropped = 1 + discard_deferred_inbound(conn);
+            warn!(
+                cap = TERMINAL_RECOVERY_QUEUE_CAP,
+                recorded = conn.terminal_sm_recovery.queue_len(),
+                dropped,
+                "Dropping deferred inbound frames after terminal SM recovery cap; sender will replay after fresh bind"
+            );
+            break;
+        }
         let responses =
             handle_xmpp_frame_with_admission(&text, domain, state, conn, permit, shutdown).await;
         if matches!(
@@ -1441,6 +1495,11 @@ async fn process_deferred_inbound_after_transport_loss(
     }
 }
 
+fn terminal_recovery_recording_is_full(conn: &WsConnState) -> bool {
+    conn.sm_recovery_required
+        && conn.terminal_sm_recovery.queue_len() >= TERMINAL_RECOVERY_QUEUE_CAP
+}
+
 fn discard_deferred_inbound(conn: &mut WsConnState) -> usize {
     let dropped = conn.deferred_inbound.len();
     conn.deferred_inbound.clear();
@@ -1473,11 +1532,14 @@ mod tests {
         batch_write::{
             write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
         },
+        cleanup::cleanup_connection_shutdown,
+        state::TERMINAL_RECOVERY_QUEUE_CAP,
         transport_xml::websocket_stream_open_xml,
     };
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+    use waddle_xmpp::stream_management::SmSessionRegistry;
 
     #[derive(Default)]
     struct UpgradeCloseSink {
@@ -1743,6 +1805,145 @@ mod tests {
             "the contiguous pre-hole stanza must be acknowledged before detach"
         );
         assert!(!conn.sm_inbound_completion.has_pending());
+    }
+
+    #[test]
+    fn terminal_recovery_handoff_replies_bypass_the_capped_sm_queue() {
+        let mut conn = WsConnState::new();
+        conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::with_config(8, 100);
+        conn.sm_state
+            .enable("terminal-handoff".to_string(), true, Some(300));
+        for sequence in 1..=8 {
+            let mut prefix = xmpp_parsers::message::Message::new(Some(
+                "alice@example.com".parse().expect("recipient JID"),
+            ));
+            prefix.id = Some(xmpp_parsers::message::Id(sequence.to_string()));
+            let _ = conn.sm_state.record_outbound(
+                waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize prefix"),
+                waddle_xmpp::telemetry::attributes::SmEvictionPath::Batch,
+            );
+        }
+        conn.begin_terminal_sm_recovery();
+        let inbound_sequence = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        let reply = xmpp_parsers::message::Message::new(Some(
+            "alice@example.com".parse().expect("recipient JID"),
+        ));
+
+        apply_ordered_relay_handoff_completion(
+            &mut conn,
+            crate::server::routes::interpret::OrderedRelayHandoffCompletion {
+                inbound_sequence,
+                replies: vec![Stanza::Message(reply)],
+            },
+        );
+
+        assert_eq!(conn.sm_state.queue_len(), 8);
+        assert_eq!(conn.sm_state.replay_gap_through(), None);
+        assert_eq!(conn.terminal_sm_recovery.queue_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_cap_discards_parked_mam_frames_and_promotes_prefix() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let jid: FullJid = "alice@example.com/terminal-cap".parse().expect("jid");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx.clone());
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        conn.registry_owner = Some(owner);
+        conn.sm_state
+            .enable("terminal-cap".to_string(), true, Some(300));
+        conn.begin_terminal_sm_recovery();
+        for sequence in 0..TERMINAL_RECOVERY_QUEUE_CAP {
+            let mut prefix = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
+            prefix.id = Some(xmpp_parsers::message::Id(format!(
+                "terminal-cap-{sequence}"
+            )));
+            let _ = conn.terminal_sm_recovery.record_outbound(
+                waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize terminal prefix"),
+                waddle_xmpp::telemetry::attributes::SmEvictionPath::ReplayTail,
+            );
+        }
+        conn.deferred_inbound.extend((0..96).map(|sequence| {
+            let mam_query =
+                xmpp_parsers::minidom::Element::builder("query", waddle_xmpp_core::mam::MAM_NS)
+                    .build();
+            let iq = xmpp_parsers::iq::Iq::Set {
+                from: None,
+                to: None,
+                id: format!("mam-{sequence}"),
+                payload: mam_query,
+            };
+            axum::extract::ws::Utf8Bytes::from(
+                waddle_xmpp::parser::stanza_to_string(iq).expect("serialize MAM query"),
+            )
+        }));
+
+        process_deferred_inbound_after_transport_loss(
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &permit,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            conn.deferred_inbound.is_empty(),
+            "all parked MAM frames are discarded"
+        );
+        assert_eq!(
+            conn.terminal_sm_recovery.queue_len(),
+            TERMINAL_RECOVERY_QUEUE_CAP
+        );
+        assert_eq!(conn.terminal_sm_recovery.replay_gap_through(), None);
+        for path in ["batch", "replay_tail", "direct_outbound", "detach_drain"] {
+            assert_eq!(
+                metrics.counter_sum("xmpp.sm.unacked_evicted", &[("path", path)]),
+                None,
+                "terminal recovery cap must not evict recorded stanzas on path {path}"
+            );
+        }
+        assert_eq!(
+            cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await,
+            super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .peek_session("terminal-cap")
+                .await
+                .expect("registry lookup")
+                .is_none(),
+            "terminal recovery promotes rather than retaining a resumable snapshot"
+        );
+        let pending = state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&jid.to_bare())
+            .await
+            .expect("list promoted rows");
+        assert!(
+            pending.iter().any(|row| {
+                matches!(
+                    &row.payload,
+                    waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                        if message.id.as_ref().is_some_and(|id| id.0 == "terminal-cap-0")
+                )
+            }),
+            "recorded prefix is promoted"
+        );
     }
 
     #[tokio::test(start_paused = true)]

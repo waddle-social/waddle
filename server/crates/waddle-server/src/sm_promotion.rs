@@ -26,7 +26,7 @@ mod stanza;
 mod tests;
 mod types;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -42,7 +42,9 @@ use waddle_xmpp::protocol::dm_routing::{
 };
 use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
-use waddle_xmpp::stream_management::{DetachedSession, TOMBSTONE_CLOCK_SKEW_SLACK};
+use waddle_xmpp::stream_management::{
+    DetachedSession, DetachedUnackedStanza, TOMBSTONE_CLOCK_SKEW_SLACK,
+};
 use waddle_xmpp::Stanza;
 
 use live::{build_online_resources, collect_live_targets};
@@ -170,7 +172,17 @@ pub async fn promote_session_unacked(
             ?outcome,
             "Q6 promotion: per-stanza outcome"
         );
+        let failed_storage = matches!(outcome, PromotedOutcome::StorageFailure);
         summary.record(entry.sequence, &outcome);
+        if failed_storage {
+            // Stop at the first durable-storage failure: promoting later
+            // entries would insert their rows AHEAD of this one's retry and
+            // invert the stream's accepted FIFO order at the storage layer
+            // (RFC 6120 §10.1 in-order processing). Everything after this
+            // entry stays unrecorded, so the partial-failure retry paths
+            // retain it behind the failed entry.
+            break;
+        }
     }
 
     debug!(
@@ -193,6 +205,232 @@ pub async fn promote_session_unacked(
     summary
 }
 
+/// Promote one accepted terminal-recovery frame without placing it in the
+/// capped in-memory replay queue. The terminal receiver is closed before its
+/// drain begins, so the normal live-redelivery attempt cannot re-enqueue work
+/// on the dead connection; the regular Q6 classifier then selects an
+/// alternate live resource, durable pending delivery, or an RFC-permitted
+/// drop.
+pub(crate) async fn promote_terminal_overflow_entry(
+    source: &DetachedSession,
+    entry: DetachedUnackedStanza,
+    deps: TerminalOverflowPromotionDeps<'_>,
+) -> PromotionSummary {
+    let session = DetachedSession {
+        stream_id: source.stream_id.clone(),
+        user_id: source.user_id.clone(),
+        jid: source.jid.clone(),
+        inbound_count: source.inbound_count,
+        outbound_count: source.outbound_count,
+        last_acked: source.last_acked,
+        replay_gap_through: source.replay_gap_through,
+        unacked_stanzas: vec![entry],
+        max_resume_time: source.max_resume_time,
+        detached_at: source.detached_at,
+        carbons_enabled: source.carbons_enabled,
+        roster_interested: source.roster_interested,
+        blocklist_interested: source.blocklist_interested,
+        presence_available: source.presence_available,
+        presence_show: source.presence_show.clone(),
+        presence_status: source.presence_status.clone(),
+        presence_priority: source.presence_priority,
+        presence_payloads: source.presence_payloads.clone(),
+        pending_subscribes_flushed: source.pending_subscribes_flushed,
+    };
+    promote_session_unacked(
+        &session,
+        deps.registry,
+        deps.user_registry,
+        deps.pending_storage,
+        deps.blocklist,
+        deps.server_domain,
+        deps.recent_tombstones,
+    )
+    .await
+}
+
+pub(crate) struct TerminalOverflowPromotionDeps<'a> {
+    pub(crate) registry: &'a ConnectionRegistry,
+    pub(crate) user_registry: &'a ActorRef<UserRegistryActor>,
+    pub(crate) pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
+    pub(crate) blocklist: &'a Blocklist,
+    pub(crate) server_domain: &'a str,
+    pub(crate) recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
+}
+
+/// Result of reconciling a detached session's replay queue against the
+/// durable `(stream_id, outbound_sequence)` pending-delivery bindings
+/// before its queue is promoted.
+///
+/// A live SM queue stores only replay XML, while `pending_delivery`
+/// stores the durable ownership binding. Promotion must discard the
+/// replay copy of every bound row after releasing the row itself;
+/// otherwise the copy is treated as new work and can collide with an
+/// existing Archived payload's uniqueness key (or duplicate a
+/// Transient one).
+#[derive(Debug, Default)]
+pub(crate) struct RowBackedReleaseOutcome {
+    /// Some bound rows were actually released back to ordinary
+    /// pending-delivery redelivery (their replay copies were stripped).
+    pub(crate) released_rows: bool,
+    /// Known bound rows had their replay copies stripped but the row
+    /// release itself failed — the rows stay claimed by the dead stream
+    /// until `release_claim`/the claim-expiry janitor frees them, so the
+    /// caller must re-drive them once that release lands.
+    pub(crate) release_failed_known_rows: bool,
+    /// Both the ownership preflight (`list`) and the sequence release
+    /// failed: row-backed replay entries cannot be told apart from fresh
+    /// work. The caller MUST keep this session's queue out of promotion
+    /// and retry after ownership can be discovered again.
+    pub(crate) ownership_unknown: bool,
+}
+
+/// Discover which of `detached`'s replay entries are copies of durable
+/// sequence-bound `pending_delivery` rows, release those rows back to
+/// ordinary redelivery, and strip the released copies from the queue.
+///
+/// Shared by terminal-recovery cleanup and the SM-expiry janitor's
+/// retry pass: promotion retries must repeat this ownership discovery,
+/// otherwise a session reinserted after a storage failure would promote
+/// replay copies whose rows were never (or have meanwhile been)
+/// released.
+pub(crate) async fn release_row_backed_replay_copies(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    pending_storage: &Arc<dyn PendingDeliveryStorage>,
+    detached: &mut DetachedSession,
+) -> RowBackedReleaseOutcome {
+    let sequences: HashSet<u32> = detached
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    if sequences.is_empty() {
+        return RowBackedReleaseOutcome::default();
+    }
+    let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone());
+    let recipient = detached.jid.to_bare();
+    let preflight = match pending_storage.list(&recipient).await {
+        Ok(rows) => Some(
+            rows.into_iter()
+                .filter(|row| {
+                    row.flushed_in_session.as_ref() == Some(&session_id)
+                        && row
+                            .outbound_sequence
+                            .is_some_and(|sequence| sequences.contains(&sequence))
+                })
+                .filter_map(|row| row.outbound_sequence)
+                .collect::<HashSet<u32>>(),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                stream_id = %detached.stream_id,
+                jid = %detached.jid,
+                %error,
+                "row-backed replay reconciliation could not preflight sequence-bound \
+                 pending rows; a release failure now leaves ownership unknown"
+            );
+            None
+        }
+    };
+    if let Some(sequence_bound_rows) = preflight.as_ref() {
+        if !sequence_bound_rows.is_empty() {
+            // Crash-consistency ordering: durably prune the replay copies of
+            // the known bound sequences BEFORE releasing their pending rows,
+            // so a restart between the two rehydrates NO stale replay copy
+            // for a row that has returned to ordinary redelivery — the
+            // pending row stays the single authority across the crash. A
+            // failed prune aborts the release (nothing changed durably) and
+            // the whole reconciliation retries on a later pass.
+            let bound: Vec<u32> = sequence_bound_rows.iter().copied().collect();
+            if let Err(error) = sm_registry
+                .delete_unacked_sequences(&detached.stream_id, &bound)
+                .await
+            {
+                tracing::warn!(
+                    stream_id = %detached.stream_id,
+                    jid = %detached.jid,
+                    %error,
+                    "row-backed replay reconciliation could not durably prune replay \
+                     copies; deferring the pending-row release to a later pass"
+                );
+                return RowBackedReleaseOutcome {
+                    released_rows: false,
+                    release_failed_known_rows: true,
+                    ownership_unknown: false,
+                };
+            }
+        }
+    }
+    let outcome = pending_storage
+        .release_rows_for_outbound_sequences(&recipient, &session_id, &sequences)
+        .await;
+    let mut replay_sequences_to_strip = outcome.released.clone();
+    let mut release_failed_known_rows = false;
+    let mut ownership_unknown = false;
+    if outcome.error.is_none() {
+        if let Some(sequence_bound_rows) = preflight.as_ref() {
+            // A preflight-known bound sequence missing from a SUCCESSFUL
+            // release means the row's claim changed hands between the two
+            // reads (reclaimed, expired, or already released elsewhere).
+            // Either way its durable row is authoritative — promoting the
+            // replay copy as fresh work would duplicate it. Strip it; no
+            // re-drive obligation is ours (the row's current owner settles
+            // it).
+            for sequence in sequence_bound_rows {
+                if !outcome.released.contains(sequence) {
+                    replay_sequences_to_strip.insert(*sequence);
+                }
+            }
+        }
+    }
+    if let Some(error) = outcome.error.as_ref() {
+        match preflight.as_ref() {
+            Some(sequence_bound_rows) => {
+                let unreleased: Vec<u32> = sequence_bound_rows
+                    .iter()
+                    .copied()
+                    .filter(|sequence| !outcome.released.contains(sequence))
+                    .collect();
+                release_failed_known_rows = !unreleased.is_empty();
+                replay_sequences_to_strip.extend(unreleased);
+                tracing::warn!(
+                    stream_id = %detached.stream_id,
+                    jid = %detached.jid,
+                    released = outcome.released.len(),
+                    %error,
+                    "row-backed replay reconciliation could not release every \
+                     sequence-bound pending row; stripped every matching replay copy \
+                     so the durable rows are re-driven after claim cleanup instead of \
+                     being promoted again"
+                );
+            }
+            None => {
+                // Findings PR#1669 round 8: with neither the preflight nor
+                // the release having succeeded, row-backed replay entries
+                // cannot be identified. Promoting ANY of this queue risks
+                // duplicating a still-claimed durable row.
+                ownership_unknown = true;
+                tracing::warn!(
+                    stream_id = %detached.stream_id,
+                    jid = %detached.jid,
+                    %error,
+                    "row-backed replay reconciliation failed ownership discovery AND \
+                     release; the session's queue must stay out of promotion until a \
+                     retry can discover row ownership"
+                );
+            }
+        }
+    }
+    detached
+        .unacked_stanzas
+        .retain(|entry| !replay_sequences_to_strip.contains(&entry.sequence));
+    RowBackedReleaseOutcome {
+        released_rows: !outcome.released.is_empty(),
+        release_failed_known_rows,
+        ownership_unknown,
+    }
+}
+
 /// Dependencies for [`promote_displaced_sessions`]. Grouped so the
 /// two displacement call sites (max_sessions eviction at detach,
 /// fresh-bind invalidation at registration) share one signature.
@@ -203,6 +441,30 @@ pub struct DisplacedPromotionDeps<'a> {
     pub pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
     pub blocking_storage: &'a dyn waddle_xmpp::xep::xep0191::BlockingStorage,
     pub server_domain: &'a str,
+}
+
+/// Terminal state of a displaced-promotion batch. A retrying stream remains
+/// owned by the SM registry, so its claim fence must stay live until that
+/// retry's own promote → confirm completion settles it.
+#[derive(Debug, Default)]
+pub(crate) struct DisplacedPromotionOutcome {
+    retrying_stream_ids: HashSet<String>,
+    queued_pending_rows: bool,
+}
+
+impl DisplacedPromotionOutcome {
+    pub(crate) fn is_retrying(&self, stream_id: &str) -> bool {
+        self.retrying_stream_ids.contains(stream_id)
+    }
+
+    /// True when any session in the batch inserted `pending_delivery`
+    /// rows. The online-resource snapshot inside promotion can miss a
+    /// replacement that binds mid-batch and spends its once-only
+    /// offline flush before the insert commits, so callers with a live
+    /// routing view must re-drive queued rows afterwards.
+    pub(crate) fn queued_pending_rows(&self) -> bool {
+        self.queued_pending_rows
+    }
 }
 
 pub(crate) struct PromotionBatchGuard<'a> {
@@ -229,11 +491,22 @@ impl<'a> PromotionBatchGuard<'a> {
 impl Drop for PromotionBatchGuard<'_> {
     fn drop(&mut self) {
         for session in self.sessions.drain(..) {
-            if let Err(error) = self.registry.retain_pending_promotion_for_retry(session) {
-                tracing::warn!(
-                    %error,
-                    "cancelled displaced-promotion batch could not restore an unstarted session"
-                );
+            let stream_id = session.stream_id.clone();
+            match self.registry.retain_pending_promotion_for_retry(session) {
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::Retained) => {}
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::NotTracked) => {
+                    tracing::warn!(
+                        %stream_id,
+                        "cancelled displaced-promotion batch found no pending promotion to restore"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %stream_id,
+                        %error,
+                        "cancelled displaced-promotion batch could not restore an unstarted session"
+                    );
+                }
             }
         }
     }
@@ -264,20 +537,55 @@ impl<'a> PromotionSessionGuard<'a> {
     pub(crate) fn complete(&mut self) {
         self.armed = false;
     }
+
+    /// Make the guard's cancellation fallback explicit so callers can report
+    /// whether a retry really remains live before deciding claim cleanup.
+    pub(crate) fn retain_for_retry(&mut self) -> bool {
+        match self
+            .registry
+            .retain_pending_promotion_for_retry(self.session.clone())
+        {
+            Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::Retained) => {
+                self.armed = false;
+                true
+            }
+            Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::NotTracked) => {
+                self.armed = false;
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    stream_id = %self.session.stream_id,
+                    %error,
+                    "displaced promotion could not retain its session for retry"
+                );
+                false
+            }
+        }
+    }
 }
 
 impl Drop for PromotionSessionGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            if let Err(error) = self
+            match self
                 .registry
                 .retain_pending_promotion_for_retry(self.session.clone())
             {
-                tracing::warn!(
-                    stream_id = %self.session.stream_id,
-                    %error,
-                    "cancelled displaced promotion could not restore its session"
-                );
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::Retained) => {}
+                Ok(waddle_xmpp::stream_management::PendingPromotionRetryRetention::NotTracked) => {
+                    tracing::warn!(
+                        stream_id = %self.session.stream_id,
+                        "cancelled displaced promotion found no pending promotion to restore"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        stream_id = %self.session.stream_id,
+                        %error,
+                        "cancelled displaced promotion could not restore its session"
+                    );
+                }
             }
         }
     }
@@ -316,6 +624,18 @@ pub async fn reinsert_failed_session_for_retry(
         return false;
     }
     true
+}
+
+async fn reinsert_or_retain_for_retry(
+    promotion_guard: &mut PromotionSessionGuard<'_>,
+    session: DetachedSession,
+) -> bool {
+    if reinsert_failed_session_for_retry(promotion_guard.registry, session).await {
+        promotion_guard.complete();
+        true
+    } else {
+        promotion_guard.retain_for_retry()
+    }
 }
 
 /// After a PARTIAL promotion failure, durably erase the successfully
@@ -470,10 +790,11 @@ pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
     }
 }
 
-pub async fn promote_displaced_sessions(
+pub(crate) async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
-) {
+) -> DisplacedPromotionOutcome {
+    let mut outcome = DisplacedPromotionOutcome::default();
     let mut batch_guard = PromotionBatchGuard::new(deps.sm_registry, sessions);
     while let Some(pending_session) = batch_guard.pop() {
         let mut promotion_guard = PromotionSessionGuard::new(deps.sm_registry, pending_session);
@@ -498,8 +819,10 @@ pub async fn promote_displaced_sessions(
                         "displaced SM session: blocklist load and failure recording both \
                          failed; preserving durable rows and re-inserting for janitor retry"
                     );
-                    if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
-                        promotion_guard.complete();
+                    if reinsert_or_retain_for_retry(&mut promotion_guard, session.clone()).await {
+                        outcome
+                            .retrying_stream_ids
+                            .insert(session.stream_id.clone());
                     }
                     continue;
                 }
@@ -511,8 +834,10 @@ pub async fn promote_displaced_sessions(
                      preserve fail-closed XEP-0191 policy. Re-inserted for retry on the \
                      SM-expiry janitor's next pass."
                 );
-                if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
-                    promotion_guard.complete();
+                if reinsert_or_retain_for_retry(&mut promotion_guard, session.clone()).await {
+                    outcome
+                        .retrying_stream_ids
+                        .insert(session.stream_id.clone());
                 }
                 continue;
             }
@@ -538,6 +863,9 @@ pub async fn promote_displaced_sessions(
             &recent_tombstones,
         )
         .await;
+        if summary.queued > 0 {
+            outcome.queued_pending_rows = true;
+        }
         // Finding B: a retraction recorded AFTER the snapshot above
         // raced this session's promotion — re-scrub pending rows
         // before the drain is confirmed (or the session reinserted).
@@ -575,10 +903,22 @@ pub async fn promote_displaced_sessions(
                 .await
             {
                 promotion_guard.complete();
+                outcome
+                    .retrying_stream_ids
+                    .insert(session.stream_id.clone());
+            } else if promotion_guard.retain_for_retry() {
+                outcome
+                    .retrying_stream_ids
+                    .insert(session.stream_id.clone());
             }
             continue;
         }
         if !deps.sm_registry.confirm_drained(&session.stream_id).await {
+            if promotion_guard.retain_for_retry() {
+                outcome
+                    .retrying_stream_ids
+                    .insert(session.stream_id.clone());
+            }
             continue;
         }
         promotion_guard.complete();
@@ -605,6 +945,7 @@ pub async fn promote_displaced_sessions(
             "displaced SM session: Q6 promotion completed"
         );
     }
+    outcome
 }
 
 /// Extract the stamp of a `<delay/>` this server itself added to the

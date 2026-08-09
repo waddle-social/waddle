@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::core::{DetachClaimFenceReservation, InMemorySmSessionRegistry};
-use super::{DetachedSession, SmRegistryError, SmSessionRegistry};
+use super::{DetachedSession, PendingPromotionRetryRetention, SmRegistryError, SmSessionRegistry};
 use crate::tombstone::{matching_tombstone_sequences, TombstoneTarget};
 
 struct DetachReservationGuard<'a> {
@@ -67,7 +67,23 @@ impl<'a> DisplacedPromotionGuard<'a> {
             // can scrub those rows while the replacement snapshot is
             // suspended, so publishing this copy directly would resurrect
             // the scrubbed stanza after the recent-tombstone window expires.
-            let _ = self.registry.retain_pending_promotion_for_retry(session);
+            let stream_id = session.stream_id.clone();
+            match self.registry.retain_pending_promotion_for_retry(session) {
+                Ok(PendingPromotionRetryRetention::Retained) => {}
+                Ok(PendingPromotionRetryRetention::NotTracked) => {
+                    tracing::warn!(
+                        %stream_id,
+                        "cancelled displacement found no pending promotion to restore"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %stream_id,
+                        %error,
+                        "cancelled displacement could not restore promotion ownership"
+                    );
+                }
+            }
         }
         self.armed = false;
     }

@@ -55,6 +55,41 @@ pub enum PendingStorageError {
     },
 }
 
+/// Outcome of releasing sequence-bound pending rows during terminal recovery.
+///
+/// `released` names the replay entries that are no longer owned by the
+/// detached session and can therefore be stripped from its in-memory replay
+/// queue immediately. `error` carries any backend failure that interrupted the
+/// sweep after some rows may already have been released.
+#[derive(Debug)]
+pub struct ReleaseRowsForOutboundSequencesOutcome {
+    pub released: HashSet<u32>,
+    pub error: Option<PendingStorageError>,
+}
+
+impl ReleaseRowsForOutboundSequencesOutcome {
+    pub fn complete(released: HashSet<u32>) -> Self {
+        Self {
+            released,
+            error: None,
+        }
+    }
+
+    pub fn failed(error: PendingStorageError) -> Self {
+        Self {
+            released: HashSet::new(),
+            error: Some(error),
+        }
+    }
+
+    pub fn partial(released: HashSet<u32>, error: PendingStorageError) -> Self {
+        Self {
+            released,
+            error: Some(error),
+        }
+    }
+}
+
 /// Storage contract for `pending_delivery`.
 ///
 /// All operations are per-recipient (bare JID). FIFO ordering within a
@@ -253,6 +288,52 @@ pub trait PendingDeliveryStorage: Send + Sync {
     ) -> Result<u64, PendingStorageError> {
         let _ = expected_session;
         self.release_row(id).await
+    }
+
+    /// Release only rows whose recorded outbound sequence belongs to a
+    /// terminally-promoted SM queue. This is the inverse of
+    /// [`Self::delete_acked_in_window`]: terminal recovery abandons replay,
+    /// so a row that already has a durable `(session, sequence)` binding must
+    /// return to ordinary pending-delivery redelivery instead of being
+    /// promoted from its unacked XML a second time.
+    ///
+    /// The default keeps storage implementations source-compatible while
+    /// preserving the ownership check through [`Self::release_row_if_session`].
+    /// Implementations may override it with a set-based query.
+    async fn release_rows_for_outbound_sequences(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        sequences: &HashSet<u32>,
+    ) -> ReleaseRowsForOutboundSequencesOutcome {
+        if sequences.is_empty() {
+            return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
+        }
+
+        let rows = match self.list(recipient).await {
+            Ok(rows) => rows,
+            Err(error) => return ReleaseRowsForOutboundSequencesOutcome::failed(error),
+        };
+        let mut released = HashSet::new();
+        for row in rows.into_iter().filter(|row| {
+            row.flushed_in_session.as_ref() == Some(session)
+                && row
+                    .outbound_sequence
+                    .is_some_and(|sequence| sequences.contains(&sequence))
+        }) {
+            let released_count = match self.release_row_if_session(&row.id, session).await {
+                Ok(released_count) => released_count,
+                Err(error) => {
+                    return ReleaseRowsForOutboundSequencesOutcome::partial(released, error)
+                }
+            };
+            if released_count > 0 {
+                if let Some(sequence) = row.outbound_sequence {
+                    released.insert(sequence);
+                }
+            }
+        }
+        ReleaseRowsForOutboundSequencesOutcome::complete(released)
     }
 
     /// Stamp the XEP-0198 outbound counter value onto a previously-
@@ -837,6 +918,49 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             }
         }
         Ok(0)
+    }
+
+    async fn release_rows_for_outbound_sequences(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        sequences: &HashSet<u32>,
+    ) -> ReleaseRowsForOutboundSequencesOutcome {
+        if sequences.is_empty() {
+            return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
+        }
+
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()));
+        let mut guard = match guard {
+            Ok(guard) => guard,
+            Err(error) => return ReleaseRowsForOutboundSequencesOutcome::failed(error),
+        };
+        let Some(queue) = guard.get_mut(recipient) else {
+            return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
+        };
+
+        let mut released_ids = Vec::new();
+        let mut released_sequences = HashSet::new();
+        for row in queue.iter_mut() {
+            if row.flushed_in_session.as_ref() == Some(session)
+                && row
+                    .outbound_sequence
+                    .is_some_and(|sequence| sequences.contains(&sequence))
+            {
+                released_ids.push(row.id.clone());
+                released_sequences.extend(row.outbound_sequence);
+                row.flushed_in_session = None;
+                row.outbound_sequence = None;
+            }
+        }
+        drop(guard);
+        if let Err(error) = self.clear_claimed_at(&released_ids) {
+            return ReleaseRowsForOutboundSequencesOutcome::partial(released_sequences, error);
+        }
+        ReleaseRowsForOutboundSequencesOutcome::complete(released_sequences)
     }
 
     async fn record_pushed_at(

@@ -74,13 +74,13 @@ groups:
             runbook: 0 in all history. A burst usually accompanies a network event or a client bug that stops acking.
             summary: XEP-0198 send-window pauses are timing out — dead peers are piling up instead of acking.
         - alert: SmUnackedEvictions
-          expr: sum(increase(waddle_sm_unacked_evicted_total[1h])) > 100
+          expr: sum(increase(waddle_sm_unacked_evicted_total[1h])) > 0
           for: 2h
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: 'KNOWN-FIRING until issue #1316 lands (bootstrap-flood bursts measured 44-968/h). Tighten to > 0 after #1316. https://github.com/waddle-social/waddle/issues/1316'
+            runbook: Healthy history is 0. This counter now carries a `path` label (`batch`, `replay_tail`, `direct_outbound`, `detach_drain`) — check the firing path first to localize which eviction path is still dropping unacked XEP-0198 stanzas.
             summary: Sustained eviction of unacked XEP-0198 stanzas — message-loss risk for resuming clients.
     - name: waddle-broadcast
       rules:
@@ -151,7 +151,7 @@ groups:
     - name: waddle-aliases-sm
       rules:
         - record: waddle_sm_unacked_evicted_total
-          expr: sum by (job, instance) (xmpp_sm_unacked_evicted_total)
+          expr: sum by (job, instance, path) (xmpp_sm_unacked_evicted_total)
         - record: waddle_sm_promotion_storage_failed_total
           expr: sum by (job, instance) (xmpp_sm_promotion_storage_failed_total)
         - record: waddle_sm_promotion_not_promotable_total
