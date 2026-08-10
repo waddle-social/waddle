@@ -382,14 +382,23 @@ fn status_for_error(error: &DatabaseError) -> LineageStatus {
 fn is_transport_error(error: &DatabaseError) -> bool {
     match error {
         DatabaseError::ConnectionFailed(_) => true,
-        DatabaseError::Internal(source) => matches!(
-            source,
+        DatabaseError::Internal(source) => match source {
             sqlx::Error::Io(_)
-                | sqlx::Error::Tls(_)
-                | sqlx::Error::PoolTimedOut
-                | sqlx::Error::PoolClosed
-                | sqlx::Error::WorkerCrashed
-        ),
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::WorkerCrashed => true,
+            // A Postgres restart/failover terminates in-flight queries with
+            // an ErrorResponse, not an I/O error: SQLSTATE class 57
+            // (operator intervention, e.g. 57P01 admin_shutdown) and class
+            // 08 (connection exception). Those are reachability, not an
+            // answer about the data.
+            sqlx::Error::Database(database_error) => database_error
+                .code()
+                .is_some_and(|code| code.starts_with("57") || code.starts_with("08")),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -431,5 +440,85 @@ impl LineageReport {
                     LineageStatus::ProbeError | LineageStatus::ProbeTimeout
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod transport_classification_tests {
+    use super::is_transport_error;
+    use crate::db::DatabaseError;
+
+    #[derive(Debug)]
+    struct FakePgError(&'static str);
+
+    impl std::fmt::Display for FakePgError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "fake pg error {}", self.0)
+        }
+    }
+
+    impl std::error::Error for FakePgError {}
+
+    impl sqlx::error::DatabaseError for FakePgError {
+        fn message(&self) -> &str {
+            "fake pg error"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.0))
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn database_error(code: &'static str) -> DatabaseError {
+        DatabaseError::Internal(sqlx::Error::Database(Box::new(FakePgError(code))))
+    }
+
+    #[test]
+    fn pool_and_io_class_errors_are_transport() {
+        assert!(is_transport_error(&DatabaseError::Internal(
+            sqlx::Error::PoolTimedOut
+        )));
+        assert!(is_transport_error(&DatabaseError::ConnectionFailed(
+            "refused".to_string()
+        )));
+    }
+
+    #[test]
+    fn postgres_shutdown_and_connection_sqlstates_are_transport() {
+        // 57P01 admin_shutdown / 57P03 cannot_connect_now: a restart or
+        // failover terminating the in-flight query.
+        assert!(is_transport_error(&database_error("57P01")));
+        assert!(is_transport_error(&database_error("57P03")));
+        // Class 08: connection exception.
+        assert!(is_transport_error(&database_error("08006")));
+    }
+
+    #[test]
+    fn data_answering_sqlstates_are_definitive() {
+        // undefined_table: the database ANSWERED that `_lineage` is gone —
+        // the wipe/restore class must never ride the sticky path.
+        assert!(!is_transport_error(&database_error("42P01")));
+        // insufficient_privilege.
+        assert!(!is_transport_error(&database_error("42501")));
+        // And typed lineage refusals are always definitive.
+        assert!(!is_transport_error(&DatabaseError::Lineage(
+            super::super::LineageError::MissingRow
+        )));
     }
 }

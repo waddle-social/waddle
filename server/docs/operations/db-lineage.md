@@ -124,6 +124,11 @@ not-ready pod; fix the DSN/UUID (or perform adoption) and roll. A database
 with NO lineage row proceeds un-enrolled and is instead held not-ready by
 the readiness gate.
 
+A database that is simply UNREACHABLE during startup attestation also fails
+startup (after a short bounded retry): the restart backoff is the retry
+loop, and the next boot runs a full bootstrap. Only definitive lineage
+refusals keep the pod alive-but-unready.
+
 ## Clustering requirement
 
 Clustered Waddle deployments require PostgreSQL. SQLite is unsuitable and fails

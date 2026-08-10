@@ -349,51 +349,6 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             &websocket_state,
             server_config.clustering.orphan_reaper_interval,
         );
-    } else if !websocket_state
-        .deps
-        .app_state
-        .node_lifecycle
-        .startup_blocked()
-    {
-        let retry_state = Arc::clone(&websocket_state);
-        let orphan_reaper_interval = server_config.clustering.orphan_reaper_interval;
-        tokio::spawn(async move {
-            const RETRY_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
-            loop {
-                tokio::time::sleep(RETRY_PERIOD).await;
-                let app_state = &retry_state.deps.app_state;
-                if app_state.node_lifecycle.startup_blocked()
-                    || !matches!(
-                        app_state.node_lifecycle.admission(),
-                        crate::clustering::NodeAdmission::Starting
-                    )
-                {
-                    return;
-                }
-                let Some(registry) = app_state.lineage_registry.get() else {
-                    return;
-                };
-                let report = registry
-                    .attest(&app_state.lineage_config, app_state.clustering_enabled)
-                    .await;
-                if report.is_attested() {
-                    info!("startup lineage attestation recovered; promoting to serving");
-                    promote_to_serving_and_spawn_janitors(&retry_state, orphan_reaper_interval);
-                    return;
-                }
-                if !report.is_transient_only() {
-                    for (store, status) in report.failures() {
-                        tracing::error!(
-                            store = %store,
-                            status = status.as_str(),
-                            "lineage attestation became definitive during startup self-heal; latching"
-                        );
-                    }
-                    app_state.node_lifecycle.latch_startup_block();
-                    return;
-                }
-            }
-        });
     }
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
@@ -757,17 +712,23 @@ async fn create_websocket_state(
     if lineage_attested {
         info!("startup database lineage attestation passed");
     } else if lineage_report.is_transient_only() {
-        // Unreachable database, nothing definitive: do NOT latch. The node
-        // stays `Starting` (unready, no mutating bootstraps, no janitors)
-        // and the self-heal task in `create_router` re-attests until the
-        // database returns, then promotes.
+        // Unreachable database, nothing definitive: fail startup outright,
+        // exactly like migrations against an unreachable database — the
+        // orchestrator's restart backoff is the retry loop, and the next
+        // boot runs the FULL bootstrap (topology, VAPID, backfill) instead
+        // of promoting a half-bootstrapped node. Definitive refusals (the
+        // `else` below) stay alive-unready instead, because restarting
+        // cannot fix them and the readiness JSON is the diagnostic surface.
         for (store, status) in lineage_report.failures() {
-            warn!(
+            tracing::error!(
                 store = %store,
                 status = status.as_str(),
-                "startup lineage attestation could not reach the database; will retry in the background"
+                "startup lineage attestation could not reach the database; exiting so the restart retries a full bootstrap"
             );
         }
+        return Err(anyhow::anyhow!(
+            "database unreachable during startup lineage attestation"
+        ));
     } else {
         for (store, status) in lineage_report.failures() {
             tracing::error!(
@@ -1070,8 +1031,9 @@ fn promote_to_serving_and_spawn_janitors(
     {
         warn!(
             ?admission,
-            "promotion attempted after node admission left Starting; preserving non-serving state"
+            "promotion attempted after node admission left Starting; preserving non-serving state and starting no janitors"
         );
+        return;
     }
     spawn_sm_expiry_janitor(websocket_state);
     spawn_orphan_reaper_janitor(websocket_state, orphan_reaper_interval);

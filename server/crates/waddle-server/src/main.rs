@@ -100,6 +100,25 @@ async fn main() -> Result<()> {
     match db::lineage::verify(db_pool.global(), &lineage_config).await {
         Ok(_) => {}
         Err(db::DatabaseError::Lineage(db::lineage::LineageError::MissingRow)) => {
+            // A clustered node starts writing dynamic control-plane rows
+            // (leases, node registration) right after migrations — before
+            // the full readiness attestation could hold it back. An
+            // un-enrolled database is therefore acceptable only when this
+            // process is the one enrolling it; otherwise a clustered node
+            // mis-pointed at a fresh/foreign row-less database would
+            // mutate it. Single-node deployments stay lenient: they write
+            // nothing dynamic before the readiness gate.
+            if server_config.clustering.enabled
+                && !matches!(
+                    lineage_config.action,
+                    Some(db::lineage::LineageAction::Enroll)
+                )
+            {
+                return Err(anyhow::anyhow!(
+                    "refusing to start clustering against a database with no lineage row: \
+                     enroll it first (WADDLE_DB_LINEAGE_ACTION=enroll on one rollout)"
+                ));
+            }
             info!("global database has no lineage row yet; proceeding to migrations un-enrolled");
         }
         Err(error) => {

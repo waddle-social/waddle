@@ -1,8 +1,6 @@
 use thiserror::Error;
 
-use super::{
-    DeploymentUuid, PgDatabaseIdentity, PgSchemaIdentity, PgSystemIdentifier,
-};
+use super::{DeploymentUuid, PgDatabaseIdentity, PgSchemaIdentity, PgSystemIdentifier};
 
 /// Fail-closed lineage attestation errors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
