@@ -257,7 +257,16 @@ impl LineageRegistry {
         Self { entries }
     }
 
-    pub async fn attest(&self, config: &LineageConfig, clustering_enabled: bool) -> LineageReport {
+    /// `probe_timeout` bounds EACH boundary's probe individually so one
+    /// stalled pool cannot withhold another boundary's already-definitive
+    /// answer from the report; a timed-out probe reports as the transient
+    /// `probe_timeout` status (sticky-eligible on a proven boundary).
+    pub async fn attest(
+        &self,
+        config: &LineageConfig,
+        clustering_enabled: bool,
+        probe_timeout: std::time::Duration,
+    ) -> LineageReport {
         let mut failures = Vec::new();
         let probes = self
             .entries
@@ -277,15 +286,38 @@ impl LineageRegistry {
             });
         let results = join_all(probes.map(|(store, attestor, last_good)| async move {
             let driver = attestor.driver();
-            (store, driver, last_good, attestor.attest(config).await)
+            let outcome = tokio::time::timeout(probe_timeout, attestor.attest(config)).await;
+            (store, driver, last_good, outcome)
         }))
         .await;
         let mut postgres = Vec::new();
-        for (store, driver, last_good, result) in results {
+        for (store, driver, last_good, outcome) in results {
             if clustering_enabled && driver == DatabaseDriver::Sqlite {
                 failures.push((store, LineageStatus::ClusteredSqlite));
                 continue;
             }
+            let result = match outcome {
+                Ok(result) => result,
+                // A stalled probe is reachability, not an answer: keep a
+                // proven boundary's attestation, otherwise report the
+                // transient probe_timeout status for this store alone.
+                Err(_) => match last_good.get() {
+                    Some(proven) => {
+                        tracing::warn!(
+                            store = %store,
+                            "lineage probe timed out on a previously proven boundary; keeping the proven attestation"
+                        );
+                        if let Some(identity) = proven.postgres_identity.clone() {
+                            postgres.push((store, proven.clone(), identity));
+                        }
+                        continue;
+                    }
+                    None => {
+                        failures.push((store, LineageStatus::ProbeTimeout));
+                        continue;
+                    }
+                },
+            };
             match result {
                 Ok(attested) => {
                     let _ = last_good.set(attested.clone());

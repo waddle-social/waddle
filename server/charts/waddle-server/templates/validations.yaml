@@ -58,7 +58,11 @@
 {{- fail "deployment.uuid must be a lower-case RFC-4122 UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) when set; remove/clear it or provide a valid value" -}}
 {{- end -}}
 
-{{- $lineageAction := trim (toString .Values.deployment.lineageAction) -}}
+{{- $rawLineageAction := toString .Values.deployment.lineageAction -}}
+{{- $lineageAction := trim $rawLineageAction -}}
+{{- if and (ne $rawLineageAction "") (eq $lineageAction "") -}}
+{{- fail "deployment.lineageAction must not be whitespace-only: the configmap would render the raw value and the server refuses a set-but-blank WADDLE_DB_LINEAGE_ACTION" -}}
+{{- end -}}
 {{- if ne $lineageAction "" -}}
 {{- if eq $deploymentUuid "" -}}
 {{- fail "deployment.lineageAction requires deployment.uuid: enroll/adopt bind the configured deployment UUID, and the server refuses the action without one" -}}

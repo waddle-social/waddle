@@ -581,7 +581,10 @@ async fn clustered_schema_boundaries_report_colocation_mismatch() {
     let mut builder = LineageRegistryBuilder::default();
     builder.register_database(DurableStore::Global, fixture.db.clone());
     builder.register_database(DurableStore::Mam, mam.clone());
-    let report = builder.seal().attest(&configured(), true).await;
+    let report = builder
+        .seal()
+        .attest(&configured(), true, std::time::Duration::from_secs(5))
+        .await;
     assert!(report
         .failures()
         .contains(&(DurableStore::Mam, LineageStatus::ColocationMismatch)));
@@ -756,8 +759,14 @@ mod sticky_success {
     async fn transport_error_after_proven_attestation_stays_attested() {
         let registry = registry_with(vec![Ok(attested()), Err(transport_error())]);
         let config = LineageConfig::default();
-        assert!(registry.attest(&config, false).await.is_attested());
-        assert!(registry.attest(&config, false).await.is_attested());
+        assert!(registry
+            .attest(&config, false, std::time::Duration::from_secs(5))
+            .await
+            .is_attested());
+        assert!(registry
+            .attest(&config, false, std::time::Duration::from_secs(5))
+            .await
+            .is_attested());
     }
 
     #[tokio::test]
@@ -767,8 +776,13 @@ mod sticky_success {
             Err(DatabaseError::Lineage(LineageError::MissingRow)),
         ]);
         let config = LineageConfig::default();
-        assert!(registry.attest(&config, false).await.is_attested());
-        let report = registry.attest(&config, false).await;
+        assert!(registry
+            .attest(&config, false, std::time::Duration::from_secs(5))
+            .await
+            .is_attested());
+        let report = registry
+            .attest(&config, false, std::time::Duration::from_secs(5))
+            .await;
         assert_eq!(
             report.failures(),
             &[(DurableStore::Global, LineageStatus::MissingLineage)]
@@ -788,8 +802,13 @@ mod sticky_success {
             )),
         ]);
         let config = LineageConfig::default();
-        assert!(registry.attest(&config, false).await.is_attested());
-        let report = registry.attest(&config, false).await;
+        assert!(registry
+            .attest(&config, false, std::time::Duration::from_secs(5))
+            .await
+            .is_attested());
+        let report = registry
+            .attest(&config, false, std::time::Duration::from_secs(5))
+            .await;
         assert_eq!(
             report.failures(),
             &[(DurableStore::Global, LineageStatus::VerificationFailed)]
@@ -801,7 +820,9 @@ mod sticky_success {
     async fn transport_error_without_prior_proof_is_transient_only() {
         let registry = registry_with(vec![Err(transport_error())]);
         let config = LineageConfig::default();
-        let report = registry.attest(&config, false).await;
+        let report = registry
+            .attest(&config, false, std::time::Duration::from_secs(5))
+            .await;
         assert_eq!(
             report.failures(),
             &[(DurableStore::Global, LineageStatus::ProbeError)]

@@ -17,6 +17,11 @@ use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 const LINEAGE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Per-boundary probe budget, deliberately inside the joint deadline so a
+/// single slow pool reports as that store's typed `probe_timeout` (and the
+/// sticky path can keep proven boundaries) rather than the whole request
+/// hitting the outer deadline.
+const LINEAGE_PER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
 
 /// Configure CORS layer.
 ///
@@ -292,7 +297,11 @@ async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageSta
         return Err(LineageStatus::Initializing);
     };
     let report = registry
-        .attest(&state.lineage_config, state.clustering_enabled)
+        .attest(
+            &state.lineage_config,
+            state.clustering_enabled,
+            LINEAGE_PER_PROBE_TIMEOUT,
+        )
         .await;
     // Live drift fails CLOSED, not just unready: a definitive lineage
     // failure appearing while this node is Serving (database restored or
@@ -315,6 +324,22 @@ async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageSta
         }
         let _ = state.lineage_latched.set(report.clone());
         state.node_lifecycle.latch_startup_block();
+        // The latch cut client admission, but the janitor fleet (not all of
+        // which consults the lifecycle) would keep mutating the replaced
+        // database. A database swapped under a running node is a controlled
+        // crash: give the 503 response and logs a moment to flush, then
+        // exit — the next boot's pre-migration guard refuses the foreign
+        // database with zero writes. Compiled out of unit-test builds
+        // (which run the handler in-process); the spawned-binary
+        // integration tests exercise the real exit.
+        #[cfg(not(test))]
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tracing::error!(
+                "exiting: definitive lineage drift detected on a serving node (see prior errors)"
+            );
+            std::process::exit(1);
+        });
     }
     Ok(report)
 }
@@ -892,7 +917,7 @@ mod readiness_generation_tests {
         let json = response_json(response).await;
 
         assert_eq!(json["status"], "not_ready");
-        assert_eq!(json["lineage"]["status"], "probe_timeout");
+        assert_eq!(json["lineage"]["global"], "probe_timeout");
     }
 
     #[tokio::test]

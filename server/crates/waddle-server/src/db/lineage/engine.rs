@@ -207,7 +207,7 @@ pub async fn verify_via_sqlite_pool(
 
 async fn ensure_single_row_pg(pool: &PgPool) -> Result<(), DatabaseError> {
     let row = sqlx::query(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id <> 1 THEN 1 ELSE 0 END), 0) FROM _lineage",
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id = 1 THEN 0 ELSE 1 END), 0) FROM _lineage",
     )
     .fetch_one(pool)
     .await
@@ -219,7 +219,7 @@ async fn ensure_single_row_pg(pool: &PgPool) -> Result<(), DatabaseError> {
 
 async fn ensure_single_row_sqlite(pool: &SqlitePool) -> Result<(), DatabaseError> {
     let row = sqlx::query(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id <> 1 THEN 1 ELSE 0 END), 0) FROM _lineage",
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id = 1 THEN 0 ELSE 1 END), 0) FROM _lineage",
     )
     .fetch_one(pool)
     .await
@@ -421,7 +421,7 @@ impl LineageQuery for ConnectionGuard {
 async fn ensure_single_row(query: &mut impl LineageQuery) -> Result<(), DatabaseError> {
     let mut rows = query
         .lineage_query(
-            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id <> 1 THEN 1 ELSE 0 END), 0) FROM _lineage",
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id = 1 THEN 0 ELSE 1 END), 0) FROM _lineage",
             Vec::new(),
         )
         .await?;
@@ -445,7 +445,7 @@ fn ensure_singleton_shape(count: i64, stray: i64) -> Result<(), DatabaseError> {
     }
     if stray > 0 {
         return Err(LineageError::MalformedTable {
-            detail: "lineage row exists with id != 1".to_string(),
+            detail: "lineage row exists whose id is not 1 (including NULL)".to_string(),
         }
         .into());
     }

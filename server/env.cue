@@ -900,8 +900,9 @@ schema.#Project & {
 					# repo's HelmRelease carries the real value: publishing without it
 					# would leave Flux unable to render the chart, silently stalling
 					# every rollout. See docs/operations/db-lineage.md.
-					if ! yq -e '.spec.values.deployment.uuid' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null; then
-					  echo "refusing to publish: infrastructure helmrelease.yaml must set deployment.uuid (see docs/operations/db-lineage.md)" >&2
+					if ! yq -r '.spec.values.deployment.uuid // ""' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml \
+					  | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+					  echo "refusing to publish: infrastructure helmrelease.yaml must set deployment.uuid to a lower-case RFC-4122 UUID (see docs/operations/db-lineage.md)" >&2
 					  exit 1
 					fi
 					cue vet . "${gitops_values}" -d '#PublishedValues' \

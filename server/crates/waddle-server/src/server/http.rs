@@ -1109,28 +1109,55 @@ async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::Lineage
     const ATTEMPTS: u32 = 3;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
     const OVERALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    // Bounds each boundary's probe so one stalled pool cannot withhold
+    // another boundary's definitive answer for the whole deadline.
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
     let Some(registry) = state.lineage_registry.get() else {
         return crate::db::lineage::LineageReport::initializing();
     };
+    // Each completed pass lands in this slot so the overall deadline cannot
+    // discard an already-returned DEFINITIVE report (one boundary answering
+    // a mismatch while another stalls must latch, not fabricate a
+    // transient-only timeout that exit-and-retries forever).
+    let completed: std::sync::Mutex<Option<crate::db::lineage::LineageReport>> =
+        std::sync::Mutex::new(None);
     let pass = async {
         let mut last = registry
-            .attest(&state.lineage_config, state.clustering_enabled)
+            .attest(
+                &state.lineage_config,
+                state.clustering_enabled,
+                PROBE_TIMEOUT,
+            )
             .await;
+        if let Ok(mut slot) = completed.lock() {
+            *slot = Some(last.clone());
+        }
         for _ in 1..ATTEMPTS {
             if !last.is_transient_only() {
                 break;
             }
             tokio::time::sleep(RETRY_DELAY).await;
             last = registry
-                .attest(&state.lineage_config, state.clustering_enabled)
+                .attest(
+                    &state.lineage_config,
+                    state.clustering_enabled,
+                    PROBE_TIMEOUT,
+                )
                 .await;
+            if let Ok(mut slot) = completed.lock() {
+                *slot = Some(last.clone());
+            }
         }
         last
     };
     let report = match tokio::time::timeout(OVERALL_DEADLINE, pass).await {
         Ok(report) => report,
-        Err(_) => crate::db::lineage::LineageReport::timeout(),
+        Err(_) => completed
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .unwrap_or_else(crate::db::lineage::LineageReport::timeout),
     };
     let unmatched = state.lineage_adopt_unmatched();
     if !unmatched.is_empty() {
