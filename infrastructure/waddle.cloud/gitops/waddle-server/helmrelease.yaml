@@ -27,6 +27,14 @@ spec:
     clustering:
       enabled: true
       enrolledKeyCount: 4
+    # Database lineage attestation (#1672, docs/operations/db-lineage.md).
+    # The uuid is the stable deployment identity bound into `_lineage`;
+    # it must never change across upgrades or rollbacks.
+    deployment:
+      uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
+      # One-shot first-time enrollment for the lineage rollout; idempotent
+      # across replicas. REMOVE in the next upgrade once the fleet is ready.
+      lineageAction: enroll
     # Zero-downtime rollouts (ADR-0017 Phase 4). Safe under mixed
     # versions because the ordered-relay envelope message id is
     # versioned (deliver_ordered.vN, #1597/#1600): an old replica
