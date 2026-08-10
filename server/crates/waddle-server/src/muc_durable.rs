@@ -247,13 +247,48 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
+        // Catalog-guarded instead of `ADD COLUMN IF NOT EXISTS`: Postgres
+        // acquires ACCESS EXCLUSIVE on the relation before it evaluates the
+        // per-column IF NOT EXISTS clause, so the bare form would queue every
+        // cluster-wide room read and write behind each pod start — held for
+        // the rest of this transaction, with no lock_timeout, while the
+        // advisory lock above additionally serializes every other starting
+        // pod behind the wait. The steady-state (columns already exist) must
+        // take no relation lock at all; only the one bootstrap that actually
+        // adds a column pays for it.
         tx.execute(
-            "ALTER TABLE clustering_muc_rooms ADD COLUMN IF NOT EXISTS lifecycle_id TEXT",
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'clustering_muc_rooms'
+                      AND column_name = 'lifecycle_id'
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms ADD COLUMN lifecycle_id TEXT;
+                END IF;
+            END $$
+            "#,
             (),
         )
         .await?;
         tx.execute(
-            "ALTER TABLE clustering_muc_rooms ADD COLUMN IF NOT EXISTS revision BIGINT",
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'clustering_muc_rooms'
+                      AND column_name = 'revision'
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms ADD COLUMN revision BIGINT;
+                END IF;
+            END $$
+            "#,
             (),
         )
         .await?;
@@ -1044,6 +1079,90 @@ mod tests {
         );
     }
 
+    /// Poll `pg_locks` until a transaction is queued (ungranted) on the MUC
+    /// schema advisory lock, mirroring
+    /// `db::migrations::tests::wait_for_postgres_advisory_waiter`: Postgres
+    /// exposes a single-bigint advisory key with its high 32 bits in
+    /// `classid`, low 32 bits in `objid`, and `objsubid = 1`.
+    async fn wait_for_muc_schema_advisory_waiter(db: &Database) {
+        let waiter = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let conn = db.guard().await.expect("guard");
+                let mut rows = conn
+                    .query(
+                        "SELECT COUNT(*) \
+                         FROM pg_locks \
+                         WHERE locktype = 'advisory' \
+                           AND granted = false \
+                           AND objsubid = 1 \
+                           AND ((classid::bigint << 32) | objid::bigint) = ?",
+                        crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
+                    )
+                    .await
+                    .expect("query MUC schema advisory lock waiters");
+                let count = rows
+                    .next()
+                    .await
+                    .expect("read MUC schema advisory lock waiters")
+                    .expect("advisory waiter count row")
+                    .get::<i64>(0)
+                    .expect("decode advisory waiter count");
+                if count > 0 {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            waiter.is_ok(),
+            "MUC schema bootstrap must show an ungranted advisory waiter in pg_locks"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_blocks_until_the_muc_schema_advisory_lock_is_released() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = fresh_muc_schema_database().await else {
+            return;
+        };
+
+        let mut lock_tx = db.begin().await.expect("start lock transaction");
+        lock_tx
+            .query(
+                "SELECT pg_advisory_xact_lock(?)",
+                crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
+            )
+            .await
+            .expect("take MUC schema advisory lock");
+
+        let open_db = db.clone();
+        let mut open = tokio::spawn(async move {
+            PostgresMucRoomStore::open(
+                open_db,
+                CancellationToken::new(),
+                SharedNodeIdentity::new(node_identity()),
+            )
+            .await
+        });
+
+        wait_for_muc_schema_advisory_waiter(&db).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut open)
+                .await
+                .is_err(),
+            "MUC schema bootstrap must block while another transaction holds its advisory lock"
+        );
+
+        lock_tx
+            .commit()
+            .await
+            .expect("release MUC schema advisory lock");
+        open.await
+            .expect("MUC schema open task")
+            .expect("MUC schema open must succeed once the advisory lock is released");
+    }
+
     #[tokio::test]
     async fn repeated_open_is_idempotent() {
         let _guard = clustering_control_plane_table_lock().lock().await;
@@ -1177,6 +1296,22 @@ mod tests {
                 .await
                 .is_err(), "a second {state} lifecycle must be rejected");
         }
+
+        // Prove the state CHECK actually admits 'dormant' on its own: the
+        // rejections above would also fire from the live-room unique index,
+        // so without this insert a vocabulary typo in the constraint would
+        // pass the suite while breaking #1646's dormancy snapshot.
+        conn.execute(
+            "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+            crate::db_params![
+                "fresh-dormant",
+                "dormant-only@muc.example.com",
+                1_i64,
+                "dormant"
+            ],
+        )
+        .await
+        .expect("a dormant lifecycle on a fresh room must satisfy the state vocabulary");
 
         for (lifecycle_id, room_jid, revision, state) in [
             (

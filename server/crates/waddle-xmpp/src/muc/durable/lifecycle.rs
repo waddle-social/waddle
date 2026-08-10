@@ -75,10 +75,12 @@ impl RoomRevision {
     }
 }
 
-/// The lifecycle-local ordinal of one post-commit effect. Together with a
-/// [`RoomLifecycleId`] and [`RoomRevision`], this is the third component of
-/// #1646's effect-outbox key and preserves FIFO ordering within that exact
-/// `(lifecycle, revision)` coordinate.
+/// The ordinal of one post-commit effect, scoped to a single committed
+/// `(lifecycle, revision)` coordinate: each committed revision emits its
+/// effects as ordinals `0, 1, 2, …`. Together with [`RoomLifecycleId`] and
+/// [`RoomRevision`] it is the third component of #1646's effect-outbox key;
+/// the per-lifecycle FIFO #1646 requires is the order of
+/// `(RoomRevision, RoomEffectOrdinal)` within one lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RoomEffectOrdinal(i64);
 
@@ -128,6 +130,12 @@ pub struct RoomMutationCommit {
 }
 
 impl RoomMutationCommit {
+    /// Assemble a commit proof. `pub` because the durable writer lives across
+    /// the crate seam in waddle-server; nothing in this dark slice constructs
+    /// one outside tests. When #1645 wires the real commit path it owns
+    /// narrowing construction to that path (the `ownership::resume`
+    /// sole-constructor-submodule pattern), so a fabricated proof cannot
+    /// impersonate a durable commit.
     pub fn new(
         fence: RoomClaimFenceContext,
         lifecycle: RoomLifecycleId,
@@ -219,7 +227,10 @@ pub struct EphemeralProjectionAuthorization {
 
 impl EphemeralProjectionAuthorization {
     /// Mint an authorization only after the supplied durable commit has
-    /// succeeded; #1645 owns wiring the production minting site.
+    /// succeeded. `pub` because the minting site lives across the crate seam
+    /// in waddle-server; #1645 owns wiring that production site and narrowing
+    /// construction alongside [`RoomMutationCommit::new`] so a cloned or
+    /// fabricated commit proof cannot mint a second capability.
     pub fn new(commit: RoomMutationCommit) -> Self {
         Self { commit }
     }
