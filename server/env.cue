@@ -570,6 +570,7 @@ schema.#Project & {
 					if helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  --set spicedb.enabled=false \
+					  --set-string deployment.uuid="${lineage_uuid}" \
 					  --set-string deployment.lineageAction=enrol \
 					  "${chart_secret_args[@]}" >/dev/null 2>"${malformed_action_stderr}"; then
 					  echo "chart template must fail a malformed deployment.lineageAction (a typo here crash-loops the fleet)" >&2
