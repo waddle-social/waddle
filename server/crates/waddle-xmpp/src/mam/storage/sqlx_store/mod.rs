@@ -111,12 +111,11 @@ impl SqlxMamStorage {
     /// shape one table over.
     ///
     /// The caller MUST already have verified the co-location invariant
-    /// before calling this: this storage's own resolved database URL is an
-    /// EXACT string match for the clustering global database URL (the
+    /// before calling this: this storage's own live PostgreSQL boundary
+    /// identity must match the clustering global database identity (the
     /// fencing `SELECT ... FOR SHARE` this storage issues targets
     /// `clustering_claims`, which only exists there). That check lives in
-    /// `waddle-server` (which has the redaction helper the resulting error
-    /// message needs) — see `create_websocket_mam_storage`'s call site.
+    /// `waddle-server` — see `create_websocket_mam_storage`'s call site.
     ///
     /// A no-op when this storage's backend is not Postgres: SQLite has no
     /// `clustering_claims` table to fence against, and clustering is
@@ -159,8 +158,8 @@ mod tests {
         assert!(!storage.sqlite_pool().expect("sqlite pool").is_closed());
     }
 
-    #[test]
-    fn postgres_backend_exposes_only_postgres_pool() {
+    #[tokio::test]
+    async fn postgres_backend_exposes_only_postgres_pool() {
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgresql://postgres@localhost/waddle")

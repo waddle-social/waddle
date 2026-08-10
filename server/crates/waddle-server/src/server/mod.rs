@@ -153,7 +153,7 @@ pub async fn start_with_config(
             .await
             .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?,
     );
-    prepare_database_lineage(inbox_database_storage.database(), &lineage_config, "inbox").await?;
+    bootstrap_store_lineage(inbox_database_storage.database(), &lineage_config, "inbox").await?;
     let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         inbox_database_storage.clone();
     let spaces_metadata_database_store = Arc::new(
@@ -163,7 +163,7 @@ pub async fn start_with_config(
                 anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
             })?,
     );
-    prepare_database_lineage(
+    bootstrap_store_lineage(
         spaces_metadata_database_store.database(),
         &lineage_config,
         "spaces_metadata",
@@ -180,7 +180,7 @@ pub async fn start_with_config(
             anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
         })?,
     );
-    prepare_database_lineage(
+    bootstrap_store_lineage(
         channel_space_link_database_store.database(),
         &lineage_config,
         "channel_space_links",
@@ -196,11 +196,12 @@ pub async fn start_with_config(
     // `DatabasePubSubStorage` handle is also passed onward into the
     // HTTP server so the notification-settings projection can read the
     // same database without re-opening it.
-    let pubsub_database_storage =
-        crate::pubsub::build_database_pubsub_storage(xmpp_config.pubsub_database_url.clone())
-            .await
-            .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
-    prepare_database_lineage(
+    let pubsub_database_storage = crate::pubsub::build_database_pubsub_storage(
+        xmpp_config.pubsub_database_url.clone_resolved_url(),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
+    bootstrap_store_lineage(
         pubsub_database_storage.database(),
         &lineage_config,
         "pubsub",
@@ -311,35 +312,37 @@ pub async fn start_with_config(
         server_owner_jids,
         node_lifecycle: node_lifecycle.clone(),
         clustering_claims: clustering_handles,
-        lineage_config,
+        lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,
     }));
     state.register_lineage_database(
         crate::db::lineage::DurableStore::Global,
         db_pool.global().clone(),
     );
+    if db_pool.global().has_control_plane_pool() {
+        state.register_lineage_control_plane(
+            crate::db::lineage::DurableStore::ControlPlane,
+            db_pool.global().clone(),
+        );
+    }
     register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Inbox,
-        xmpp_config.inbox_database_url.is_none(),
         inbox_database_storage.database(),
     );
     register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::SpacesMetadata,
-        xmpp_config.spaces_metadata_database_url.is_none(),
         spaces_metadata_database_store.database(),
     );
     register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::ChannelSpaceLinks,
-        xmpp_config.channel_space_links_database_url.is_none(),
         channel_space_link_database_store.database(),
     );
     register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Pubsub,
-        xmpp_config.pubsub_database_url.is_none(),
         pubsub_database_storage.database(),
     );
     // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
@@ -348,12 +351,13 @@ pub async fn start_with_config(
     // `sm_persistence`/`pending_delivery` `open_for_cluster_mode` gating
     // already established for their own durability stores.
     let websocket_mam_storage = create_websocket_mam_storage(
-        xmpp_config.mam_database_url.clone(),
+        xmpp_config.mam_database_url.clone_resolved_url(),
         server_config.clustering.enabled,
         state.clustering_claims.claim_pair().is_some(),
         db_pool.global(),
     )
     .await?;
+    bootstrap_mam_lineage(&state, &websocket_mam_storage, &lineage_config).await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
@@ -462,7 +466,7 @@ pub async fn start_with_config(
     }
 }
 
-async fn prepare_database_lineage(
+pub(crate) async fn bootstrap_store_lineage(
     database: crate::db::Database,
     config: &crate::config::LineageConfig,
     store: &'static str,
@@ -482,13 +486,50 @@ async fn prepare_database_lineage(
     Ok(())
 }
 
+async fn bootstrap_mam_lineage(
+    state: &AppState,
+    storage: &waddle_xmpp::mam::SqlxMamStorage,
+    config: &crate::config::LineageConfig,
+) -> Result<()> {
+    if let Some(pool) = storage.sqlite_pool() {
+        let in_memory = crate::db::lineage::sqlite_pool_is_in_memory(pool).await?;
+        let database = crate::db::Database::from_sqlite_pool("mam", pool.clone(), in_memory);
+        if in_memory {
+            state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Mam);
+        } else {
+            bootstrap_store_lineage(database, config, "mam").await?;
+            state.register_lineage_probe(
+                crate::db::lineage::DurableStore::Mam,
+                Arc::new(crate::db::lineage::SqlxLineageAttestor::from_sqlite(
+                    pool.clone(),
+                )),
+            );
+        }
+        return Ok(());
+    }
+    if let Some(pool) = storage.postgres_pool() {
+        let database = crate::db::Database::from_postgres_pool("mam", pool.clone());
+        bootstrap_store_lineage(database, config, "mam").await?;
+        state.register_lineage_probe(
+            crate::db::lineage::DurableStore::Mam,
+            Arc::new(crate::db::lineage::SqlxLineageAttestor::from_postgres(
+                pool.clone(),
+            )),
+        );
+        return Ok(());
+    }
+    anyhow::bail!("MAM storage did not expose a lineage backend")
+}
+
 fn register_store_lineage(
     state: &AppState,
     store: crate::db::lineage::DurableStore,
-    ephemeral: bool,
     database: crate::db::Database,
 ) {
-    if ephemeral {
+    // Ephemeral classification must follow the opened handle's real backend,
+    // not env-var presence: a missing per-store URL may still resolve to the
+    // durable global `WADDLE_DATABASE_URL`.
+    if database.is_in_memory_sqlite() {
         state.register_lineage_ephemeral(store);
     } else {
         state.register_lineage_database(store, database);

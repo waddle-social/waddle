@@ -4,6 +4,38 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use url::Url;
 
+/// Resolved XMPP storage location for one store.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ResolvedXmppDatabaseUrl {
+    /// A concrete SQLite/Postgres DSN, whether dedicated or inherited from
+    /// `WADDLE_DATABASE_URL`.
+    Resolved(String),
+    /// No dedicated or global DSN was configured, so the caller must fall back
+    /// to an in-memory SQLite store.
+    #[default]
+    EphemeralFallback,
+}
+
+impl ResolvedXmppDatabaseUrl {
+    pub fn as_deref(&self) -> Option<&str> {
+        match self {
+            Self::Resolved(url) => Some(url.as_str()),
+            Self::EphemeralFallback => None,
+        }
+    }
+
+    pub fn clone_resolved_url(&self) -> Option<String> {
+        match self {
+            Self::Resolved(url) => Some(url.clone()),
+            Self::EphemeralFallback => None,
+        }
+    }
+
+    pub const fn is_ephemeral_fallback(&self) -> bool {
+        matches!(self, Self::EphemeralFallback)
+    }
+}
+
 /// XMPP server configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct XmppConfig {
@@ -20,22 +52,22 @@ pub struct XmppConfig {
     /// Defaults to `muc.<domain>`; overridable via `WADDLE_MUC_DOMAIN`.
     pub muc_domain: DomainPart,
     /// MAM database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
-    pub mam_database_url: Option<String>,
+    pub mam_database_url: ResolvedXmppDatabaseUrl,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
-    pub inbox_database_url: Option<String>,
+    pub inbox_database_url: ResolvedXmppDatabaseUrl,
     /// Spaces-metadata database URL — prefers dedicated XMPP DSN, otherwise
     /// the main runtime DSN. Resolution order matches
     /// `resolve_xmpp_database_url`:
     /// `WADDLE_XMPP_SPACES_METADATA_DATABASE_URL` → `WADDLE_DATABASE_URL`.
     /// When unset, the store falls back to in-memory SQLite — suitable
     /// for tests only.
-    pub spaces_metadata_database_url: Option<String>,
+    pub spaces_metadata_database_url: ResolvedXmppDatabaseUrl,
     /// Channel-space-link database URL — prefers dedicated XMPP DSN,
     /// otherwise the main runtime DSN. Resolution order:
     /// `WADDLE_XMPP_CHANNEL_SPACE_LINKS_DATABASE_URL` →
     /// `WADDLE_DATABASE_URL`. When unset, the store falls back to
     /// in-memory SQLite — suitable for tests only.
-    pub channel_space_links_database_url: Option<String>,
+    pub channel_space_links_database_url: ResolvedXmppDatabaseUrl,
     /// XEP-0160 offline-message (`pending_delivery`) database URL —
     /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
     /// Resolution order (matches `resolve_xmpp_database_url`):
@@ -44,7 +76,7 @@ pub struct XmppConfig {
     /// back to in-memory SQLite — suitable only for tests; production
     /// deployments MUST set one of these env vars so queued offline
     /// DMs survive restart per issue #209.
-    pub pending_delivery_database_url: Option<String>,
+    pub pending_delivery_database_url: ResolvedXmppDatabaseUrl,
     /// XEP-0198 stream-management persistence database URL —
     /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
     /// Resolution order:
@@ -53,9 +85,9 @@ pub struct XmppConfig {
     /// for tests; production deployments MUST set one of these env
     /// vars so detached sessions survive restart per issue #209
     /// slice (d) Q8 = B.
-    pub sm_database_url: Option<String>,
+    pub sm_database_url: ResolvedXmppDatabaseUrl,
     /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
-    pub pubsub_database_url: Option<String>,
+    pub pubsub_database_url: ResolvedXmppDatabaseUrl,
     /// Trusted public RFC 7395 endpoint used by clients. Its scheme is the
     /// authoritative source for transport-security decisions; the unrelated
     /// HTTP application base URL and client-controlled forwarding headers are
@@ -92,13 +124,13 @@ impl Default for XmppConfig {
             domain,
             spaces_jid,
             muc_domain,
-            mam_database_url: None,
-            inbox_database_url: None,
-            spaces_metadata_database_url: None,
-            channel_space_links_database_url: None,
-            pending_delivery_database_url: None,
-            sm_database_url: None,
-            pubsub_database_url: None,
+            mam_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
+            inbox_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
+            spaces_metadata_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
+            channel_space_links_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
+            pending_delivery_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
+            sm_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
+            pubsub_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
             public_websocket_url: Url::parse("ws://localhost:3000/ws")
                 .expect("default public XMPP WebSocket URL is valid"),
             native_auth_enabled: true,
@@ -265,15 +297,18 @@ where
         .with_context(|| format!("invalid {env_key} environment variable"))
 }
 
-pub(crate) fn resolve_xmpp_database_url(env_key: &str) -> Option<String> {
+pub(crate) fn resolve_xmpp_database_url(env_key: &str) -> ResolvedXmppDatabaseUrl {
     std::env::var(env_key)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+        .map(ResolvedXmppDatabaseUrl::Resolved)
         .or_else(|| {
             std::env::var("WADDLE_DATABASE_URL")
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
+                .map(ResolvedXmppDatabaseUrl::Resolved)
         })
+        .unwrap_or(ResolvedXmppDatabaseUrl::EphemeralFallback)
 }

@@ -24,9 +24,7 @@ use crate::server::{AppState, XmppConfig};
 use anyhow::Result;
 use axum::{middleware, routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
-use sqlx::sqlite::SqliteConnectOptions;
 use std::future::IntoFuture as _;
-use std::str::FromStr;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing::{info, warn};
@@ -153,16 +151,13 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
 /// `pending_delivery::open_for_cluster_mode`'s/`sm_persistence::open_for_cluster_mode`'s
 /// identical co-location-then-construct pattern, one table over. Lives here
 /// (in `waddle-server`, not `waddle-xmpp` where `SqlxMamStorage` itself is
-/// defined) because the co-location mismatch error needs
-/// `crate::db::redact_database_url` — a `waddle-server`-only helper — and
-/// because the clustering global database URL only exists on this side of
-/// the crate boundary.
+/// defined) because the clustering global database identity is available on
+/// this side of the crate boundary.
 ///
 /// When clustering is enabled AND the resolved `database_url` is a
-/// Postgres DSN, the co-location invariant is checked BEFORE fencing is
-/// ever attached: the resolved URL must be an EXACT string match for
-/// `global_db.database_url()` (deliberately no DSN normalization, matching
-/// every sibling `open_for_cluster_mode`) — the fencing
+/// Postgres pool, the co-location invariant is checked BEFORE fencing is
+/// ever attached by comparing its live PostgreSQL identity with the global
+/// database identity — the fencing
 /// `SELECT ... FOR SHARE` `SqlxMamStorage::store_message_fenced` issues
 /// targets `clustering_claims`, which only exists in the clustering global
 /// database. A mismatch fails startup with
@@ -180,7 +175,7 @@ pub(crate) async fn create_websocket_mam_storage(
     clustering_enabled: bool,
     clustering_claim_pair_live: bool,
     global_db: &crate::db::Database,
-) -> Result<Arc<dyn MamStorage>> {
+) -> Result<Arc<SqlxMamStorage>> {
     if !cfg!(test) {
         ensure_mam_database_is_durable(
             database_url.as_deref(),
@@ -194,21 +189,25 @@ pub(crate) async fn create_websocket_mam_storage(
             })?;
             #[cfg(feature = "clustering")]
             {
-                let resolved_url = (database_url.starts_with("postgres://")
-                    || database_url.starts_with("postgresql://"))
-                .then_some(database_url);
-                if let (true, true, Some(resolved_url)) =
-                    (clustering_enabled, clustering_claim_pair_live, resolved_url)
-                {
-                    if resolved_url != global_db.database_url() {
-                        return Err(anyhow::anyhow!(
-                            waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
-                                mam_database_url: crate::db::redact_database_url(resolved_url),
-                                global_database_url: crate::db::redact_database_url(
-                                    global_db.database_url()
-                                ),
-                            }
-                        ));
+                if clustering_enabled && clustering_claim_pair_live {
+                    if let Some(mam_pool) = opened.postgres_pool() {
+                        let mam_identity =
+                            crate::db::lineage::live_postgres_identity_via_pg_pool(mam_pool)
+                                .await?;
+                        let global_identity =
+                            crate::db::lineage::live_postgres_identity(global_db).await?;
+                        if mam_identity != global_identity {
+                            return Err(anyhow::anyhow!(
+                                waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
+                                    identities: Box::new(
+                                        waddle_xmpp::ClusterColocationIdentities {
+                                            store: (&mam_identity).into(),
+                                            global: (&global_identity).into(),
+                                        }
+                                    ),
+                                }
+                            ));
+                        }
                     }
                     opened.with_cluster_fencing(true)
                 } else {
@@ -711,8 +710,9 @@ async fn create_websocket_state(
         server_config,
         &state.clustering_claims,
         state.db_pool.global(),
+        &state,
     )
-    .await;
+    .await?;
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
@@ -848,8 +848,9 @@ async fn create_websocket_state(
         server_config,
         &state.clustering_claims,
         state.db_pool.global(),
+        &state,
     )
-    .await;
+    .await?;
 
     let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
 
@@ -1128,9 +1129,10 @@ async fn create_sm_session_registry(
     server_config: &ServerConfig,
     clustering: &crate::clustering::ClusteringHandles,
     global_db: &crate::db::Database,
-) -> Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry> {
+    state: &Arc<AppState>,
+) -> Result<Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>> {
     let sm_database_url = xmpp_config.sm_database_url.clone();
-    if sm_database_url.is_none() {
+    if sm_database_url.is_ephemeral_fallback() {
         warn!(
             "Neither WADDLE_XMPP_SM_DATABASE_URL nor WADDLE_DATABASE_URL is set; \
              falling back to in-memory SQLite for SM session persistence. \
@@ -1145,15 +1147,28 @@ async fn create_sm_session_registry(
     // branching — including FIX 4's co-location check against `global_db`,
     // the same handle `clustering::start_if_enabled` itself received —
     // lives inside `open_for_cluster_mode` itself.
-    let sm_persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
-        crate::sm_persistence::open_for_cluster_mode(
-            sm_database_url.as_deref(),
-            server_config.clustering.enabled,
-            clustering.claim_pair(),
-            global_db,
-        )
-        .await
-        .expect("open SM persistence storage");
+    let opened = crate::sm_persistence::open_for_cluster_mode_with_lineage(
+        sm_database_url.as_deref(),
+        server_config.clustering.enabled,
+        clustering.claim_pair(),
+        global_db,
+    )
+    .await?;
+    if opened.aliases_global {
+        state.register_lineage_alias(
+            crate::db::lineage::DurableStore::Sm,
+            crate::db::lineage::DurableStore::Global,
+        );
+    } else if let Some(database) = opened.database.clone() {
+        if database.is_in_memory_sqlite() {
+            state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Sm);
+        } else {
+            crate::server::bootstrap_store_lineage(database.clone(), &state.lineage_config, "sm")
+                .await?;
+            state.register_lineage_database(crate::db::lineage::DurableStore::Sm, database);
+        }
+    }
+    let sm_persistence = opened.storage;
     let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),
@@ -1206,7 +1221,7 @@ async fn create_sm_session_registry(
     if let Some(local_claims) = &clustering.local_claims {
         local_claims.wire(Arc::clone(&sm_session_registry));
     }
-    sm_session_registry
+    Ok(sm_session_registry)
 }
 
 async fn create_pending_delivery_storage(
@@ -1214,9 +1229,10 @@ async fn create_pending_delivery_storage(
     server_config: &ServerConfig,
     clustering: &crate::clustering::ClusteringHandles,
     global_db: &crate::db::Database,
-) -> Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> {
+    state: &Arc<AppState>,
+) -> Result<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>> {
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
-    if pending_delivery_url.is_none() {
+    if pending_delivery_url.is_ephemeral_fallback() {
         warn!(
             "Neither WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL nor \
              WADDLE_DATABASE_URL is set; falling back to in-memory SQLite. \
@@ -1232,17 +1248,28 @@ async fn create_pending_delivery_storage(
     // including the co-location check against `global_db` — lives inside
     // `open_for_cluster_mode` itself, mirroring `create_sm_session_registry`'s
     // identical `sm_persistence::open_for_cluster_mode` call above.
-    Arc::new(
-        crate::pending_delivery::open_for_cluster_mode(
-            pending_delivery_url.as_deref(),
-            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
-            server_config.clustering.enabled,
-            clustering.claim_pair(),
-            global_db,
-        )
-        .await
-        .expect("open pending_delivery storage"),
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        pending_delivery_url.as_deref(),
+        waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        server_config.clustering.enabled,
+        clustering.claim_pair(),
+        global_db,
     )
+    .await?;
+    let database = storage.database();
+    if database.is_in_memory_sqlite() {
+        state.register_lineage_ephemeral(crate::db::lineage::DurableStore::PendingDelivery);
+    } else {
+        crate::server::bootstrap_store_lineage(
+            database.clone(),
+            &state.lineage_config,
+            "pending_delivery",
+        )
+        .await?;
+        state
+            .register_lineage_database(crate::db::lineage::DurableStore::PendingDelivery, database);
+    }
+    Ok(Arc::new(storage))
 }
 
 /// Fail-fast guard for XEP-0313 MAM storage durability. A missing or
@@ -1252,7 +1279,7 @@ pub(crate) fn ensure_mam_database_is_durable(
     database_url: Option<&str>,
     allow_in_memory: bool,
 ) -> Result<()> {
-    if database_url.is_some_and(|url| !sqlite_url_is_in_memory(url)) {
+    if database_url.is_some_and(|url| !crate::db::sqlite_url_is_in_memory(url)) {
         return Ok(());
     }
     if allow_in_memory {
@@ -1300,45 +1327,10 @@ pub(crate) fn push_service_database_is_restart_durable(
 ) -> bool {
     match db_runtime.driver {
         crate::db::DatabaseDriver::Postgres => true,
-        crate::db::DatabaseDriver::Sqlite => !sqlite_url_is_in_memory(&db_runtime.database_url),
+        crate::db::DatabaseDriver::Sqlite => {
+            !crate::db::sqlite_url_is_in_memory(&db_runtime.database_url)
+        }
     }
-}
-
-fn sqlite_url_is_in_memory(database_url: &str) -> bool {
-    let trimmed = database_url.trim().to_ascii_lowercase();
-    let base = trimmed
-        .split_once('?')
-        .map_or(trimmed.as_str(), |(base, _)| base);
-    if matches!(
-        base,
-        ":memory:" | "sqlite::memory:" | "sqlite://{memory}:" | "sqlite:///{memory}:"
-    ) || base.ends_with("file::memory:")
-        || sqlite_url_query_requests_memory(&trimmed)
-    {
-        return true;
-    }
-    SqliteConnectOptions::from_str(database_url)
-        .map(|options| {
-            let filename = options
-                .get_filename()
-                .to_string_lossy()
-                .to_ascii_lowercase();
-            filename == ":memory:"
-                || filename == "file::memory:"
-                || filename.contains("sqlx-in-memory-")
-        })
-        .unwrap_or(false)
-}
-
-fn sqlite_url_query_requests_memory(database_url: &str) -> bool {
-    let Some((_, query)) = database_url.split_once('?') else {
-        return false;
-    };
-    query.split('&').any(|param| {
-        param
-            .split_once('=')
-            .is_some_and(|(key, value)| key == "mode" && value == "memory")
-    })
 }
 
 fn env_flag(key: &str) -> bool {

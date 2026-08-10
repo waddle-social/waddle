@@ -1,6 +1,9 @@
 use std::str::FromStr;
 
-use super::{adopt, enroll, ensure_table, verify, DeploymentUuid, LineageError, LineageUuid};
+use super::{
+    adopt, enroll, ensure_table, verify, DeploymentUuid, DurableStore, LineageError,
+    LineageRegistryBuilder, LineageStatus, LineageUuid,
+};
 use crate::{
     config::LineageConfig,
     db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError},
@@ -352,5 +355,52 @@ async fn postgres_search_path_boundaries_have_independent_lineages() {
         .execute(&fixture.admin)
         .await
         .expect("drop second isolated schema");
+    drop_postgres_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn clustered_schema_boundaries_report_colocation_mismatch() {
+    let Some(fixture) = postgres_fixture("colocation_global").await else {
+        return;
+    };
+    let database_url = std::env::var("WADDLE_TEST_POSTGRES_URL")
+        .expect("postgres URL remains available for gated test");
+    let mam_schema = format!(
+        "waddle_test_lineage_colocation_mam_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    sqlx::query(&format!("CREATE SCHEMA {mam_schema}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("create MAM schema");
+    let mam = Database::from_config(
+        "lineage-postgres-colocation-mam",
+        &DatabaseConfig::new(
+            DatabaseDriver::Postgres,
+            postgres_url_with_search_path(&database_url, &mam_schema),
+        ),
+    )
+    .await
+    .expect("open MAM schema database");
+    enroll(&fixture.db, &configured())
+        .await
+        .expect("enroll global boundary");
+    enroll(&mam, &configured())
+        .await
+        .expect("enroll MAM boundary");
+
+    let mut builder = LineageRegistryBuilder::default();
+    builder.register_database(DurableStore::Global, fixture.db.clone());
+    builder.register_database(DurableStore::Mam, mam.clone());
+    let report = builder.seal().attest(&configured(), true).await;
+    assert!(report
+        .failures()
+        .contains(&(DurableStore::Mam, LineageStatus::ColocationMismatch)));
+
+    drop(mam);
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {mam_schema} CASCADE"))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop MAM schema");
     drop_postgres_fixture(fixture).await;
 }

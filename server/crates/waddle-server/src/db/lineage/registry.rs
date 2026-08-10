@@ -2,13 +2,17 @@ use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use futures::future::join_all;
+use sqlx::{postgres::PgPool, sqlite::SqlitePool};
 
 use crate::{
     config::LineageConfig,
     db::{Database, DatabaseDriver, DatabaseError},
 };
 
-use super::{verify, AttestedLineage, PgIdentity};
+use super::{
+    verify, verify_via_control_plane, verify_via_pg_pool, verify_via_sqlite_pool, AttestedLineage,
+    PgIdentity,
+};
 
 /// A durable storage boundary whose readiness is attested by this process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,6 +50,7 @@ pub enum LineageStatus {
     Initializing,
     MissingLineage,
     DeploymentUuidMismatch,
+    SystemIdentifierUnavailable,
     ProbeTimeout,
     ClusteredSqlite,
     ClusteredEphemeral,
@@ -59,6 +64,7 @@ impl LineageStatus {
             Self::Initializing => "initializing",
             Self::MissingLineage => "missing_lineage",
             Self::DeploymentUuidMismatch => "deployment_uuid_mismatch",
+            Self::SystemIdentifierUnavailable => "system_identifier_unavailable",
             Self::ProbeTimeout => "probe_timeout",
             Self::ClusteredSqlite => "clustered_sqlite",
             Self::ClusteredEphemeral => "clustered_ephemeral",
@@ -81,9 +87,45 @@ pub struct DatabaseLineageAttestor {
     database: Database,
 }
 
+#[derive(Clone)]
+pub struct ControlPlaneLineageAttestor {
+    database: Database,
+}
+
+#[derive(Clone)]
+pub enum SqlxLineageBackend {
+    Sqlite(SqlitePool),
+    Postgres(PgPool),
+}
+
+#[derive(Clone)]
+pub struct SqlxLineageAttestor {
+    backend: SqlxLineageBackend,
+}
+
+impl ControlPlaneLineageAttestor {
+    pub fn new(database: Database) -> Self {
+        Self { database }
+    }
+}
+
 impl DatabaseLineageAttestor {
     pub fn new(database: Database) -> Self {
         Self { database }
+    }
+}
+
+impl SqlxLineageAttestor {
+    pub fn from_sqlite(pool: SqlitePool) -> Self {
+        Self {
+            backend: SqlxLineageBackend::Sqlite(pool),
+        }
+    }
+
+    pub fn from_postgres(pool: PgPool) -> Self {
+        Self {
+            backend: SqlxLineageBackend::Postgres(pool),
+        }
     }
 }
 
@@ -95,6 +137,34 @@ impl LineageAttestor for DatabaseLineageAttestor {
 
     fn driver(&self) -> DatabaseDriver {
         self.database.driver()
+    }
+}
+
+#[async_trait]
+impl LineageAttestor for ControlPlaneLineageAttestor {
+    async fn attest(&self, config: &LineageConfig) -> Result<AttestedLineage, DatabaseError> {
+        verify_via_control_plane(&self.database, config).await
+    }
+
+    fn driver(&self) -> DatabaseDriver {
+        self.database.driver()
+    }
+}
+
+#[async_trait]
+impl LineageAttestor for SqlxLineageAttestor {
+    async fn attest(&self, config: &LineageConfig) -> Result<AttestedLineage, DatabaseError> {
+        match &self.backend {
+            SqlxLineageBackend::Sqlite(pool) => verify_via_sqlite_pool(pool, config).await,
+            SqlxLineageBackend::Postgres(pool) => verify_via_pg_pool(pool, config).await,
+        }
+    }
+
+    fn driver(&self) -> DatabaseDriver {
+        match &self.backend {
+            SqlxLineageBackend::Sqlite(_) => DatabaseDriver::Sqlite,
+            SqlxLineageBackend::Postgres(_) => DatabaseDriver::Postgres,
+        }
     }
 }
 
@@ -131,6 +201,10 @@ impl LineageRegistryBuilder {
 
     pub fn register_database(&mut self, store: DurableStore, database: Database) {
         self.register_probe(store, Arc::new(DatabaseLineageAttestor::new(database)));
+    }
+
+    pub fn register_control_plane(&mut self, store: DurableStore, database: Database) {
+        self.register_probe(store, Arc::new(ControlPlaneLineageAttestor::new(database)));
     }
 
     pub fn register_alias(&mut self, store: DurableStore, of: DurableStore) {
@@ -203,10 +277,16 @@ fn mark_colocation_mismatches(
     postgres: &[(DurableStore, AttestedLineage, PgIdentity)],
     failures: &mut Vec<(DurableStore, LineageStatus)>,
 ) {
-    let Some((_, expected, expected_identity)) = postgres.first() else {
+    let Some((_, expected, expected_identity)) = postgres
+        .iter()
+        .find(|(store, _, _)| *store == DurableStore::Global)
+    else {
         return;
     };
-    for (store, actual, identity) in postgres.iter().skip(1) {
+    for (store, actual, identity) in postgres {
+        if *store == DurableStore::Global {
+            continue;
+        }
         if actual.lineage_uuid != expected.lineage_uuid || identity != expected_identity {
             failures.push((*store, LineageStatus::ColocationMismatch));
         }
@@ -219,6 +299,9 @@ fn status_for_error(error: &DatabaseError) -> LineageStatus {
         DatabaseError::Lineage(super::LineageError::DeploymentUuidMismatch { .. })
         | DatabaseError::Lineage(super::LineageError::DeploymentUuidUnconfigured { .. }) => {
             LineageStatus::DeploymentUuidMismatch
+        }
+        DatabaseError::Lineage(super::LineageError::SystemIdentifierUnavailable) => {
+            LineageStatus::SystemIdentifierUnavailable
         }
         _ => LineageStatus::VerificationFailed,
     }

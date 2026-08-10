@@ -9,15 +9,20 @@ mod record;
 mod registry;
 mod sql;
 
-pub use engine::{adopt, enroll, ensure_table, verify, AttestedLineage, LINEAGE_ADVISORY_LOCK_KEY};
+pub use engine::{
+    adopt, enroll, ensure_table, live_postgres_identity, live_postgres_identity_via_control_plane,
+    live_postgres_identity_via_pg_pool, sqlite_pool_is_in_memory, verify, verify_via_control_plane,
+    verify_via_pg_pool, verify_via_sqlite_pool, AttestedLineage, LINEAGE_ADVISORY_LOCK_KEY,
+};
 pub use error::LineageError;
 pub use record::{
     DeploymentUuid, LineageAction, LineageRecord, LineageUuid, PgDatabaseIdentity, PgIdentity,
     PgSchemaIdentity, PgSystemIdentifier,
 };
 pub use registry::{
-    DatabaseLineageAttestor, DurableStore, LineageAttestor, LineageRegistry,
-    LineageRegistryBuilder, LineageRegistryEntry, LineageReport, LineageStatus, LineageTopology,
+    ControlPlaneLineageAttestor, DatabaseLineageAttestor, DurableStore, LineageAttestor,
+    LineageRegistry, LineageRegistryBuilder, LineageRegistryEntry, LineageReport, LineageStatus,
+    LineageTopology, SqlxLineageAttestor,
 };
 
 #[cfg(test)]

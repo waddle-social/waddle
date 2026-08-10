@@ -35,6 +35,7 @@ pub mod muc;
 pub mod ownership;
 pub mod parser;
 pub mod pending_delivery;
+pub mod postgres_identity;
 pub mod presence;
 pub mod prometheus;
 pub mod protocol;
@@ -60,6 +61,10 @@ pub use error::{
     generate_stream_error, stream_errors, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
 pub use parser::ns;
+pub use postgres_identity::{
+    ClusterColocationIdentities, PostgresBoundaryIdentity, PostgresDatabaseIdentity,
+    PostgresSchemaIdentity,
+};
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
 pub use types::*;
 pub use waddle_xmpp_core::{

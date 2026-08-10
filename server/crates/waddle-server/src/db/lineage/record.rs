@@ -108,6 +108,22 @@ pub struct PgIdentity {
     pub schema: PgSchemaIdentity,
 }
 
+impl From<&PgIdentity> for waddle_xmpp::PostgresBoundaryIdentity {
+    fn from(identity: &PgIdentity) -> Self {
+        Self {
+            system_identifier: identity.system_identifier.0,
+            database: waddle_xmpp::PostgresDatabaseIdentity {
+                oid: identity.database.oid,
+                name: identity.database.name.clone(),
+            },
+            schema: waddle_xmpp::PostgresSchemaIdentity {
+                oid: identity.schema.oid,
+                name: identity.schema.name.clone(),
+            },
+        }
+    }
+}
+
 /// The persisted `_lineage` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageRecord {

@@ -68,10 +68,7 @@ async fn clustering_refuses_portable_sm_persistence() {
         Ok(_) => panic!("cluster mode must never fall back to unfenced portable persistence"),
         Err(error) => error,
     };
-    assert!(matches!(
-        error,
-        SmPersistenceError::ClusterRequiresPostgres { .. }
-    ));
+    assert!(matches!(error, SmPersistenceError::ClusterRequiresPostgres));
 }
 
 #[tokio::test]

@@ -198,6 +198,42 @@ impl AppState {
         }
     }
 
+    pub fn register_lineage_probe(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        attestor: Arc<dyn crate::db::lineage::LineageAttestor>,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_probe(store, attestor);
+            }
+        }
+    }
+
+    pub fn register_lineage_control_plane(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        database: crate::db::Database,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_control_plane(store, database);
+            }
+        }
+    }
+
+    pub fn register_lineage_alias(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        of: crate::db::lineage::DurableStore,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_alias(store, of);
+            }
+        }
+    }
+
     pub fn register_lineage_ephemeral(&self, store: crate::db::lineage::DurableStore) {
         if let Ok(mut builder) = self.lineage_registry_builder.lock() {
             if let Some(builder) = builder.as_mut() {

@@ -1,7 +1,8 @@
 use crate::{
     config::LineageConfig,
-    db::{Database, DatabaseDriver, DatabaseError, Row, Transaction},
+    db::{ConnectionGuard, Database, DatabaseDriver, DatabaseError, Row, Rows, Transaction, Value},
 };
+use sqlx::{postgres::PgPool, sqlite::SqlitePool, Row as SqlxRow};
 
 use super::{
     sql::{
@@ -118,6 +119,135 @@ pub async fn verify(
     Ok(result)
 }
 
+/// Verify through the dedicated control-plane pool. The verification SQL and
+/// comparison logic are shared with [`verify`]; only the physical pool that
+/// supplies the connection differs.
+pub async fn verify_via_control_plane(
+    db: &Database,
+    config: &LineageConfig,
+) -> Result<AttestedLineage, DatabaseError> {
+    let mut guard = db.control_plane_guard().await?;
+    verify_via_query(&mut guard, db.driver(), config).await
+}
+
+/// Verify through a raw sqlx SQLite pool that owns the physical connection.
+pub async fn verify_via_sqlite_pool(
+    pool: &SqlitePool,
+    config: &LineageConfig,
+) -> Result<AttestedLineage, DatabaseError> {
+    let row = sqlx::query(READ_ROW_SQL)
+        .fetch_optional(pool)
+        .await
+        .map_err(DatabaseError::from)?;
+    let row = row.ok_or(LineageError::MissingRow)?;
+    let format: i64 = row.try_get(0).map_err(DatabaseError::from)?;
+    if format != LINEAGE_FORMAT {
+        return Err(LineageError::UnknownFormat { found: format }.into());
+    }
+    let lineage_uuid = row
+        .try_get::<String, _>(1)
+        .map_err(DatabaseError::from)?
+        .parse::<LineageUuid>()?;
+    let deployment_uuid = row
+        .try_get::<String, _>(2)
+        .map_err(DatabaseError::from)?
+        .parse::<DeploymentUuid>()?;
+    verify_deployment_uuid(
+        &LineageRecord {
+            format,
+            lineage_uuid,
+            deployment_uuid,
+            postgres_identity: None,
+        },
+        config,
+    )?;
+    Ok(AttestedLineage {
+        lineage_uuid,
+        deployment_uuid,
+        postgres_identity: None,
+    })
+}
+
+/// Verify through a raw sqlx Postgres pool that owns the physical connection.
+pub async fn verify_via_pg_pool(
+    pool: &PgPool,
+    config: &LineageConfig,
+) -> Result<AttestedLineage, DatabaseError> {
+    let row = sqlx::query(READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_postgres_identity_error)?;
+    let row = row.ok_or(LineageError::MissingRow)?;
+    let format: i64 = row.try_get(0).map_err(DatabaseError::from)?;
+    if format != LINEAGE_FORMAT {
+        return Err(LineageError::UnknownFormat { found: format }.into());
+    }
+    let lineage_uuid = row
+        .try_get::<String, _>(1)
+        .map_err(DatabaseError::from)?
+        .parse::<LineageUuid>()?;
+    let deployment_uuid = row
+        .try_get::<String, _>(2)
+        .map_err(DatabaseError::from)?
+        .parse::<DeploymentUuid>()?;
+    let persisted = postgres_identity_from_sqlx_row(&row, 3)?;
+    let live = postgres_identity_from_sqlx_row(&row, 8)?;
+    verify_deployment_uuid(
+        &LineageRecord {
+            format,
+            lineage_uuid,
+            deployment_uuid,
+            postgres_identity: Some(persisted.clone()),
+        },
+        config,
+    )?;
+    verify_postgres_identity(&persisted, &live)?;
+    Ok(AttestedLineage {
+        lineage_uuid,
+        deployment_uuid,
+        postgres_identity: Some(live),
+    })
+}
+
+/// Read the live PostgreSQL identity through a [`Database`] handle without
+/// consulting the persisted lineage row.
+pub async fn live_postgres_identity(db: &Database) -> Result<PgIdentity, DatabaseError> {
+    let mut tx = db.begin().await?;
+    let identity = read_live_postgres_identity(&mut tx, db.driver()).await?;
+    tx.commit().await?;
+    Ok(identity)
+}
+
+/// Read the live PostgreSQL identity through the dedicated control-plane pool.
+pub async fn live_postgres_identity_via_control_plane(
+    db: &Database,
+) -> Result<PgIdentity, DatabaseError> {
+    let mut guard = db.control_plane_guard().await?;
+    read_live_postgres_identity(&mut guard, db.driver()).await
+}
+
+/// Determine whether a raw SQLite pool is backed by SQLite's process-local
+/// in-memory store.
+pub async fn sqlite_pool_is_in_memory(pool: &SqlitePool) -> Result<bool, DatabaseError> {
+    let row = sqlx::query("PRAGMA database_list")
+        .fetch_one(pool)
+        .await
+        .map_err(DatabaseError::from)?;
+    let filename: String = row.try_get(2).map_err(DatabaseError::from)?;
+    Ok(matches!(filename.as_str(), "" | ":memory:"))
+}
+
+/// Read the live PostgreSQL identity through a raw sqlx Postgres pool.
+pub async fn live_postgres_identity_via_pg_pool(
+    pool: &PgPool,
+) -> Result<PgIdentity, DatabaseError> {
+    let row = sqlx::query(READ_POSTGRES_LIVE_IDENTITY_SQL)
+        .fetch_one(pool)
+        .await
+        .map_err(map_postgres_identity_error)?;
+    postgres_identity_from_sqlx_row(&row, 0)
+}
+
 async fn begin_locked(db: &Database) -> Result<Transaction<'_>, DatabaseError> {
     match db.driver() {
         DatabaseDriver::Postgres => {
@@ -184,20 +314,54 @@ async fn verify_in_transaction(
     driver: DatabaseDriver,
     config: &LineageConfig,
 ) -> Result<AttestedLineage, DatabaseError> {
+    verify_via_query(tx, driver, config).await
+}
+
+#[async_trait::async_trait]
+trait LineageQuery {
+    async fn lineage_query(&mut self, sql: &str, params: Vec<Value>)
+        -> Result<Rows, DatabaseError>;
+}
+
+#[async_trait::async_trait]
+impl LineageQuery for Transaction<'_> {
+    async fn lineage_query(
+        &mut self,
+        sql: &str,
+        params: Vec<Value>,
+    ) -> Result<Rows, DatabaseError> {
+        self.query(sql, params).await
+    }
+}
+
+#[async_trait::async_trait]
+impl LineageQuery for ConnectionGuard {
+    async fn lineage_query(
+        &mut self,
+        sql: &str,
+        params: Vec<Value>,
+    ) -> Result<Rows, DatabaseError> {
+        self.query(sql, params).await
+    }
+}
+
+async fn verify_via_query(
+    query: &mut impl LineageQuery,
+    driver: DatabaseDriver,
+    config: &LineageConfig,
+) -> Result<AttestedLineage, DatabaseError> {
     match driver {
         DatabaseDriver::Sqlite => {
-            let record = read_record(tx, driver)
+            let record = read_record(query, driver)
                 .await?
                 .ok_or(LineageError::MissingRow)?;
-            verify_deployment_uuid(&record, config)?;
-            Ok(AttestedLineage {
-                lineage_uuid: record.lineage_uuid,
-                deployment_uuid: record.deployment_uuid,
-                postgres_identity: None,
-            })
+            attested_sqlite_record(record, config)
         }
         DatabaseDriver::Postgres => {
-            let mut rows = match tx.query(READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL, ()).await {
+            let mut rows = match query
+                .lineage_query(READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL, Vec::new())
+                .await
+            {
                 Ok(rows) => rows,
                 Err(error) if is_system_identifier_permission_error(&error) => {
                     return Err(LineageError::SystemIdentifierUnavailable.into());
@@ -206,22 +370,70 @@ async fn verify_in_transaction(
             };
             let row = rows.next().await?.ok_or(LineageError::MissingRow)?;
             let record = record_from_row(&row, driver)?;
-            verify_deployment_uuid(&record, config)?;
             let live = postgres_identity_from_row(&row, 8)?;
-            let persisted =
-                record
-                    .postgres_identity
-                    .ok_or_else(|| LineageError::MalformedTable {
-                        detail: "PostgreSQL lineage row has NULL identity fields".to_string(),
-                    })?;
-            verify_postgres_identity(&persisted, &live)?;
-            Ok(AttestedLineage {
-                lineage_uuid: record.lineage_uuid,
-                deployment_uuid: record.deployment_uuid,
-                postgres_identity: Some(live),
-            })
+            attested_postgres_record(record, live, config)
         }
     }
+}
+
+fn attested_sqlite_record(
+    record: LineageRecord,
+    config: &LineageConfig,
+) -> Result<AttestedLineage, DatabaseError> {
+    verify_deployment_uuid(&record, config)?;
+    Ok(AttestedLineage {
+        lineage_uuid: record.lineage_uuid,
+        deployment_uuid: record.deployment_uuid,
+        postgres_identity: None,
+    })
+}
+
+fn attested_postgres_record(
+    record: LineageRecord,
+    live: PgIdentity,
+    config: &LineageConfig,
+) -> Result<AttestedLineage, DatabaseError> {
+    verify_deployment_uuid(&record, config)?;
+    let persisted = record
+        .postgres_identity
+        .ok_or_else(|| LineageError::MalformedTable {
+            detail: "PostgreSQL lineage row has NULL identity fields".to_string(),
+        })?;
+    verify_postgres_identity(&persisted, &live)?;
+    Ok(AttestedLineage {
+        lineage_uuid: record.lineage_uuid,
+        deployment_uuid: record.deployment_uuid,
+        postgres_identity: Some(live),
+    })
+}
+
+async fn read_live_postgres_identity(
+    query: &mut impl LineageQuery,
+    driver: DatabaseDriver,
+) -> Result<PgIdentity, DatabaseError> {
+    if driver != DatabaseDriver::Postgres {
+        return Err(LineageError::MalformedTable {
+            detail: "PostgreSQL live identity requested for a non-Postgres database".to_string(),
+        }
+        .into());
+    }
+    let mut rows = match query
+        .lineage_query(READ_POSTGRES_LIVE_IDENTITY_SQL, Vec::new())
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) if is_system_identifier_permission_error(&error) => {
+            return Err(LineageError::SystemIdentifierUnavailable.into());
+        }
+        Err(error) => return Err(error),
+    };
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LineageError::MalformedTable {
+            detail: "PostgreSQL live identity query returned no row".to_string(),
+        })?;
+    postgres_identity_from_row(&row, 0)
 }
 
 fn verify_deployment_uuid(
@@ -269,10 +481,10 @@ fn required_deployment_uuid(config: &LineageConfig) -> Result<DeploymentUuid, Da
 }
 
 async fn read_record(
-    tx: &mut Transaction<'_>,
+    query: &mut impl LineageQuery,
     driver: DatabaseDriver,
 ) -> Result<Option<LineageRecord>, DatabaseError> {
-    let mut rows = tx.query(READ_ROW_SQL, ()).await?;
+    let mut rows = query.lineage_query(READ_ROW_SQL, Vec::new()).await?;
     match rows.next().await? {
         Some(row) => Ok(Some(record_from_row(&row, driver)?)),
         None => Ok(None),
@@ -352,6 +564,48 @@ fn parse_oid(value: &str, field: &'static str) -> Result<u32, DatabaseError> {
     })
 }
 
+fn postgres_identity_from_sqlx_row(
+    row: &sqlx::postgres::PgRow,
+    offset: usize,
+) -> Result<PgIdentity, DatabaseError> {
+    let system_identifier = row
+        .try_get::<String, _>(offset)
+        .map_err(map_postgres_identity_error)?;
+    let database_oid = row
+        .try_get::<String, _>(offset + 1)
+        .map_err(map_postgres_identity_error)?;
+    let database_name = row
+        .try_get::<String, _>(offset + 2)
+        .map_err(map_postgres_identity_error)?;
+    let schema_oid = row
+        .try_get::<String, _>(offset + 3)
+        .map_err(map_postgres_identity_error)?;
+    let schema_name = row
+        .try_get::<String, _>(offset + 4)
+        .map_err(map_postgres_identity_error)?;
+
+    Ok(PgIdentity {
+        system_identifier: system_identifier.parse()?,
+        database: PgDatabaseIdentity {
+            oid: parse_oid(&database_oid, "pg_database_oid")?,
+            name: database_name,
+        },
+        schema: PgSchemaIdentity {
+            oid: parse_oid(&schema_oid, "pg_schema_oid")?,
+            name: schema_name,
+        },
+    })
+}
+
+fn map_postgres_identity_error(error: sqlx::Error) -> DatabaseError {
+    let db_error = DatabaseError::from(error);
+    if is_system_identifier_permission_error(&db_error) {
+        LineageError::SystemIdentifierUnavailable.into()
+    } else {
+        db_error
+    }
+}
+
 async fn read_live_identity(
     tx: &mut Transaction<'_>,
     driver: DatabaseDriver,
@@ -359,20 +613,7 @@ async fn read_live_identity(
     if driver == DatabaseDriver::Sqlite {
         return Ok(None);
     }
-    let mut rows = match tx.query(READ_POSTGRES_LIVE_IDENTITY_SQL, ()).await {
-        Ok(rows) => rows,
-        Err(error) if is_system_identifier_permission_error(&error) => {
-            return Err(LineageError::SystemIdentifierUnavailable.into());
-        }
-        Err(error) => return Err(error),
-    };
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LineageError::MalformedTable {
-            detail: "PostgreSQL live identity query returned no row".to_string(),
-        })?;
-    Ok(Some(postgres_identity_from_row(&row, 0)?))
+    Ok(Some(read_live_postgres_identity(tx, driver).await?))
 }
 
 async fn insert_record(
