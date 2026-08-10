@@ -206,31 +206,27 @@ pub async fn verify_via_sqlite_pool(
 }
 
 async fn ensure_single_row_pg(pool: &PgPool) -> Result<(), DatabaseError> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _lineage")
-        .fetch_one(pool)
-        .await
-        .map_err(DatabaseError::from)?;
-    if count > 1 {
-        return Err(LineageError::MalformedTable {
-            detail: format!("expected at most one lineage row, found {count}"),
-        }
-        .into());
-    }
-    Ok(())
+    let row = sqlx::query(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id <> 1 THEN 1 ELSE 0 END), 0) FROM _lineage",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(DatabaseError::from)?;
+    let count: i64 = row.try_get(0).map_err(DatabaseError::from)?;
+    let stray: i64 = row.try_get(1).map_err(DatabaseError::from)?;
+    ensure_singleton_shape(count, stray)
 }
 
 async fn ensure_single_row_sqlite(pool: &SqlitePool) -> Result<(), DatabaseError> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _lineage")
-        .fetch_one(pool)
-        .await
-        .map_err(DatabaseError::from)?;
-    if count > 1 {
-        return Err(LineageError::MalformedTable {
-            detail: format!("expected at most one lineage row, found {count}"),
-        }
-        .into());
-    }
-    Ok(())
+    let row = sqlx::query(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id <> 1 THEN 1 ELSE 0 END), 0) FROM _lineage",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(DatabaseError::from)?;
+    let count: i64 = row.try_get(0).map_err(DatabaseError::from)?;
+    let stray: i64 = row.try_get(1).map_err(DatabaseError::from)?;
+    ensure_singleton_shape(count, stray)
 }
 
 /// Verify through a raw sqlx Postgres pool that owns the physical connection.
@@ -418,11 +414,16 @@ impl LineageQuery for ConnectionGuard {
 }
 
 /// A `_lineage` table that predates this binary (no PK / no `CHECK (id = 1)`)
-/// could hold several rows; attesting "whichever row comes back first" would
-/// be unsound, so more than one row is a typed malformed-table refusal.
+/// could hold several rows, or a single row whose id is not 1 — the
+/// `WHERE id = 1` reads would miss the latter and enrollment would then
+/// write a SECOND row into a table already deemed singleton. Both shapes
+/// are typed malformed-table refusals.
 async fn ensure_single_row(query: &mut impl LineageQuery) -> Result<(), DatabaseError> {
     let mut rows = query
-        .lineage_query("SELECT COUNT(*) FROM _lineage", Vec::new())
+        .lineage_query(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id <> 1 THEN 1 ELSE 0 END), 0) FROM _lineage",
+            Vec::new(),
+        )
         .await?;
     let row = rows
         .next()
@@ -431,9 +432,20 @@ async fn ensure_single_row(query: &mut impl LineageQuery) -> Result<(), Database
             detail: "lineage row count query returned no row".to_string(),
         })?;
     let count: i64 = row.get(0)?;
+    let stray: i64 = row.get(1)?;
+    ensure_singleton_shape(count, stray)
+}
+
+fn ensure_singleton_shape(count: i64, stray: i64) -> Result<(), DatabaseError> {
     if count > 1 {
         return Err(LineageError::MalformedTable {
             detail: format!("expected at most one lineage row, found {count}"),
+        }
+        .into());
+    }
+    if stray > 0 {
+        return Err(LineageError::MalformedTable {
+            detail: "lineage row exists with id != 1".to_string(),
         }
         .into());
     }
@@ -629,11 +641,11 @@ fn postgres_identity_from_row(row: &Row, offset: usize) -> Result<PgIdentity, Da
         system_identifier: system_identifier.parse()?,
         database: PgDatabaseIdentity {
             oid: parse_oid(&database_oid, "pg_database_oid")?,
-            name: database_name,
+            name: super::PgDatabaseName(database_name),
         },
         schema: PgSchemaIdentity {
             oid: parse_oid(&schema_oid, "pg_schema_oid")?,
-            name: schema_name,
+            name: super::PgSchemaName(schema_name),
         },
     })
 }
@@ -684,11 +696,11 @@ fn postgres_identity_from_sqlx_row(
         system_identifier: system_identifier.parse()?,
         database: PgDatabaseIdentity {
             oid: parse_oid(&database_oid, "pg_database_oid")?,
-            name: database_name,
+            name: super::PgDatabaseName(database_name),
         },
         schema: PgSchemaIdentity {
             oid: parse_oid(&schema_oid, "pg_schema_oid")?,
-            name: schema_name,
+            name: super::PgSchemaName(schema_name),
         },
     })
 }
@@ -750,9 +762,9 @@ fn record_values(record: &LineageRecord) -> Vec<crate::db::Value> {
         record.deployment_uuid.to_string(),
         identity.map(|value| value.system_identifier.to_string()),
         identity.map(|value| value.database.oid.to_string()),
-        identity.map(|value| value.database.name.clone()),
+        identity.map(|value| value.database.name.0.clone()),
         identity.map(|value| value.schema.oid.to_string()),
-        identity.map(|value| value.schema.name.clone()),
+        identity.map(|value| value.schema.name.0.clone()),
     ]
 }
 

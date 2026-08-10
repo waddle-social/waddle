@@ -845,3 +845,44 @@ async fn adopt_list_rotates_each_matching_boundary() {
     assert_ne!(rotated_b.lineage_uuid, enrolled_b.lineage_uuid);
     assert_ne!(rotated_a.lineage_uuid, rotated_b.lineage_uuid);
 }
+
+#[tokio::test]
+async fn sqlite_rejects_single_row_with_wrong_id() {
+    let db = Database::in_memory("lineage-wrong-id-row")
+        .await
+        .expect("open sqlite database");
+    db.execute(
+        "CREATE TABLE _lineage (id INTEGER, format INTEGER NOT NULL, lineage_uuid TEXT NOT NULL, \
+         deployment_uuid TEXT NOT NULL, pg_system_identifier TEXT, pg_database_oid TEXT, \
+         pg_database_name TEXT, pg_schema_oid TEXT, pg_schema_name TEXT, \
+         stamped_at TEXT NOT NULL DEFAULT (datetime('now')))",
+    )
+    .await
+    .expect("create constraint-free lineage table");
+    db.execute(
+        "INSERT INTO _lineage (id, format, lineage_uuid, deployment_uuid) \
+         VALUES (7, 1, '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001', \
+         '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001')",
+    )
+    .await
+    .expect("insert row with wrong id");
+
+    // Both verify AND enroll must refuse: an enroll that missed this row via
+    // `WHERE id = 1` would write a second row into a "singleton" table.
+    assert!(matches!(
+        lineage_error(
+            verify(&db, &configured())
+                .await
+                .expect_err("verify refuses")
+        ),
+        LineageError::MalformedTable { .. }
+    ));
+    assert!(matches!(
+        lineage_error(
+            enroll(&db, &configured())
+                .await
+                .expect_err("enroll refuses")
+        ),
+        LineageError::MalformedTable { .. }
+    ));
+}

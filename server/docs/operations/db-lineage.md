@@ -87,8 +87,11 @@ probe failure.
 
 ## PostgreSQL permission prerequisite
 
-If the role cannot execute `pg_control_system()`, readiness reports
-`system_identifier_unavailable`. Grant:
+If the role cannot execute `pg_control_system()`, dedicated store pools
+report `system_identifier_unavailable` at readiness. For the GLOBAL pool
+the same denial is caught by the pre-migration guard instead: the pod
+refuses to start (CrashLoopBackOff) and the typed error appears in its
+logs, since the check runs before the HTTP listener exists. Grant:
 
 ```sql
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO <app role>;

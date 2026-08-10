@@ -91,18 +91,39 @@ impl FromStr for PgSystemIdentifier {
     }
 }
 
+/// A PostgreSQL database name, typed so identity values cannot be confused
+/// with arbitrary strings at storage and error boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PgDatabaseName(pub String);
+
+impl fmt::Display for PgDatabaseName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// A PostgreSQL schema (namespace) name, typed like [`PgDatabaseName`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PgSchemaName(pub String);
+
+impl fmt::Display for PgSchemaName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// PostgreSQL database OID and name, captured as one indivisible identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgDatabaseIdentity {
     pub oid: u32,
-    pub name: String,
+    pub name: PgDatabaseName,
 }
 
 /// PostgreSQL schema OID and name, captured as one indivisible identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgSchemaIdentity {
     pub oid: u32,
-    pub name: String,
+    pub name: PgSchemaName,
 }
 
 /// The complete PostgreSQL identity of a durable schema boundary.
@@ -119,11 +140,11 @@ impl From<&PgIdentity> for waddle_xmpp::PostgresBoundaryIdentity {
             system_identifier: identity.system_identifier.0,
             database: waddle_xmpp::PostgresDatabaseIdentity {
                 oid: identity.database.oid,
-                name: identity.database.name.clone(),
+                name: waddle_xmpp::PostgresDatabaseName(identity.database.name.0.clone()),
             },
             schema: waddle_xmpp::PostgresSchemaIdentity {
                 oid: identity.schema.oid,
-                name: identity.schema.name.clone(),
+                name: waddle_xmpp::PostgresSchemaName(identity.schema.name.0.clone()),
             },
         }
     }

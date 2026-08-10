@@ -16,8 +16,8 @@ pub use engine::{
 };
 pub use error::LineageError;
 pub use record::{
-    DeploymentUuid, LineageAction, LineageRecord, LineageUuid, PgDatabaseIdentity, PgIdentity,
-    PgSchemaIdentity, PgSystemIdentifier,
+    DeploymentUuid, LineageAction, LineageRecord, LineageUuid, PgDatabaseIdentity, PgDatabaseName,
+    PgIdentity, PgSchemaIdentity, PgSchemaName, PgSystemIdentifier,
 };
 pub use registry::{
     ControlPlaneLineageAttestor, DatabaseLineageAttestor, DurableStore, LineageAttestor,

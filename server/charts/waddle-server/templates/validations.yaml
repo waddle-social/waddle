@@ -60,6 +60,9 @@
 
 {{- $lineageAction := trim (toString .Values.deployment.lineageAction) -}}
 {{- if ne $lineageAction "" -}}
+{{- if eq $deploymentUuid "" -}}
+{{- fail "deployment.lineageAction requires deployment.uuid: enroll/adopt bind the configured deployment UUID, and the server refuses the action without one" -}}
+{{- end -}}
 {{- if ne $lineageAction "enroll" -}}
 {{- if not (hasPrefix "adopt=" $lineageAction) -}}
 {{- fail "deployment.lineageAction must be \"enroll\" or \"adopt=<uuid>[,<uuid>...]\"; a typo here would crash-loop the fleet at startup" -}}

@@ -63,7 +63,7 @@ pub use error::{
 pub use parser::ns;
 pub use postgres_identity::{
     ClusterColocationIdentities, PostgresBoundaryIdentity, PostgresDatabaseIdentity,
-    PostgresSchemaIdentity,
+    PostgresDatabaseName, PostgresSchemaIdentity, PostgresSchemaName,
 };
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
 pub use types::*;

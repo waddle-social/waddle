@@ -579,6 +579,14 @@ schema.#Project & {
 					  echo "chart template must explain malformed deployment.lineageAction values" >&2
 					  exit 1
 					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string deployment.lineageAction=enroll \
+					  "${chart_secret_args[@]}" >/dev/null 2>&1; then
+					  echo "chart template must reject a lineage action without deployment.uuid (the server exits without one)" >&2
+					  exit 1
+					fi
 
 					helm lint charts/waddle-server --set spicedb.enabled=false "${chart_secret_args[@]}"
 					helm template waddle-server charts/waddle-server \

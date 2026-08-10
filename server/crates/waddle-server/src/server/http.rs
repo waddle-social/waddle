@@ -1029,11 +1029,19 @@ fn promote_to_serving_and_spawn_janitors(
         .node_lifecycle
         .finish_startup()
     {
+        // A fence/drain/failure won the race during slow startup: preserve
+        // the non-serving state, but STILL start the janitor fleet. The
+        // janitors are fence-aware (they run through runtime fences and
+        // drains in steady state), and clustering's later lease-recovery
+        // `serve()` re-admits clients without re-running this function — a
+        // node recovered that way must not serve janitor-less forever.
+        // Lineage attestation already passed (the only caller gates on it),
+        // so the fail-closed no-janitors state applies solely to unattested
+        // nodes.
         warn!(
             ?admission,
-            "promotion attempted after node admission left Starting; preserving non-serving state and starting no janitors"
+            "promotion attempted after node admission left Starting; preserving non-serving state"
         );
-        return;
     }
     spawn_sm_expiry_janitor(websocket_state);
     spawn_orphan_reaper_janitor(websocket_state, orphan_reaper_interval);
