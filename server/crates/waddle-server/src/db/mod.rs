@@ -434,11 +434,17 @@ pub(crate) fn sqlite_url_is_in_memory(database_url: &str) -> bool {
                 .to_ascii_lowercase();
             filename == ":memory:"
                 || filename == "file::memory:"
-                // sqlx names shared in-memory databases `sqlx-in-memory-<n>`
-                // with no directory component; a durable file that merely
-                // CONTAINS the marker (`/var/lib/.../sqlx-in-memory-x.db`)
+                // sqlx names shared in-memory databases exactly
+                // `sqlx-in-memory-<digits>` with no directory component; a
+                // durable file that merely resembles the marker
+                // (`sqlx-in-memory-prod.db`, `/var/.../sqlx-in-memory-x`)
                 // must stay durable.
-                || (filename.starts_with("sqlx-in-memory-") && !filename.contains('/'))
+                || (!filename.contains('/')
+                    && filename
+                        .strip_prefix("sqlx-in-memory-")
+                        .is_some_and(|rest| {
+                            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                        }))
         })
         .unwrap_or(false)
 }

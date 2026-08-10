@@ -310,10 +310,18 @@ async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageSta
     // sessions and direct upgrades stop writing through the wrong database.
     // Transport-only failures never latch (sticky-success already absorbs
     // them on proven boundaries).
+    // Keyed on "startup attested" rather than "currently Serving": a lease
+    // self-fence can win the race mid-probe, and a definitive mismatch
+    // observed on a fenced-recovering (or draining) node must still latch —
+    // otherwise recovery would re-serve against the drifted database until
+    // the next probe.
     if !report.is_attested()
         && !report.is_transient_only()
-        && state.node_lifecycle.is_ready()
         && !state.node_lifecycle.startup_blocked()
+        && state
+            .lineage_startup
+            .get()
+            .is_some_and(LineageReport::is_attested)
     {
         for (store, status) in report.failures() {
             tracing::error!(
@@ -815,6 +823,9 @@ mod readiness_generation_tests {
             Arc::new(DatabaseLineageAttestor::new(db)),
         );
         let _ = state.lineage_registry.set(registry.seal());
+        // Production invariant the latch keys on: a serving node's startup
+        // attestation passed.
+        let _ = state.lineage_startup.set(LineageReport::default());
         assert!(state.node_lifecycle.is_ready());
 
         let response = readiness_handler(State(Arc::clone(&state)))
