@@ -5,6 +5,7 @@
 pub mod actor;
 mod backend;
 pub mod blocking;
+pub mod lineage;
 mod migrations;
 mod pool;
 pub mod roster;
@@ -49,6 +50,11 @@ pub enum DatabaseError {
     /// violation, rather than an environmental database failure.
     #[error(transparent)]
     MigrationLedger(#[from] migrations::MigrationLedgerError),
+
+    /// Fail-closed readiness refusal for a database whose durable lineage
+    /// attestation is missing, malformed, or does not describe this database.
+    #[error(transparent)]
+    Lineage(#[from] lineage::LineageError),
 
     /// A migration statement batch (or its ledger record insert) failed while
     /// applying. Carries which migration so a crash-looping pod's log names it.
