@@ -341,9 +341,9 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     spawn_critical_registry_supervisor(&websocket_state).await;
     // The startup attestation ran in `create_websocket_state`, before any
     // data-mutating bootstrap. A definitive failure latched the lifecycle
-    // there (permanent, restart to recover); a transient-only failure did
-    // NOT latch — this node self-heals by re-attesting in the background and
-    // promoting once the database is reachable again.
+    // there (permanent, alive-unready; restart to recover); a transient-only
+    // failure already failed startup outright, so reaching this point
+    // unattested means the latched case.
     if lineage_attested {
         promote_to_serving_and_spawn_janitors(
             &websocket_state,
@@ -1012,8 +1012,8 @@ async fn create_websocket_state(
 }
 
 /// Startup-only promotion plus the janitor fleet. Called exactly once per
-/// process — either directly when startup attestation passed, or from the
-/// transient self-heal task on its first clean re-attestation.
+/// process, when startup attestation passed. Returns without spawning
+/// anything if a fence/drain/failure won the race to leave `Starting`.
 fn promote_to_serving_and_spawn_janitors(
     websocket_state: &Arc<WebSocketState>,
     orphan_reaper_interval: std::time::Duration,

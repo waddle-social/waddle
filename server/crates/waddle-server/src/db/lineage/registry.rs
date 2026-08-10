@@ -377,8 +377,9 @@ fn status_for_error(error: &DatabaseError) -> LineageStatus {
 
 /// Whitelist of errors that mean "the database was unreachable", as opposed
 /// to "the database answered something disqualifying". Only these are
-/// eligible for sticky-success and for the transient startup retry/self-heal
-/// path; everything else is definitive.
+/// eligible for sticky-success at readiness and for the bounded startup
+/// retry (after which a transient-only failure exits the process so the
+/// restart reruns a full bootstrap); everything else is definitive.
 fn is_transport_error(error: &DatabaseError) -> bool {
     match error {
         DatabaseError::ConnectionFailed(_) => true,
@@ -431,7 +432,8 @@ impl LineageReport {
 
     /// True when every failure is transport-class (unreachable database /
     /// deadline), i.e. nothing definitive disqualified a boundary. The
-    /// startup gate self-heals this class instead of latching.
+    /// startup gate exits the process for this class (restart reruns a full
+    /// bootstrap) instead of latching the alive-unready state.
     pub fn is_transient_only(&self) -> bool {
         !self.failures.is_empty()
             && self.failures.iter().all(|(_, status)| {

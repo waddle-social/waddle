@@ -42,10 +42,14 @@ Use this when a deployment first points at a durable database:
    restore the normal replica count before reopening traffic.
 
 When rolling out the lineage-aware binary to an existing installation, do
-steps 2 and 4 in the SAME `helm upgrade` that carries the image bump: a
-lineage-aware pod against an un-enrolled database stays alive but
-permanently unready (it never promotes to serving and starts no background
-janitors) until enrollment happens and the pod restarts. Enrollment is
+steps 2 and 4 in the SAME `helm upgrade` that carries the image bump.
+Single-node: a lineage-aware pod against an un-enrolled database stays
+alive but permanently unready (it never promotes to serving and starts no
+background janitors) until enrollment happens and the pod restarts.
+Clustered: `enroll` on that rollout is a HARD precondition — a clustered
+pod refuses to start at all against a database with no lineage row (it
+would otherwise write lease/registration rows before attestation), so
+omitting the action produces `CrashLoopBackOff`, not a 503. Enrollment is
 idempotent, so applying `enroll` to every replica of that one rollout is
 safe.
 
@@ -121,8 +125,9 @@ missing/incorrect `WADDLE_DEPLOYMENT_UUID`) exits at startup without
 writing anything — including the append-only migration ledger — and the
 log names the refusal. This surfaces as `CrashLoopBackOff` rather than a
 not-ready pod; fix the DSN/UUID (or perform adoption) and roll. A database
-with NO lineage row proceeds un-enrolled and is instead held not-ready by
-the readiness gate.
+with NO lineage row proceeds un-enrolled on single-node deployments (held
+not-ready by the readiness gate instead); a CLUSTERED deployment refuses a
+row-less database outright unless the rollout carries the `enroll` action.
 
 A database that is simply UNREACHABLE during startup attestation also fails
 startup (after a short bounded retry): the restart backoff is the retry

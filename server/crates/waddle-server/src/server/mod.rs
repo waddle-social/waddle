@@ -418,8 +418,19 @@ pub async fn start_with_config(
             info!("HTTP server stopped (graceful drain complete)");
             Ok(())
         }
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
+        Ok(Err(e)) => {
+            // Startup failed (e.g. the lineage attestation gate exiting on
+            // an unreachable database) rather than a signal firing: cancel
+            // the stop token so the clustering drain below returns
+            // immediately instead of burning its full budget and logging a
+            // spurious drain-timeout on every crash-looping boot.
+            stop_token.cancel();
+            Err(e)
+        }
+        Err(e) => {
+            stop_token.cancel();
+            Err(anyhow::anyhow!("HTTP server task failed: {}", e))
+        }
     };
     // ADR-0017 Phase 3 Slice 10: the clustering node-lease loop runs its
     // own per-entity graceful drain (mark draining, seal + batch-release
