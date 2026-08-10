@@ -217,10 +217,24 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
+        // Both index creations are catalog-guarded rather than
+        // `CREATE INDEX IF NOT EXISTS`: non-concurrent CREATE INDEX takes
+        // SHARE on the target table BEFORE evaluating IF NOT EXISTS and, in
+        // the already-exists case, retains it to end of transaction — which,
+        // now that this bootstrap is one advisory-locked transaction, would
+        // block every fenced affiliation write cluster-wide (SHARE conflicts
+        // with ROW EXCLUSIVE) on every steady-state pod start, with no
+        // lock_timeout. `to_regclass` resolves via search_path without
+        // touching the relation, so the steady state stays lock-free.
         tx.execute(
             r#"
-            CREATE INDEX IF NOT EXISTS clustering_muc_room_affiliations_room_jid_idx
-                ON clustering_muc_room_affiliations (room_jid)
+            DO $$
+            BEGIN
+                IF to_regclass('clustering_muc_room_affiliations_room_jid_idx') IS NULL THEN
+                    CREATE INDEX clustering_muc_room_affiliations_room_jid_idx
+                        ON clustering_muc_room_affiliations (room_jid);
+                END IF;
+            END $$
             "#,
             (),
         )
@@ -241,8 +255,13 @@ impl PostgresMucRoomStore {
         .await?;
         tx.execute(
             r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS clustering_muc_room_lifecycles_live_room_idx
-                ON clustering_muc_room_lifecycles (room_jid) WHERE state IN ('active','dormant')
+            DO $$
+            BEGIN
+                IF to_regclass('clustering_muc_room_lifecycles_live_room_idx') IS NULL THEN
+                    CREATE UNIQUE INDEX clustering_muc_room_lifecycles_live_room_idx
+                        ON clustering_muc_room_lifecycles (room_jid) WHERE state IN ('active','dormant');
+                END IF;
+            END $$
             "#,
             (),
         )
@@ -253,19 +272,20 @@ impl PostgresMucRoomStore {
         // cluster-wide room read and write behind each pod start — held for
         // the rest of this transaction, with no lock_timeout, while the
         // advisory lock above additionally serializes every other starting
-        // pod behind the wait. The steady-state (columns already exist) must
-        // take no relation lock at all; only the one bootstrap that actually
-        // adds a column pays for it.
+        // pod behind the wait. The pg_attribute probe takes no lock on the
+        // table (and, unlike information_schema.columns, is not filtered by
+        // column privileges); only the one bootstrap that actually adds a
+        // column pays for the relation lock.
         tx.execute(
             r#"
             DO $$
             BEGIN
                 IF NOT EXISTS (
                     SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND table_name = 'clustering_muc_rooms'
-                      AND column_name = 'lifecycle_id'
+                    FROM pg_attribute
+                    WHERE attrelid = 'clustering_muc_rooms'::regclass
+                      AND attname = 'lifecycle_id'
+                      AND NOT attisdropped
                 ) THEN
                     ALTER TABLE clustering_muc_rooms ADD COLUMN lifecycle_id TEXT;
                 END IF;
@@ -280,10 +300,10 @@ impl PostgresMucRoomStore {
             BEGIN
                 IF NOT EXISTS (
                     SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND table_name = 'clustering_muc_rooms'
-                      AND column_name = 'revision'
+                    FROM pg_attribute
+                    WHERE attrelid = 'clustering_muc_rooms'::regclass
+                      AND attname = 'revision'
+                      AND NOT attisdropped
                 ) THEN
                     ALTER TABLE clustering_muc_rooms ADD COLUMN revision BIGINT;
                 END IF;
