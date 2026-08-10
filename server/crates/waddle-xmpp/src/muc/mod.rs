@@ -31,7 +31,11 @@ pub use admin::{
     is_role_change_query, parse_admin_query, AdminItem, AdminQuery, AffiliationChangeResult,
     KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
 };
-pub use durable::{DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext};
+pub use durable::{
+    DurableRoomState, EphemeralProjectionAuthorization, MucDurableFuture, MucDurableStore,
+    RoomClaimFenceContext, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId,
+    RoomLifecycleState, RoomMutationCommit, RoomRevision,
+};
 pub use messages::{
     build_config_change_message, config_change_status_codes, create_broadcast_message,
     is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucConfigStatusCode, MucMessage,
