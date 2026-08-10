@@ -14,6 +14,12 @@ impl LineageUuid {
     }
 }
 
+impl Default for LineageUuid {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl fmt::Display for LineageUuid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
