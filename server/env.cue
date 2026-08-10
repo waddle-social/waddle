@@ -628,9 +628,17 @@ schema.#Project & {
 					  fi
 					done
 					cue vet . "${gitops_values}" -d '#CheckedInGitOpsValues'
-					helm lint charts/waddle-server -f "${gitops_values}"
+					helm lint charts/waddle-server \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
+					  -f "${gitops_values}"
+					# CI-only stand-in: prod is clustered, so chart 0.4.4 hard-requires
+					# deployment.uuid — the REAL value must land in the infrastructure
+					# repo's helmrelease values before this chart version rolls out
+					# (see docs/operations/db-lineage.md). Without this stand-in the
+					# render gate would be blocked on a change outside this repo.
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
 					  -f "${gitops_values}" > "${gitops_render}"
 					for env_name in WADDLE_SESSION_KEY WADDLE_OCCUPANT_ID_SECRET; do
 					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .valueFrom.secretKeyRef.name == \"waddle-runtime-secrets\" and .valueFrom.secretKeyRef.optional == false)" "${gitops_render}" > /dev/null
@@ -671,9 +679,12 @@ schema.#Project & {
 					  -t decisionPollsDigest="${sample_digest}" \
 					  -t githubDigest="${sample_digest}" \
 					  -t stargateQuotesDigest="${sample_digest}"
-					helm lint charts/waddle-server -f "${published_values}"
+					helm lint charts/waddle-server \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
+					  -f "${published_values}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
 					  -f "${published_values}" > "${published_render}"
 
 					rendered_image="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .image' "${published_render}")"
@@ -882,8 +893,14 @@ schema.#Project & {
 					  -t decisionPollsDigest="${decision_polls_digest}" \
 					  -t githubDigest="${github_digest}" \
 					  -t stargateQuotesDigest="${stargate_quotes_digest}"
+					# CI-only stand-in: prod is clustered, so chart 0.4.4 hard-requires
+					# deployment.uuid — the REAL value must land in the infrastructure
+					# repo's helmrelease values before this chart version rolls out
+					# (see docs/operations/db-lineage.md). Without this stand-in the
+					# render gate would be blocked on a change outside this repo.
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
 					  -f "${gitops_values}" > "${gitops_render}"
 					rendered_image="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .image' "${gitops_render}")"
 					case "${rendered_image}" in

@@ -302,16 +302,15 @@ pub async fn start_with_config(
     if let Some(matched) = global_adopt_matched {
         state.note_lineage_adopt_match(matched);
     }
-    bootstrap_store_lineage(
+    // The global store follows the same ephemeral classification as every
+    // other boundary: an in-memory SQLite global (bare dev runs, the WS
+    // integration harness) is non-durable and exempt from attestation.
+    bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Global,
         db_pool.global().clone(),
     )
     .await?;
-    state.register_lineage_database(
-        crate::db::lineage::DurableStore::Global,
-        db_pool.global().clone(),
-    );
     if db_pool.global().has_control_plane_pool() {
         state.register_lineage_control_plane(
             crate::db::lineage::DurableStore::ControlPlane,
