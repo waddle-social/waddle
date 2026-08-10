@@ -170,22 +170,7 @@ fn lifecycle_not_ready_response(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let admission = lifecycle.admission();
     warn!(?admission, %error, "Readiness check: node is not admitting clients");
-    let lineage_value = match lineage {
-        Ok(report) if report.is_attested() => serde_json::Value::String("attested".to_string()),
-        Ok(report) => serde_json::Value::Object(
-            report
-                .failures()
-                .iter()
-                .map(|(store, status)| {
-                    (
-                        store.to_string(),
-                        serde_json::Value::String(status.as_str().to_string()),
-                    )
-                })
-                .collect(),
-        ),
-        Err(status) => json!({ "status": status.as_str() }),
-    };
+    let lineage_value = lineage_json(lineage);
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
@@ -221,9 +206,15 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
     };
     match health_for_serving_generation(&state.node_lifecycle, readiness).await {
         Err(error) => {
-            let lineage = tokio::time::timeout(LINEAGE_PROBE_TIMEOUT, lineage_readiness(&state))
-                .await
-                .unwrap_or(Err(LineageStatus::ProbeTimeout));
+            // A not-Serving node reports the STORED startup attestation
+            // outcome instead of probing again: it is free, cannot double
+            // the request's deadline, and is exactly the diagnostic the
+            // operator needs (why the node never promoted).
+            let lineage = state
+                .lineage_startup
+                .get()
+                .cloned()
+                .ok_or(LineageStatus::Initializing);
             lifecycle_not_ready_response(&state.node_lifecycle, &error, lineage)
         }
         Ok(Err(_)) => {
@@ -298,16 +289,9 @@ async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageSta
     let Some(registry) = state.lineage_registry.get() else {
         return Err(LineageStatus::Initializing);
     };
-    let report = registry
+    Ok(registry
         .attest(&state.lineage_config, state.clustering_enabled)
-        .await;
-    // While `adopt=` names an entry that matched no boundary, the node stays
-    // typed-unready even though every row verifies — otherwise readiness
-    // would claim "attested" on a node the startup gate refused to promote.
-    Ok(match state.lineage_adopt_unmatched() {
-        Some(unmatched) => report.merged(unmatched),
-        None => report,
-    })
+        .await)
 }
 
 fn lineage_json(lineage: Result<LineageReport, LineageStatus>) -> serde_json::Value {

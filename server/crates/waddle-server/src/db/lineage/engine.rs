@@ -47,6 +47,7 @@ pub async fn enroll(
     let driver = db.driver();
     let mut tx = begin_locked(db).await?;
     ensure_table_in_transaction(&mut tx, driver).await?;
+    ensure_single_row(&mut tx).await?;
 
     let result = match read_record(&mut tx, driver).await? {
         Some(_) => verify_in_transaction(&mut tx, driver, config).await?,
@@ -73,44 +74,6 @@ pub async fn enroll(
 
     tx.commit().await?;
     Ok(result)
-}
-
-/// Rotate an existing lineage record after an operator-verified clone or restore.
-pub async fn adopt(
-    db: &Database,
-    config: &LineageConfig,
-    expected: LineageUuid,
-) -> Result<AttestedLineage, DatabaseError> {
-    let deployment_uuid = required_deployment_uuid(config)?;
-    let driver = db.driver();
-    let mut tx = begin_locked(db).await?;
-    ensure_table_in_transaction(&mut tx, driver).await?;
-
-    let record = read_record(&mut tx, driver).await?;
-    let found = record.as_ref().map(|row| row.lineage_uuid);
-    if found != Some(expected) {
-        return Err(LineageError::AdoptExpectationFailed { expected, found }.into());
-    }
-
-    let lineage_uuid = LineageUuid::new();
-    let postgres_identity = read_live_identity(&mut tx, driver).await?;
-    update_record(
-        &mut tx,
-        LineageRecord {
-            format: LINEAGE_FORMAT,
-            lineage_uuid,
-            deployment_uuid,
-            postgres_identity: postgres_identity.clone(),
-        },
-    )
-    .await?;
-    tx.commit().await?;
-
-    Ok(AttestedLineage {
-        lineage_uuid,
-        deployment_uuid,
-        postgres_identity,
-    })
 }
 
 /// Outcome of [`adopt_if_matched`] for one durable boundary.
@@ -144,6 +107,7 @@ pub async fn adopt_if_matched(
     let driver = db.driver();
     let mut tx = begin_locked(db).await?;
     ensure_table_in_transaction(&mut tx, driver).await?;
+    ensure_single_row(&mut tx).await?;
 
     let record = read_record(&mut tx, driver).await?;
     let matched = record
@@ -323,14 +287,6 @@ pub async fn live_postgres_identity(db: &Database) -> Result<PgIdentity, Databas
     let identity = read_live_postgres_identity(&mut tx, db.driver()).await?;
     tx.commit().await?;
     Ok(identity)
-}
-
-/// Read the live PostgreSQL identity through the dedicated control-plane pool.
-pub async fn live_postgres_identity_via_control_plane(
-    db: &Database,
-) -> Result<PgIdentity, DatabaseError> {
-    let mut guard = db.control_plane_guard().await?;
-    read_live_postgres_identity(&mut guard, db.driver()).await
 }
 
 /// Determine whether a raw SQLite pool is backed by SQLite's process-local

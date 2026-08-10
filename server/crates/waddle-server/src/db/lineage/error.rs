@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use super::{
-    DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgSchemaIdentity, PgSystemIdentifier,
+    DeploymentUuid, PgDatabaseIdentity, PgSchemaIdentity, PgSystemIdentifier,
 };
 
 /// Fail-closed lineage attestation errors.
@@ -42,13 +42,19 @@ pub enum LineageError {
         persisted: PgSystemIdentifier,
     },
 
-    #[error("live PostgreSQL database identity does not match persisted database identity")]
+    #[error(
+        "live PostgreSQL database identity {}:{} does not match persisted {}:{}",
+        live.oid, live.name, persisted.oid, persisted.name
+    )]
     DatabaseIdentityMismatch {
         live: PgDatabaseIdentity,
         persisted: PgDatabaseIdentity,
     },
 
-    #[error("live PostgreSQL schema identity does not match persisted schema identity")]
+    #[error(
+        "live PostgreSQL schema identity {}:{} does not match persisted {}:{}",
+        live.oid, live.name, persisted.oid, persisted.name
+    )]
     SchemaIdentityMismatch {
         live: PgSchemaIdentity,
         persisted: PgSchemaIdentity,
@@ -58,10 +64,4 @@ pub enum LineageError {
         "PostgreSQL pg_control_system() is unavailable; grant EXECUTE on it to the database role"
     )]
     SystemIdentifierUnavailable,
-
-    #[error("lineage adoption expected {expected}, but found {found:?}")]
-    AdoptExpectationFailed {
-        expected: LineageUuid,
-        found: Option<LineageUuid>,
-    },
 }

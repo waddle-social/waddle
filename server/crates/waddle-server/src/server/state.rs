@@ -258,23 +258,28 @@ impl AppState {
         }
     }
 
-    /// Report entries for `adopt=` list values that matched no boundary.
-    pub fn lineage_adopt_unmatched(&self) -> Option<crate::db::lineage::LineageReport> {
+    /// `adopt=` list entries that matched no boundary this run. Non-empty is
+    /// NOT a readiness failure: after a successful adoption (or a pod restart
+    /// while the one-shot action is still rendered) every row verifies and
+    /// the replayed action legitimately matches nothing; a genuine restore
+    /// that still needs adoption keeps failing attestation on its own
+    /// identity mismatch. The startup gate logs these loudly instead.
+    pub fn lineage_adopt_unmatched(&self) -> Vec<crate::db::lineage::LineageUuid> {
         let Some(crate::db::lineage::LineageAction::Adopt(expected)) =
             self.lineage_config.action.as_ref()
         else {
-            return None;
+            return Vec::new();
         };
         let matched = self
             .lineage_adopt_matched
             .lock()
             .map(|set| set.clone())
             .unwrap_or_default();
-        if expected.iter().all(|uuid| matched.contains(uuid)) {
-            None
-        } else {
-            Some(crate::db::lineage::LineageReport::adopt_unmatched())
-        }
+        expected
+            .iter()
+            .filter(|uuid| !matched.contains(uuid))
+            .copied()
+            .collect()
     }
 
     pub fn seal_lineage_registry(&self) {

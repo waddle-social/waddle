@@ -1,9 +1,8 @@
 use std::str::FromStr;
 
 use super::{
-    adopt, adopt_if_matched, enroll, ensure_table, verify, AdoptOutcome, DeploymentUuid,
-    DurableStore, LineageError, LineageRegistryBuilder, LineageStatus, LineageUuid,
-    PgSystemIdentifier,
+    adopt_if_matched, enroll, ensure_table, verify, AdoptOutcome, DeploymentUuid, DurableStore,
+    LineageError, LineageRegistryBuilder, LineageStatus, LineageUuid, PgSystemIdentifier,
 };
 use crate::{
     config::LineageConfig,
@@ -114,14 +113,18 @@ async fn sqlite_adopt_rotates_lineage() {
         .await
         .expect("open sqlite database");
     let original = enroll(&db, &configured()).await.expect("enroll lineage");
-    let adopted = adopt(&db, &configured(), original.lineage_uuid)
-        .await
-        .expect("adopt lineage");
+    let AdoptOutcome::Adopted { attested, .. } =
+        adopt_if_matched(&db, &configured(), &[original.lineage_uuid])
+            .await
+            .expect("adopt lineage")
+    else {
+        panic!("expected adoption");
+    };
 
-    assert_ne!(adopted.lineage_uuid, original.lineage_uuid);
+    assert_ne!(attested.lineage_uuid, original.lineage_uuid);
     assert_eq!(
         verify(&db, &configured()).await.expect("verify adopted"),
-        adopted
+        attested
     );
 }
 
@@ -130,18 +133,25 @@ async fn sqlite_adopt_requires_expected_lineage() {
     let db = Database::in_memory("lineage-adopt-wrong-expected")
         .await
         .expect("open sqlite database");
-    enroll(&db, &configured()).await.expect("enroll lineage");
+    let enrolled = enroll(&db, &configured()).await.expect("enroll lineage");
     let wrong =
         LineageUuid::from_str("018f47b2-4b2e-7a3a-9a4c-52a5a6a90003").expect("valid expected UUID");
 
-    assert!(matches!(
-        lineage_error(
-            adopt(&db, &configured(), wrong)
-                .await
-                .expect_err("wrong expected lineage fails")
-        ),
-        LineageError::AdoptExpectationFailed { expected, .. } if expected == wrong
-    ));
+    // An expected UUID that matches nothing is a read-only no-op; the row
+    // is untouched (the startup gate reports unmatched entries separately).
+    assert_eq!(
+        adopt_if_matched(&db, &configured(), &[wrong])
+            .await
+            .expect("unmatched adopt is read-only"),
+        AdoptOutcome::NotMatched
+    );
+    assert_eq!(
+        verify(&db, &configured())
+            .await
+            .expect("verify")
+            .lineage_uuid,
+        enrolled.lineage_uuid
+    );
 }
 
 #[tokio::test]
@@ -483,10 +493,14 @@ async fn postgres_adopt_rotates_lineage_and_concurrent_enrollment_serializes() {
     let first = first.expect("first concurrent enrollment");
     let second = second.expect("second concurrent enrollment");
     assert_eq!(first, second);
-    let adopted = adopt(&db, &configured(), first.lineage_uuid)
-        .await
-        .expect("adopt lineage");
-    assert_ne!(adopted.lineage_uuid, first.lineage_uuid);
+    let AdoptOutcome::Adopted { attested, .. } =
+        adopt_if_matched(&db, &configured(), &[first.lineage_uuid])
+            .await
+            .expect("adopt lineage")
+    else {
+        panic!("expected adoption");
+    };
+    assert_ne!(attested.lineage_uuid, first.lineage_uuid);
 
     drop(db_second);
     drop_postgres_fixture(fixture).await;
@@ -669,4 +683,165 @@ fn pg_system_identifier_accepts_negative_bigint_rendering() {
     let positive: PgSystemIdentifier = "7373622067229815983".parse().expect("positive parses");
     assert_eq!(positive.0, 7_373_622_067_229_815_983);
     assert!("not-a-number".parse::<PgSystemIdentifier>().is_err());
+}
+
+mod sticky_success {
+    use std::sync::{Arc, Mutex};
+
+    use super::super::{
+        AttestedLineage, DurableStore, LineageAttestor, LineageError, LineageRegistryBuilder,
+        LineageStatus,
+    };
+    use crate::{
+        config::LineageConfig,
+        db::{DatabaseDriver, DatabaseError},
+    };
+    use std::collections::VecDeque;
+    use std::str::FromStr;
+
+    fn attested() -> AttestedLineage {
+        AttestedLineage {
+            lineage_uuid: super::super::LineageUuid::from_str(
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90010",
+            )
+            .expect("lineage uuid"),
+            deployment_uuid: super::super::DeploymentUuid::from_str(
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001",
+            )
+            .expect("deployment uuid"),
+            postgres_identity: None,
+        }
+    }
+
+    struct ScriptedAttestor {
+        script: Mutex<VecDeque<Result<AttestedLineage, DatabaseError>>>,
+    }
+
+    impl ScriptedAttestor {
+        fn new(script: Vec<Result<AttestedLineage, DatabaseError>>) -> Arc<Self> {
+            Arc::new(Self {
+                script: Mutex::new(script.into()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LineageAttestor for ScriptedAttestor {
+        async fn attest(&self, _config: &LineageConfig) -> Result<AttestedLineage, DatabaseError> {
+            self.script
+                .lock()
+                .expect("script lock")
+                .pop_front()
+                .expect("scripted attestation available")
+        }
+
+        fn driver(&self) -> DatabaseDriver {
+            DatabaseDriver::Sqlite
+        }
+    }
+
+    fn transport_error() -> DatabaseError {
+        DatabaseError::Internal(sqlx::Error::PoolTimedOut)
+    }
+
+    fn registry_with(
+        script: Vec<Result<AttestedLineage, DatabaseError>>,
+    ) -> super::super::LineageRegistry {
+        let mut builder = LineageRegistryBuilder::default();
+        builder.register_probe(DurableStore::Global, ScriptedAttestor::new(script));
+        builder.seal()
+    }
+
+    #[tokio::test]
+    async fn transport_error_after_proven_attestation_stays_attested() {
+        let registry = registry_with(vec![Ok(attested()), Err(transport_error())]);
+        let config = LineageConfig::default();
+        assert!(registry.attest(&config, false).await.is_attested());
+        assert!(registry.attest(&config, false).await.is_attested());
+    }
+
+    #[tokio::test]
+    async fn typed_lineage_error_always_fails_even_after_proven_attestation() {
+        let registry = registry_with(vec![
+            Ok(attested()),
+            Err(DatabaseError::Lineage(LineageError::MissingRow)),
+        ]);
+        let config = LineageConfig::default();
+        assert!(registry.attest(&config, false).await.is_attested());
+        let report = registry.attest(&config, false).await;
+        assert_eq!(
+            report.failures(),
+            &[(DurableStore::Global, LineageStatus::MissingLineage)]
+        );
+        assert!(!report.is_transient_only());
+    }
+
+    #[tokio::test]
+    async fn database_level_error_is_definitive_not_sticky() {
+        // A dropped `_lineage` table / revoked SELECT surfaces as a
+        // database-level error, NOT a transport error: it must fail even on
+        // a previously proven boundary.
+        let registry = registry_with(vec![
+            Ok(attested()),
+            Err(DatabaseError::QueryFailed(
+                "relation _lineage does not exist".to_string(),
+            )),
+        ]);
+        let config = LineageConfig::default();
+        assert!(registry.attest(&config, false).await.is_attested());
+        let report = registry.attest(&config, false).await;
+        assert_eq!(
+            report.failures(),
+            &[(DurableStore::Global, LineageStatus::VerificationFailed)]
+        );
+        assert!(!report.is_transient_only());
+    }
+
+    #[tokio::test]
+    async fn transport_error_without_prior_proof_is_transient_only() {
+        let registry = registry_with(vec![Err(transport_error())]);
+        let config = LineageConfig::default();
+        let report = registry.attest(&config, false).await;
+        assert_eq!(
+            report.failures(),
+            &[(DurableStore::Global, LineageStatus::ProbeError)]
+        );
+        assert!(report.is_transient_only());
+    }
+}
+
+#[tokio::test]
+async fn adopt_list_rotates_each_matching_boundary() {
+    // Two distinct durable boundaries, one comma-list action naming both
+    // old lineage UUIDs: each boundary rotates on its own match.
+    let db_a = Database::in_memory("lineage-adopt-list-a")
+        .await
+        .expect("open boundary a");
+    let db_b = Database::in_memory("lineage-adopt-list-b")
+        .await
+        .expect("open boundary b");
+    let enrolled_a = enroll(&db_a, &configured()).await.expect("enroll a");
+    let enrolled_b = enroll(&db_b, &configured()).await.expect("enroll b");
+    let expected = [enrolled_a.lineage_uuid, enrolled_b.lineage_uuid];
+
+    let AdoptOutcome::Adopted { matched, .. } = adopt_if_matched(&db_a, &configured(), &expected)
+        .await
+        .expect("adopt boundary a")
+    else {
+        panic!("boundary a should match");
+    };
+    assert_eq!(matched, enrolled_a.lineage_uuid);
+    let AdoptOutcome::Adopted { matched, .. } = adopt_if_matched(&db_b, &configured(), &expected)
+        .await
+        .expect("adopt boundary b")
+    else {
+        panic!("boundary b should match");
+    };
+    assert_eq!(matched, enrolled_b.lineage_uuid);
+
+    let rotated_a = verify(&db_a, &configured()).await.expect("verify a");
+    let rotated_b = verify(&db_b, &configured()).await.expect("verify b");
+    assert_ne!(rotated_a.lineage_uuid, enrolled_a.lineage_uuid);
+    assert_ne!(rotated_b.lineage_uuid, enrolled_b.lineage_uuid);
+    assert_ne!(rotated_a.lineage_uuid, rotated_b.lineage_uuid);
 }

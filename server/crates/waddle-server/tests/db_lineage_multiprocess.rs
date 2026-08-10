@@ -4,7 +4,7 @@
 //! `WADDLE_TEST_POSTGRES_URL` is configured. Each test gets UUID-named schemas:
 //! a schema is a lineage boundary because its identity is part of the attestation.
 
-use std::{sync::OnceLock, time::Duration};
+use std::{process::Command, sync::OnceLock, time::Duration};
 
 use waddle_ws_test_support::TestServer;
 
@@ -222,6 +222,81 @@ async fn assert_liveness(server: &TestServer) {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 }
 
+/// The pre-migration lineage guard refuses to boot (before the HTTP
+/// listener binds, and before any write) when the global database holds a
+/// lineage row that does not verify for this deployment. This mirrors
+/// TestServer's env-driven spawn but observes the clean non-success exit.
+async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>) {
+    let status = tokio::task::spawn_blocking(move || {
+        let binary = env!("CARGO_BIN_EXE_waddle-server");
+        let port_file = std::env::temp_dir().join(format!(
+            "waddle-lineage-refused-port-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let upload_dir = std::env::temp_dir().join(format!(
+            "waddle-lineage-refused-uploads-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut command = Command::new(binary);
+        for (key, _) in std::env::vars() {
+            if key.starts_with("WADDLE_") || key.starts_with("OTEL_") {
+                command.env_remove(key);
+            }
+        }
+        command
+            .env("WADDLE_CERTS_EPHEMERAL", "true")
+            .env("WADDLE_TEST_FIXED_ACCOUNT_ENABLED", "true")
+            .env(
+                "WADDLE_TEST_FIXED_ACCOUNT_PASSWORD",
+                "lineage-test-password",
+            )
+            .env("WADDLE_TEST_PROFILE_PUBLISH_TOKEN", "lineage-test-token")
+            .env("WADDLE_SERVER_OWNER_LOCALPARTS", "admin")
+            .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
+            .env("WADDLE_XMPP_DOMAIN", "localhost")
+            .env("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY", "true")
+            .env("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY", "true")
+            .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_XMPP_SM_DATABASE_URL", "sqlite::memory:")
+            .env(
+                "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",
+                "sqlite::memory:",
+            )
+            .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_UPLOAD_DIR", &upload_dir)
+            .env("WADDLE_GIT_SHA", waddle_ws_test_support::TEST_GIT_SHA)
+            .env(
+                "WADDLE_SESSION_KEY",
+                "integration-test-session-key-32-bytes-long",
+            )
+            .env(
+                "WADDLE_OCCUPANT_ID_SECRET",
+                "integration-test-occupant-id-secret-32-bytes-long",
+            )
+            .env("WADDLE_HTTP_PORT_FILE", &port_file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let status = command
+            .spawn()
+            .expect("spawn refused server")
+            .wait()
+            .expect("wait for refused server exit");
+        let _ = std::fs::remove_file(port_file);
+        let _ = std::fs::remove_dir_all(upload_dir);
+        status
+    })
+    .await
+    .expect("refused process task completes");
+    assert!(
+        !status.success(),
+        "a mis-deployed global database must refuse startup cleanly"
+    );
+}
+
 #[tokio::test]
 async fn two_replicas_same_database_both_ready() {
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
@@ -305,8 +380,11 @@ async fn split_deployment_rejected() {
     .await;
     wait_for_attested(&enrolled).await;
 
-    let conflicting = spawn_server(lineage_envs(&database_a, &deployment_two, None, None)).await;
-    wait_for_lineage_failure(&conflicting, "global", "deployment_uuid_mismatch").await;
+    // A replica configured with the WRONG deployment UUID against an
+    // enrolled database is refused by the pre-migration guard: the process
+    // exits before writing anything (including the append-only migration
+    // ledger), rather than coming up unready.
+    spawn_expecting_startup_refusal(lineage_envs(&database_a, &deployment_two, None, None)).await;
 
     let independently_provisioned = spawn_server(lineage_envs(
         &database_a,
@@ -318,7 +396,6 @@ async fn split_deployment_rejected() {
     wait_for_attested(&independently_provisioned).await;
 
     drop(independently_provisioned);
-    drop(conflicting);
     drop(enrolled);
     fixture.cleanup().await;
 }
@@ -378,26 +455,26 @@ async fn enroll_action_is_one_shot_and_idempotent() {
     assert_eq!(fixture.lineage_row_count().await, 1);
     drop(adopted);
 
-    // An adopt list entry that matches no boundary is an operator typo: the
-    // node stays alive but unready with the typed adopt_unmatched status
-    // (rotating nothing), rather than exiting or silently no-opping.
+    // An adopt entry that matches no boundary rotates nothing and is NOT a
+    // readiness failure (the one-shot action legitimately replays after a
+    // restart once adoption succeeded; a restore that still needs adoption
+    // keeps failing on its identity mismatch). The gate logs it loudly.
     let wrong = uuid::Uuid::new_v4();
-    let invalid_adopt_action = format!("adopt={wrong}");
-    let mut mistyped = spawn_server(lineage_envs(
+    let unmatched_adopt_action = format!("adopt={wrong}");
+    let replayed = spawn_server(lineage_envs(
         &database_url,
         &deployment_uuid,
-        Some(&invalid_adopt_action),
+        Some(&unmatched_adopt_action),
         None,
     ))
     .await;
-    wait_for_lineage_failure(&mistyped, "global", "adopt_unmatched").await;
-    assert!(!mistyped.wait_for_exit(Duration::from_secs(1)).await);
+    wait_for_attested(&replayed).await;
     assert_eq!(
         fixture.lineage_uuid().await,
         after_adopt,
         "an unmatched adopt must not rotate anything"
     );
-    drop(mistyped);
+    drop(replayed);
 
     fixture.cleanup().await;
 }

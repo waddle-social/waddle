@@ -65,9 +65,14 @@ After a physical clone or logical restore, use adoption to re-bind the deploymen
 - The action is one-shot and must be run manually.
 - Adoption rotates exactly the boundaries whose current lineage UUID appears
   in the list (minting a fresh lineage UUID and re-capturing live identity);
-  every other boundary is left untouched. If a listed UUID matches no
-  boundary at all, startup attestation fails with `adopt_unmatched` — check
-  the UUIDs and retry.
+  every other boundary is left untouched.
+- Replaying the action is harmless: after a successful adoption (or a pod
+  restart while the action is still rendered) the listed UUIDs match nothing
+  and the server logs a warning per unmatched entry while starting normally.
+  A restore that still NEEDS adoption keeps failing readiness on its own
+  `identity_mismatch`, so an unmatched entry with a ready fleet means either
+  "already adopted — remove the action" or a typo against a healthy
+  database. Check the warning logs, then remove `WADDLE_DB_LINEAGE_ACTION`.
 - Once attestation succeeds, remove `WADDLE_DB_LINEAGE_ACTION`, restore the
   normal replica count, and reopen traffic.
 
@@ -106,6 +111,18 @@ A same-name `pg_basebackup` clone is intentionally indistinguishable from inside
 the database: it retains the PostgreSQL system identifier, OIDs, lineage row,
 and deployment UUID. That means lineage cannot always detect a clone by itself,
 so adoption discipline is the operator-level control for these cases.
+
+## Startup refusal before migrations
+
+The GLOBAL database's lineage is verified BEFORE schema migrations run. A
+pod pointed at a database whose lineage row exists but does not verify for
+this deployment (another deployment's database, an unadopted restore, or a
+missing/incorrect `WADDLE_DEPLOYMENT_UUID`) exits at startup without
+writing anything — including the append-only migration ledger — and the
+log names the refusal. This surfaces as `CrashLoopBackOff` rather than a
+not-ready pod; fix the DSN/UUID (or perform adoption) and roll. A database
+with NO lineage row proceeds un-enrolled and is instead held not-ready by
+the readiness gate.
 
 ## Clustering requirement
 

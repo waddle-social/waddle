@@ -68,6 +68,7 @@ pub async fn start(
     db_pool: DatabasePool,
     server_config: ServerConfig,
     lineage_config: crate::config::LineageConfig,
+    global_adopt_matched: Option<crate::db::lineage::LineageUuid>,
     inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
     let xmpp_config = XmppConfig::from_env()
@@ -78,6 +79,7 @@ pub async fn start(
         xmpp_config,
         server_config,
         lineage_config,
+        global_adopt_matched,
         inherited,
     )
     .await
@@ -92,6 +94,7 @@ pub async fn start_with_config(
     xmpp_config: XmppConfig,
     server_config: ServerConfig,
     lineage_config: crate::config::LineageConfig,
+    global_adopt_matched: Option<crate::db::lineage::LineageUuid>,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
     // Set up Ecdysis graceful shutdown coordinator
@@ -296,6 +299,9 @@ pub async fn start_with_config(
         lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,
     }));
+    if let Some(matched) = global_adopt_matched {
+        state.note_lineage_adopt_match(matched);
+    }
     bootstrap_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Global,

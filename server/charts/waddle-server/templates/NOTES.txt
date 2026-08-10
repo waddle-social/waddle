@@ -17,6 +17,19 @@ secret values, secret.existingSecret, or secret.runtimeSecretName:
 
 Do not rotate WADDLE_OCCUPANT_ID_SECRET without an explicit migration plan;
 rotation breaks XEP-0421 occupant-id continuity for existing room/user pairs.
+{{- if not .Values.deployment.uuid }}
+
+WARNING: deployment.uuid is not set. Pods against a durable (non in-memory)
+database stay permanently NOT READY until the database lineage is enrolled:
+set deployment.uuid to a stable UUID and run a one-shot
+deployment.lineageAction=enroll rollout. See docs/operations/db-lineage.md.
+{{- end }}
+{{- if .Values.deployment.lineageAction }}
+
+REMINDER: deployment.lineageAction is set ("{{ .Values.deployment.lineageAction }}").
+This is a ONE-SHOT operator action — remove it in the next upgrade once the
+fleet is ready; leaving it rendered re-applies it on every pod restart.
+{{- end }}
 
 {{- if .Values.secret.existingSecret }}
 

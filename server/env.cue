@@ -459,6 +459,7 @@ schema.#Project & {
 					lineage_cluster_render="$(mktemp)"
 					missing_uuid_stderr="$(mktemp)"
 					malformed_uuid_stderr="$(mktemp)"
+					malformed_action_stderr="$(mktemp)"
 					lineage_uuid="123e4567-e89b-12d3-a456-426614174000"
 					malformed_lineage_uuid="not-a-uuid"
 					chart_secret_args=(
@@ -564,6 +565,18 @@ schema.#Project & {
 					fi
 					if ! grep -q "deployment.uuid must be a lower-case RFC-4122 UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) when set; remove/clear it or provide a valid value" "${malformed_uuid_stderr}"; then
 					  echo "chart template must explain malformed deployment.uuid values" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string deployment.lineageAction=enrol \
+					  "${chart_secret_args[@]}" >/dev/null 2>"${malformed_action_stderr}"; then
+					  echo "chart template must fail a malformed deployment.lineageAction (a typo here crash-loops the fleet)" >&2
+					  exit 1
+					fi
+					if ! grep -q 'deployment.lineageAction must be' "${malformed_action_stderr}"; then
+					  echo "chart template must explain malformed deployment.lineageAction values" >&2
 					  exit 1
 					fi
 

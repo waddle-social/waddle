@@ -2594,6 +2594,43 @@ mod lineage_config_tests {
             LineageConfig::from_vars([("WADDLE_DB_LINEAGE_ACTION", "adopt=")]),
             Err(LineageConfigError::InvalidAction)
         ));
+        assert!(matches!(
+            LineageConfig::from_vars([(
+                "WADDLE_DB_LINEAGE_ACTION",
+                "adopt=018f47b2-4b2e-7a3a-9a4c-52a5a6a90001,,018f47b2-4b2e-7a3a-9a4c-52a5a6a90002"
+            )]),
+            Err(LineageConfigError::InvalidAction)
+        ));
+        assert!(matches!(
+            LineageConfig::from_vars([(
+                "WADDLE_DB_LINEAGE_ACTION",
+                "adopt=018f47b2-4b2e-7a3a-9a4c-52a5a6a90001,garbage"
+            )]),
+            Err(LineageConfigError::InvalidUuid { .. })
+        ));
+    }
+
+    #[test]
+    fn lineage_config_parses_adopt_lists() {
+        let parsed = LineageConfig::from_vars([(
+            "WADDLE_DB_LINEAGE_ACTION",
+            "adopt=018f47b2-4b2e-7a3a-9a4c-52a5a6a90001, 018f47b2-4b2e-7a3a-9a4c-52a5a6a90002",
+        )])
+        .expect("parse adopt list");
+        let Some(crate::db::lineage::LineageAction::Adopt(expected)) = parsed.action else {
+            panic!("expected adopt action");
+        };
+        assert_eq!(
+            expected,
+            vec![
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001"
+                    .parse::<crate::db::lineage::LineageUuid>()
+                    .expect("first uuid"),
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90002"
+                    .parse::<crate::db::lineage::LineageUuid>()
+                    .expect("second uuid"),
+            ]
+        );
     }
 }
 

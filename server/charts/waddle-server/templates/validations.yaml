@@ -58,6 +58,20 @@
 {{- fail "deployment.uuid must be a lower-case RFC-4122 UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) when set; remove/clear it or provide a valid value" -}}
 {{- end -}}
 
+{{- $lineageAction := trim (toString .Values.deployment.lineageAction) -}}
+{{- if ne $lineageAction "" -}}
+{{- if ne $lineageAction "enroll" -}}
+{{- if not (hasPrefix "adopt=" $lineageAction) -}}
+{{- fail "deployment.lineageAction must be \"enroll\" or \"adopt=<uuid>[,<uuid>...]\"; a typo here would crash-loop the fleet at startup" -}}
+{{- end -}}
+{{- range splitList "," (trimPrefix "adopt=" $lineageAction) -}}
+{{- if not (regexMatch $uuidPattern (trim .)) -}}
+{{- fail (printf "deployment.lineageAction adopt entry %q must be a lower-case RFC-4122 UUID" (trim .)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- if and (gt (int .Values.replicaCount) 1) (not .Values.clustering.enabled) -}}
 {{- fail (printf "replicaCount (%d) > 1 requires clustering.enabled=true so cross-node routing, claims, MUC, and SM state use the ordered relay/Postgres fabric." (int .Values.replicaCount)) -}}
 {{- end -}}

@@ -322,12 +322,28 @@ impl NodeLifecycle {
     /// Permanently refuse every future `Serving` promotion for this process.
     /// Called when startup lineage attestation fails; see the field doc on
     /// [`NodeLifecycleState::startup_blocked`].
+    ///
+    /// Clustering starts before the attestation gate, so a lease-recovery
+    /// `serve()` can win the race and promote first. The latch therefore
+    /// also DEMOTES an already-`Serving` node back to `Starting` (revoking
+    /// the serving generation, which closes any just-admitted sockets) —
+    /// otherwise a boolean set after the fact would leave `/ws` open
+    /// against the unattested database.
     pub fn latch_startup_block(&self) {
         let mut state = self
             .state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.startup_blocked = true;
+        if state.admission == NodeAdmission::Serving {
+            tracing::warn!(
+                "demoting Serving node to Starting: startup lineage attestation failed after a racing promotion"
+            );
+            state.generation_revoked.cancel();
+            state.admission = NodeAdmission::Starting;
+            state.generation = state.generation.next();
+            state.generation_revoked = CancellationToken::new();
+        }
     }
 
     pub fn startup_blocked(&self) -> bool {
@@ -446,6 +462,24 @@ mod readiness_tests {
         assert_eq!(lifecycle.admission(), NodeAdmission::Starting);
         assert!(lifecycle.admit().is_err());
         assert!(lifecycle.startup_blocked());
+    }
+
+    #[test]
+    fn latch_after_racing_serve_demotes_and_revokes_the_generation() {
+        // Clustering lease recovery can call `serve()` BEFORE the startup
+        // attestation gate runs. Latching afterwards must demote the node
+        // and revoke any permit issued by the racing generation.
+        let lifecycle = NodeLifecycle::starting();
+        lifecycle.serve();
+        let permit = lifecycle.admit().expect("racing promotion admits");
+
+        lifecycle.latch_startup_block();
+        assert_eq!(lifecycle.admission(), NodeAdmission::Starting);
+        assert!(permit.revalidate().is_err());
+        assert!(lifecycle.admit().is_err());
+        // And it stays down: another recovery serve() cannot re-promote.
+        lifecycle.serve();
+        assert_eq!(lifecycle.admission(), NodeAdmission::Starting);
     }
 
     #[test]

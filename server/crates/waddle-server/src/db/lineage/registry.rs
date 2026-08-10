@@ -57,8 +57,9 @@ pub enum LineageStatus {
     /// The lineage table or row is structurally unusable (unknown format,
     /// invalid UUIDs, NULL identity fields, multiple rows, missing columns).
     MalformedLineage,
-    /// `WADDLE_DB_LINEAGE_ACTION=adopt=<uuid>` matched no durable boundary.
-    AdoptUnmatched,
+    /// A transport-level failure (connection loss, pool exhaustion) kept the
+    /// probe from reaching the database at all. Transient by construction.
+    ProbeError,
     ProbeTimeout,
     ClusteredSqlite,
     ClusteredEphemeral,
@@ -75,7 +76,7 @@ impl LineageStatus {
             Self::SystemIdentifierUnavailable => "system_identifier_unavailable",
             Self::IdentityMismatch => "identity_mismatch",
             Self::MalformedLineage => "malformed_lineage",
-            Self::AdoptUnmatched => "adopt_unmatched",
+            Self::ProbeError => "probe_error",
             Self::ProbeTimeout => "probe_timeout",
             Self::ClusteredSqlite => "clustered_sqlite",
             Self::ClusteredEphemeral => "clustered_ephemeral",
@@ -292,12 +293,15 @@ impl LineageRegistry {
                         postgres.push((store, attested, identity));
                     }
                 }
-                // Sticky success: a transport-level error (pool saturation,
-                // brief connection loss) on a boundary this process already
-                // proved does not un-prove it. Typed lineage errors are
-                // definitive and always fail.
-                Err(error) => match (&error, last_good.get()) {
-                    (DatabaseError::Lineage(_), _) | (_, None) => {
+                // Sticky success: ONLY a whitelisted transport-level error
+                // (connection loss, pool exhaustion) on a boundary this
+                // process already proved keeps the proven attestation — a
+                // pool cannot silently become a different database while it
+                // stays reachable. Every database-level error (any SQLSTATE:
+                // dropped table, revoked grants, decode failures) and every
+                // typed lineage error is definitive and always fails.
+                Err(error) => match (is_transport_error(&error), last_good.get()) {
+                    (false, _) | (_, None) => {
                         tracing::warn!(
                             store = %store,
                             error = %error,
@@ -305,7 +309,7 @@ impl LineageRegistry {
                         );
                         failures.push((store, status_for_error(&error)));
                     }
-                    (_, Some(proven)) => {
+                    (true, Some(proven)) => {
                         tracing::warn!(
                             store = %store,
                             error = %error,
@@ -366,7 +370,27 @@ fn status_for_error(error: &DatabaseError) -> LineageStatus {
             | super::LineageError::InvalidUuid { .. }
             | super::LineageError::InvalidPostgresIdentity { .. },
         ) => LineageStatus::MalformedLineage,
+        error if is_transport_error(error) => LineageStatus::ProbeError,
         _ => LineageStatus::VerificationFailed,
+    }
+}
+
+/// Whitelist of errors that mean "the database was unreachable", as opposed
+/// to "the database answered something disqualifying". Only these are
+/// eligible for sticky-success and for the transient startup retry/self-heal
+/// path; everything else is definitive.
+fn is_transport_error(error: &DatabaseError) -> bool {
+    match error {
+        DatabaseError::ConnectionFailed(_) => true,
+        DatabaseError::Internal(source) => matches!(
+            source,
+            sqlx::Error::Io(_)
+                | sqlx::Error::Tls(_)
+                | sqlx::Error::PoolTimedOut
+                | sqlx::Error::PoolClosed
+                | sqlx::Error::WorkerCrashed
+        ),
+        _ => false,
     }
 }
 
@@ -396,14 +420,16 @@ impl LineageReport {
         }
     }
 
-    pub fn adopt_unmatched() -> Self {
-        Self {
-            failures: vec![(DurableStore::Global, LineageStatus::AdoptUnmatched)],
-        }
-    }
-
-    pub fn merged(mut self, other: LineageReport) -> Self {
-        self.failures.extend(other.failures);
-        self
+    /// True when every failure is transport-class (unreachable database /
+    /// deadline), i.e. nothing definitive disqualified a boundary. The
+    /// startup gate self-heals this class instead of latching.
+    pub fn is_transient_only(&self) -> bool {
+        !self.failures.is_empty()
+            && self.failures.iter().all(|(_, status)| {
+                matches!(
+                    status,
+                    LineageStatus::ProbeError | LineageStatus::ProbeTimeout
+                )
+            })
     }
 }

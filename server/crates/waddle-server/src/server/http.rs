@@ -340,39 +340,60 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 
     spawn_critical_registry_supervisor(&websocket_state).await;
     // The startup attestation ran in `create_websocket_state`, before any
-    // data-mutating bootstrap. Failure latched the lifecycle there; here it
-    // only decides whether this node promotes to Serving and runs janitors.
+    // data-mutating bootstrap. A definitive failure latched the lifecycle
+    // there (permanent, restart to recover); a transient-only failure did
+    // NOT latch — this node self-heals by re-attesting in the background and
+    // promoting once the database is reachable again.
     if lineage_attested {
-        // Both critical registries now have lifetime supervision. Only after
-        // that fence is armed may a node still in `Starting` transition to
-        // `Serving`. A lease fence/drain/failure that won during slow startup
-        // remains authoritative until its own recovery path explicitly serves.
-        if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
-            .deps
-            .app_state
-            .node_lifecycle
-            .finish_startup()
-        {
-            warn!(
-            ?admission,
-            "HTTP graph completed after node admission left Starting; preserving non-serving state"
-        );
-        }
-        spawn_sm_expiry_janitor(&websocket_state);
-        spawn_orphan_reaper_janitor(
+        promote_to_serving_and_spawn_janitors(
             &websocket_state,
             server_config.clustering.orphan_reaper_interval,
         );
-        spawn_pending_delivery_claim_janitor(&websocket_state);
-        spawn_notification_outbox_janitor(&websocket_state);
-        spawn_call_teardown_outbox_janitor(&websocket_state);
-        spawn_push_service_publish_job_janitor(&websocket_state);
-        spawn_auth_state_janitor(&websocket_state);
-        spawn_room_dormancy_janitor(&websocket_state);
-        spawn_user_actor_reaper(&websocket_state);
-        #[cfg(feature = "clustering")]
-        crate::server::session_janitors::spawn_remote_muc_membership_reconciler(&websocket_state);
-        crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
+    } else if !websocket_state
+        .deps
+        .app_state
+        .node_lifecycle
+        .startup_blocked()
+    {
+        let retry_state = Arc::clone(&websocket_state);
+        let orphan_reaper_interval = server_config.clustering.orphan_reaper_interval;
+        tokio::spawn(async move {
+            const RETRY_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
+            loop {
+                tokio::time::sleep(RETRY_PERIOD).await;
+                let app_state = &retry_state.deps.app_state;
+                if app_state.node_lifecycle.startup_blocked()
+                    || !matches!(
+                        app_state.node_lifecycle.admission(),
+                        crate::clustering::NodeAdmission::Starting
+                    )
+                {
+                    return;
+                }
+                let Some(registry) = app_state.lineage_registry.get() else {
+                    return;
+                };
+                let report = registry
+                    .attest(&app_state.lineage_config, app_state.clustering_enabled)
+                    .await;
+                if report.is_attested() {
+                    info!("startup lineage attestation recovered; promoting to serving");
+                    promote_to_serving_and_spawn_janitors(&retry_state, orphan_reaper_interval);
+                    return;
+                }
+                if !report.is_transient_only() {
+                    for (store, status) in report.failures() {
+                        tracing::error!(
+                            store = %store,
+                            status = status.as_str(),
+                            "lineage attestation became definitive during startup self-heal; latching"
+                        );
+                    }
+                    app_state.node_lifecycle.latch_startup_block();
+                    return;
+                }
+            }
+        });
     }
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
@@ -735,6 +756,18 @@ async fn create_websocket_state(
     let lineage_attested = lineage_report.is_attested();
     if lineage_attested {
         info!("startup database lineage attestation passed");
+    } else if lineage_report.is_transient_only() {
+        // Unreachable database, nothing definitive: do NOT latch. The node
+        // stays `Starting` (unready, no mutating bootstraps, no janitors)
+        // and the self-heal task in `create_router` re-attests until the
+        // database returns, then promotes.
+        for (store, status) in lineage_report.failures() {
+            warn!(
+                store = %store,
+                status = status.as_str(),
+                "startup lineage attestation could not reach the database; will retry in the background"
+            );
+        }
     } else {
         for (store, status) in lineage_report.failures() {
             tracing::error!(
@@ -1017,6 +1050,43 @@ async fn create_websocket_state(
     Ok(websocket_state)
 }
 
+/// Startup-only promotion plus the janitor fleet. Called exactly once per
+/// process — either directly when startup attestation passed, or from the
+/// transient self-heal task on its first clean re-attestation.
+fn promote_to_serving_and_spawn_janitors(
+    websocket_state: &Arc<WebSocketState>,
+    orphan_reaper_interval: std::time::Duration,
+) {
+    // Both critical registries have lifetime supervision before this runs.
+    // Only after that fence is armed may a node still in `Starting`
+    // transition to `Serving`. A lease fence/drain/failure that won during
+    // slow startup remains authoritative until its own recovery path
+    // explicitly serves.
+    if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
+        .deps
+        .app_state
+        .node_lifecycle
+        .finish_startup()
+    {
+        warn!(
+            ?admission,
+            "promotion attempted after node admission left Starting; preserving non-serving state"
+        );
+    }
+    spawn_sm_expiry_janitor(websocket_state);
+    spawn_orphan_reaper_janitor(websocket_state, orphan_reaper_interval);
+    spawn_pending_delivery_claim_janitor(websocket_state);
+    spawn_notification_outbox_janitor(websocket_state);
+    spawn_call_teardown_outbox_janitor(websocket_state);
+    spawn_push_service_publish_job_janitor(websocket_state);
+    spawn_auth_state_janitor(websocket_state);
+    spawn_room_dormancy_janitor(websocket_state);
+    spawn_user_actor_reaper(websocket_state);
+    #[cfg(feature = "clustering")]
+    crate::server::session_janitors::spawn_remote_muc_membership_reconciler(websocket_state);
+    crate::server::state_inventory_metrics::spawn_state_inventory_publisher(websocket_state);
+}
+
 /// One startup attestation pass with a short bounded retry for transient
 /// errors and an overall deadline. Definitive lineage failures do not retry.
 async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::LineageReport {
@@ -1032,14 +1102,7 @@ async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::Lineage
             .attest(&state.lineage_config, state.clustering_enabled)
             .await;
         for _ in 1..ATTEMPTS {
-            if last.is_attested()
-                || last.failures().iter().any(|(_, status)| {
-                    !matches!(
-                        status,
-                        crate::db::lineage::LineageStatus::VerificationFailed
-                    )
-                })
-            {
+            if !last.is_transient_only() {
                 break;
             }
             tokio::time::sleep(RETRY_DELAY).await;
@@ -1053,10 +1116,22 @@ async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::Lineage
         Ok(report) => report,
         Err(_) => crate::db::lineage::LineageReport::timeout(),
     };
-    match state.lineage_adopt_unmatched() {
-        Some(unmatched) => report.merged(unmatched),
-        None => report,
+    let unmatched = state.lineage_adopt_unmatched();
+    if !unmatched.is_empty() {
+        // Not a readiness failure: after a successful adoption (or a pod
+        // restart with the one-shot action still rendered) the replayed
+        // entries legitimately match nothing, while a restore that still
+        // needs adoption keeps failing on its own identity mismatch. Loud
+        // so an operator TYPO is still visible.
+        for uuid in &unmatched {
+            warn!(
+                unmatched = %uuid,
+                "lineage adopt entry matched no boundary; if this adoption already \
+                 completed, remove WADDLE_DB_LINEAGE_ACTION — otherwise check the UUID"
+            );
+        }
     }
+    report
 }
 
 /// Build the [`TestSeamAuth`] for the test profile-publish route, or
