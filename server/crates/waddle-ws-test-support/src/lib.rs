@@ -152,14 +152,14 @@ impl TestServer {
             .map(|(username, password)| format!("{username}:{password}"))
             .collect::<Vec<_>>()
             .join(",");
-        // A caller-supplied database URL means a DURABLE store (persistent
-        // SQLite file), which the lineage attestation gate (#1652) refuses
-        // to serve un-enrolled. The harness enrolls it under one fixed
-        // deployment UUID so restart-persistence tests re-verify the same
-        // identity across server generations. The in-memory default is
-        // classified ephemeral and needs neither. Callers can override both
-        // via `extra_envs` (later `env()` calls win).
-        let durable_database = database_url.is_some();
+        // A caller-supplied database URL (global OR MAM) means a DURABLE
+        // store (persistent SQLite file), which the lineage attestation gate
+        // (#1652) refuses to serve un-enrolled. The harness enrolls it under
+        // one fixed deployment UUID so restart-persistence tests re-verify
+        // the same identity across server generations. The in-memory
+        // defaults are classified ephemeral and need neither. Callers can
+        // override both via `extra_envs` (later `env()` calls win).
+        let durable_database = database_url.is_some() || mam_database_url.is_some();
         let database_url = database_url.unwrap_or_else(|| "sqlite::memory:".to_string());
 
         // Temp file where the server writes its bound HTTP port
