@@ -421,7 +421,9 @@ pub(crate) fn sqlite_url_is_in_memory(database_url: &str) -> bool {
     if matches!(
         base,
         ":memory:" | "sqlite::memory:" | "sqlite://{memory}:" | "sqlite:///{memory}:"
-    ) || base.ends_with("file::memory:")
+    ) || base == "file::memory:"
+        || base.ends_with("://file::memory:")
+        || base.ends_with(":file::memory:")
         || sqlite_url_query_requests_memory(&trimmed)
     {
         return true;
