@@ -159,19 +159,41 @@ async fn health_for_serving_generation<T>(
     Ok(health)
 }
 
+/// A node held out of `Serving` — including one held there by a failed
+/// startup lineage attestation — must still tell the operator *why*: the
+/// lifecycle admission state alone reads as a generic "Starting", so the
+/// live per-store lineage statuses are attached whenever they are not clean.
 fn lifecycle_not_ready_response(
     lifecycle: &crate::clustering::NodeLifecycle,
     error: &crate::clustering::NodeAdmissionError,
+    lineage: Result<LineageReport, LineageStatus>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let admission = lifecycle.admission();
     warn!(?admission, %error, "Readiness check: node is not admitting clients");
+    let lineage_value = match lineage {
+        Ok(report) if report.is_attested() => serde_json::Value::String("attested".to_string()),
+        Ok(report) => serde_json::Value::Object(
+            report
+                .failures()
+                .iter()
+                .map(|(store, status)| {
+                    (
+                        store.to_string(),
+                        serde_json::Value::String(status.as_str().to_string()),
+                    )
+                })
+                .collect(),
+        ),
+        Err(status) => json!({ "status": status.as_str() }),
+    };
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
             "status": "not_ready",
             "service": "waddle-server",
             "version": env!("CARGO_PKG_VERSION"),
-            "admission": format!("{admission:?}")
+            "admission": format!("{admission:?}"),
+            "lineage": lineage_value
         })),
     )
 }
@@ -193,7 +215,10 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
         (health, lineage)
     };
     match health_for_serving_generation(&state.node_lifecycle, readiness).await {
-        Err(error) => lifecycle_not_ready_response(&state.node_lifecycle, &error),
+        Err(error) => {
+            let lineage = lineage_readiness(&state).await;
+            lifecycle_not_ready_response(&state.node_lifecycle, &error, lineage)
+        }
         Ok((Ok(health), Ok(report))) if health.is_healthy() && report.is_attested() => (
             StatusCode::OK,
             Json(json!({
@@ -587,7 +612,7 @@ mod readiness_generation_tests {
             .expect_err("changed serving generation must not become ready");
 
         assert_eq!(
-            lifecycle_not_ready_response(&lifecycle, &error)
+            lifecycle_not_ready_response(&lifecycle, &error, Err(LineageStatus::Initializing))
                 .into_response()
                 .status(),
             StatusCode::SERVICE_UNAVAILABLE

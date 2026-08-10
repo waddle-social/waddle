@@ -220,12 +220,39 @@ fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
     url.to_string()
 }
 
+fn postgres_url_with_search_path_and_role(database_url: &str, schema: &str, role: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse postgres URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair(
+            "options",
+            &format!("-c search_path={schema} -c role={role}"),
+        );
+    url.to_string()
+}
+
+fn postgres_url_with_database(database_url: &str, database: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse postgres URL");
+    url.set_path(&format!("/{database}"));
+    url.to_string()
+}
+
 async fn postgres_fixture(prefix: &str) -> Option<PostgresFixture> {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (lineage PostgreSQL test)");
         return None;
     };
-    let admin = sqlx::PgPool::connect(&database_url)
+    Some(postgres_fixture_for_url(prefix, &database_url).await)
+}
+
+async fn postgres_fixture_for_url(prefix: &str, database_url: &str) -> PostgresFixture {
+    let admin = sqlx::PgPool::connect(database_url)
         .await
         .expect("connect postgres admin pool");
     let schema = format!(
@@ -240,12 +267,12 @@ async fn postgres_fixture(prefix: &str) -> Option<PostgresFixture> {
         "lineage-postgres-test",
         &DatabaseConfig::new(
             DatabaseDriver::Postgres,
-            postgres_url_with_search_path(&database_url, &schema),
+            postgres_url_with_search_path(database_url, &schema),
         ),
     )
     .await
     .expect("open isolated database");
-    Some(PostgresFixture { db, admin, schema })
+    PostgresFixture { db, admin, schema }
 }
 
 async fn drop_postgres_fixture(fixture: PostgresFixture) {
@@ -255,6 +282,25 @@ async fn drop_postgres_fixture(fixture: PostgresFixture) {
         .execute(&admin)
         .await
         .expect("drop isolated schema");
+}
+
+async fn drop_postgres_database_fixture(
+    fixture: PostgresFixture,
+    control: sqlx::PgPool,
+    database: &str,
+) {
+    let PostgresFixture { db, admin, schema } = fixture;
+    drop(db);
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop isolated schema before database cleanup");
+    admin.close().await;
+    sqlx::query(&format!("DROP DATABASE {database} WITH (FORCE)"))
+        .execute(&control)
+        .await
+        .expect("drop isolated PostgreSQL database");
+    control.close().await;
 }
 
 #[tokio::test]
@@ -289,6 +335,134 @@ async fn postgres_detects_tampered_identity_fields() {
             .expect("restore identity");
     }
     drop_postgres_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn postgres_reports_system_identifier_unavailable_without_execute_privilege() {
+    let Ok(base_database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (lineage PostgreSQL test)");
+        return;
+    };
+    let control = sqlx::PgPool::connect(&base_database_url)
+        .await
+        .expect("connect PostgreSQL database-control pool");
+    let database = format!(
+        "waddle_lineage_pg_control_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    sqlx::query(&format!("CREATE DATABASE {database}"))
+        .execute(&control)
+        .await
+        .expect("create isolated PostgreSQL database for catalog ACL test");
+    let isolated_database_url = postgres_url_with_database(&base_database_url, &database);
+    let fixture =
+        postgres_fixture_for_url("pg_control_system_privilege", &isolated_database_url).await;
+    enroll(&fixture.db, &configured())
+        .await
+        .expect("enroll lineage before testing restricted role");
+
+    let role = format!(
+        "waddle_lineage_no_pg_control_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let public_execute: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege('public', 'pg_catalog.pg_control_system()', 'EXECUTE')",
+    )
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read existing pg_control_system public privilege");
+
+    // PostgreSQL grants this catalog function to PUBLIC by default, so revoking
+    // only from the restricted role would not test the permission-error path.
+    // This test owns a disposable database, so its catalog ACL cannot affect
+    // parallel tests; keep the original ACL state and restore it on every path.
+    let result = async {
+        sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+            .execute(&fixture.admin)
+            .await
+            .map_err(|error| format!("create restricted role: {error}"))?;
+        sqlx::query(&format!("GRANT {role} TO CURRENT_USER"))
+            .execute(&fixture.admin)
+            .await
+            .map_err(|error| format!("permit test process to SET ROLE: {error}"))?;
+        sqlx::query(&format!(
+            "GRANT USAGE ON SCHEMA {} TO {role}",
+            fixture.schema
+        ))
+        .execute(&fixture.admin)
+        .await
+        .map_err(|error| format!("grant schema usage: {error}"))?;
+        sqlx::query(&format!(
+            "GRANT SELECT ON TABLE {}._lineage TO {role}",
+            fixture.schema
+        ))
+        .execute(&fixture.admin)
+        .await
+        .map_err(|error| format!("grant lineage read: {error}"))?;
+        sqlx::query("REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC")
+            .execute(&fixture.admin)
+            .await
+            .map_err(|error| format!("revoke public pg_control_system execute: {error}"))?;
+        sqlx::query(&format!(
+            "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM {role}"
+        ))
+        .execute(&fixture.admin)
+        .await
+        .map_err(|error| format!("revoke restricted-role pg_control_system execute: {error}"))?;
+
+        let restricted = Database::from_config(
+            "lineage-postgres-restricted-role",
+            &DatabaseConfig::new(
+                DatabaseDriver::Postgres,
+                postgres_url_with_search_path_and_role(
+                    &isolated_database_url,
+                    &fixture.schema,
+                    &role,
+                ),
+            ),
+        )
+        .await
+        .map_err(|error| format!("open restricted database: {error}"))?;
+        let verification = verify(&restricted, &configured()).await;
+        drop(restricted);
+        match verification {
+            Err(DatabaseError::Lineage(LineageError::SystemIdentifierUnavailable)) => Ok(()),
+            Err(other) => Err(format!(
+                "expected typed system identifier error, got {other}"
+            )),
+            Ok(_) => Err("restricted role unexpectedly read pg_control_system".to_string()),
+        }
+    }
+    .await;
+
+    if public_execute {
+        sqlx::query("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO PUBLIC")
+            .execute(&fixture.admin)
+            .await
+            .expect("restore public pg_control_system execute privilege");
+    } else {
+        sqlx::query("REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC")
+            .execute(&fixture.admin)
+            .await
+            .expect("restore absent public pg_control_system execute privilege");
+    }
+    sqlx::query(&format!("REVOKE {role} FROM CURRENT_USER"))
+        .execute(&fixture.admin)
+        .await
+        .expect("revoke restricted-role membership");
+    // The role still holds GRANTs on the disposable schema/table; a bare
+    // DROP ROLE fails with 2BP01 until those dependent privileges go.
+    sqlx::query(&format!("DROP OWNED BY {role}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop restricted-role privileges");
+    sqlx::query(&format!("DROP ROLE IF EXISTS {role}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop restricted role");
+    drop_postgres_database_fixture(fixture, control, &database).await;
+
+    result.expect("restricted role must receive typed privilege error");
 }
 
 #[tokio::test]

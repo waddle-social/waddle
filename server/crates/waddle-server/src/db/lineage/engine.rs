@@ -178,7 +178,12 @@ pub async fn verify_via_pg_pool(
         .await
         .map_err(map_postgres_identity_error)?;
     let row = row.ok_or(LineageError::MissingRow)?;
-    let format: i64 = row.try_get(0).map_err(DatabaseError::from)?;
+    // `format` is `INTEGER` (int4) on Postgres; sqlx decodes it strictly, so
+    // read i32 here and widen — unlike SQLite, where INTEGER decodes as i64.
+    let format: i64 = row
+        .try_get::<i32, _>(0)
+        .map(i64::from)
+        .map_err(DatabaseError::from)?;
     if format != LINEAGE_FORMAT {
         return Err(LineageError::UnknownFormat { found: format }.into());
     }
