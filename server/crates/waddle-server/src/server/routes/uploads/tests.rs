@@ -57,6 +57,8 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         server_owner_jids: Arc::from(Vec::<jid::BareJid>::new()),
         node_lifecycle: crate::clustering::NodeLifecycle::new(),
         clustering_claims: crate::clustering::ClusteringHandles::default(),
+        lineage_config: crate::config::LineageConfig::default(),
+        clustering_enabled: false,
     }));
 
     (Arc::new(UploadState::new(app_state)), upload_dir)

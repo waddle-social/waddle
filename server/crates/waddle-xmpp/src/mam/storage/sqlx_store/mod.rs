@@ -85,6 +85,26 @@ impl SqlxMamStorage {
         Self::open("sqlite::memory:").await
     }
 
+    /// Expose the underlying SQLite pool when this storage uses the
+    /// SQLite backend. This keeps backend attestation in higher layers
+    /// typed without coupling this crate to `waddle-server`.
+    pub fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => Some(pool),
+            MamDatabaseBackend::Postgres(_) => None,
+        }
+    }
+
+    /// Expose the underlying Postgres pool when this storage uses the
+    /// Postgres backend. This keeps backend attestation in higher layers
+    /// typed without coupling this crate to `waddle-server`.
+    pub fn postgres_pool(&self) -> Option<&PgPool> {
+        match &self.backend {
+            MamDatabaseBackend::Postgres(pool) => Some(pool),
+            MamDatabaseBackend::Sqlite(_) => None,
+        }
+    }
+
     /// Enable cluster fencing (ADR-0017 Phase 3 Slice 7 FIX 1,
     /// council-adjudicated) — a small builder mirroring
     /// `DatabasePendingDeliveryStorage::with_cluster_fencing`'s identical
@@ -112,5 +132,46 @@ impl SqlxMamStorage {
             MamDatabaseBackend::Sqlite(pool) => schema::ensure_sqlite_schema(pool).await,
             MamDatabaseBackend::Postgres(pool) => ensure_postgres_schema(pool).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use super::{MamDatabaseBackend, SqlxMamStorage};
+
+    #[tokio::test]
+    async fn sqlite_backend_exposes_only_sqlite_pool() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        let storage = SqlxMamStorage {
+            backend: MamDatabaseBackend::Sqlite(pool.clone()),
+            fencing_enabled: false,
+        };
+
+        assert!(storage.sqlite_pool().is_some());
+        assert!(storage.postgres_pool().is_none());
+        assert!(!storage.sqlite_pool().expect("sqlite pool").is_closed());
+    }
+
+    #[test]
+    fn postgres_backend_exposes_only_postgres_pool() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgresql://postgres@localhost/waddle")
+            .expect("postgres pool");
+        let storage = SqlxMamStorage {
+            backend: MamDatabaseBackend::Postgres(pool.clone()),
+            fencing_enabled: false,
+        };
+
+        assert!(storage.postgres_pool().is_some());
+        assert!(storage.sqlite_pool().is_none());
+        assert!(!storage.postgres_pool().expect("postgres pool").is_closed());
     }
 }

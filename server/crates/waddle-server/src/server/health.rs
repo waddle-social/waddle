@@ -1,5 +1,10 @@
-use crate::db::PoolHealth;
-use crate::server::AppState;
+use crate::{
+    db::{
+        lineage::{LineageReport, LineageStatus},
+        PoolHealth,
+    },
+    server::AppState,
+};
 use axum::{
     extract::State,
     http::{header, HeaderName, Method, StatusCode},
@@ -10,6 +15,8 @@ use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
+
+const LINEAGE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Configure CORS layer.
 ///
@@ -180,18 +187,26 @@ fn lifecycle_not_ready_response(
 /// node. The same lifecycle also fails closed when a critical local actor
 /// terminates in a single-node deployment.
 pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match health_for_serving_generation(&state.node_lifecycle, state.db_pool.health_check()).await {
+    let readiness = async {
+        let health = state.db_pool.health_check().await;
+        let lineage = lineage_readiness(&state).await;
+        (health, lineage)
+    };
+    match health_for_serving_generation(&state.node_lifecycle, readiness).await {
         Err(error) => lifecycle_not_ready_response(&state.node_lifecycle, &error),
-        Ok(Ok(health)) if health.is_healthy() => (
+        Ok((Ok(health), Ok(report))) if health.is_healthy() && report.is_attested() => (
             StatusCode::OK,
             Json(json!({
                 "status": "ready",
                 "service": "waddle-server",
                 "version": env!("CARGO_PKG_VERSION"),
-                "database": "ready"
+                "database": "ready",
+                "lineage": "attested"
             })),
         ),
-        Ok(Ok(health)) => {
+        Ok((Ok(health), Ok(report))) if health.is_healthy() => lineage_not_ready_response(report),
+        Ok((Ok(_), Err(status))) => lineage_status_response(status),
+        Ok((Ok(health), _)) => {
             warn!(
                 global_healthy = health.global_healthy,
                 waddle_dbs_healthy = health.waddle_dbs_healthy,
@@ -213,7 +228,7 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 })),
             )
         }
-        Ok(Err(e)) => {
+        Ok((Err(e), _)) => {
             warn!(error = %e, "Readiness check failed");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -228,6 +243,55 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
             )
         }
     }
+}
+
+async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageStatus> {
+    let Some(registry) = state.lineage_registry.get() else {
+        return Err(LineageStatus::Initializing);
+    };
+    match tokio::time::timeout(
+        LINEAGE_PROBE_TIMEOUT,
+        registry.attest(&state.lineage_config, state.clustering_enabled),
+    )
+    .await
+    {
+        Ok(report) => Ok(report),
+        Err(_) => Err(LineageStatus::ProbeTimeout),
+    }
+}
+
+fn lineage_not_ready_response(report: LineageReport) -> (StatusCode, Json<serde_json::Value>) {
+    let statuses = report
+        .failures()
+        .iter()
+        .map(|(store, status)| {
+            (
+                store.to_string(),
+                serde_json::Value::String(status.as_str().to_string()),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "status": "not_ready",
+            "service": "waddle-server",
+            "version": env!("CARGO_PKG_VERSION"),
+            "lineage": statuses
+        })),
+    )
+}
+
+fn lineage_status_response(status: LineageStatus) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "status": "not_ready",
+            "service": "waddle-server",
+            "version": env!("CARGO_PKG_VERSION"),
+            "lineage": { "status": status.as_str() }
+        })),
+    )
 }
 
 /// Prometheus metrics endpoint.

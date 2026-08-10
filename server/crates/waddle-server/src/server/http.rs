@@ -331,36 +331,54 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     }
 
     spawn_critical_registry_supervisor(&websocket_state).await;
-    // Both critical registries now have lifetime supervision. Only after
-    // that fence is armed may a node still in `Starting` transition to
-    // `Serving`. A lease fence/drain/failure that won during slow startup
-    // remains authoritative until its own recovery path explicitly serves.
-    if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
-        .deps
-        .app_state
-        .node_lifecycle
-        .finish_startup()
-    {
-        warn!(
+    websocket_state.deps.app_state.seal_lineage_registry();
+    let lineage_attested = match websocket_state.deps.app_state.lineage_registry.get() {
+        Some(registry) => {
+            registry
+                .attest(
+                    &websocket_state.deps.app_state.lineage_config,
+                    websocket_state.deps.app_state.clustering_enabled,
+                )
+                .await
+        }
+        None => crate::db::lineage::LineageReport::timeout(),
+    };
+    if !lineage_attested.is_attested() {
+        for (store, status) in lineage_attested.failures() {
+            tracing::error!(store = %store, status = status.as_str(), "database lineage attestation failed; node remains Starting");
+        }
+    } else {
+        // Both critical registries now have lifetime supervision. Only after
+        // that fence is armed may a node still in `Starting` transition to
+        // `Serving`. A lease fence/drain/failure that won during slow startup
+        // remains authoritative until its own recovery path explicitly serves.
+        if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
+            .deps
+            .app_state
+            .node_lifecycle
+            .finish_startup()
+        {
+            warn!(
             ?admission,
             "HTTP graph completed after node admission left Starting; preserving non-serving state"
         );
+        }
+        spawn_sm_expiry_janitor(&websocket_state);
+        spawn_orphan_reaper_janitor(
+            &websocket_state,
+            server_config.clustering.orphan_reaper_interval,
+        );
+        spawn_pending_delivery_claim_janitor(&websocket_state);
+        spawn_notification_outbox_janitor(&websocket_state);
+        spawn_call_teardown_outbox_janitor(&websocket_state);
+        spawn_push_service_publish_job_janitor(&websocket_state);
+        spawn_auth_state_janitor(&websocket_state);
+        spawn_room_dormancy_janitor(&websocket_state);
+        spawn_user_actor_reaper(&websocket_state);
+        #[cfg(feature = "clustering")]
+        crate::server::session_janitors::spawn_remote_muc_membership_reconciler(&websocket_state);
+        crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
     }
-    spawn_sm_expiry_janitor(&websocket_state);
-    spawn_orphan_reaper_janitor(
-        &websocket_state,
-        server_config.clustering.orphan_reaper_interval,
-    );
-    spawn_pending_delivery_claim_janitor(&websocket_state);
-    spawn_notification_outbox_janitor(&websocket_state);
-    spawn_call_teardown_outbox_janitor(&websocket_state);
-    spawn_push_service_publish_job_janitor(&websocket_state);
-    spawn_auth_state_janitor(&websocket_state);
-    spawn_room_dormancy_janitor(&websocket_state);
-    spawn_user_actor_reaper(&websocket_state);
-    #[cfg(feature = "clustering")]
-    crate::server::session_janitors::spawn_remote_muc_membership_reconciler(&websocket_state);
-    crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
         shutdown_stop_token,

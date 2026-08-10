@@ -105,6 +105,10 @@ pub struct DatabaseSpacesMetadataStore {
 }
 
 impl DatabaseSpacesMetadataStore {
+    pub fn database(&self) -> Database {
+        self.db.clone()
+    }
+
     /// Open (or create) the spaces-metadata storage at `database_url`.
     /// When `None`, an ephemeral in-memory SQLite database is used; this
     /// mirrors the inbox storage so tests can spin up without a DSN.

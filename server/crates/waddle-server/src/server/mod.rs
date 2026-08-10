@@ -47,12 +47,11 @@ pub mod xmpp_state;
 pub use config::{XmppAcmeConfig, XmppConfig};
 pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
-use crate::channel_space_links::build_channel_space_link_store;
 use crate::config::ServerConfig;
 use crate::db::DatabasePool;
-use crate::inbox::build_inbox_storage;
+use crate::inbox::DatabaseInboxStorage;
 use crate::permissions::PermissionActor;
-use crate::spaces_metadata::build_spaces_metadata_store;
+use crate::spaces_metadata::DatabaseSpacesMetadataStore;
 use acme::start_acme_runtime;
 use anyhow::Result;
 use fixed_account::{ensure_fixed_test_account, fixed_test_account_enabled};
@@ -68,12 +67,20 @@ use tracing::info;
 pub async fn start(
     db_pool: DatabasePool,
     server_config: ServerConfig,
+    lineage_config: crate::config::LineageConfig,
     inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
     let xmpp_config = XmppConfig::from_env()
         .map_err(|error| anyhow::anyhow!("Failed to load XMPP configuration: {}", error))?;
 
-    start_with_config(db_pool, xmpp_config, server_config, inherited).await
+    start_with_config(
+        db_pool,
+        xmpp_config,
+        server_config,
+        lineage_config,
+        inherited,
+    )
+    .await
 }
 
 /// Start both HTTP and XMPP servers with explicit configuration.
@@ -84,6 +91,7 @@ pub async fn start_with_config(
     db_pool: DatabasePool,
     xmpp_config: XmppConfig,
     server_config: ServerConfig,
+    lineage_config: crate::config::LineageConfig,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
     // Set up Ecdysis graceful shutdown coordinator
@@ -140,21 +148,46 @@ pub async fn start_with_config(
         &bootstrap_membership::BootstrapMembershipConfig::from_env(),
     )
     .await;
-    let inbox_storage = build_inbox_storage(xmpp_config.inbox_database_url.clone())
-        .await
-        .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;
-    let spaces_metadata_store =
-        build_spaces_metadata_store(xmpp_config.spaces_metadata_database_url.clone())
+    let inbox_database_storage = Arc::new(
+        DatabaseInboxStorage::open(xmpp_config.inbox_database_url.as_deref())
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?,
+    );
+    prepare_database_lineage(inbox_database_storage.database(), &lineage_config, "inbox").await?;
+    let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
+        inbox_database_storage.clone();
+    let spaces_metadata_database_store = Arc::new(
+        DatabaseSpacesMetadataStore::open(xmpp_config.spaces_metadata_database_url.as_deref())
             .await
             .map_err(|error| {
                 anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
-            })?;
-    let channel_space_link_store =
-        build_channel_space_link_store(xmpp_config.channel_space_links_database_url.clone())
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
-            })?;
+            })?,
+    );
+    prepare_database_lineage(
+        spaces_metadata_database_store.database(),
+        &lineage_config,
+        "spaces_metadata",
+    )
+    .await?;
+    let spaces_metadata_store: Arc<dyn crate::spaces_metadata::SpacesMetadataStore> =
+        spaces_metadata_database_store.clone();
+    let channel_space_link_database_store = Arc::new(
+        crate::channel_space_links::DatabaseChannelSpaceLinkStore::open(
+            xmpp_config.channel_space_links_database_url.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
+        })?,
+    );
+    prepare_database_lineage(
+        channel_space_link_database_store.database(),
+        &lineage_config,
+        "channel_space_links",
+    )
+    .await?;
+    let channel_space_link_store: Arc<dyn crate::channel_space_links::ChannelSpaceLinkStore> =
+        channel_space_link_database_store.clone();
     // Build the shared XEP-0060 PubSub/PEP storage and the MUC
     // (XEP-0045) room registry here so the resulting handles live on
     // `AppState`. Admin V2 handlers reach them via `state.*` instead of
@@ -167,6 +200,12 @@ pub async fn start_with_config(
         crate::pubsub::build_database_pubsub_storage(xmpp_config.pubsub_database_url.clone())
             .await
             .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
+    prepare_database_lineage(
+        pubsub_database_storage.database(),
+        &lineage_config,
+        "pubsub",
+    )
+    .await?;
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         pubsub_database_storage.clone();
     // #807: spawn the registry behind the instrumented, explicitly-bounded
@@ -272,7 +311,37 @@ pub async fn start_with_config(
         server_owner_jids,
         node_lifecycle: node_lifecycle.clone(),
         clustering_claims: clustering_handles,
+        lineage_config,
+        clustering_enabled: server_config.clustering.enabled,
     }));
+    state.register_lineage_database(
+        crate::db::lineage::DurableStore::Global,
+        db_pool.global().clone(),
+    );
+    register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::Inbox,
+        xmpp_config.inbox_database_url.is_none(),
+        inbox_database_storage.database(),
+    );
+    register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::SpacesMetadata,
+        xmpp_config.spaces_metadata_database_url.is_none(),
+        spaces_metadata_database_store.database(),
+    );
+    register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::ChannelSpaceLinks,
+        xmpp_config.channel_space_links_database_url.is_none(),
+        channel_space_link_database_store.database(),
+    );
+    register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::Pubsub,
+        xmpp_config.pubsub_database_url.is_none(),
+        pubsub_database_storage.database(),
+    );
     // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
     // the clustering global database and enable fenced groupchat-archive
     // writes when clustering is live, mirroring the
@@ -390,6 +459,39 @@ pub async fn start_with_config(
             "critical actor service terminated; node fenced and drained: {failure:?}"
         )),
         None => result.map(|()| metrics_flush),
+    }
+}
+
+async fn prepare_database_lineage(
+    database: crate::db::Database,
+    config: &crate::config::LineageConfig,
+    store: &'static str,
+) -> Result<()> {
+    crate::db::lineage::ensure_table(&database).await?;
+    match config.action {
+        Some(crate::db::lineage::LineageAction::Enroll) => {
+            info!(store, "enrolling database lineage");
+            crate::db::lineage::enroll(&database, config).await?;
+        }
+        Some(crate::db::lineage::LineageAction::Adopt(expected)) => {
+            info!(store, expected = %expected, "adopting database lineage");
+            crate::db::lineage::adopt(&database, config, expected).await?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn register_store_lineage(
+    state: &AppState,
+    store: crate::db::lineage::DurableStore,
+    ephemeral: bool,
+    database: crate::db::Database,
+) {
+    if ephemeral {
+        state.register_lineage_ephemeral(store);
+    } else {
+        state.register_lineage_database(store, database);
     }
 }
 

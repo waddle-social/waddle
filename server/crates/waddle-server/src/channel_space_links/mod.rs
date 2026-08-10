@@ -109,6 +109,10 @@ pub struct DatabaseChannelSpaceLinkStore {
 }
 
 impl DatabaseChannelSpaceLinkStore {
+    pub fn database(&self) -> Database {
+        self.db.clone()
+    }
+
     /// Open (or create) the link storage at `database_url`. When `None`,
     /// an ephemeral in-memory SQLite database is used — this mirrors the
     /// spaces-metadata storage so tests can spin up without a DSN.

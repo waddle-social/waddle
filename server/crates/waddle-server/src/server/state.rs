@@ -4,7 +4,7 @@ use crate::server::bootstrap_membership;
 use crate::spaces_metadata::SpacesMetadataStore;
 use jid::{BareJid, DomainPart};
 use kameo::actor::ActorRef;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
@@ -73,6 +73,12 @@ pub struct AppState {
     /// clustering is disabled or not compiled in — see
     /// [`crate::clustering::ClusteringHandles`].
     pub clustering_claims: crate::clustering::ClusteringHandles,
+    /// Immutable database-lineage topology, published exactly once after all
+    /// independently opened storage pools are available.
+    pub lineage_registry: OnceLock<crate::db::lineage::LineageRegistry>,
+    lineage_registry_builder: Mutex<Option<crate::db::lineage::LineageRegistryBuilder>>,
+    pub lineage_config: crate::config::LineageConfig,
+    pub clustering_enabled: bool,
 }
 
 impl AppState {
@@ -104,7 +110,7 @@ impl AppState {
         let spaces_jid: BareJid = "spaces.localhost"
             .parse()
             .expect("test spaces JID 'spaces.localhost' parses as BareJid");
-        Self::new_with_deps(AppStateDeps {
+        let state = Self::new_with_deps(AppStateDeps {
             db_pool,
             blob_storage,
             inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
@@ -123,7 +129,13 @@ impl AppState {
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
             node_lifecycle: crate::clustering::NodeLifecycle::new(),
             clustering_claims: crate::clustering::ClusteringHandles::default(),
-        })
+            lineage_config: crate::config::LineageConfig::default(),
+            clustering_enabled: false,
+        });
+        let _ = state
+            .lineage_registry
+            .set(crate::db::lineage::LineageRegistry::new(Vec::new()));
+        state
     }
 
     /// Construct an `AppState` from its explicit dependencies. Callers
@@ -145,6 +157,8 @@ impl AppState {
             server_owner_jids,
             node_lifecycle,
             clustering_claims,
+            lineage_config,
+            clustering_enabled,
         } = deps;
         Self {
             db_pool,
@@ -161,6 +175,49 @@ impl AppState {
             server_owner_jids,
             node_lifecycle,
             clustering_claims,
+            lineage_registry: OnceLock::new(),
+            lineage_registry_builder: Mutex::new(Some(
+                crate::db::lineage::LineageRegistryBuilder::default(),
+            )),
+            lineage_config,
+            clustering_enabled,
+        }
+    }
+}
+
+impl AppState {
+    pub fn register_lineage_database(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        database: crate::db::Database,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_database(store, database);
+            }
+        }
+    }
+
+    pub fn register_lineage_ephemeral(&self, store: crate::db::lineage::DurableStore) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_ephemeral(store);
+            }
+        }
+    }
+
+    pub fn seal_lineage_registry(&self) {
+        let registry = self
+            .lineage_registry_builder
+            .lock()
+            .ok()
+            .and_then(|mut builder| {
+                builder
+                    .take()
+                    .map(crate::db::lineage::LineageRegistryBuilder::seal)
+            });
+        if let Some(registry) = registry {
+            let _ = self.lineage_registry.set(registry);
         }
     }
 }
@@ -183,6 +240,8 @@ pub struct AppStateDeps {
     pub server_owner_jids: Arc<[BareJid]>,
     pub node_lifecycle: crate::clustering::NodeLifecycle,
     pub clustering_claims: crate::clustering::ClusteringHandles,
+    pub lineage_config: crate::config::LineageConfig,
+    pub clustering_enabled: bool,
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against

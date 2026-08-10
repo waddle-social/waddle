@@ -35,6 +35,8 @@ async fn main() -> Result<()> {
     // Initialize database (driver + DSN contract)
     let db_runtime = config::DatabaseRuntimeConfig::from_env()
         .map_err(|e| anyhow::anyhow!("Failed to load database runtime config: {}", e))?;
+    let lineage_config = config::LineageConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("Failed to load database lineage configuration: {}", e))?;
     info!(
         driver = ?db_runtime.driver,
         "Using configured database runtime"
@@ -65,11 +67,29 @@ async fn main() -> Result<()> {
         .run(db_pool.global())
         .await
         .context("Failed to run migrations")?;
+    db::lineage::ensure_table(db_pool.global())
+        .await
+        .context("Failed to bootstrap database lineage table")?;
+    match lineage_config.action {
+        Some(db::lineage::LineageAction::Enroll) => {
+            info!(store = "global", "enrolling database lineage");
+            db::lineage::enroll(db_pool.global(), &lineage_config)
+                .await
+                .context("Failed to enroll global database lineage")?;
+        }
+        Some(db::lineage::LineageAction::Adopt(expected)) => {
+            info!(store = "global", expected = %expected, "adopting database lineage");
+            db::lineage::adopt(db_pool.global(), &lineage_config, expected)
+                .await
+                .context("Failed to adopt global database lineage")?;
+        }
+        None => {}
+    }
 
     info!("Database initialized and migrations complete");
 
     // Start the server
-    let metrics_flush = server::start(db_pool, server_config, inherited).await?;
+    let metrics_flush = server::start(db_pool, server_config, lineage_config, inherited).await?;
 
     telemetry::shutdown(metrics_flush);
 
