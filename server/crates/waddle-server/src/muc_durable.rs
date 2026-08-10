@@ -224,13 +224,25 @@ impl PostgresMucRoomStore {
         // now that this bootstrap is one advisory-locked transaction, would
         // block every fenced affiliation write cluster-wide (SHARE conflicts
         // with ROW EXCLUSIVE) on every steady-state pod start, with no
-        // lock_timeout. `to_regclass` resolves via search_path without
-        // touching the relation, so the steady state stays lock-free.
+        // lock_timeout. The pg_index probe takes no lock on the relation and
+        // is bound to the target table's own regclass — an unqualified
+        // to_regclass('<index name>') would resolve across the whole
+        // search_path, so a same-named index in another schema could falsely
+        // suppress creation on the table this transaction just created.
+        // `'<table>'::regclass` here and the unqualified CREATE INDEX target
+        // resolve through the same search_path rules, so the probe and the
+        // DDL always agree on one relation.
         tx.execute(
             r#"
             DO $$
             BEGIN
-                IF to_regclass('clustering_muc_room_affiliations_room_jid_idx') IS NULL THEN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_index i
+                    JOIN pg_class c ON c.oid = i.indexrelid
+                    WHERE i.indrelid = 'clustering_muc_room_affiliations'::regclass
+                      AND c.relname = 'clustering_muc_room_affiliations_room_jid_idx'
+                ) THEN
                     CREATE INDEX clustering_muc_room_affiliations_room_jid_idx
                         ON clustering_muc_room_affiliations (room_jid);
                 END IF;
@@ -257,7 +269,13 @@ impl PostgresMucRoomStore {
             r#"
             DO $$
             BEGIN
-                IF to_regclass('clustering_muc_room_lifecycles_live_room_idx') IS NULL THEN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_index i
+                    JOIN pg_class c ON c.oid = i.indexrelid
+                    WHERE i.indrelid = 'clustering_muc_room_lifecycles'::regclass
+                      AND c.relname = 'clustering_muc_room_lifecycles_live_room_idx'
+                ) THEN
                     CREATE UNIQUE INDEX clustering_muc_room_lifecycles_live_room_idx
                         ON clustering_muc_room_lifecycles (room_jid) WHERE state IN ('active','dormant');
                 END IF;
