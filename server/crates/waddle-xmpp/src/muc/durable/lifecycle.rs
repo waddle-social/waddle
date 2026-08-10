@@ -305,6 +305,20 @@ mod tests {
     }
 
     #[test]
+    fn effect_intent_envelope_preserves_its_key_and_effect() {
+        let lifecycle = RoomLifecycleId::generate();
+        let revision = RoomRevision::initial();
+        let ordinal = RoomEffectOrdinal::first();
+        let intent = RoomEffectIntent::new(lifecycle, revision, ordinal, 7_u8);
+
+        assert_eq!(intent.lifecycle(), lifecycle);
+        assert_eq!(intent.revision(), revision);
+        assert_eq!(intent.ordinal(), ordinal);
+        assert_eq!(*intent.effect(), 7);
+        assert_eq!(intent.into_effect(), 7);
+    }
+
+    #[test]
     fn authorization_consumes_the_exact_commit() {
         let commit = RoomMutationCommit::new(
             claim_fence(),
