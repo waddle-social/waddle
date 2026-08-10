@@ -64,6 +64,37 @@ pub struct VapidStorage {
 }
 
 impl VapidStorage {
+    /// Read-only variant for a node whose startup lineage attestation failed
+    /// (#1652): never write into an unattested database — not the env-var
+    /// bootstrap persist, not a fresh-keypair persist. The node is
+    /// permanently unready in that state, so when no key exists an
+    /// ephemeral, unpersisted signer is enough to keep the push-service
+    /// object graph constructible.
+    pub async fn load_or_ephemeral(
+        db: Database,
+        root_key: &[u8],
+    ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
+        let storage =
+            Self::new(db.clone(), root_key)
+                .await
+                .map_err(|source| VapidLoadError::DbWrite {
+                    stage: VapidDbWriteStage::Initialize,
+                    source: Box::new(source),
+                })?;
+        if let Some((kid, secret_key)) = storage.load_latest().await? {
+            return Ok(Arc::new(
+                InProcessVapidSigner::new(kid, secret_key)
+                    .map_err(|source| VapidLoadError::SignerInit { source })?,
+            ));
+        }
+        let kid = Kid::new();
+        let secret_key = p256::SecretKey::random(&mut OsRng);
+        Ok(Arc::new(
+            InProcessVapidSigner::new(kid, secret_key)
+                .map_err(|source| VapidLoadError::SignerInit { source })?,
+        ))
+    }
+
     pub async fn load_or_provision(
         db: Database,
         root_key: &[u8],

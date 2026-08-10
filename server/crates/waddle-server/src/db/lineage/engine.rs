@@ -25,9 +25,15 @@ pub struct AttestedLineage {
 }
 
 /// Create and validate the lineage bootstrap table without writing its row.
+///
+/// Takes the lineage advisory lock (SQLite: immediate write lock) for the
+/// same reason the migration runner locks its own bootstrap DDL: Postgres's
+/// `CREATE TABLE IF NOT EXISTS` is not race-free, and two replicas starting
+/// against a fresh schema would otherwise crash one of them with a spurious
+/// `pg_type` unique-constraint violation.
 pub async fn ensure_table(db: &Database) -> Result<(), DatabaseError> {
     let driver = db.driver();
-    let mut tx = db.begin().await?;
+    let mut tx = begin_locked(db).await?;
     ensure_table_in_transaction(&mut tx, driver).await?;
     tx.commit().await
 }
@@ -107,6 +113,72 @@ pub async fn adopt(
     })
 }
 
+/// Outcome of [`adopt_if_matched`] for one durable boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdoptOutcome {
+    Adopted {
+        /// Which `adopt=` list entry this boundary's row held.
+        matched: LineageUuid,
+        attested: AttestedLineage,
+    },
+    /// This boundary's row holds none of the expected lineage UUIDs (or has
+    /// no row). No write happened; the boundary proceeds to normal verify.
+    NotMatched,
+}
+
+/// Boundary-safe adoption: `WADDLE_DB_LINEAGE_ACTION=adopt=<uuid>` is one
+/// process-wide value applied at every durable boundary, but the expected
+/// UUID can only ever name ONE boundary's row — and several stores usually
+/// share a single database (and therefore a single row). Rotating on the
+/// first match and erroring on the rest would rotate the shared row and then
+/// crash the process against its own rotation. So adoption rotates exactly
+/// where the row matches and is a read-only no-op everywhere else; the
+/// startup gate separately fails attestation when the action matched no
+/// boundary at all (an operator typo must stay loud).
+pub async fn adopt_if_matched(
+    db: &Database,
+    config: &LineageConfig,
+    expected: &[LineageUuid],
+) -> Result<AdoptOutcome, DatabaseError> {
+    let deployment_uuid = required_deployment_uuid(config)?;
+    let driver = db.driver();
+    let mut tx = begin_locked(db).await?;
+    ensure_table_in_transaction(&mut tx, driver).await?;
+
+    let record = read_record(&mut tx, driver).await?;
+    let matched = record
+        .as_ref()
+        .map(|row| row.lineage_uuid)
+        .filter(|current| expected.contains(current));
+    let Some(matched) = matched else {
+        tx.commit().await?;
+        return Ok(AdoptOutcome::NotMatched);
+    };
+
+    let lineage_uuid = LineageUuid::new();
+    let postgres_identity = read_live_identity(&mut tx, driver).await?;
+    update_record(
+        &mut tx,
+        LineageRecord {
+            format: LINEAGE_FORMAT,
+            lineage_uuid,
+            deployment_uuid,
+            postgres_identity: postgres_identity.clone(),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+
+    Ok(AdoptOutcome::Adopted {
+        matched,
+        attested: AttestedLineage {
+            lineage_uuid,
+            deployment_uuid,
+            postgres_identity,
+        },
+    })
+}
+
 /// Verify the persisted lineage record without writing to the database.
 pub async fn verify(
     db: &Database,
@@ -135,6 +207,7 @@ pub async fn verify_via_sqlite_pool(
     pool: &SqlitePool,
     config: &LineageConfig,
 ) -> Result<AttestedLineage, DatabaseError> {
+    ensure_single_row_sqlite(pool).await?;
     let row = sqlx::query(READ_ROW_SQL)
         .fetch_optional(pool)
         .await
@@ -168,11 +241,40 @@ pub async fn verify_via_sqlite_pool(
     })
 }
 
+async fn ensure_single_row_pg(pool: &PgPool) -> Result<(), DatabaseError> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _lineage")
+        .fetch_one(pool)
+        .await
+        .map_err(DatabaseError::from)?;
+    if count > 1 {
+        return Err(LineageError::MalformedTable {
+            detail: format!("expected at most one lineage row, found {count}"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+async fn ensure_single_row_sqlite(pool: &SqlitePool) -> Result<(), DatabaseError> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _lineage")
+        .fetch_one(pool)
+        .await
+        .map_err(DatabaseError::from)?;
+    if count > 1 {
+        return Err(LineageError::MalformedTable {
+            detail: format!("expected at most one lineage row, found {count}"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Verify through a raw sqlx Postgres pool that owns the physical connection.
 pub async fn verify_via_pg_pool(
     pool: &PgPool,
     config: &LineageConfig,
 ) -> Result<AttestedLineage, DatabaseError> {
+    ensure_single_row_pg(pool).await?;
     let row = sqlx::query(READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL)
         .fetch_optional(pool)
         .await
@@ -304,10 +406,19 @@ async fn validate_column_set(
         found.push(name);
     }
 
-    let expected = LINEAGE_COLUMNS.map(str::to_string);
-    if found != expected {
+    // Require format-1's columns as a SUBSET of what exists rather than an
+    // exact match: `_lineage` versions itself via `format` (it lives outside
+    // the migration ledger), so a future additive format must not make this
+    // binary refuse the table before it can even read `format` and produce
+    // the typed `UnknownFormat` refusal.
+    let missing: Vec<&str> = LINEAGE_COLUMNS
+        .iter()
+        .filter(|expected| !found.iter().any(|name| name == *expected))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
         return Err(LineageError::MalformedTable {
-            detail: format!("expected columns {expected:?}, found {found:?}"),
+            detail: format!("missing columns {missing:?}, found {found:?}"),
         }
         .into());
     }
@@ -350,11 +461,35 @@ impl LineageQuery for ConnectionGuard {
     }
 }
 
+/// A `_lineage` table that predates this binary (no PK / no `CHECK (id = 1)`)
+/// could hold several rows; attesting "whichever row comes back first" would
+/// be unsound, so more than one row is a typed malformed-table refusal.
+async fn ensure_single_row(query: &mut impl LineageQuery) -> Result<(), DatabaseError> {
+    let mut rows = query
+        .lineage_query("SELECT COUNT(*) FROM _lineage", Vec::new())
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LineageError::MalformedTable {
+            detail: "lineage row count query returned no row".to_string(),
+        })?;
+    let count: i64 = row.get(0)?;
+    if count > 1 {
+        return Err(LineageError::MalformedTable {
+            detail: format!("expected at most one lineage row, found {count}"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 async fn verify_via_query(
     query: &mut impl LineageQuery,
     driver: DatabaseDriver,
     config: &LineageConfig,
 ) -> Result<AttestedLineage, DatabaseError> {
+    ensure_single_row(query).await?;
     match driver {
         DatabaseDriver::Sqlite => {
             let record = read_record(query, driver)
@@ -665,10 +800,16 @@ fn record_values(record: &LineageRecord) -> Vec<crate::db::Value> {
     ]
 }
 
+/// A `42501` alone is not enough: the combined verify query also reads
+/// `_lineage`, so a role missing `SELECT` on the table raises the same
+/// SQLSTATE. Only a denial that names `pg_control_system` gets the typed
+/// grant-EXECUTE remediation; any other permission failure stays a plain
+/// database error so the operator chases the right ACL.
 fn is_system_identifier_permission_error(error: &DatabaseError) -> bool {
     match error {
         DatabaseError::Internal(sqlx::Error::Database(database_error)) => {
             database_error.code().as_deref() == Some("42501")
+                && database_error.message().contains("pg_control_system")
         }
         _ => false,
     }

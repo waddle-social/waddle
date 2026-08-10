@@ -76,8 +76,13 @@ impl FromStr for PgSystemIdentifier {
     type Err = LineageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        // `pg_control_system().system_identifier` is a signed bigint on the
+        // wire (initdb packs seconds-since-epoch into the high word, so from
+        // 2038 PostgreSQL renders it as a negative decimal). Accept both
+        // renderings and normalize to the u64 bit pattern.
         value
-            .parse()
+            .parse::<u64>()
+            .or_else(|_| value.parse::<i64>().map(|signed| signed as u64))
             .map(Self)
             .map_err(|_| LineageError::InvalidPostgresIdentity {
                 field: "pg_system_identifier",
@@ -134,8 +139,13 @@ pub struct LineageRecord {
 }
 
 /// Explicit operator action requested through `WADDLE_DB_LINEAGE_ACTION`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Adopt` carries a list because one deployment can span several durable
+/// boundaries (each with its own lineage UUID); a post-restore adoption
+/// names every boundary's expected old UUID in one one-shot action:
+/// `adopt=<uuid>[,<uuid>...]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineageAction {
     Enroll,
-    Adopt(LineageUuid),
+    Adopt(Vec<LineageUuid>),
 }

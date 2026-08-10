@@ -578,22 +578,6 @@ pub struct OpenedSmPersistence {
     pub aliases_global: bool,
 }
 
-pub async fn open_for_cluster_mode(
-    database_url: Option<&str>,
-    clustering_enabled: bool,
-    claim_pair: Option<(
-        std::sync::Arc<dyn waddle_xmpp::ownership::ClaimStore>,
-        waddle_xmpp::ownership::SharedNodeIdentity,
-    )>,
-    global_db: &Database,
-) -> Result<Arc<dyn SmPersistenceStorage>, SmPersistenceError> {
-    Ok(
-        open_for_cluster_mode_with_lineage(database_url, clustering_enabled, claim_pair, global_db)
-            .await?
-            .storage,
-    )
-}
-
 pub async fn open_for_cluster_mode_with_lineage(
     database_url: Option<&str>,
     clustering_enabled: bool,

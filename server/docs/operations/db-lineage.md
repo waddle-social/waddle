@@ -41,6 +41,14 @@ Use this when a deployment first points at a durable database:
 6. Remove `WADDLE_DB_LINEAGE_ACTION` immediately (do not leave it set), then
    restore the normal replica count before reopening traffic.
 
+When rolling out the lineage-aware binary to an existing installation, do
+steps 2 and 4 in the SAME `helm upgrade` that carries the image bump: a
+lineage-aware pod against an un-enrolled database stays alive but
+permanently unready (it never promotes to serving and starts no background
+janitors) until enrollment happens and the pod restarts. Enrollment is
+idempotent, so applying `enroll` to every replica of that one rollout is
+safe.
+
 This binds the configured `WADDLE_DEPLOYMENT_UUID` into `_lineage` and records the
 live PostgreSQL and schema identity.
 
@@ -50,11 +58,16 @@ After a physical clone or logical restore, use adoption to re-bind the deploymen
 
 - Close traffic or scale to one replica.
 - Set the stable `WADDLE_DEPLOYMENT_UUID` for this deployment.
-- Set `WADDLE_DB_LINEAGE_ACTION=adopt=<expected-old-lineage-uuid>`.
+- Set `WADDLE_DB_LINEAGE_ACTION=adopt=<expected-old-lineage-uuid>`. A
+  deployment whose stores span several distinct databases/schemas (each with
+  its own lineage UUID) lists every expected old UUID comma-separated:
+  `adopt=<uuid-a>,<uuid-b>`.
 - The action is one-shot and must be run manually.
-- Adoption is atomic: it verifies the current lineage UUID and mints a new
-  lineage UUID before rebinding the deployment and refreshing all live identity
-  fields.
+- Adoption rotates exactly the boundaries whose current lineage UUID appears
+  in the list (minting a fresh lineage UUID and re-capturing live identity);
+  every other boundary is left untouched. If a listed UUID matches no
+  boundary at all, startup attestation fails with `adopt_unmatched` — check
+  the UUIDs and retry.
 - Once attestation succeeds, remove `WADDLE_DB_LINEAGE_ACTION`, restore the
   normal replica count, and reopen traffic.
 
@@ -65,14 +78,27 @@ probe failure.
 
 ## PostgreSQL permission prerequisite
 
-If the role cannot read catalog identity, readiness reports
-`SystemIdentifierUnavailable`. Grant:
+If the role cannot execute `pg_control_system()`, readiness reports
+`system_identifier_unavailable`. Grant:
 
 ```sql
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO <app role>;
 ```
 
-Then rerun readiness/probe.
+Note: a `permission denied` on other objects (for example missing `SELECT`
+on `_lineage`) is reported as a plain verification failure, not
+`system_identifier_unavailable` — the grant above only fixes the
+`pg_control_system()` case.
+
+## Recovery after a failed startup attestation
+
+A pod whose STARTUP attestation failed latches itself: it stays alive and
+observable (liveness `200`, readiness `503` with per-store lineage detail),
+but it can never promote to serving in that process — not even if the
+underlying cause is fixed while it runs. After fixing the cause (enrollment,
+grants, configuration), restart or roll the pod. Changing the configmap
+(deployment UUID or lineage action) rolls pods automatically via the
+checksum annotation.
 
 ## Physical-clone limitation (honest operator rule)
 

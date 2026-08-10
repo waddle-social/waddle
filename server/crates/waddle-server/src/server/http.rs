@@ -292,7 +292,14 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // short-circuits the row stream — without that, an N-row pass
     // could block the publish-tracker `wait()` in the graceful-
     // shutdown drain past the deployment grace period.
-    {
+    let lineage_attested = websocket_state
+        .deps
+        .app_state
+        .lineage_startup
+        .get()
+        .map(crate::db::lineage::LineageReport::is_attested)
+        .unwrap_or(false);
+    if lineage_attested {
         let db_actor = websocket_state
             .deps
             .app_state
@@ -327,26 +334,15 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             .instrument(span)
             .await;
         });
+    } else {
+        warn!("skipping OIDC profile backfill: lineage attestation failed");
     }
 
     spawn_critical_registry_supervisor(&websocket_state).await;
-    websocket_state.deps.app_state.seal_lineage_registry();
-    let lineage_attested = match websocket_state.deps.app_state.lineage_registry.get() {
-        Some(registry) => {
-            registry
-                .attest(
-                    &websocket_state.deps.app_state.lineage_config,
-                    websocket_state.deps.app_state.clustering_enabled,
-                )
-                .await
-        }
-        None => crate::db::lineage::LineageReport::timeout(),
-    };
-    if !lineage_attested.is_attested() {
-        for (store, status) in lineage_attested.failures() {
-            tracing::error!(store = %store, status = status.as_str(), "database lineage attestation failed; node remains Starting");
-        }
-    } else {
+    // The startup attestation ran in `create_websocket_state`, before any
+    // data-mutating bootstrap. Failure latched the lifecycle there; here it
+    // only decides whether this node promotes to Serving and runs janitors.
+    if lineage_attested {
         // Both critical registries now have lifetime supervision. Only after
         // that fence is armed may a node still in `Starting` transition to
         // `Serving`. A lease fence/drain/failure that won during slow startup
@@ -713,6 +709,43 @@ async fn create_websocket_state(
         &state,
     )
     .await?;
+    // Pending delivery opens here (rather than with the other protocol
+    // stores below) so that EVERY durable pool is registered before the
+    // startup attestation gate that follows — it is the last registrant.
+    let pending_delivery_storage = create_pending_delivery_storage(
+        xmpp_config,
+        server_config,
+        &state.clustering_claims,
+        state.db_pool.global(),
+        &state,
+    )
+    .await?;
+    // ---- Startup lineage attestation gate (#1652) ----
+    // All durable stores are open and registered; seal the registry and run
+    // the one startup attestation pass BEFORE anything mutates application
+    // data (XMPP topology bootstrap, VAPID provisioning, profile backfill,
+    // LiveKit reconciliation). A mis-provisioned database must not be
+    // written to by a node that will never serve from it. Transient
+    // transport errors get a short bounded retry; a definitive failure
+    // latches the lifecycle so no path (including clustering lease
+    // recovery) can ever promote this process to `Serving` — recovery is an
+    // operator restart after the cause is fixed.
+    state.seal_lineage_registry();
+    let lineage_report = attest_startup_lineage(&state).await;
+    let lineage_attested = lineage_report.is_attested();
+    if lineage_attested {
+        info!("startup database lineage attestation passed");
+    } else {
+        for (store, status) in lineage_report.failures() {
+            tracing::error!(
+                store = %store,
+                status = status.as_str(),
+                "database lineage attestation failed; node stays unready until the cause is fixed and the pod is restarted"
+            );
+        }
+        state.node_lifecycle.latch_startup_block();
+    }
+    let _ = state.lineage_startup.set(lineage_report);
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
@@ -747,15 +780,19 @@ async fn create_websocket_state(
         sfu_service.clone(),
     )
     .await;
-    if let Err(error) = bootstrap_fresh_xmpp_topology(
-        &state,
-        Arc::clone(&pubsub_storage),
-        &service_domains,
-        &room_registry,
-    )
-    .await
-    {
-        warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
+    if lineage_attested {
+        if let Err(error) = bootstrap_fresh_xmpp_topology(
+            &state,
+            Arc::clone(&pubsub_storage),
+            &service_domains,
+            &room_registry,
+        )
+        .await
+        {
+            warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
+        }
+    } else {
+        warn!("skipping XMPP topology bootstrap: lineage attestation failed");
     }
     ensure_push_service_global_database_is_durable()?;
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
@@ -772,12 +809,24 @@ async fn create_websocket_state(
     // is unusable or the env-bootstrap value is malformed — in that
     // case the entire push service degrades, so the caller intentionally
     // fails boot rather than silently dispatching without VAPID.
-    let vapid_signer = crate::push_service::vapid_storage::VapidStorage::load_or_provision(
-        state.db_pool.global().clone(),
-        server_config.session_key.as_bytes(),
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?;
+    let vapid_signer = if lineage_attested {
+        crate::push_service::vapid_storage::VapidStorage::load_or_provision(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?
+    } else {
+        // Never provision (write) a key into an unattested database. The
+        // node is permanently unready in this state, so an ephemeral,
+        // unpersisted signer only has to keep the object graph valid.
+        crate::push_service::vapid_storage::VapidStorage::load_or_ephemeral(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?
+    };
     // Rate-limit outbound sends: global semaphore caps concurrent
     // requests at 64; per-(endpoint, urgency) leaky bucket spaces
     // same-pair sends to at least 100ms apart so one chatty relay+class
@@ -843,15 +892,6 @@ async fn create_websocket_state(
     let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
         crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
     );
-    let pending_delivery_storage = create_pending_delivery_storage(
-        xmpp_config,
-        server_config,
-        &state.clustering_claims,
-        state.db_pool.global(),
-        &state,
-    )
-    .await?;
-
     let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
 
     let provider_ingress = Arc::new(
@@ -965,12 +1005,58 @@ async fn create_websocket_state(
     // `participant_left`/`room_finished` webhook delivery. No-op when
     // A/V calling is unconfigured (`sfu_reconciler` is `None`).
     if let Some(reconciler) = sfu_reconciler {
-        routes::livekit_webhook::spawn_reconciliation_task(
-            Arc::clone(&websocket_state),
-            reconciler,
-        );
+        if lineage_attested {
+            routes::livekit_webhook::spawn_reconciliation_task(
+                Arc::clone(&websocket_state),
+                reconciler,
+            );
+        } else {
+            warn!("skipping LiveKit ghost reconciliation: lineage attestation failed");
+        }
     }
     Ok(websocket_state)
+}
+
+/// One startup attestation pass with a short bounded retry for transient
+/// errors and an overall deadline. Definitive lineage failures do not retry.
+async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::LineageReport {
+    const ATTEMPTS: u32 = 3;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    const OVERALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let Some(registry) = state.lineage_registry.get() else {
+        return crate::db::lineage::LineageReport::initializing();
+    };
+    let pass = async {
+        let mut last = registry
+            .attest(&state.lineage_config, state.clustering_enabled)
+            .await;
+        for _ in 1..ATTEMPTS {
+            if last.is_attested()
+                || last.failures().iter().any(|(_, status)| {
+                    !matches!(
+                        status,
+                        crate::db::lineage::LineageStatus::VerificationFailed
+                    )
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
+            last = registry
+                .attest(&state.lineage_config, state.clustering_enabled)
+                .await;
+        }
+        last
+    };
+    let report = match tokio::time::timeout(OVERALL_DEADLINE, pass).await {
+        Ok(report) => report,
+        Err(_) => crate::db::lineage::LineageReport::timeout(),
+    };
+    match state.lineage_adopt_unmatched() {
+        Some(unmatched) => report.merged(unmatched),
+        None => report,
+    }
 }
 
 /// Build the [`TestSeamAuth`] for the test profile-publish route, or
@@ -1163,8 +1249,12 @@ async fn create_sm_session_registry(
         if database.is_in_memory_sqlite() {
             state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Sm);
         } else {
-            crate::server::bootstrap_store_lineage(database.clone(), &state.lineage_config, "sm")
-                .await?;
+            crate::server::bootstrap_store_lineage(
+                state,
+                crate::db::lineage::DurableStore::Sm,
+                database.clone(),
+            )
+            .await?;
             state.register_lineage_database(crate::db::lineage::DurableStore::Sm, database);
         }
     }
@@ -1261,9 +1351,9 @@ async fn create_pending_delivery_storage(
         state.register_lineage_ephemeral(crate::db::lineage::DurableStore::PendingDelivery);
     } else {
         crate::server::bootstrap_store_lineage(
+            state,
+            crate::db::lineage::DurableStore::PendingDelivery,
             database.clone(),
-            &state.lineage_config,
-            "pending_delivery",
         )
         .await?;
         state

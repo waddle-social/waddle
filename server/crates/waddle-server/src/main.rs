@@ -67,24 +67,12 @@ async fn main() -> Result<()> {
         .run(db_pool.global())
         .await
         .context("Failed to run migrations")?;
+    // Bootstrap DDL only. The enroll/adopt operator action is applied
+    // per durable boundary by `server::bootstrap_store_lineage` (the global
+    // boundary included) so the adopt-match accounting lives in one place.
     db::lineage::ensure_table(db_pool.global())
         .await
         .context("Failed to bootstrap database lineage table")?;
-    match lineage_config.action {
-        Some(db::lineage::LineageAction::Enroll) => {
-            info!(store = "global", "enrolling database lineage");
-            db::lineage::enroll(db_pool.global(), &lineage_config)
-                .await
-                .context("Failed to enroll global database lineage")?;
-        }
-        Some(db::lineage::LineageAction::Adopt(expected)) => {
-            info!(store = "global", expected = %expected, "adopting database lineage");
-            db::lineage::adopt(db_pool.global(), &lineage_config, expected)
-                .await
-                .context("Failed to adopt global database lineage")?;
-        }
-        None => {}
-    }
 
     info!("Database initialized and migrations complete");
 

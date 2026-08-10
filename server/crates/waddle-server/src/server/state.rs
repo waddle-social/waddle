@@ -79,6 +79,14 @@ pub struct AppState {
     lineage_registry_builder: Mutex<Option<crate::db::lineage::LineageRegistryBuilder>>,
     pub lineage_config: crate::config::LineageConfig,
     pub clustering_enabled: bool,
+    /// Result of the one startup attestation pass, published exactly once by
+    /// `create_websocket_state` after the registry seals. `create_router`
+    /// consults it to gate Serving promotion and the janitor spawns.
+    pub lineage_startup: OnceLock<crate::db::lineage::LineageReport>,
+    /// Which `adopt=<uuid>` list entries actually matched a durable
+    /// boundary. An entry that matched nothing is an operator typo (or a
+    /// boundary that no longer exists) and must fail the startup gate loudly.
+    lineage_adopt_matched: Mutex<std::collections::HashSet<crate::db::lineage::LineageUuid>>,
 }
 
 impl AppState {
@@ -181,6 +189,8 @@ impl AppState {
             )),
             lineage_config,
             clustering_enabled,
+            lineage_startup: OnceLock::new(),
+            lineage_adopt_matched: Mutex::new(std::collections::HashSet::new()),
         }
     }
 }
@@ -239,6 +249,31 @@ impl AppState {
             if let Some(builder) = builder.as_mut() {
                 builder.register_ephemeral(store);
             }
+        }
+    }
+
+    pub fn note_lineage_adopt_match(&self, matched: crate::db::lineage::LineageUuid) {
+        if let Ok(mut set) = self.lineage_adopt_matched.lock() {
+            set.insert(matched);
+        }
+    }
+
+    /// Report entries for `adopt=` list values that matched no boundary.
+    pub fn lineage_adopt_unmatched(&self) -> Option<crate::db::lineage::LineageReport> {
+        let Some(crate::db::lineage::LineageAction::Adopt(expected)) =
+            self.lineage_config.action.as_ref()
+        else {
+            return None;
+        };
+        let matched = self
+            .lineage_adopt_matched
+            .lock()
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        if expected.iter().all(|uuid| matched.contains(uuid)) {
+            None
+        } else {
+            Some(crate::db::lineage::LineageReport::adopt_unmatched())
         }
     }
 

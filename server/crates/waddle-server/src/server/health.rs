@@ -209,17 +209,37 @@ fn lifecycle_not_ready_response(
 /// node. The same lifecycle also fails closed when a critical local actor
 /// terminates in a single-node deployment.
 pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // One deadline bounds the WHOLE readiness body — pool health and lineage
+    // probes run concurrently inside it — so a stalled pool acquisition
+    // cannot eat the kubelet's 2s budget and surface as an untyped
+    // client-side probe timeout.
     let readiness = async {
-        let health = state.db_pool.health_check().await;
-        let lineage = lineage_readiness(&state).await;
-        (health, lineage)
+        tokio::time::timeout(LINEAGE_PROBE_TIMEOUT, async {
+            tokio::join!(state.db_pool.health_check(), lineage_readiness(&state))
+        })
+        .await
     };
     match health_for_serving_generation(&state.node_lifecycle, readiness).await {
         Err(error) => {
-            let lineage = lineage_readiness(&state).await;
+            let lineage = tokio::time::timeout(LINEAGE_PROBE_TIMEOUT, lineage_readiness(&state))
+                .await
+                .unwrap_or(Err(LineageStatus::ProbeTimeout));
             lifecycle_not_ready_response(&state.node_lifecycle, &error, lineage)
         }
-        Ok((Ok(health), Ok(report))) if health.is_healthy() && report.is_attested() => (
+        Ok(Err(_)) => {
+            warn!("Readiness check: deadline exceeded before health/lineage completed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "not_ready",
+                    "service": "waddle-server",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "database": { "status": "timeout" },
+                    "lineage": { "status": LineageStatus::ProbeTimeout.as_str() }
+                })),
+            )
+        }
+        Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() && report.is_attested() => (
             StatusCode::OK,
             Json(json!({
                 "status": "ready",
@@ -229,9 +249,11 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                 "lineage": "attested"
             })),
         ),
-        Ok((Ok(health), Ok(report))) if health.is_healthy() => lineage_not_ready_response(report),
-        Ok((Ok(_), Err(status))) => lineage_status_response(status),
-        Ok((Ok(health), _)) => {
+        Ok(Ok((Ok(health), Ok(report)))) if health.is_healthy() => {
+            lineage_not_ready_response(report)
+        }
+        Ok(Ok((Ok(_), Err(status)))) => lineage_status_response(status),
+        Ok(Ok((Ok(health), lineage))) => {
             warn!(
                 global_healthy = health.global_healthy,
                 waddle_dbs_healthy = health.waddle_dbs_healthy,
@@ -249,11 +271,12 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                         "global_healthy": health.global_healthy,
                         "waddle_dbs_healthy": health.waddle_dbs_healthy,
                         "loaded_waddle_count": health.loaded_waddle_count
-                    }
+                    },
+                    "lineage": lineage_json(lineage)
                 })),
             )
         }
-        Ok((Err(e), _)) => {
+        Ok(Ok((Err(e), lineage))) => {
             warn!(error = %e, "Readiness check failed");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -263,7 +286,8 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
                     "version": env!("CARGO_PKG_VERSION"),
                     "database": {
                         "status": format!("error: {}", e)
-                    }
+                    },
+                    "lineage": lineage_json(lineage)
                 })),
             )
         }
@@ -274,14 +298,34 @@ async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageSta
     let Some(registry) = state.lineage_registry.get() else {
         return Err(LineageStatus::Initializing);
     };
-    match tokio::time::timeout(
-        LINEAGE_PROBE_TIMEOUT,
-        registry.attest(&state.lineage_config, state.clustering_enabled),
-    )
-    .await
-    {
-        Ok(report) => Ok(report),
-        Err(_) => Err(LineageStatus::ProbeTimeout),
+    let report = registry
+        .attest(&state.lineage_config, state.clustering_enabled)
+        .await;
+    // While `adopt=` names an entry that matched no boundary, the node stays
+    // typed-unready even though every row verifies — otherwise readiness
+    // would claim "attested" on a node the startup gate refused to promote.
+    Ok(match state.lineage_adopt_unmatched() {
+        Some(unmatched) => report.merged(unmatched),
+        None => report,
+    })
+}
+
+fn lineage_json(lineage: Result<LineageReport, LineageStatus>) -> serde_json::Value {
+    match lineage {
+        Ok(report) if report.is_attested() => serde_json::Value::String("attested".to_string()),
+        Ok(report) => serde_json::Value::Object(
+            report
+                .failures()
+                .iter()
+                .map(|(store, status)| {
+                    (
+                        store.to_string(),
+                        serde_json::Value::String(status.as_str().to_string()),
+                    )
+                })
+                .collect(),
+        ),
+        Err(status) => json!({ "status": status.as_str() }),
     }
 }
 

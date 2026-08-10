@@ -509,8 +509,8 @@ schema.#Project & {
 					  echo "WADDLE_DB_LINEAGE_ACTION must not render when deployment.lineageAction is unset" >&2
 					  exit 1
 					fi
-					if ! grep -q 'WADDLE_DEPLOYMENT_UUID: ""' "${lineage_default_render}"; then
-					  echo "default chart render must provide an empty WADDLE_DEPLOYMENT_UUID" >&2
+					if grep -q 'WADDLE_DEPLOYMENT_UUID' "${lineage_default_render}"; then
+					  echo "WADDLE_DEPLOYMENT_UUID must not render when deployment.uuid is unset (a present-but-empty env var fails server startup)" >&2
 					  exit 1
 					fi
 					if helm template waddle-server charts/waddle-server \

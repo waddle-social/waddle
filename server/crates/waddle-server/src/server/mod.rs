@@ -153,7 +153,6 @@ pub async fn start_with_config(
             .await
             .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?,
     );
-    bootstrap_store_lineage(inbox_database_storage.database(), &lineage_config, "inbox").await?;
     let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         inbox_database_storage.clone();
     let spaces_metadata_database_store = Arc::new(
@@ -163,12 +162,6 @@ pub async fn start_with_config(
                 anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
             })?,
     );
-    bootstrap_store_lineage(
-        spaces_metadata_database_store.database(),
-        &lineage_config,
-        "spaces_metadata",
-    )
-    .await?;
     let spaces_metadata_store: Arc<dyn crate::spaces_metadata::SpacesMetadataStore> =
         spaces_metadata_database_store.clone();
     let channel_space_link_database_store = Arc::new(
@@ -180,12 +173,6 @@ pub async fn start_with_config(
             anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
         })?,
     );
-    bootstrap_store_lineage(
-        channel_space_link_database_store.database(),
-        &lineage_config,
-        "channel_space_links",
-    )
-    .await?;
     let channel_space_link_store: Arc<dyn crate::channel_space_links::ChannelSpaceLinkStore> =
         channel_space_link_database_store.clone();
     // Build the shared XEP-0060 PubSub/PEP storage and the MUC
@@ -201,12 +188,6 @@ pub async fn start_with_config(
     )
     .await
     .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
-    bootstrap_store_lineage(
-        pubsub_database_storage.database(),
-        &lineage_config,
-        "pubsub",
-    )
-    .await?;
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         pubsub_database_storage.clone();
     // #807: spawn the registry behind the instrumented, explicitly-bounded
@@ -315,6 +296,12 @@ pub async fn start_with_config(
         lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,
     }));
+    bootstrap_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::Global,
+        db_pool.global().clone(),
+    )
+    .await?;
     state.register_lineage_database(
         crate::db::lineage::DurableStore::Global,
         db_pool.global().clone(),
@@ -325,26 +312,30 @@ pub async fn start_with_config(
             db_pool.global().clone(),
         );
     }
-    register_store_lineage(
+    bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Inbox,
         inbox_database_storage.database(),
-    );
-    register_store_lineage(
+    )
+    .await?;
+    bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::SpacesMetadata,
         spaces_metadata_database_store.database(),
-    );
-    register_store_lineage(
+    )
+    .await?;
+    bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::ChannelSpaceLinks,
         channel_space_link_database_store.database(),
-    );
-    register_store_lineage(
+    )
+    .await?;
+    bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Pubsub,
         pubsub_database_storage.database(),
-    );
+    )
+    .await?;
     // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
     // the clustering global database and enable fenced groupchat-archive
     // writes when clustering is live, mirroring the
@@ -357,7 +348,7 @@ pub async fn start_with_config(
         db_pool.global(),
     )
     .await?;
-    bootstrap_mam_lineage(&state, &websocket_mam_storage, &lineage_config).await?;
+    bootstrap_mam_lineage(&state, &websocket_mam_storage).await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
@@ -466,22 +457,57 @@ pub async fn start_with_config(
     }
 }
 
+/// Bootstrap DDL plus the one-shot operator action for one durable boundary.
+///
+/// `Adopt` uses the matched-or-skip engine call: several stores usually share
+/// one database (one `_lineage` row), so only the boundary whose row holds a
+/// listed UUID rotates; everywhere else this is read-only. Matches are
+/// recorded on `AppState` so the startup gate can fail loudly when an
+/// `adopt=` entry matched no boundary at all.
 pub(crate) async fn bootstrap_store_lineage(
+    state: &AppState,
+    store: crate::db::lineage::DurableStore,
     database: crate::db::Database,
-    config: &crate::config::LineageConfig,
-    store: &'static str,
 ) -> Result<()> {
+    let config = &state.lineage_config;
     crate::db::lineage::ensure_table(&database).await?;
-    match config.action {
+    match &config.action {
         Some(crate::db::lineage::LineageAction::Enroll) => {
-            info!(store, "enrolling database lineage");
+            info!(store = %store, "enrolling database lineage");
             crate::db::lineage::enroll(&database, config).await?;
         }
         Some(crate::db::lineage::LineageAction::Adopt(expected)) => {
-            info!(store, expected = %expected, "adopting database lineage");
-            crate::db::lineage::adopt(&database, config, expected).await?;
+            match crate::db::lineage::adopt_if_matched(&database, config, expected).await? {
+                crate::db::lineage::AdoptOutcome::Adopted { matched, .. } => {
+                    info!(store = %store, matched = %matched, "adopted database lineage");
+                    state.note_lineage_adopt_match(matched);
+                }
+                crate::db::lineage::AdoptOutcome::NotMatched => {
+                    info!(
+                        store = %store,
+                        "lineage adopt action did not name this boundary; leaving it untouched"
+                    );
+                }
+            }
         }
         None => {}
+    }
+    Ok(())
+}
+
+async fn bootstrap_and_register_store_lineage(
+    state: &AppState,
+    store: crate::db::lineage::DurableStore,
+    database: crate::db::Database,
+) -> Result<()> {
+    // Ephemeral classification must follow the opened handle's real backend,
+    // not env-var presence: a missing per-store URL may still resolve to the
+    // durable global `WADDLE_DATABASE_URL`.
+    if database.is_in_memory_sqlite() {
+        state.register_lineage_ephemeral(store);
+    } else {
+        bootstrap_store_lineage(state, store, database.clone()).await?;
+        state.register_lineage_database(store, database);
     }
     Ok(())
 }
@@ -489,7 +515,6 @@ pub(crate) async fn bootstrap_store_lineage(
 async fn bootstrap_mam_lineage(
     state: &AppState,
     storage: &waddle_xmpp::mam::SqlxMamStorage,
-    config: &crate::config::LineageConfig,
 ) -> Result<()> {
     if let Some(pool) = storage.sqlite_pool() {
         let in_memory = crate::db::lineage::sqlite_pool_is_in_memory(pool).await?;
@@ -497,7 +522,7 @@ async fn bootstrap_mam_lineage(
         if in_memory {
             state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Mam);
         } else {
-            bootstrap_store_lineage(database, config, "mam").await?;
+            bootstrap_store_lineage(state, crate::db::lineage::DurableStore::Mam, database).await?;
             state.register_lineage_probe(
                 crate::db::lineage::DurableStore::Mam,
                 Arc::new(crate::db::lineage::SqlxLineageAttestor::from_sqlite(
@@ -509,7 +534,7 @@ async fn bootstrap_mam_lineage(
     }
     if let Some(pool) = storage.postgres_pool() {
         let database = crate::db::Database::from_postgres_pool("mam", pool.clone());
-        bootstrap_store_lineage(database, config, "mam").await?;
+        bootstrap_store_lineage(state, crate::db::lineage::DurableStore::Mam, database).await?;
         state.register_lineage_probe(
             crate::db::lineage::DurableStore::Mam,
             Arc::new(crate::db::lineage::SqlxLineageAttestor::from_postgres(
@@ -519,21 +544,6 @@ async fn bootstrap_mam_lineage(
         return Ok(());
     }
     anyhow::bail!("MAM storage did not expose a lineage backend")
-}
-
-fn register_store_lineage(
-    state: &AppState,
-    store: crate::db::lineage::DurableStore,
-    database: crate::db::Database,
-) {
-    // Ephemeral classification must follow the opened handle's real backend,
-    // not env-var presence: a missing per-store URL may still resolve to the
-    // durable global `WADDLE_DATABASE_URL`.
-    if database.is_in_memory_sqlite() {
-        state.register_lineage_ephemeral(store);
-    } else {
-        state.register_lineage_database(store, database);
-    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,9 @@ data:
   WADDLE_MODE: {{ .Values.config.mode | quote }}
   WADDLE_BASE_URL: {{ .Values.config.baseUrl | quote }}
   WADDLE_DB_DRIVER: {{ .Values.database.driver | quote }}
+  {{- if .Values.deployment.uuid }}
   WADDLE_DEPLOYMENT_UUID: {{ .Values.deployment.uuid | quote }}
+  {{- end }}
   WADDLE_DB_POOL_SIZE: {{ .Values.database.poolSize | toString | quote }}
   WADDLE_DB_CONTROL_PLANE_POOL_SIZE: {{ .Values.database.controlPlanePoolSize | toString | quote }}
   WADDLE_XMPP_ENABLED: {{ .Values.xmpp.enabled | toString | quote }}

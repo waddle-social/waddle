@@ -2503,13 +2503,19 @@ impl LineageConfig {
                         if expected.is_empty() {
                             return Err(LineageConfigError::InvalidAction);
                         }
-                        let expected =
-                            expected
-                                .parse()
-                                .map_err(|_| LineageConfigError::InvalidUuid {
+                        let expected = expected
+                            .split(',')
+                            .map(str::trim)
+                            .map(|entry| {
+                                if entry.is_empty() {
+                                    return Err(LineageConfigError::InvalidAction);
+                                }
+                                entry.parse().map_err(|_| LineageConfigError::InvalidUuid {
                                     name: "WADDLE_DB_LINEAGE_ACTION",
-                                    value: expected.to_string(),
-                                })?;
+                                    value: entry.to_string(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
                         Some(crate::db::lineage::LineageAction::Adopt(expected))
                     }
                 }

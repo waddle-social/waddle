@@ -51,6 +51,14 @@ pub enum LineageStatus {
     MissingLineage,
     DeploymentUuidMismatch,
     SystemIdentifierUnavailable,
+    /// Persisted PG identity (system identifier, database, or schema) does
+    /// not match the live connection — the clone/restore/mis-point class.
+    IdentityMismatch,
+    /// The lineage table or row is structurally unusable (unknown format,
+    /// invalid UUIDs, NULL identity fields, multiple rows, missing columns).
+    MalformedLineage,
+    /// `WADDLE_DB_LINEAGE_ACTION=adopt=<uuid>` matched no durable boundary.
+    AdoptUnmatched,
     ProbeTimeout,
     ClusteredSqlite,
     ClusteredEphemeral,
@@ -65,6 +73,9 @@ impl LineageStatus {
             Self::MissingLineage => "missing_lineage",
             Self::DeploymentUuidMismatch => "deployment_uuid_mismatch",
             Self::SystemIdentifierUnavailable => "system_identifier_unavailable",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::MalformedLineage => "malformed_lineage",
+            Self::AdoptUnmatched => "adopt_unmatched",
             Self::ProbeTimeout => "probe_timeout",
             Self::ClusteredSqlite => "clustered_sqlite",
             Self::ClusteredEphemeral => "clustered_ephemeral",
@@ -171,8 +182,19 @@ impl LineageAttestor for SqlxLineageAttestor {
 /// Store topology: probes prove the pool they represent, aliases do not
 /// duplicate shared pools, and ephemeral stores are exempt outside cluster mode.
 pub enum LineageTopology {
-    Probe(Arc<dyn LineageAttestor>),
-    Alias { of: DurableStore },
+    Probe {
+        attestor: Arc<dyn LineageAttestor>,
+        /// Set once on the first successful attestation. A pool's identity
+        /// is immutable for the process lifetime (the DSN never changes and
+        /// a proven boundary cannot silently become a different database
+        /// through the same healthy pool), so a later TRANSPORT failure on a
+        /// previously-proven store must not eject the node from the
+        /// endpoint set. Definitive lineage errors always fail regardless.
+        last_good: std::sync::OnceLock<AttestedLineage>,
+    },
+    Alias {
+        of: DurableStore,
+    },
     Ephemeral,
 }
 
@@ -195,7 +217,10 @@ impl LineageRegistryBuilder {
     pub fn register_probe(&mut self, store: DurableStore, attestor: Arc<dyn LineageAttestor>) {
         self.entries.push(LineageRegistryEntry {
             store,
-            topology: LineageTopology::Probe(attestor),
+            topology: LineageTopology::Probe {
+                attestor,
+                last_good: std::sync::OnceLock::new(),
+            },
         });
     }
 
@@ -237,7 +262,10 @@ impl LineageRegistry {
             .entries
             .iter()
             .filter_map(|entry| match &entry.topology {
-                LineageTopology::Probe(attestor) => Some((entry.store, Arc::clone(attestor))),
+                LineageTopology::Probe {
+                    attestor,
+                    last_good,
+                } => Some((entry.store, Arc::clone(attestor), last_good)),
                 LineageTopology::Alias { .. } => None,
                 LineageTopology::Ephemeral => {
                     if clustering_enabled {
@@ -246,24 +274,48 @@ impl LineageRegistry {
                     None
                 }
             });
-        let results = join_all(probes.map(|(store, attestor)| async move {
+        let results = join_all(probes.map(|(store, attestor, last_good)| async move {
             let driver = attestor.driver();
-            (store, driver, attestor.attest(config).await)
+            (store, driver, last_good, attestor.attest(config).await)
         }))
         .await;
         let mut postgres = Vec::new();
-        for (store, driver, result) in results {
+        for (store, driver, last_good, result) in results {
             if clustering_enabled && driver == DatabaseDriver::Sqlite {
                 failures.push((store, LineageStatus::ClusteredSqlite));
                 continue;
             }
             match result {
                 Ok(attested) => {
+                    let _ = last_good.set(attested.clone());
                     if let Some(identity) = attested.postgres_identity.clone() {
                         postgres.push((store, attested, identity));
                     }
                 }
-                Err(error) => failures.push((store, status_for_error(&error))),
+                // Sticky success: a transport-level error (pool saturation,
+                // brief connection loss) on a boundary this process already
+                // proved does not un-prove it. Typed lineage errors are
+                // definitive and always fail.
+                Err(error) => match (&error, last_good.get()) {
+                    (DatabaseError::Lineage(_), _) | (_, None) => {
+                        tracing::warn!(
+                            store = %store,
+                            error = %error,
+                            "lineage attestation probe failed"
+                        );
+                        failures.push((store, status_for_error(&error)));
+                    }
+                    (_, Some(proven)) => {
+                        tracing::warn!(
+                            store = %store,
+                            error = %error,
+                            "lineage probe hit a transport error on a previously proven boundary; keeping the proven attestation"
+                        );
+                        if let Some(identity) = proven.postgres_identity.clone() {
+                            postgres.push((store, proven.clone(), identity));
+                        }
+                    }
+                },
             }
         }
         if clustering_enabled {
@@ -303,6 +355,17 @@ fn status_for_error(error: &DatabaseError) -> LineageStatus {
         DatabaseError::Lineage(super::LineageError::SystemIdentifierUnavailable) => {
             LineageStatus::SystemIdentifierUnavailable
         }
+        DatabaseError::Lineage(
+            super::LineageError::SystemIdentifierMismatch { .. }
+            | super::LineageError::DatabaseIdentityMismatch { .. }
+            | super::LineageError::SchemaIdentityMismatch { .. },
+        ) => LineageStatus::IdentityMismatch,
+        DatabaseError::Lineage(
+            super::LineageError::UnknownFormat { .. }
+            | super::LineageError::MalformedTable { .. }
+            | super::LineageError::InvalidUuid { .. }
+            | super::LineageError::InvalidPostgresIdentity { .. },
+        ) => LineageStatus::MalformedLineage,
         _ => LineageStatus::VerificationFailed,
     }
 }
@@ -325,5 +388,22 @@ impl LineageReport {
         Self {
             failures: vec![(DurableStore::Global, LineageStatus::ProbeTimeout)],
         }
+    }
+
+    pub fn initializing() -> Self {
+        Self {
+            failures: vec![(DurableStore::Global, LineageStatus::Initializing)],
+        }
+    }
+
+    pub fn adopt_unmatched() -> Self {
+        Self {
+            failures: vec![(DurableStore::Global, LineageStatus::AdoptUnmatched)],
+        }
+    }
+
+    pub fn merged(mut self, other: LineageReport) -> Self {
+        self.failures.extend(other.failures);
+        self
     }
 }

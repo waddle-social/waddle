@@ -1,8 +1,9 @@
 use std::str::FromStr;
 
 use super::{
-    adopt, enroll, ensure_table, verify, DeploymentUuid, DurableStore, LineageError,
-    LineageRegistryBuilder, LineageStatus, LineageUuid,
+    adopt, adopt_if_matched, enroll, ensure_table, verify, AdoptOutcome, DeploymentUuid,
+    DurableStore, LineageError, LineageRegistryBuilder, LineageStatus, LineageUuid,
+    PgSystemIdentifier,
 };
 use crate::{
     config::LineageConfig,
@@ -577,4 +578,95 @@ async fn clustered_schema_boundaries_report_colocation_mismatch() {
         .await
         .expect("drop MAM schema");
     drop_postgres_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn sqlite_adopt_if_matched_rotates_only_the_named_boundary() {
+    let db = Database::in_memory("lineage-adopt-if-matched")
+        .await
+        .expect("open sqlite database");
+    let original = enroll(&db, &configured()).await.expect("enroll lineage");
+
+    // Matched: rotates.
+    let outcome = adopt_if_matched(&db, &configured(), &[original.lineage_uuid])
+        .await
+        .expect("adopt matched boundary");
+    let AdoptOutcome::Adopted { matched, attested } = outcome else {
+        panic!("expected adoption, got {outcome:?}");
+    };
+    assert_eq!(matched, original.lineage_uuid);
+    assert_ne!(attested.lineage_uuid, original.lineage_uuid);
+
+    // Re-applying the SAME expected list against the now-rotated row is the
+    // shared-database second-store case: a read-only no-op, not an error.
+    let outcome = adopt_if_matched(&db, &configured(), &[original.lineage_uuid])
+        .await
+        .expect("second application is read-only");
+    assert_eq!(outcome, AdoptOutcome::NotMatched);
+    assert_eq!(
+        verify(&db, &configured())
+            .await
+            .expect("verify")
+            .lineage_uuid,
+        attested.lineage_uuid,
+    );
+}
+
+#[tokio::test]
+async fn sqlite_rejects_multiple_lineage_rows() {
+    let db = Database::in_memory("lineage-multi-row")
+        .await
+        .expect("open sqlite database");
+    // A pre-existing table without the singleton PK/CHECK can hold several
+    // rows; build that shape by hand.
+    db.execute(
+        "CREATE TABLE _lineage (id INTEGER, format INTEGER NOT NULL, lineage_uuid TEXT NOT NULL,          deployment_uuid TEXT NOT NULL, pg_system_identifier TEXT, pg_database_oid TEXT,          pg_database_name TEXT, pg_schema_oid TEXT, pg_schema_name TEXT,          stamped_at TEXT NOT NULL DEFAULT (datetime('now')))",
+    )
+    .await
+    .expect("create constraint-free lineage table");
+    for _ in 0..2 {
+        db.execute(
+            "INSERT INTO _lineage (id, format, lineage_uuid, deployment_uuid)              VALUES (1, 1, '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001',              '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001')",
+        )
+        .await
+        .expect("insert duplicate lineage row");
+    }
+
+    assert!(matches!(
+        lineage_error(
+            verify(&db, &configured())
+                .await
+                .expect_err("multiple rows fail closed")
+        ),
+        LineageError::MalformedTable { .. }
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_tolerates_additive_future_columns() {
+    let db = Database::in_memory("lineage-extra-column")
+        .await
+        .expect("open sqlite database");
+    enroll(&db, &configured()).await.expect("enroll lineage");
+    db.execute("ALTER TABLE _lineage ADD COLUMN future_field TEXT")
+        .await
+        .expect("add future column");
+
+    // Format-1 columns are a subset: bootstrap validation and verify still
+    // work, preserving the format-based evolution story.
+    ensure_table(&db).await.expect("extra column tolerated");
+    verify(&db, &configured())
+        .await
+        .expect("verify tolerates additive columns");
+}
+
+#[test]
+fn pg_system_identifier_accepts_negative_bigint_rendering() {
+    // From 2038 initdb-derived identifiers exceed i64::MAX bit patterns and
+    // PostgreSQL renders the bigint as a negative decimal.
+    let negative: PgSystemIdentifier = "-9223372036854775808".parse().expect("negative parses");
+    assert_eq!(negative.0, 9_223_372_036_854_775_808);
+    let positive: PgSystemIdentifier = "7373622067229815983".parse().expect("positive parses");
+    assert_eq!(positive.0, 7_373_622_067_229_815_983);
+    assert!("not-a-number".parse::<PgSystemIdentifier>().is_err());
 }
