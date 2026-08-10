@@ -37,6 +37,7 @@ use xmpp_parsers::presence::Show;
 use crate::auth::AuthenticatedPrincipalRef;
 use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
+use crate::postgres_identity::ClusterColocationIdentities;
 use crate::Stanza;
 
 /// Immutable ownership context authorizing one clustered SM persistence write.
@@ -107,34 +108,27 @@ pub enum SmPersistenceError {
     NotOwner { entity: Entity },
 
     /// Startup-time misconfiguration (ADR-0017 Phase 3 Slice 4 FIX 4): the
-    /// resolved SM-persistence database URL does not match the clustering
-    /// subsystem's global database URL while clustering is enabled. The
-    /// Postgres-fenced `SmPersistenceStorage`'s fencing `SELECT ... FOR
-    /// SHARE` targets `clustering_claims`, which lives in the clustering
-    /// global database — clustered SM persistence and the claims tables
-    /// must be co-located in the same Postgres database, never two
-    /// independently configured ones (a second, unrelated database might
-    /// not even have a `clustering_claims` table to fence against).
+    /// physical SM storage identity does not match the clustering global
+    /// database identity while clustering is enabled. The Postgres-fenced
+    /// `SmPersistenceStorage`'s fencing `SELECT ... FOR SHARE` targets
+    /// `clustering_claims`, which lives in the clustering global database —
+    /// clustered SM persistence and the claims tables must be co-located in
+    /// the same Postgres schema boundary, never two independently opened
+    /// ones (a second, unrelated boundary might not even have a
+    /// `clustering_claims` table to fence against).
     ///
-    /// Both fields are expected to already be credential-redacted by the
-    /// caller before construction (this type has no way to redact a DSN
-    /// itself, and must not be trusted to store raw secrets).
     #[error(
         "clustered SM persistence must be co-located with the clustering claims tables: \
-         resolved SM database URL ({sm_database_url}) does not match the clustering global \
-         database URL ({global_database_url})"
+         physical SM storage identity does not match the clustering global database identity"
     )]
     ClusterColocationMismatch {
-        sm_database_url: String,
-        global_database_url: String,
+        identities: Box<ClusterColocationIdentities>,
     },
 
     /// Clustering cannot use the portable SQLite/in-memory persistence
     /// implementation because its ownership fence lives in Postgres.
-    #[error(
-        "clustered SM persistence requires a postgres:// or postgresql:// database URL; got {sm_database_url}"
-    )]
-    ClusterRequiresPostgres { sm_database_url: String },
+    #[error("clustered SM persistence requires a PostgreSQL database")]
+    ClusterRequiresPostgres,
 
     /// Startup wiring enabled clustering without providing the live claim
     /// store and rotating node identity needed by fenced persistence.

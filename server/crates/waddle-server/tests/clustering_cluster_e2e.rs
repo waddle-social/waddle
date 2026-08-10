@@ -360,6 +360,13 @@ async fn spawn_cluster_server_with_envs(
             // entirely (Slice 6's `cross_node_resume_live_steal_handshake`
             // needs both nodes reading/writing the SAME persisted rows).
             ("WADDLE_XMPP_SM_DATABASE_URL", &postgres_url),
+            // #1652: clustering rejects ephemeral (in-memory) durable stores
+            // at readiness, so the harness runs every store on the shared
+            // Postgres — the same shape as a production clustered node.
+            ("WADDLE_XMPP_MAM_DATABASE_URL", &postgres_url),
+            ("WADDLE_XMPP_INBOX_DATABASE_URL", &postgres_url),
+            ("WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL", &postgres_url),
+            ("WADDLE_XMPP_PUBSUB_DATABASE_URL", &postgres_url),
             // NB: the fixed test account stays enabled (TestServer's default) —
             // disabling it flips the permission backend onto the SpiceDB path and
             // fails startup. Its seeding is delete-then-recreate, safe for the
@@ -369,6 +376,15 @@ async fn spawn_cluster_server_with_envs(
             // being denied by the local instant-room creation guard first.
             ("WADDLE_SERVER_OWNER_LOCALPARTS", "admin,cluster-peer"),
             ("WADDLE_CLUSTERING_ENABLED", "true"),
+            // #1652: clustered nodes refuse a row-less database unless the
+            // rollout carries the enroll action; enroll is idempotent, so
+            // every node of the harness may carry it. One fixed deployment
+            // UUID = one deployment sharing the Postgres, matching prod.
+            (
+                "WADDLE_DEPLOYMENT_UUID",
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1e2",
+            ),
+            ("WADDLE_DB_LINEAGE_ACTION", "enroll"),
             ("WADDLE_CLUSTERING_LISTEN_ADDRS", &listen),
             ("WADDLE_CLUSTERING_KEYPAIR_POOL", &pool_env),
             ("WADDLE_CLUSTERING_NODE_ID_FILE", &node_id_file_str),

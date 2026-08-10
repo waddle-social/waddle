@@ -150,6 +150,10 @@ fn claim_error_to_pending_storage_error(error: ClaimError, entity: Entity) -> Pe
 }
 
 impl DatabasePendingDeliveryStorage {
+    pub fn database(&self) -> Database {
+        self.db.clone()
+    }
+
     /// Open a backing database (or in-memory fallback when no URL is
     /// supplied). Mirrors [`crate::inbox::DatabaseInboxStorage::open`].
     /// Never fenced — see [`open_for_cluster_mode`] for the entry point

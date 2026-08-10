@@ -35,6 +35,8 @@ async fn main() -> Result<()> {
     // Initialize database (driver + DSN contract)
     let db_runtime = config::DatabaseRuntimeConfig::from_env()
         .map_err(|e| anyhow::anyhow!("Failed to load database runtime config: {}", e))?;
+    let lineage_config = config::LineageConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("Failed to load database lineage configuration: {}", e))?;
     info!(
         driver = ?db_runtime.driver,
         "Using configured database runtime"
@@ -60,6 +62,74 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;
 
+    // Pre-migration lineage guard (#1652): the append-only migration ledger
+    // (#1651) is the most damaging write in the boot path, so the GLOBAL
+    // boundary's lineage is checked BEFORE migrations run. The operator
+    // action (enroll / adopt) applies here first for the same reason. A
+    // database that holds a lineage row that does not verify — another
+    // deployment's database, an unadopted restore — refuses migrations
+    // outright. A database with NO row (fresh install, or the first rollout
+    // of a lineage-aware binary) proceeds: enrollment is what creates the
+    // row, and refusing here would deadlock the bootstrap. That un-enrolled
+    // window is the accepted residual risk and is closed at readiness.
+    db::lineage::ensure_table(db_pool.global())
+        .await
+        .context("Failed to bootstrap database lineage table")?;
+    let global_adopt_matched = match &lineage_config.action {
+        Some(db::lineage::LineageAction::Enroll) => {
+            info!(store = "global", "enrolling database lineage");
+            db::lineage::enroll(db_pool.global(), &lineage_config)
+                .await
+                .context("Failed to enroll global database lineage")?;
+            None
+        }
+        Some(db::lineage::LineageAction::Adopt(expected)) => {
+            match db::lineage::adopt_if_matched(db_pool.global(), &lineage_config, expected)
+                .await
+                .context("Failed to apply global database lineage adoption")?
+            {
+                db::lineage::AdoptOutcome::Adopted { matched, .. } => {
+                    info!(store = "global", matched = %matched, "adopted database lineage");
+                    Some(matched)
+                }
+                db::lineage::AdoptOutcome::NotMatched => None,
+            }
+        }
+        None => None,
+    };
+    match db::lineage::verify(db_pool.global(), &lineage_config).await {
+        Ok(_) => {}
+        Err(db::DatabaseError::Lineage(db::lineage::LineageError::MissingRow)) => {
+            // A clustered node starts writing dynamic control-plane rows
+            // (leases, node registration) right after migrations — before
+            // the full readiness attestation could hold it back. An
+            // un-enrolled database is therefore acceptable only when this
+            // process is the one enrolling it; otherwise a clustered node
+            // mis-pointed at a fresh/foreign row-less database would
+            // mutate it. Single-node deployments stay lenient: they write
+            // nothing dynamic before the readiness gate.
+            if server_config.clustering.enabled
+                && !matches!(
+                    lineage_config.action,
+                    Some(db::lineage::LineageAction::Enroll)
+                )
+            {
+                return Err(anyhow::anyhow!(
+                    "refusing to start clustering against a database with no lineage row: \
+                     enroll it first (WADDLE_DB_LINEAGE_ACTION=enroll on one rollout)"
+                ));
+            }
+            info!("global database has no lineage row yet; proceeding to migrations un-enrolled");
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(error).context(
+                "refusing to run migrations: the global database's lineage does not \
+                 describe this deployment (mis-pointed DSN, unadopted restore, or \
+                 missing WADDLE_DEPLOYMENT_UUID)",
+            ));
+        }
+    }
+
     let migration_runner = db::MigrationRunner::single();
     migration_runner
         .run(db_pool.global())
@@ -69,7 +139,14 @@ async fn main() -> Result<()> {
     info!("Database initialized and migrations complete");
 
     // Start the server
-    let metrics_flush = server::start(db_pool, server_config, inherited).await?;
+    let metrics_flush = server::start(
+        db_pool,
+        server_config,
+        lineage_config,
+        global_adopt_matched,
+        inherited,
+    )
+    .await?;
 
     telemetry::shutdown(metrics_flush);
 

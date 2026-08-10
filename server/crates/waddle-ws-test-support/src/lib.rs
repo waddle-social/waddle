@@ -152,6 +152,14 @@ impl TestServer {
             .map(|(username, password)| format!("{username}:{password}"))
             .collect::<Vec<_>>()
             .join(",");
+        // A caller-supplied database URL (global OR MAM) means a DURABLE
+        // store (persistent SQLite file), which the lineage attestation gate
+        // (#1652) refuses to serve un-enrolled. The harness enrolls it under
+        // one fixed deployment UUID so restart-persistence tests re-verify
+        // the same identity across server generations. The in-memory
+        // defaults are classified ephemeral and need neither. Callers can
+        // override both via `extra_envs` (later `env()` calls win).
+        let durable_database = database_url.is_some() || mam_database_url.is_some();
         let database_url = database_url.unwrap_or_else(|| "sqlite::memory:".to_string());
 
         // Temp file where the server writes its bound HTTP port
@@ -185,7 +193,16 @@ impl TestServer {
             .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_DB_DRIVER", "sqlite")
-            .env("WADDLE_DATABASE_URL", &database_url)
+            .env("WADDLE_DATABASE_URL", &database_url);
+        if durable_database {
+            command
+                .env(
+                    "WADDLE_DEPLOYMENT_UUID",
+                    "018f47b2-4b2e-7a3a-9a4c-52a5a6a97e57",
+                )
+                .env("WADDLE_DB_LINEAGE_ACTION", "enroll");
+        }
+        command
             .env("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY", "true")
             .env("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY", "true")
             .env(

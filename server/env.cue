@@ -455,6 +455,13 @@ schema.#Project & {
 					modules_yaml="$(mktemp)"
 					published_values="$(mktemp).yaml"
 					published_render="$(mktemp)"
+					lineage_default_render="$(mktemp)"
+					lineage_cluster_render="$(mktemp)"
+					missing_uuid_stderr="$(mktemp)"
+					malformed_uuid_stderr="$(mktemp)"
+					malformed_action_stderr="$(mktemp)"
+					lineage_uuid="123e4567-e89b-12d3-a456-426614174000"
+					malformed_lineage_uuid="not-a-uuid"
 					chart_secret_args=(
 					  --set-string secret.sessionKey=ci-session-key
 					  --set-string secret.occupantIdSecret=ci-occupant-id-secret-32-bytes-long
@@ -487,6 +494,98 @@ schema.#Project & {
 					  --set spicedb.enabled=false \
 					  --set-string 'extraSecretRefs[0]=not-runtime-secrets' > /dev/null 2>&1; then
 					  echo "chart must reject arbitrary extraSecretRefs as proof of required runtime keys" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" \
+					  > "${lineage_default_render}" ; then
+					  :
+					else
+					  echo "chart template must succeed with default lineage settings when clustering is off" >&2
+					  exit 1
+					fi
+					if grep -q "WADDLE_DB_LINEAGE_ACTION" "${lineage_default_render}"; then
+					  echo "WADDLE_DB_LINEAGE_ACTION must not render when deployment.lineageAction is unset" >&2
+					  exit 1
+					fi
+					if grep -q 'WADDLE_DEPLOYMENT_UUID' "${lineage_default_render}"; then
+					  echo "WADDLE_DEPLOYMENT_UUID must not render when deployment.uuid is unset (a present-but-empty env var fails server startup)" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set clustering.enabled=true \
+					  --set database.driver=postgres \
+					  --set deployment.uuid="${lineage_uuid}" \
+					  --set deployment.lineageAction=enroll \
+					  --set config.s3Endpoint=http://127.0.0.1 \
+					  --set config.s3Bucket=placeholder-bucket \
+					  --set-string secret.clusteringKeypairPool="one\\,two\\,three" \
+					  "${chart_secret_args[@]}" \
+					  > "${lineage_cluster_render}" ; then
+					  :
+					else
+					  echo "clustered chart render must succeed with valid deployment.uuid" >&2
+					  exit 1
+					fi
+					if ! grep -q "WADDLE_DEPLOYMENT_UUID: \"${lineage_uuid}\"" "${lineage_cluster_render}"; then
+					  echo "WADDLE_DEPLOYMENT_UUID must render in clustered deployments with valid UUID" >&2
+					  exit 1
+					fi
+					if ! grep -q 'WADDLE_DB_LINEAGE_ACTION: "enroll"' "${lineage_cluster_render}"; then
+					  echo "WADDLE_DB_LINEAGE_ACTION must render when deployment.lineageAction is set" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set clustering.enabled=true \
+					  --set database.driver=postgres \
+					  --set config.s3Endpoint=http://127.0.0.1 \
+					  --set config.s3Bucket=placeholder-bucket \
+					  --set-string secret.clusteringKeypairPool="one\\,two\\,three" \
+					  "${chart_secret_args[@]}" >/dev/null 2>"${missing_uuid_stderr}"; then
+					  echo "chart template must fail clustering without deployment.uuid" >&2
+					  exit 1
+					fi
+					if ! grep -q "clustering.enabled=true requires deployment.uuid to be set to a stable non-empty RFC-4122 UUID for lineage comparison." "${missing_uuid_stderr}"; then
+					  echo "chart template must explain clustering's deployment.uuid requirement" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string deployment.uuid="${malformed_lineage_uuid}" \
+					  "${chart_secret_args[@]}" >/dev/null 2>"${malformed_uuid_stderr}"; then
+					  echo "chart template must fail malformed deployment.uuid" >&2
+					  exit 1
+					fi
+					if ! grep -q "deployment.uuid must be a lower-case RFC-4122 UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) when set; remove/clear it or provide a valid value" "${malformed_uuid_stderr}"; then
+					  echo "chart template must explain malformed deployment.uuid values" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string deployment.uuid="${lineage_uuid}" \
+					  --set-string deployment.lineageAction=enrol \
+					  "${chart_secret_args[@]}" >/dev/null 2>"${malformed_action_stderr}"; then
+					  echo "chart template must fail a malformed deployment.lineageAction (a typo here crash-loops the fleet)" >&2
+					  exit 1
+					fi
+					if ! grep -q 'deployment.lineageAction must be' "${malformed_action_stderr}"; then
+					  echo "chart template must explain malformed deployment.lineageAction values" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string deployment.lineageAction=enroll \
+					  "${chart_secret_args[@]}" >/dev/null 2>&1; then
+					  echo "chart template must reject a lineage action without deployment.uuid (the server exits without one)" >&2
 					  exit 1
 					fi
 
@@ -538,9 +637,17 @@ schema.#Project & {
 					  fi
 					done
 					cue vet . "${gitops_values}" -d '#CheckedInGitOpsValues'
-					helm lint charts/waddle-server -f "${gitops_values}"
+					helm lint charts/waddle-server \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
+					  -f "${gitops_values}"
+					# CI-only stand-in: prod is clustered, so chart 0.4.4 hard-requires
+					# deployment.uuid — the REAL value must land in the infrastructure
+					# repo's helmrelease values before this chart version rolls out
+					# (see docs/operations/db-lineage.md). Without this stand-in the
+					# render gate would be blocked on a change outside this repo.
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
 					  -f "${gitops_values}" > "${gitops_render}"
 					for env_name in WADDLE_SESSION_KEY WADDLE_OCCUPANT_ID_SECRET; do
 					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .valueFrom.secretKeyRef.name == \"waddle-runtime-secrets\" and .valueFrom.secretKeyRef.optional == false)" "${gitops_render}" > /dev/null
@@ -581,9 +688,12 @@ schema.#Project & {
 					  -t decisionPollsDigest="${sample_digest}" \
 					  -t githubDigest="${sample_digest}" \
 					  -t stargateQuotesDigest="${sample_digest}"
-					helm lint charts/waddle-server -f "${published_values}"
+					helm lint charts/waddle-server \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
+					  -f "${published_values}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
 					  -f "${published_values}" > "${published_render}"
 
 					rendered_image="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .image' "${published_render}")"
@@ -785,6 +895,16 @@ schema.#Project & {
 					gitops_values="$(mktemp).yaml"
 					gitops_render="$(mktemp)"
 					yq -o=yaml '.spec.values' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > "${gitops_values}"
+					# Chart >= 0.4.4 hard-requires deployment.uuid for the clustered
+					# prod values (#1652). Refuse to PUBLISH until the infrastructure
+					# repo's HelmRelease carries the real value: publishing without it
+					# would leave Flux unable to render the chart, silently stalling
+					# every rollout. See docs/operations/db-lineage.md.
+					if ! yq -r '.spec.values.deployment.uuid // ""' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml \
+					  | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+					  echo "refusing to publish: infrastructure helmrelease.yaml must set deployment.uuid to a lower-case RFC-4122 UUID (see docs/operations/db-lineage.md)" >&2
+					  exit 1
+					fi
 					cue vet . "${gitops_values}" -d '#PublishedValues' \
 					  -t serverImageDigest="${digest}" \
 					  -t linkBoardDigest="${link_board_digest}" \
@@ -792,8 +912,14 @@ schema.#Project & {
 					  -t decisionPollsDigest="${decision_polls_digest}" \
 					  -t githubDigest="${github_digest}" \
 					  -t stargateQuotesDigest="${stargate_quotes_digest}"
+					# CI-only stand-in: prod is clustered, so chart 0.4.4 hard-requires
+					# deployment.uuid — the REAL value must land in the infrastructure
+					# repo's helmrelease values before this chart version rolls out
+					# (see docs/operations/db-lineage.md). Without this stand-in the
+					# render gate would be blocked on a change outside this repo.
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
+					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
 					  -f "${gitops_values}" > "${gitops_render}"
 					rendered_image="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .image' "${gitops_render}")"
 					case "${rendered_image}" in

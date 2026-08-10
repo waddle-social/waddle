@@ -22,6 +22,22 @@ clustering:
   # chart unlock rather than needing a second chart change then" precedent.
   claimReleaseBudgetSeconds: 5
 
+deployment:
+  # Stable operator-provided UUID identifying this deployment.
+  # Bound into DB lineage at enrollment and used for readiness lineage checks.
+  # This value must never change across upgrades or rollbacks.
+  # REQUIRED for any durable database: leaving it empty renders no
+  # WADDLE_DEPLOYMENT_UUID and every pod stays permanently NOT READY until
+  # the lineage is enrolled (see docs/operations/db-lineage.md).
+  uuid: ""
+  # One-shot operator action for lineage bootstrap/repair. Use "enroll" or
+  # "adopt=<old-lineage-uuid>[,<old-lineage-uuid>...]" temporarily, then
+  # REMOVE it in the next upgrade. Enrollment is idempotent; an adopt entry
+  # that no longer matches (e.g. replayed after success) is a logged no-op.
+  # The very first install against a fresh durable database needs
+  # lineageAction: enroll or the fleet never becomes ready.
+  lineageAction: ""
+
 # Deployment update strategy. While persistence uses a ReadWriteOnce PVC, a
 # RollingUpdate surges a second pod that deadlocks on Multi-Attach, so the
 # single-replica phases pin Recreate (a brief per-deploy connection gap

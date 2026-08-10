@@ -33,6 +33,10 @@ pub struct DatabaseInboxStorage {
 }
 
 impl DatabaseInboxStorage {
+    pub fn database(&self) -> Database {
+        self.db.clone()
+    }
+
     pub async fn open(database_url: Option<&str>) -> Result<Self, InboxStorageError> {
         let db = match database_url {
             Some(database_url) => open::open_database(database_url).await?,

@@ -4,7 +4,7 @@ use crate::server::bootstrap_membership;
 use crate::spaces_metadata::SpacesMetadataStore;
 use jid::{BareJid, DomainPart};
 use kameo::actor::ActorRef;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
@@ -73,6 +73,25 @@ pub struct AppState {
     /// clustering is disabled or not compiled in — see
     /// [`crate::clustering::ClusteringHandles`].
     pub clustering_claims: crate::clustering::ClusteringHandles,
+    /// Immutable database-lineage topology, published exactly once after all
+    /// independently opened storage pools are available.
+    pub lineage_registry: OnceLock<crate::db::lineage::LineageRegistry>,
+    lineage_registry_builder: Mutex<Option<crate::db::lineage::LineageRegistryBuilder>>,
+    pub lineage_config: crate::config::LineageConfig,
+    pub clustering_enabled: bool,
+    /// Result of the one startup attestation pass, published exactly once by
+    /// `create_websocket_state` after the registry seals. `create_router`
+    /// consults it to gate Serving promotion and the janitor spawns.
+    pub lineage_startup: OnceLock<crate::db::lineage::LineageReport>,
+    /// The report that LATCHED this node (startup-definitive or live drift
+    /// detected at readiness). Preferred over `lineage_startup` in
+    /// not-Serving readiness responses so the operator sees the failure
+    /// that actually took the node down, not a stale startup snapshot.
+    pub lineage_latched: OnceLock<crate::db::lineage::LineageReport>,
+    /// Which `adopt=<uuid>` list entries actually matched a durable
+    /// boundary. An entry that matched nothing is an operator typo (or a
+    /// boundary that no longer exists) and must fail the startup gate loudly.
+    lineage_adopt_matched: Mutex<std::collections::HashSet<crate::db::lineage::LineageUuid>>,
 }
 
 impl AppState {
@@ -104,7 +123,7 @@ impl AppState {
         let spaces_jid: BareJid = "spaces.localhost"
             .parse()
             .expect("test spaces JID 'spaces.localhost' parses as BareJid");
-        Self::new_with_deps(AppStateDeps {
+        let state = Self::new_with_deps(AppStateDeps {
             db_pool,
             blob_storage,
             inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
@@ -123,7 +142,13 @@ impl AppState {
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
             node_lifecycle: crate::clustering::NodeLifecycle::new(),
             clustering_claims: crate::clustering::ClusteringHandles::default(),
-        })
+            lineage_config: crate::config::LineageConfig::default(),
+            clustering_enabled: false,
+        });
+        let _ = state
+            .lineage_registry
+            .set(crate::db::lineage::LineageRegistry::new(Vec::new()));
+        state
     }
 
     /// Construct an `AppState` from its explicit dependencies. Callers
@@ -145,6 +170,8 @@ impl AppState {
             server_owner_jids,
             node_lifecycle,
             clustering_claims,
+            lineage_config,
+            clustering_enabled,
         } = deps;
         Self {
             db_pool,
@@ -161,6 +188,118 @@ impl AppState {
             server_owner_jids,
             node_lifecycle,
             clustering_claims,
+            lineage_registry: OnceLock::new(),
+            lineage_registry_builder: Mutex::new(Some(
+                crate::db::lineage::LineageRegistryBuilder::default(),
+            )),
+            lineage_config,
+            clustering_enabled,
+            lineage_startup: OnceLock::new(),
+            lineage_latched: OnceLock::new(),
+            lineage_adopt_matched: Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+}
+
+impl AppState {
+    pub fn register_lineage_database(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        database: crate::db::Database,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_database(store, database);
+            }
+        }
+    }
+
+    pub fn register_lineage_probe(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        attestor: Arc<dyn crate::db::lineage::LineageAttestor>,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_probe(store, attestor);
+            }
+        }
+    }
+
+    pub fn register_lineage_control_plane(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        database: crate::db::Database,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_control_plane(store, database);
+            }
+        }
+    }
+
+    pub fn register_lineage_alias(
+        &self,
+        store: crate::db::lineage::DurableStore,
+        of: crate::db::lineage::DurableStore,
+    ) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_alias(store, of);
+            }
+        }
+    }
+
+    pub fn register_lineage_ephemeral(&self, store: crate::db::lineage::DurableStore) {
+        if let Ok(mut builder) = self.lineage_registry_builder.lock() {
+            if let Some(builder) = builder.as_mut() {
+                builder.register_ephemeral(store);
+            }
+        }
+    }
+
+    pub fn note_lineage_adopt_match(&self, matched: crate::db::lineage::LineageUuid) {
+        if let Ok(mut set) = self.lineage_adopt_matched.lock() {
+            set.insert(matched);
+        }
+    }
+
+    /// `adopt=` list entries that matched no boundary this run. Non-empty is
+    /// NOT a readiness failure: after a successful adoption (or a pod restart
+    /// while the one-shot action is still rendered) every row verifies and
+    /// the replayed action legitimately matches nothing; a genuine restore
+    /// that still needs adoption keeps failing attestation on its own
+    /// identity mismatch. The startup gate logs these loudly instead.
+    pub fn lineage_adopt_unmatched(&self) -> Vec<crate::db::lineage::LineageUuid> {
+        let Some(crate::db::lineage::LineageAction::Adopt(expected)) =
+            self.lineage_config.action.as_ref()
+        else {
+            return Vec::new();
+        };
+        let matched = self
+            .lineage_adopt_matched
+            .lock()
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        expected
+            .iter()
+            .filter(|uuid| !matched.contains(uuid))
+            .copied()
+            .collect()
+    }
+
+    pub fn seal_lineage_registry(&self) {
+        let registry = self
+            .lineage_registry_builder
+            .lock()
+            .ok()
+            .and_then(|mut builder| {
+                builder
+                    .take()
+                    .map(crate::db::lineage::LineageRegistryBuilder::seal)
+            });
+        if let Some(registry) = registry {
+            let _ = self.lineage_registry.set(registry);
         }
     }
 }
@@ -183,6 +322,8 @@ pub struct AppStateDeps {
     pub server_owner_jids: Arc<[BareJid]>,
     pub node_lifecycle: crate::clustering::NodeLifecycle,
     pub clustering_claims: crate::clustering::ClusteringHandles,
+    pub lineage_config: crate::config::LineageConfig,
+    pub clustering_enabled: bool,
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against

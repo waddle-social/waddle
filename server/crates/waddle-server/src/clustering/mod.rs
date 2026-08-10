@@ -191,6 +191,13 @@ struct NodeLifecycleState {
     admission: NodeAdmission,
     generation: NodeAdmissionGeneration,
     generation_revoked: CancellationToken,
+    /// Latched when startup database-lineage attestation fails (#1652).
+    /// While set, no path may promote this node to `Serving` — including
+    /// clustering lease recovery's unconditional `serve()` — because the
+    /// process may be pointed at a database that is not this deployment's.
+    /// The latch is permanent for the process lifetime; recovery is an
+    /// operator-driven restart after the lineage cause is fixed.
+    startup_blocked: bool,
 }
 
 /// A successful admission decision for one socket upgrade, bound to the
@@ -275,6 +282,7 @@ impl NodeLifecycle {
                 admission,
                 generation: NodeAdmissionGeneration(0),
                 generation_revoked: CancellationToken::new(),
+                startup_blocked: false,
             })),
             fatal_fence: CancellationToken::new(),
         }
@@ -311,6 +319,40 @@ impl NodeLifecycle {
         self.transition_nonterminal(NodeAdmission::Serving);
     }
 
+    /// Permanently refuse every future `Serving` promotion for this process.
+    /// Called when startup lineage attestation fails; see the field doc on
+    /// [`NodeLifecycleState::startup_blocked`].
+    ///
+    /// Clustering starts before the attestation gate, so a lease-recovery
+    /// `serve()` can win the race and promote first. The latch therefore
+    /// also DEMOTES an already-`Serving` node back to `Starting` (revoking
+    /// the serving generation, which closes any just-admitted sockets) —
+    /// otherwise a boolean set after the fact would leave `/ws` open
+    /// against the unattested database.
+    pub fn latch_startup_block(&self) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.startup_blocked = true;
+        if state.admission == NodeAdmission::Serving {
+            tracing::warn!(
+                "demoting Serving node to Starting: startup lineage attestation failed after a racing promotion"
+            );
+            state.generation_revoked.cancel();
+            state.admission = NodeAdmission::Starting;
+            state.generation = state.generation.next();
+            state.generation_revoked = CancellationToken::new();
+        }
+    }
+
+    pub fn startup_blocked(&self) -> bool {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .startup_blocked
+    }
+
     /// Complete startup only if no fence/drain/failure won the race while
     /// the HTTP graph was being constructed. Recovery is intentionally a
     /// separate explicit [`Self::serve`] call after the node re-registers.
@@ -319,6 +361,9 @@ impl NodeLifecycle {
             .state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.startup_blocked {
+            return StartupServingTransition::Blocked(state.admission.clone());
+        }
         match state.admission {
             NodeAdmission::Starting => {
                 state.generation_revoked.cancel();
@@ -368,6 +413,13 @@ impl NodeLifecycle {
             .state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.startup_blocked && next == NodeAdmission::Serving {
+            tracing::warn!(
+                current = ?state.admission,
+                "refusing Serving promotion: startup lineage attestation failed and the block is latched"
+            );
+            return;
+        }
         if !matches!(state.admission, NodeAdmission::Failed(_)) && state.admission != next {
             state.generation_revoked.cancel();
             state.admission = next;
@@ -394,6 +446,41 @@ mod readiness_tests {
         CriticalNodeFailure, NodeAdmission, NodeAdmissionError, NodeLifecycle,
         StartupServingTransition,
     };
+
+    #[test]
+    fn latched_startup_block_refuses_every_serving_promotion() {
+        let lifecycle = NodeLifecycle::starting();
+        lifecycle.latch_startup_block();
+
+        assert!(matches!(
+            lifecycle.finish_startup(),
+            StartupServingTransition::Blocked(NodeAdmission::Starting)
+        ));
+        // The clustering lease-recovery path promotes via `serve()`
+        // unconditionally; the latch must hold there too.
+        lifecycle.serve();
+        assert_eq!(lifecycle.admission(), NodeAdmission::Starting);
+        assert!(lifecycle.admit().is_err());
+        assert!(lifecycle.startup_blocked());
+    }
+
+    #[test]
+    fn latch_after_racing_serve_demotes_and_revokes_the_generation() {
+        // Clustering lease recovery can call `serve()` BEFORE the startup
+        // attestation gate runs. Latching afterwards must demote the node
+        // and revoke any permit issued by the racing generation.
+        let lifecycle = NodeLifecycle::starting();
+        lifecycle.serve();
+        let permit = lifecycle.admit().expect("racing promotion admits");
+
+        lifecycle.latch_startup_block();
+        assert_eq!(lifecycle.admission(), NodeAdmission::Starting);
+        assert!(permit.revalidate().is_err());
+        assert!(lifecycle.admit().is_err());
+        // And it stays down: another recovery serve() cannot re-promote.
+        lifecycle.serve();
+        assert_eq!(lifecycle.admission(), NodeAdmission::Starting);
+    }
 
     #[test]
     fn failed_latch_overrides_every_later_nonterminal_transition() {

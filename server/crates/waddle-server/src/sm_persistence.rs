@@ -92,6 +92,10 @@ pub struct DatabaseSmPersistence {
 }
 
 impl DatabaseSmPersistence {
+    pub fn database(&self) -> Database {
+        self.db.clone()
+    }
+
     /// Open against `database_url`. Supported schemes:
     ///
     /// - `postgres://…` / `postgresql://…` → Postgres adapter
@@ -562,14 +566,19 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
 /// itself received (`db_pool.global()`) — FIX 4: the fenced impl is
 /// constructed by cloning *this* handle, never by opening a second,
 /// independently-resolved pool from `database_url`. Before that clone even
-/// happens, `database_url`'s resolved DSN is compared against
-/// `global_db.database_url()`; a mismatch while clustering is enabled fails
-/// startup outright with [`SmPersistenceError::ClusterColocationMismatch`]
-/// (both URLs redacted first — DSNs commonly carry credentials) rather than
+/// happens, the candidate storage pool's live PostgreSQL identity is compared
+/// against `global_db`; a mismatch while clustering is enabled fails startup
+/// outright with [`SmPersistenceError::ClusterColocationMismatch`] rather than
 /// silently fencing `sm_sessions`/`sm_unacked` writes against a
 /// `clustering_claims` table that may not even exist in whatever database
 /// `database_url` actually points at.
-pub async fn open_for_cluster_mode(
+pub struct OpenedSmPersistence {
+    pub storage: Arc<dyn SmPersistenceStorage>,
+    pub database: Option<Database>,
+    pub aliases_global: bool,
+}
+
+pub async fn open_for_cluster_mode_with_lineage(
     database_url: Option<&str>,
     clustering_enabled: bool,
     claim_pair: Option<(
@@ -577,28 +586,26 @@ pub async fn open_for_cluster_mode(
         waddle_xmpp::ownership::SharedNodeIdentity,
     )>,
     global_db: &Database,
-) -> Result<Arc<dyn SmPersistenceStorage>, SmPersistenceError> {
+) -> Result<OpenedSmPersistence, SmPersistenceError> {
     #[cfg(feature = "clustering")]
     {
         if clustering_enabled {
             let resolved_sm_url = database_url
                 .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"))
-                .ok_or_else(|| SmPersistenceError::ClusterRequiresPostgres {
-                    sm_database_url: database_url
-                        .map(crate::db::redact_database_url)
-                        .unwrap_or_else(|| "<unset>".to_string()),
-                })?;
-            // FIX 4 — co-location invariant, checked before anything else
-            // in this branch runs: clustered SM persistence and the
-            // clustering claims tables must live in the same Postgres
-            // database. Deliberately an EXACT string comparison, no DSN
-            // normalization: two cosmetically-different-but-equivalent
-            // URLs fail closed at startup with a clear error, which is
-            // cheaper than parsing DSN equivalence and never unsafe.
-            if resolved_sm_url != global_db.database_url() {
+                .ok_or(SmPersistenceError::ClusterRequiresPostgres)?;
+            let storage = DatabaseSmPersistence::open(Some(resolved_sm_url)).await?;
+            let sm_identity = crate::db::lineage::live_postgres_identity(&storage.database())
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            let global_identity = crate::db::lineage::live_postgres_identity(global_db)
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            if sm_identity != global_identity {
                 return Err(SmPersistenceError::ClusterColocationMismatch {
-                    sm_database_url: crate::db::redact_database_url(resolved_sm_url),
-                    global_database_url: crate::db::redact_database_url(global_db.database_url()),
+                    identities: Box::new(waddle_xmpp::ClusterColocationIdentities {
+                        store: (&sm_identity).into(),
+                        global: (&global_identity).into(),
+                    }),
                 });
             }
             let (claim_store, node_identity) =
@@ -609,7 +616,11 @@ pub async fn open_for_cluster_mode(
                 node_identity,
             )
             .await?;
-            return Ok(Arc::new(fenced));
+            return Ok(OpenedSmPersistence {
+                storage: Arc::new(fenced),
+                database: None,
+                aliases_global: true,
+            });
         }
     }
     #[cfg(not(feature = "clustering"))]
@@ -619,7 +630,12 @@ pub async fn open_for_cluster_mode(
             return Err(SmPersistenceError::ClusterClaimHandlesUnavailable);
         }
     }
-    Ok(Arc::new(DatabaseSmPersistence::open(database_url).await?))
+    let storage = DatabaseSmPersistence::open(database_url).await?;
+    Ok(OpenedSmPersistence {
+        database: Some(storage.database()),
+        storage: Arc::new(storage),
+        aliases_global: false,
+    })
 }
 
 #[cfg(test)]

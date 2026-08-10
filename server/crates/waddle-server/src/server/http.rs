@@ -24,9 +24,7 @@ use crate::server::{AppState, XmppConfig};
 use anyhow::Result;
 use axum::{middleware, routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
-use sqlx::sqlite::SqliteConnectOptions;
 use std::future::IntoFuture as _;
-use std::str::FromStr;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing::{info, warn};
@@ -153,16 +151,13 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
 /// `pending_delivery::open_for_cluster_mode`'s/`sm_persistence::open_for_cluster_mode`'s
 /// identical co-location-then-construct pattern, one table over. Lives here
 /// (in `waddle-server`, not `waddle-xmpp` where `SqlxMamStorage` itself is
-/// defined) because the co-location mismatch error needs
-/// `crate::db::redact_database_url` — a `waddle-server`-only helper — and
-/// because the clustering global database URL only exists on this side of
-/// the crate boundary.
+/// defined) because the clustering global database identity is available on
+/// this side of the crate boundary.
 ///
 /// When clustering is enabled AND the resolved `database_url` is a
-/// Postgres DSN, the co-location invariant is checked BEFORE fencing is
-/// ever attached: the resolved URL must be an EXACT string match for
-/// `global_db.database_url()` (deliberately no DSN normalization, matching
-/// every sibling `open_for_cluster_mode`) — the fencing
+/// Postgres pool, the co-location invariant is checked BEFORE fencing is
+/// ever attached by comparing its live PostgreSQL identity with the global
+/// database identity — the fencing
 /// `SELECT ... FOR SHARE` `SqlxMamStorage::store_message_fenced` issues
 /// targets `clustering_claims`, which only exists in the clustering global
 /// database. A mismatch fails startup with
@@ -180,7 +175,7 @@ pub(crate) async fn create_websocket_mam_storage(
     clustering_enabled: bool,
     clustering_claim_pair_live: bool,
     global_db: &crate::db::Database,
-) -> Result<Arc<dyn MamStorage>> {
+) -> Result<Arc<SqlxMamStorage>> {
     if !cfg!(test) {
         ensure_mam_database_is_durable(
             database_url.as_deref(),
@@ -194,21 +189,25 @@ pub(crate) async fn create_websocket_mam_storage(
             })?;
             #[cfg(feature = "clustering")]
             {
-                let resolved_url = (database_url.starts_with("postgres://")
-                    || database_url.starts_with("postgresql://"))
-                .then_some(database_url);
-                if let (true, true, Some(resolved_url)) =
-                    (clustering_enabled, clustering_claim_pair_live, resolved_url)
-                {
-                    if resolved_url != global_db.database_url() {
-                        return Err(anyhow::anyhow!(
-                            waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
-                                mam_database_url: crate::db::redact_database_url(resolved_url),
-                                global_database_url: crate::db::redact_database_url(
-                                    global_db.database_url()
-                                ),
-                            }
-                        ));
+                if clustering_enabled && clustering_claim_pair_live {
+                    if let Some(mam_pool) = opened.postgres_pool() {
+                        let mam_identity =
+                            crate::db::lineage::live_postgres_identity_via_pg_pool(mam_pool)
+                                .await?;
+                        let global_identity =
+                            crate::db::lineage::live_postgres_identity(global_db).await?;
+                        if mam_identity != global_identity {
+                            return Err(anyhow::anyhow!(
+                                waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
+                                    identities: Box::new(
+                                        waddle_xmpp::ClusterColocationIdentities {
+                                            store: (&mam_identity).into(),
+                                            global: (&global_identity).into(),
+                                        }
+                                    ),
+                                }
+                            ));
+                        }
                     }
                     opened.with_cluster_fencing(true)
                 } else {
@@ -293,7 +292,14 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // short-circuits the row stream — without that, an N-row pass
     // could block the publish-tracker `wait()` in the graceful-
     // shutdown drain past the deployment grace period.
-    {
+    let lineage_attested = websocket_state
+        .deps
+        .app_state
+        .lineage_startup
+        .get()
+        .map(crate::db::lineage::LineageReport::is_attested)
+        .unwrap_or(false);
+    if lineage_attested {
         let db_actor = websocket_state
             .deps
             .app_state
@@ -328,39 +334,22 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             .instrument(span)
             .await;
         });
+    } else {
+        warn!("skipping OIDC profile backfill: lineage attestation failed");
     }
 
     spawn_critical_registry_supervisor(&websocket_state).await;
-    // Both critical registries now have lifetime supervision. Only after
-    // that fence is armed may a node still in `Starting` transition to
-    // `Serving`. A lease fence/drain/failure that won during slow startup
-    // remains authoritative until its own recovery path explicitly serves.
-    if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
-        .deps
-        .app_state
-        .node_lifecycle
-        .finish_startup()
-    {
-        warn!(
-            ?admission,
-            "HTTP graph completed after node admission left Starting; preserving non-serving state"
+    // The startup attestation ran in `create_websocket_state`, before any
+    // data-mutating bootstrap. A definitive failure latched the lifecycle
+    // there (permanent, alive-unready; restart to recover); a transient-only
+    // failure already failed startup outright, so reaching this point
+    // unattested means the latched case.
+    if lineage_attested {
+        promote_to_serving_and_spawn_janitors(
+            &websocket_state,
+            server_config.clustering.orphan_reaper_interval,
         );
     }
-    spawn_sm_expiry_janitor(&websocket_state);
-    spawn_orphan_reaper_janitor(
-        &websocket_state,
-        server_config.clustering.orphan_reaper_interval,
-    );
-    spawn_pending_delivery_claim_janitor(&websocket_state);
-    spawn_notification_outbox_janitor(&websocket_state);
-    spawn_call_teardown_outbox_janitor(&websocket_state);
-    spawn_push_service_publish_job_janitor(&websocket_state);
-    spawn_auth_state_janitor(&websocket_state);
-    spawn_room_dormancy_janitor(&websocket_state);
-    spawn_user_actor_reaper(&websocket_state);
-    #[cfg(feature = "clustering")]
-    crate::server::session_janitors::spawn_remote_muc_membership_reconciler(&websocket_state);
-    crate::server::state_inventory_metrics::spawn_state_inventory_publisher(&websocket_state);
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
         shutdown_stop_token,
@@ -409,7 +398,13 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
     let auth_page_router = routes::auth_page::router(auth_state.clone());
 
-    router = router
+    // Application routes live behind the same admission gate as WebSocket
+    // upgrades: a node held out of `Serving` (failed/latched lineage
+    // attestation, fencing, drain) must not accept HTTP requests that read
+    // or mutate application state through a database it cannot vouch for.
+    // Operational endpoints (health/readiness/metrics, ACME) stay ungated
+    // on the base router above.
+    let mut app_router = Router::new()
         .merge(auth_router)
         .merge(device_router)
         .merge(xmpp_oauth_router)
@@ -425,7 +420,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // a misconfigured staging that flips the flag without the token
     // does not mount the route.
     if let Some(auth) = build_test_profile_publish_auth(&auth_state.xmpp_domain) {
-        router = router.merge(crate::server::profile_publish_route::router(
+        app_router = app_router.merge(crate::server::profile_publish_route::router(
             websocket_state.clone(),
             auth,
         ));
@@ -438,20 +433,26 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // process RSS.
     if let Some(auth) = crate::server::state_inventory_route::debug_state_auth_from_env() {
         info!("Mounting /debug/state-inventory (WADDLE_DEBUG_STATE_TOKEN set)");
-        router = router.merge(crate::server::state_inventory_route::router(
+        app_router = app_router.merge(crate::server::state_inventory_route::router(
             websocket_state.clone(),
             auth,
         ));
     }
 
     // Always merge common routes required by XMPP, auth, upload, and operations.
-    let router = router
+    let app_router = app_router
         // Merge XMPP over WebSocket endpoint
         .merge(websocket_router)
         // Merge well-known endpoints for XMPP service discovery
         .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload
         .merge(upload_router)
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&websocket_state.deps.app_state),
+            admission_gate,
+        ));
+    let router = router
+        .merge(app_router)
         .layer(CompressionLayer::new())
         .layer(configure_cors())
         // These two observability layers stay outside CORS so preflight
@@ -693,8 +694,65 @@ async fn create_websocket_state(
         server_config,
         &state.clustering_claims,
         state.db_pool.global(),
+        &state,
     )
-    .await;
+    .await?;
+    // Pending delivery opens here (rather than with the other protocol
+    // stores below) so that EVERY durable pool is registered before the
+    // startup attestation gate that follows — it is the last registrant.
+    let pending_delivery_storage = create_pending_delivery_storage(
+        xmpp_config,
+        server_config,
+        &state.clustering_claims,
+        state.db_pool.global(),
+        &state,
+    )
+    .await?;
+    // ---- Startup lineage attestation gate (#1652) ----
+    // All durable stores are open and registered; seal the registry and run
+    // the one startup attestation pass BEFORE anything mutates application
+    // data (XMPP topology bootstrap, VAPID provisioning, profile backfill,
+    // LiveKit reconciliation). A mis-provisioned database must not be
+    // written to by a node that will never serve from it. Transient
+    // transport errors get a short bounded retry; a definitive failure
+    // latches the lifecycle so no path (including clustering lease
+    // recovery) can ever promote this process to `Serving` — recovery is an
+    // operator restart after the cause is fixed.
+    state.seal_lineage_registry();
+    let lineage_report = attest_startup_lineage(&state).await;
+    let lineage_attested = lineage_report.is_attested();
+    if lineage_attested {
+        info!("startup database lineage attestation passed");
+    } else if lineage_report.is_transient_only() {
+        // Unreachable database, nothing definitive: fail startup outright,
+        // exactly like migrations against an unreachable database — the
+        // orchestrator's restart backoff is the retry loop, and the next
+        // boot runs the FULL bootstrap (topology, VAPID, backfill) instead
+        // of promoting a half-bootstrapped node. Definitive refusals (the
+        // `else` below) stay alive-unready instead, because restarting
+        // cannot fix them and the readiness JSON is the diagnostic surface.
+        for (store, status) in lineage_report.failures() {
+            tracing::error!(
+                store = %store,
+                status = status.as_str(),
+                "startup lineage attestation could not reach the database; exiting so the restart retries a full bootstrap"
+            );
+        }
+        return Err(anyhow::anyhow!(
+            "database unreachable during startup lineage attestation"
+        ));
+    } else {
+        for (store, status) in lineage_report.failures() {
+            tracing::error!(
+                store = %store,
+                status = status.as_str(),
+                "database lineage attestation failed; node stays unready until the cause is fixed and the pod is restarted"
+            );
+        }
+        let _ = state.lineage_latched.set(lineage_report.clone());
+        state.node_lifecycle.latch_startup_block();
+    }
+    let _ = state.lineage_startup.set(lineage_report);
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
@@ -729,15 +787,27 @@ async fn create_websocket_state(
         sfu_service.clone(),
     )
     .await;
-    if let Err(error) = bootstrap_fresh_xmpp_topology(
-        &state,
-        Arc::clone(&pubsub_storage),
-        &service_domains,
-        &room_registry,
-    )
-    .await
-    {
-        warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
+    if lineage_attested {
+        crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
+            state.db_pool.global_actor(),
+            &state.permission_actor,
+            &crate::server::bootstrap_membership::BootstrapMembershipConfig::from_env(),
+        )
+        .await;
+        if let Err(error) = bootstrap_fresh_xmpp_topology(
+            &state,
+            Arc::clone(&pubsub_storage),
+            &service_domains,
+            &room_registry,
+        )
+        .await
+        {
+            warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
+        }
+    } else {
+        warn!(
+            "skipping membership reconciliation and XMPP topology bootstrap: lineage attestation failed"
+        );
     }
     ensure_push_service_global_database_is_durable()?;
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
@@ -754,12 +824,24 @@ async fn create_websocket_state(
     // is unusable or the env-bootstrap value is malformed — in that
     // case the entire push service degrades, so the caller intentionally
     // fails boot rather than silently dispatching without VAPID.
-    let vapid_signer = crate::push_service::vapid_storage::VapidStorage::load_or_provision(
-        state.db_pool.global().clone(),
-        server_config.session_key.as_bytes(),
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?;
+    let vapid_signer = if lineage_attested {
+        crate::push_service::vapid_storage::VapidStorage::load_or_provision(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?
+    } else {
+        // Never provision (write) a key into an unattested database. The
+        // node is permanently unready in this state, so an ephemeral,
+        // unpersisted signer only has to keep the object graph valid.
+        crate::push_service::vapid_storage::VapidStorage::load_or_ephemeral(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?
+    };
     // Rate-limit outbound sends: global semaphore caps concurrent
     // requests at 64; per-(endpoint, urgency) leaky bucket spaces
     // same-pair sends to at least 100ms apart so one chatty relay+class
@@ -825,14 +907,6 @@ async fn create_websocket_state(
     let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
         crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
     );
-    let pending_delivery_storage = create_pending_delivery_storage(
-        xmpp_config,
-        server_config,
-        &state.clustering_claims,
-        state.db_pool.global(),
-    )
-    .await;
-
     let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
 
     let provider_ingress = Arc::new(
@@ -946,12 +1020,161 @@ async fn create_websocket_state(
     // `participant_left`/`room_finished` webhook delivery. No-op when
     // A/V calling is unconfigured (`sfu_reconciler` is `None`).
     if let Some(reconciler) = sfu_reconciler {
-        routes::livekit_webhook::spawn_reconciliation_task(
-            Arc::clone(&websocket_state),
-            reconciler,
-        );
+        if lineage_attested {
+            routes::livekit_webhook::spawn_reconciliation_task(
+                Arc::clone(&websocket_state),
+                reconciler,
+            );
+        } else {
+            warn!("skipping LiveKit ghost reconciliation: lineage attestation failed");
+        }
     }
     Ok(websocket_state)
+}
+
+/// Refuse application-route requests while this node is not admitting
+/// clients — the same [`crate::clustering::NodeLifecycle`] gate WebSocket
+/// upgrades use. Keeps a lineage-latched, fenced, or draining node from
+/// reading or mutating application state over plain HTTP through a database
+/// it cannot vouch for. Operational endpoints are mounted outside this gate.
+async fn admission_gate(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    if let Err(error) = state.node_lifecycle.admit() {
+        warn!(%error, path = %request.uri().path(), "refusing application request: node not admitting");
+        use axum::response::IntoResponse as _;
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::response::Json(serde_json::json!({
+                "status": "not_ready",
+                "error": "node is not admitting application traffic",
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// Startup-only promotion plus the janitor fleet. Called exactly once per
+/// process, when startup attestation passed. Returns without spawning
+/// anything if a fence/drain/failure won the race to leave `Starting`.
+fn promote_to_serving_and_spawn_janitors(
+    websocket_state: &Arc<WebSocketState>,
+    orphan_reaper_interval: std::time::Duration,
+) {
+    // Both critical registries have lifetime supervision before this runs.
+    // Only after that fence is armed may a node still in `Starting`
+    // transition to `Serving`. A lease fence/drain/failure that won during
+    // slow startup remains authoritative until its own recovery path
+    // explicitly serves.
+    if let crate::clustering::StartupServingTransition::Blocked(admission) = websocket_state
+        .deps
+        .app_state
+        .node_lifecycle
+        .finish_startup()
+    {
+        // A fence/drain/failure won the race during slow startup: preserve
+        // the non-serving state, but STILL start the janitor fleet. The
+        // janitors are fence-aware (they run through runtime fences and
+        // drains in steady state), and clustering's later lease-recovery
+        // `serve()` re-admits clients without re-running this function — a
+        // node recovered that way must not serve janitor-less forever.
+        // Lineage attestation already passed (the only caller gates on it),
+        // so the fail-closed no-janitors state applies solely to unattested
+        // nodes.
+        warn!(
+            ?admission,
+            "promotion attempted after node admission left Starting; preserving non-serving state"
+        );
+    }
+    spawn_sm_expiry_janitor(websocket_state);
+    spawn_orphan_reaper_janitor(websocket_state, orphan_reaper_interval);
+    spawn_pending_delivery_claim_janitor(websocket_state);
+    spawn_notification_outbox_janitor(websocket_state);
+    spawn_call_teardown_outbox_janitor(websocket_state);
+    spawn_push_service_publish_job_janitor(websocket_state);
+    spawn_auth_state_janitor(websocket_state);
+    spawn_room_dormancy_janitor(websocket_state);
+    spawn_user_actor_reaper(websocket_state);
+    #[cfg(feature = "clustering")]
+    crate::server::session_janitors::spawn_remote_muc_membership_reconciler(websocket_state);
+    crate::server::state_inventory_metrics::spawn_state_inventory_publisher(websocket_state);
+}
+
+/// One startup attestation pass with a short bounded retry for transient
+/// errors and an overall deadline. Definitive lineage failures do not retry.
+async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::LineageReport {
+    const ATTEMPTS: u32 = 3;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    const OVERALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    // Bounds each boundary's probe so one stalled pool cannot withhold
+    // another boundary's definitive answer for the whole deadline.
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+    let Some(registry) = state.lineage_registry.get() else {
+        return crate::db::lineage::LineageReport::initializing();
+    };
+    // Each completed pass lands in this slot so the overall deadline cannot
+    // discard an already-returned DEFINITIVE report (one boundary answering
+    // a mismatch while another stalls must latch, not fabricate a
+    // transient-only timeout that exit-and-retries forever).
+    let completed: std::sync::Mutex<Option<crate::db::lineage::LineageReport>> =
+        std::sync::Mutex::new(None);
+    let pass = async {
+        let mut last = registry
+            .attest(
+                &state.lineage_config,
+                state.clustering_enabled,
+                PROBE_TIMEOUT,
+            )
+            .await;
+        if let Ok(mut slot) = completed.lock() {
+            *slot = Some(last.clone());
+        }
+        for _ in 1..ATTEMPTS {
+            if !last.is_transient_only() {
+                break;
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
+            last = registry
+                .attest(
+                    &state.lineage_config,
+                    state.clustering_enabled,
+                    PROBE_TIMEOUT,
+                )
+                .await;
+            if let Ok(mut slot) = completed.lock() {
+                *slot = Some(last.clone());
+            }
+        }
+        last
+    };
+    let report = match tokio::time::timeout(OVERALL_DEADLINE, pass).await {
+        Ok(report) => report,
+        Err(_) => completed
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .unwrap_or_else(crate::db::lineage::LineageReport::timeout),
+    };
+    let unmatched = state.lineage_adopt_unmatched();
+    if !unmatched.is_empty() {
+        // Not a readiness failure: after a successful adoption (or a pod
+        // restart with the one-shot action still rendered) the replayed
+        // entries legitimately match nothing, while a restore that still
+        // needs adoption keeps failing on its own identity mismatch. Loud
+        // so an operator TYPO is still visible.
+        for uuid in &unmatched {
+            warn!(
+                unmatched = %uuid,
+                "lineage adopt entry matched no boundary; if this adoption already \
+                 completed, remove WADDLE_DB_LINEAGE_ACTION — otherwise check the UUID"
+            );
+        }
+    }
+    report
 }
 
 /// Build the [`TestSeamAuth`] for the test profile-publish route, or
@@ -1110,9 +1333,10 @@ async fn create_sm_session_registry(
     server_config: &ServerConfig,
     clustering: &crate::clustering::ClusteringHandles,
     global_db: &crate::db::Database,
-) -> Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry> {
+    state: &Arc<AppState>,
+) -> Result<Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>> {
     let sm_database_url = xmpp_config.sm_database_url.clone();
-    if sm_database_url.is_none() {
+    if sm_database_url.is_ephemeral_fallback() {
         warn!(
             "Neither WADDLE_XMPP_SM_DATABASE_URL nor WADDLE_DATABASE_URL is set; \
              falling back to in-memory SQLite for SM session persistence. \
@@ -1127,15 +1351,32 @@ async fn create_sm_session_registry(
     // branching — including FIX 4's co-location check against `global_db`,
     // the same handle `clustering::start_if_enabled` itself received —
     // lives inside `open_for_cluster_mode` itself.
-    let sm_persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
-        crate::sm_persistence::open_for_cluster_mode(
-            sm_database_url.as_deref(),
-            server_config.clustering.enabled,
-            clustering.claim_pair(),
-            global_db,
-        )
-        .await
-        .expect("open SM persistence storage");
+    let opened = crate::sm_persistence::open_for_cluster_mode_with_lineage(
+        sm_database_url.as_deref(),
+        server_config.clustering.enabled,
+        clustering.claim_pair(),
+        global_db,
+    )
+    .await?;
+    if opened.aliases_global {
+        state.register_lineage_alias(
+            crate::db::lineage::DurableStore::Sm,
+            crate::db::lineage::DurableStore::Global,
+        );
+    } else if let Some(database) = opened.database.clone() {
+        if database.is_in_memory_sqlite() {
+            state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Sm);
+        } else {
+            crate::server::bootstrap_store_lineage(
+                state,
+                crate::db::lineage::DurableStore::Sm,
+                database.clone(),
+            )
+            .await?;
+            state.register_lineage_database(crate::db::lineage::DurableStore::Sm, database);
+        }
+    }
+    let sm_persistence = opened.storage;
     let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),
@@ -1188,7 +1429,7 @@ async fn create_sm_session_registry(
     if let Some(local_claims) = &clustering.local_claims {
         local_claims.wire(Arc::clone(&sm_session_registry));
     }
-    sm_session_registry
+    Ok(sm_session_registry)
 }
 
 async fn create_pending_delivery_storage(
@@ -1196,9 +1437,10 @@ async fn create_pending_delivery_storage(
     server_config: &ServerConfig,
     clustering: &crate::clustering::ClusteringHandles,
     global_db: &crate::db::Database,
-) -> Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> {
+    state: &Arc<AppState>,
+) -> Result<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>> {
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
-    if pending_delivery_url.is_none() {
+    if pending_delivery_url.is_ephemeral_fallback() {
         warn!(
             "Neither WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL nor \
              WADDLE_DATABASE_URL is set; falling back to in-memory SQLite. \
@@ -1214,17 +1456,28 @@ async fn create_pending_delivery_storage(
     // including the co-location check against `global_db` — lives inside
     // `open_for_cluster_mode` itself, mirroring `create_sm_session_registry`'s
     // identical `sm_persistence::open_for_cluster_mode` call above.
-    Arc::new(
-        crate::pending_delivery::open_for_cluster_mode(
-            pending_delivery_url.as_deref(),
-            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
-            server_config.clustering.enabled,
-            clustering.claim_pair(),
-            global_db,
-        )
-        .await
-        .expect("open pending_delivery storage"),
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        pending_delivery_url.as_deref(),
+        waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        server_config.clustering.enabled,
+        clustering.claim_pair(),
+        global_db,
     )
+    .await?;
+    let database = storage.database();
+    if database.is_in_memory_sqlite() {
+        state.register_lineage_ephemeral(crate::db::lineage::DurableStore::PendingDelivery);
+    } else {
+        crate::server::bootstrap_store_lineage(
+            state,
+            crate::db::lineage::DurableStore::PendingDelivery,
+            database.clone(),
+        )
+        .await?;
+        state
+            .register_lineage_database(crate::db::lineage::DurableStore::PendingDelivery, database);
+    }
+    Ok(Arc::new(storage))
 }
 
 /// Fail-fast guard for XEP-0313 MAM storage durability. A missing or
@@ -1234,7 +1487,7 @@ pub(crate) fn ensure_mam_database_is_durable(
     database_url: Option<&str>,
     allow_in_memory: bool,
 ) -> Result<()> {
-    if database_url.is_some_and(|url| !sqlite_url_is_in_memory(url)) {
+    if database_url.is_some_and(|url| !crate::db::sqlite_url_is_in_memory(url)) {
         return Ok(());
     }
     if allow_in_memory {
@@ -1282,45 +1535,10 @@ pub(crate) fn push_service_database_is_restart_durable(
 ) -> bool {
     match db_runtime.driver {
         crate::db::DatabaseDriver::Postgres => true,
-        crate::db::DatabaseDriver::Sqlite => !sqlite_url_is_in_memory(&db_runtime.database_url),
+        crate::db::DatabaseDriver::Sqlite => {
+            !crate::db::sqlite_url_is_in_memory(&db_runtime.database_url)
+        }
     }
-}
-
-fn sqlite_url_is_in_memory(database_url: &str) -> bool {
-    let trimmed = database_url.trim().to_ascii_lowercase();
-    let base = trimmed
-        .split_once('?')
-        .map_or(trimmed.as_str(), |(base, _)| base);
-    if matches!(
-        base,
-        ":memory:" | "sqlite::memory:" | "sqlite://{memory}:" | "sqlite:///{memory}:"
-    ) || base.ends_with("file::memory:")
-        || sqlite_url_query_requests_memory(&trimmed)
-    {
-        return true;
-    }
-    SqliteConnectOptions::from_str(database_url)
-        .map(|options| {
-            let filename = options
-                .get_filename()
-                .to_string_lossy()
-                .to_ascii_lowercase();
-            filename == ":memory:"
-                || filename == "file::memory:"
-                || filename.contains("sqlx-in-memory-")
-        })
-        .unwrap_or(false)
-}
-
-fn sqlite_url_query_requests_memory(database_url: &str) -> bool {
-    let Some((_, query)) = database_url.split_once('?') else {
-        return false;
-    };
-    query.split('&').any(|param| {
-        param
-            .split_once('=')
-            .is_some_and(|(key, value)| key == "mode" && value == "memory")
-    })
 }
 
 fn env_flag(key: &str) -> bool {

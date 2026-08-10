@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::ownership::Entity;
+use crate::postgres_identity::ClusterColocationIdentities;
 
 /// Errors that can occur during MAM storage operations.
 #[derive(Error, Debug)]
@@ -37,16 +38,13 @@ pub enum MamStorageError {
     /// database (the fencing `SELECT ... FOR SHARE` targets
     /// `clustering_claims`, which only exists there) — mirroring
     /// `PendingStorageError::ClusterColocationMismatch`'s identical
-    /// invariant one table over. Both fields are expected to already be
-    /// credential-redacted by the caller before construction.
+    /// invariant one table over.
     #[error(
-        "clustered MAM fencing must be co-located with the clustering claims tables: resolved \
-         MAM database URL ({mam_database_url}) does not match the clustering global database \
-         URL ({global_database_url})"
+        "clustered MAM fencing must be co-located with the clustering claims tables: physical \
+         MAM storage identity does not match the clustering global database identity"
     )]
     ClusterColocationMismatch {
-        mam_database_url: String,
-        global_database_url: String,
+        identities: Box<ClusterColocationIdentities>,
     },
 }
 

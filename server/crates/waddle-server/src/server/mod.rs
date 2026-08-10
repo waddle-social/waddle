@@ -47,12 +47,11 @@ pub mod xmpp_state;
 pub use config::{XmppAcmeConfig, XmppConfig};
 pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
-use crate::channel_space_links::build_channel_space_link_store;
 use crate::config::ServerConfig;
 use crate::db::DatabasePool;
-use crate::inbox::build_inbox_storage;
+use crate::inbox::DatabaseInboxStorage;
 use crate::permissions::PermissionActor;
-use crate::spaces_metadata::build_spaces_metadata_store;
+use crate::spaces_metadata::DatabaseSpacesMetadataStore;
 use acme::start_acme_runtime;
 use anyhow::Result;
 use fixed_account::{ensure_fixed_test_account, fixed_test_account_enabled};
@@ -68,12 +67,22 @@ use tracing::info;
 pub async fn start(
     db_pool: DatabasePool,
     server_config: ServerConfig,
+    lineage_config: crate::config::LineageConfig,
+    global_adopt_matched: Option<crate::db::lineage::LineageUuid>,
     inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
     let xmpp_config = XmppConfig::from_env()
         .map_err(|error| anyhow::anyhow!("Failed to load XMPP configuration: {}", error))?;
 
-    start_with_config(db_pool, xmpp_config, server_config, inherited).await
+    start_with_config(
+        db_pool,
+        xmpp_config,
+        server_config,
+        lineage_config,
+        global_adopt_matched,
+        inherited,
+    )
+    .await
 }
 
 /// Start both HTTP and XMPP servers with explicit configuration.
@@ -84,6 +93,8 @@ pub async fn start_with_config(
     db_pool: DatabasePool,
     xmpp_config: XmppConfig,
     server_config: ServerConfig,
+    lineage_config: crate::config::LineageConfig,
+    global_adopt_matched: Option<crate::db::lineage::LineageUuid>,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
     // Set up Ecdysis graceful shutdown coordinator
@@ -134,27 +145,37 @@ pub async fn start_with_config(
         .ask(crate::permissions::EnsureSchema)
         .await
         .map_err(|error| anyhow::anyhow!("Failed to ensure permission schema: {}", error))?;
-    bootstrap_membership::reconcile_existing_accounts_or_warn(
-        db_pool.global_actor(),
-        &permission_actor,
-        &bootstrap_membership::BootstrapMembershipConfig::from_env(),
-    )
-    .await;
-    let inbox_storage = build_inbox_storage(xmpp_config.inbox_database_url.clone())
-        .await
-        .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;
-    let spaces_metadata_store =
-        build_spaces_metadata_store(xmpp_config.spaces_metadata_database_url.clone())
+    // Membership reconciliation (reads every user row and provisions
+    // permission tuples) moved behind the startup lineage attestation gate
+    // in `create_websocket_state` — it mutates application state and must
+    // not run against a database this node cannot vouch for.
+    let inbox_database_storage = Arc::new(
+        DatabaseInboxStorage::open(xmpp_config.inbox_database_url.as_deref())
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?,
+    );
+    let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
+        inbox_database_storage.clone();
+    let spaces_metadata_database_store = Arc::new(
+        DatabaseSpacesMetadataStore::open(xmpp_config.spaces_metadata_database_url.as_deref())
             .await
             .map_err(|error| {
                 anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
-            })?;
-    let channel_space_link_store =
-        build_channel_space_link_store(xmpp_config.channel_space_links_database_url.clone())
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
-            })?;
+            })?,
+    );
+    let spaces_metadata_store: Arc<dyn crate::spaces_metadata::SpacesMetadataStore> =
+        spaces_metadata_database_store.clone();
+    let channel_space_link_database_store = Arc::new(
+        crate::channel_space_links::DatabaseChannelSpaceLinkStore::open(
+            xmpp_config.channel_space_links_database_url.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
+        })?,
+    );
+    let channel_space_link_store: Arc<dyn crate::channel_space_links::ChannelSpaceLinkStore> =
+        channel_space_link_database_store.clone();
     // Build the shared XEP-0060 PubSub/PEP storage and the MUC
     // (XEP-0045) room registry here so the resulting handles live on
     // `AppState`. Admin V2 handlers reach them via `state.*` instead of
@@ -163,10 +184,11 @@ pub async fn start_with_config(
     // `DatabasePubSubStorage` handle is also passed onward into the
     // HTTP server so the notification-settings projection can read the
     // same database without re-opening it.
-    let pubsub_database_storage =
-        crate::pubsub::build_database_pubsub_storage(xmpp_config.pubsub_database_url.clone())
-            .await
-            .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
+    let pubsub_database_storage = crate::pubsub::build_database_pubsub_storage(
+        xmpp_config.pubsub_database_url.clone_resolved_url(),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         pubsub_database_storage.clone();
     // #807: spawn the registry behind the instrumented, explicitly-bounded
@@ -272,19 +294,64 @@ pub async fn start_with_config(
         server_owner_jids,
         node_lifecycle: node_lifecycle.clone(),
         clustering_claims: clustering_handles,
+        lineage_config: lineage_config.clone(),
+        clustering_enabled: server_config.clustering.enabled,
     }));
+    if let Some(matched) = global_adopt_matched {
+        state.note_lineage_adopt_match(matched);
+    }
+    // The global store follows the same ephemeral classification as every
+    // other boundary: an in-memory SQLite global (bare dev runs, the WS
+    // integration harness) is non-durable and exempt from attestation.
+    bootstrap_and_register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::Global,
+        db_pool.global().clone(),
+    )
+    .await?;
+    if db_pool.global().has_control_plane_pool() {
+        state.register_lineage_control_plane(
+            crate::db::lineage::DurableStore::ControlPlane,
+            db_pool.global().clone(),
+        );
+    }
+    bootstrap_and_register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::Inbox,
+        inbox_database_storage.database(),
+    )
+    .await?;
+    bootstrap_and_register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::SpacesMetadata,
+        spaces_metadata_database_store.database(),
+    )
+    .await?;
+    bootstrap_and_register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::ChannelSpaceLinks,
+        channel_space_link_database_store.database(),
+    )
+    .await?;
+    bootstrap_and_register_store_lineage(
+        &state,
+        crate::db::lineage::DurableStore::Pubsub,
+        pubsub_database_storage.database(),
+    )
+    .await?;
     // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
     // the clustering global database and enable fenced groupchat-archive
     // writes when clustering is live, mirroring the
     // `sm_persistence`/`pending_delivery` `open_for_cluster_mode` gating
     // already established for their own durability stores.
     let websocket_mam_storage = create_websocket_mam_storage(
-        xmpp_config.mam_database_url.clone(),
+        xmpp_config.mam_database_url.clone_resolved_url(),
         server_config.clustering.enabled,
         state.clustering_claims.claim_pair().is_some(),
         db_pool.global(),
     )
     .await?;
+    bootstrap_mam_lineage(&state, &websocket_mam_storage).await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
@@ -348,8 +415,19 @@ pub async fn start_with_config(
             info!("HTTP server stopped (graceful drain complete)");
             Ok(())
         }
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
+        Ok(Err(e)) => {
+            // Startup failed (e.g. the lineage attestation gate exiting on
+            // an unreachable database) rather than a signal firing: cancel
+            // the stop token so the clustering drain below returns
+            // immediately instead of burning its full budget and logging a
+            // spurious drain-timeout on every crash-looping boot.
+            stop_token.cancel();
+            Err(e)
+        }
+        Err(e) => {
+            stop_token.cancel();
+            Err(anyhow::anyhow!("HTTP server task failed: {}", e))
+        }
     };
     // ADR-0017 Phase 3 Slice 10: the clustering node-lease loop runs its
     // own per-entity graceful drain (mark draining, seal + batch-release
@@ -391,6 +469,95 @@ pub async fn start_with_config(
         )),
         None => result.map(|()| metrics_flush),
     }
+}
+
+/// Bootstrap DDL plus the one-shot operator action for one durable boundary.
+///
+/// `Adopt` uses the matched-or-skip engine call: several stores usually share
+/// one database (one `_lineage` row), so only the boundary whose row holds a
+/// listed UUID rotates; everywhere else this is read-only. Matches are
+/// recorded on `AppState` so the startup gate can fail loudly when an
+/// `adopt=` entry matched no boundary at all.
+pub(crate) async fn bootstrap_store_lineage(
+    state: &AppState,
+    store: crate::db::lineage::DurableStore,
+    database: crate::db::Database,
+) -> Result<()> {
+    let config = &state.lineage_config;
+    crate::db::lineage::ensure_table(&database).await?;
+    match &config.action {
+        Some(crate::db::lineage::LineageAction::Enroll) => {
+            info!(store = %store, "enrolling database lineage");
+            crate::db::lineage::enroll(&database, config).await?;
+        }
+        Some(crate::db::lineage::LineageAction::Adopt(expected)) => {
+            match crate::db::lineage::adopt_if_matched(&database, config, expected).await? {
+                crate::db::lineage::AdoptOutcome::Adopted { matched, .. } => {
+                    info!(store = %store, matched = %matched, "adopted database lineage");
+                    state.note_lineage_adopt_match(matched);
+                }
+                crate::db::lineage::AdoptOutcome::NotMatched => {
+                    info!(
+                        store = %store,
+                        "lineage adopt action did not name this boundary; leaving it untouched"
+                    );
+                }
+            }
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+async fn bootstrap_and_register_store_lineage(
+    state: &AppState,
+    store: crate::db::lineage::DurableStore,
+    database: crate::db::Database,
+) -> Result<()> {
+    // Ephemeral classification must follow the opened handle's real backend,
+    // not env-var presence: a missing per-store URL may still resolve to the
+    // durable global `WADDLE_DATABASE_URL`.
+    if database.is_in_memory_sqlite() {
+        state.register_lineage_ephemeral(store);
+    } else {
+        bootstrap_store_lineage(state, store, database.clone()).await?;
+        state.register_lineage_database(store, database);
+    }
+    Ok(())
+}
+
+async fn bootstrap_mam_lineage(
+    state: &AppState,
+    storage: &waddle_xmpp::mam::SqlxMamStorage,
+) -> Result<()> {
+    if let Some(pool) = storage.sqlite_pool() {
+        let in_memory = crate::db::lineage::sqlite_pool_is_in_memory(pool).await?;
+        let database = crate::db::Database::from_sqlite_pool("mam", pool.clone(), in_memory);
+        if in_memory {
+            state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Mam);
+        } else {
+            bootstrap_store_lineage(state, crate::db::lineage::DurableStore::Mam, database).await?;
+            state.register_lineage_probe(
+                crate::db::lineage::DurableStore::Mam,
+                Arc::new(crate::db::lineage::SqlxLineageAttestor::from_sqlite(
+                    pool.clone(),
+                )),
+            );
+        }
+        return Ok(());
+    }
+    if let Some(pool) = storage.postgres_pool() {
+        let database = crate::db::Database::from_postgres_pool("mam", pool.clone());
+        bootstrap_store_lineage(state, crate::db::lineage::DurableStore::Mam, database).await?;
+        state.register_lineage_probe(
+            crate::db::lineage::DurableStore::Mam,
+            Arc::new(crate::db::lineage::SqlxLineageAttestor::from_postgres(
+                pool.clone(),
+            )),
+        );
+        return Ok(());
+    }
+    anyhow::bail!("MAM storage did not expose a lineage backend")
 }
 
 #[cfg(test)]

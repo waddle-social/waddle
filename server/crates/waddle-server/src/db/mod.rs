@@ -5,14 +5,18 @@
 pub mod actor;
 mod backend;
 pub mod blocking;
+pub mod lineage;
 mod migrations;
 mod pool;
 pub mod roster;
 mod schema;
 mod value;
 
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{postgres::PgPool, sqlite::SqlitePool};
 #[cfg(test)]
 use std::path::Path;
+use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
@@ -49,6 +53,11 @@ pub enum DatabaseError {
     /// violation, rather than an environmental database failure.
     #[error(transparent)]
     MigrationLedger(#[from] migrations::MigrationLedgerError),
+
+    /// Fail-closed readiness refusal for a database whose durable lineage
+    /// attestation is missing, malformed, or does not describe this database.
+    #[error(transparent)]
+    Lineage(#[from] lineage::LineageError),
 
     /// A migration statement batch (or its ledger record insert) failed while
     /// applying. Carries which migration so a crash-looping pod's log names it.
@@ -191,6 +200,33 @@ pub struct Database {
 }
 
 impl Database {
+    /// Wrap a physical external SQLx pool so shared database helpers can run
+    /// against that exact pool without opening a second connection set.
+    pub(crate) fn from_sqlite_pool(name: &str, pool: SqlitePool, in_memory: bool) -> Self {
+        Self {
+            backend: DatabaseBackend::Sqlite(pool),
+            control_plane_backend: None,
+            name: name.to_string(),
+            driver: DatabaseDriver::Sqlite,
+            database_url: if in_memory {
+                "sqlite::memory:".to_string()
+            } else {
+                "sqlite:external-pool".to_string()
+            },
+        }
+    }
+
+    /// Wrap a physical external PostgreSQL pool without retaining its DSN.
+    pub(crate) fn from_postgres_pool(name: &str, pool: PgPool) -> Self {
+        Self {
+            backend: DatabaseBackend::Postgres(pool),
+            control_plane_backend: None,
+            name: name.to_string(),
+            driver: DatabaseDriver::Postgres,
+            database_url: "postgres:external-pool".to_string(),
+        }
+    }
+
     pub async fn in_memory(name: &str) -> Result<Self, DatabaseError> {
         Self::from_config(name, &DatabaseConfig::default()).await
     }
@@ -307,6 +343,18 @@ impl Database {
         self.driver
     }
 
+    /// Whether this handle is backed by SQLite's process-local in-memory
+    /// database. This is deliberately derived from the opened handle rather
+    /// than configuration-source presence: an XMPP-specific URL may be unset
+    /// while still resolving to a durable `WADDLE_DATABASE_URL` database.
+    pub fn is_in_memory_sqlite(&self) -> bool {
+        self.driver == DatabaseDriver::Sqlite && sqlite_url_is_in_memory(&self.database_url)
+    }
+
+    pub fn has_control_plane_pool(&self) -> bool {
+        self.control_plane_backend.is_some()
+    }
+
     /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
     /// FIX 4). See the field's own doc comment for the redaction caveat —
     /// this MAY carry credentials in its userinfo component; callers that
@@ -365,65 +413,53 @@ impl Database {
     }
 }
 
-/// Strip a DSN's userinfo (`user[:password]@`) component, if any, for safe
-/// inclusion in a log line or user-facing error message (ADR-0017 Phase 3
-/// Slice 4 FIX 4). `postgres://user:pass@host/db` becomes
-/// `postgres://***@host/db`; a URL with no userinfo, or one that fails to
-/// parse as `scheme://...`, is returned unchanged.
-///
-/// A small string-scan rather than pulling in a URL-parsing crate: the only
-/// shape this needs to recognize is the `scheme://[userinfo@]rest` prefix
-/// every DSN this codebase handles (`postgres://`, `postgresql://`,
-/// `sqlite://`) already uses.
-///
-/// `#[cfg(feature = "clustering")]`: this repo's dead-code hard rule prefers
-/// narrowing visibility over suppressing an unused-code warning — the sole
-/// call site is `sm_persistence::open_for_cluster_mode`'s FIX 4 co-location
-/// check, itself only reachable in a `clustering`-feature build.
-#[cfg(feature = "clustering")]
-pub(crate) fn redact_database_url(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
-    };
-    let (scheme, rest) = url.split_at(scheme_end + 3);
-    let Some(at_pos) = rest.find('@') else {
-        return url.to_string();
-    };
-    // Only redact if everything before the `@` is plausibly userinfo (no
-    // `/` in it) — a bare `@` appearing later in a path/query segment must
-    // not be mistaken for credentials.
-    let userinfo_candidate = &rest[..at_pos];
-    if userinfo_candidate.contains('/') {
-        return url.to_string();
+pub(crate) fn sqlite_url_is_in_memory(database_url: &str) -> bool {
+    let trimmed = database_url.trim().to_ascii_lowercase();
+    let base = trimmed
+        .split_once('?')
+        .map_or(trimmed.as_str(), |(base, _)| base);
+    if matches!(
+        base,
+        ":memory:" | "sqlite::memory:" | "sqlite://{memory}:" | "sqlite:///{memory}:"
+    ) || base == "file::memory:"
+        || base.ends_with("://file::memory:")
+        || base.ends_with(":file::memory:")
+        || sqlite_url_query_requests_memory(&trimmed)
+    {
+        return true;
     }
-    format!("{scheme}***@{}", &rest[at_pos + 1..])
+    SqliteConnectOptions::from_str(database_url)
+        .map(|options| {
+            let filename = options
+                .get_filename()
+                .to_string_lossy()
+                .to_ascii_lowercase();
+            filename == ":memory:"
+                || filename == "file::memory:"
+                // sqlx names shared in-memory databases exactly
+                // `sqlx-in-memory-<digits>` with no directory component; a
+                // durable file that merely resembles the marker
+                // (`sqlx-in-memory-prod.db`, `/var/.../sqlx-in-memory-x`)
+                // must stay durable.
+                || (!filename.contains('/')
+                    && filename
+                        .strip_prefix("sqlx-in-memory-")
+                        .is_some_and(|rest| {
+                            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                        }))
+        })
+        .unwrap_or(false)
 }
 
-#[cfg(all(test, feature = "clustering"))]
-mod redact_database_url_tests {
-    use super::*;
-
-    #[test]
-    fn redact_database_url_strips_credentials() {
-        assert_eq!(
-            redact_database_url("postgres://user:hunter2@localhost:5432/waddle"),
-            "postgres://***@localhost:5432/waddle"
-        );
-        assert_eq!(
-            redact_database_url("postgres://user@localhost/waddle"),
-            "postgres://***@localhost/waddle"
-        );
-    }
-
-    #[test]
-    fn redact_database_url_is_a_no_op_without_userinfo() {
-        assert_eq!(
-            redact_database_url("postgres://localhost:5432/waddle"),
-            "postgres://localhost:5432/waddle"
-        );
-        assert_eq!(redact_database_url("sqlite::memory:"), "sqlite::memory:");
-        assert_eq!(redact_database_url("not-a-url-at-all"), "not-a-url-at-all");
-    }
+fn sqlite_url_query_requests_memory(database_url: &str) -> bool {
+    let Some((_, query)) = database_url.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|param| {
+        param
+            .split_once('=')
+            .is_some_and(|(key, value)| key == "mode" && value == "memory")
+    })
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use jid::BareJid;
 
 use crate::ownership::Entity;
+use crate::postgres_identity::ClusterColocationIdentities;
 
 use super::{InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId};
 
@@ -41,17 +42,14 @@ pub enum PendingStorageError {
     /// `SELECT ... FOR SHARE` targets `clustering_claims`, which only
     /// exists there) — mirroring
     /// `SmPersistenceError::ClusterColocationMismatch`'s identical
-    /// invariant for `PostgresFencedSmPersistence`. Both fields are
-    /// expected to already be credential-redacted by the caller before
-    /// construction.
+    /// invariant for `PostgresFencedSmPersistence`.
     #[error(
         "clustered pending_delivery fencing must be co-located with the clustering claims \
-         tables: resolved pending_delivery database URL ({pending_delivery_database_url}) does \
-         not match the clustering global database URL ({global_database_url})"
+         tables: physical pending_delivery storage identity does not match the clustering global \
+         database identity"
     )]
     ClusterColocationMismatch {
-        pending_delivery_database_url: String,
-        global_database_url: String,
+        identities: Box<ClusterColocationIdentities>,
     },
 }
 

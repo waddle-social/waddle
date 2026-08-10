@@ -66,11 +66,9 @@ pub(crate) use flush::FLUSH_BATCH_SIZE;
 /// `sm_persistence::open_for_cluster_mode`'s identical
 /// co-location-then-construct pattern, one table over.
 ///
-/// When clustering is enabled AND the resolved `database_url` is a
-/// Postgres DSN, the co-location invariant is checked BEFORE anything
-/// else: the resolved URL must be an EXACT string match for
-/// `global_db.database_url()` (deliberately no DSN normalization — see
-/// `sm_persistence::open_for_cluster_mode`'s identical comment) — the
+/// When clustering is enabled and this storage opens a Postgres pool, its
+/// live PostgreSQL identity is compared with the global database before
+/// fencing is attached — the
 /// fencing `SELECT ... FOR SHARE` [`DatabasePendingDeliveryStorage::insert_fenced`]
 /// issues targets `clustering_claims`, which only exists in the
 /// clustering global database. A mismatch fails startup with
@@ -97,19 +95,26 @@ pub async fn open_for_cluster_mode(
     let storage = DatabasePendingDeliveryStorage::open(database_url, quota).await?;
     #[cfg(feature = "clustering")]
     {
-        let resolved_url = database_url
-            .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"));
-        if let (true, Some(resolved_url)) = (clustering_enabled, resolved_url) {
+        let is_postgres = storage.database().driver() == DatabaseDriver::Postgres;
+        if clustering_enabled && is_postgres {
             // FIX 3 — co-location invariant, checked before this storage's
             // fencing is ever attached: clustered pending_delivery and the
             // clustering claims tables must live in the same Postgres
             // database, or `insert_fenced`'s fencing check would run
             // against a `clustering_claims` table that does not exist in
             // this storage's own database.
-            if resolved_url != global_db.database_url() {
+            let pending_identity = crate::db::lineage::live_postgres_identity(&storage.database())
+                .await
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let global_identity = crate::db::lineage::live_postgres_identity(global_db)
+                .await
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            if pending_identity != global_identity {
                 return Err(PendingStorageError::ClusterColocationMismatch {
-                    pending_delivery_database_url: crate::db::redact_database_url(resolved_url),
-                    global_database_url: crate::db::redact_database_url(global_db.database_url()),
+                    identities: Box::new(waddle_xmpp::ClusterColocationIdentities {
+                        store: (&pending_identity).into(),
+                        global: (&global_identity).into(),
+                    }),
                 });
             }
             if let Some((claim_store, node_identity)) = claim_pair {

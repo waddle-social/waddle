@@ -2442,6 +2442,198 @@ pub enum DatabaseRuntimeConfigError {
     EmptyVar { name: &'static str },
 }
 
+/// Errors while parsing the explicit database-lineage operator configuration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LineageConfigError {
+    #[error("{name} is set but empty")]
+    EmptyVar { name: &'static str },
+    #[error("{name} is not a UUID: {value}")]
+    InvalidUuid { name: &'static str, value: String },
+    #[error("WADDLE_DB_LINEAGE_ACTION must be 'enroll' or 'adopt=<lineage-uuid>'")]
+    InvalidAction,
+}
+
+/// Parsed configuration for an explicit lineage enrollment/adoption action.
+///
+/// An unset deployment UUID is permitted for normal verify-only startup, but
+/// the engine refuses enrollment or adoption without one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LineageConfig {
+    pub deployment_uuid: Option<crate::db::lineage::DeploymentUuid>,
+    pub action: Option<crate::db::lineage::LineageAction>,
+}
+
+impl LineageConfig {
+    pub fn from_env() -> Result<Self, LineageConfigError> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, LineageConfigError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let deployment_uuid = match vars.get("WADDLE_DEPLOYMENT_UUID") {
+            None => None,
+            Some(value) => {
+                let value = nonempty_lineage_var("WADDLE_DEPLOYMENT_UUID", value)?;
+                Some(value.parse().map_err(|_| LineageConfigError::InvalidUuid {
+                    name: "WADDLE_DEPLOYMENT_UUID",
+                    value: value.to_string(),
+                })?)
+            }
+        };
+
+        let action = match vars.get("WADDLE_DB_LINEAGE_ACTION") {
+            None => None,
+            Some(value) => {
+                let value = nonempty_lineage_var("WADDLE_DB_LINEAGE_ACTION", value)?;
+                match value {
+                    "enroll" => Some(crate::db::lineage::LineageAction::Enroll),
+                    _ => {
+                        let Some(expected) = value.strip_prefix("adopt=") else {
+                            return Err(LineageConfigError::InvalidAction);
+                        };
+                        if expected.is_empty() {
+                            return Err(LineageConfigError::InvalidAction);
+                        }
+                        let expected = expected
+                            .split(',')
+                            .map(str::trim)
+                            .map(|entry| {
+                                if entry.is_empty() {
+                                    return Err(LineageConfigError::InvalidAction);
+                                }
+                                entry.parse().map_err(|_| LineageConfigError::InvalidUuid {
+                                    name: "WADDLE_DB_LINEAGE_ACTION",
+                                    value: entry.to_string(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Some(crate::db::lineage::LineageAction::Adopt(expected))
+                    }
+                }
+            }
+        };
+
+        Ok(Self {
+            deployment_uuid,
+            action,
+        })
+    }
+}
+
+fn nonempty_lineage_var<'a>(
+    name: &'static str,
+    value: &'a str,
+) -> Result<&'a str, LineageConfigError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(LineageConfigError::EmptyVar { name });
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod lineage_config_tests {
+    use super::*;
+
+    #[test]
+    fn lineage_config_defaults_to_verify_only() {
+        assert_eq!(
+            LineageConfig::from_vars(std::iter::empty::<(&str, &str)>()),
+            Ok(LineageConfig::default())
+        );
+    }
+
+    #[test]
+    fn lineage_config_parses_deployment_and_actions() {
+        let deployment = "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001";
+        let adopted = "018f47b2-4b2e-7a3a-9a4c-52a5a6a90002";
+        let enroll_config = LineageConfig::from_vars([
+            ("WADDLE_DEPLOYMENT_UUID", deployment),
+            ("WADDLE_DB_LINEAGE_ACTION", "enroll"),
+        ])
+        .expect("parse enrollment config");
+        assert!(matches!(
+            enroll_config.action,
+            Some(crate::db::lineage::LineageAction::Enroll)
+        ));
+
+        let adopt_config =
+            LineageConfig::from_vars([("WADDLE_DB_LINEAGE_ACTION", &format!("adopt={adopted}"))])
+                .expect("parse adoption config");
+        assert!(matches!(
+            adopt_config.action,
+            Some(crate::db::lineage::LineageAction::Adopt(_))
+        ));
+    }
+
+    #[test]
+    fn lineage_config_rejects_blank_and_invalid_values() {
+        assert!(matches!(
+            LineageConfig::from_vars([("WADDLE_DEPLOYMENT_UUID", " ")]),
+            Err(LineageConfigError::EmptyVar {
+                name: "WADDLE_DEPLOYMENT_UUID"
+            })
+        ));
+        assert!(matches!(
+            LineageConfig::from_vars([("WADDLE_DEPLOYMENT_UUID", "invalid")]),
+            Err(LineageConfigError::InvalidUuid {
+                name: "WADDLE_DEPLOYMENT_UUID",
+                ..
+            })
+        ));
+        assert!(matches!(
+            LineageConfig::from_vars([("WADDLE_DB_LINEAGE_ACTION", "adopt=")]),
+            Err(LineageConfigError::InvalidAction)
+        ));
+        assert!(matches!(
+            LineageConfig::from_vars([(
+                "WADDLE_DB_LINEAGE_ACTION",
+                "adopt=018f47b2-4b2e-7a3a-9a4c-52a5a6a90001,,018f47b2-4b2e-7a3a-9a4c-52a5a6a90002"
+            )]),
+            Err(LineageConfigError::InvalidAction)
+        ));
+        assert!(matches!(
+            LineageConfig::from_vars([(
+                "WADDLE_DB_LINEAGE_ACTION",
+                "adopt=018f47b2-4b2e-7a3a-9a4c-52a5a6a90001,garbage"
+            )]),
+            Err(LineageConfigError::InvalidUuid { .. })
+        ));
+    }
+
+    #[test]
+    fn lineage_config_parses_adopt_lists() {
+        let parsed = LineageConfig::from_vars([(
+            "WADDLE_DB_LINEAGE_ACTION",
+            "adopt=018f47b2-4b2e-7a3a-9a4c-52a5a6a90001, 018f47b2-4b2e-7a3a-9a4c-52a5a6a90002",
+        )])
+        .expect("parse adopt list");
+        let Some(crate::db::lineage::LineageAction::Adopt(expected)) = parsed.action else {
+            panic!("expected adopt action");
+        };
+        assert_eq!(
+            expected,
+            vec![
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001"
+                    .parse::<crate::db::lineage::LineageUuid>()
+                    .expect("first uuid"),
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90002"
+                    .parse::<crate::db::lineage::LineageUuid>()
+                    .expect("second uuid"),
+            ]
+        );
+    }
+}
+
 /// Runtime database driver + DSN + pool-sizing contract, parsed from
 /// `WADDLE_DB_*`/`WADDLE_DATABASE_URL` (ADR-0017 element 12).
 #[derive(Debug, Clone)]
