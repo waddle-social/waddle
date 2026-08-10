@@ -9,6 +9,9 @@
 {{- $killMargin := 5 -}}
 {{- $drainTimeout := int .Values.config.drainTimeoutSeconds -}}
 {{- $preStopSleep := int .Values.preStopSleepSeconds -}}
+{{- $uuidPattern := "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" -}}
+{{- $rawDeploymentUuid := toString .Values.deployment.uuid -}}
+{{- $deploymentUuid := trim $rawDeploymentUuid -}}
 {{- /*
   ADR-0017 Phase 3 Slice 10: the per-entity claim-release drain
   (`clustering::drain::run_shutdown_drain`) runs on its own budget,
@@ -51,11 +54,18 @@
 {{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + clustering.claimReleaseBudgetSeconds (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $claimReleaseBudget $killMargin $shutdownFloor) -}}
 {{- end -}}
 
+{{- if and (ne $rawDeploymentUuid "") (not (regexMatch $uuidPattern $rawDeploymentUuid)) -}}
+{{- fail "deployment.uuid must be a lower-case RFC-4122 UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) when set; remove/clear it or provide a valid value" -}}
+{{- end -}}
+
 {{- if and (gt (int .Values.replicaCount) 1) (not .Values.clustering.enabled) -}}
 {{- fail (printf "replicaCount (%d) > 1 requires clustering.enabled=true so cross-node routing, claims, MUC, and SM state use the ordered relay/Postgres fabric." (int .Values.replicaCount)) -}}
 {{- end -}}
 
 {{- if .Values.clustering.enabled -}}
+{{- if eq $deploymentUuid "" -}}
+{{- fail "clustering.enabled=true requires deployment.uuid to be set to a stable non-empty RFC-4122 UUID for lineage comparison." -}}
+{{- end -}}
 {{- if ne .Values.database.driver "postgres" -}}
 {{- fail "clustering.enabled=true requires database.driver=postgres" -}}
 {{- end -}}
