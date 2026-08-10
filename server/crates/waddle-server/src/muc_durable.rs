@@ -14,9 +14,10 @@
 //! **Schema** (PROPOSED — no ADR-locked DDL exists for MUC room durability,
 //! only the column shapes element 7's text names): `clustering_` prefixed,
 //! following the `clustering_nodes`/`clustering_claims`/
-//! `clustering_steal_intents` convention (ensure-schema-on-the-store, not a
+//! `clustering_steal_intents` convention (store-owned ensure-schema, not a
 //! versioned app migration, since these tables exist purely to back the
-//! clustering-durability subsystem):
+//! clustering-durability subsystem and the migration-version freeze in
+//! #1651 deliberately excludes them):
 //! - `clustering_muc_rooms` — one row per durably-written room: `waddle_id`/
 //!   `channel_id` plus the JSON-serialized `RoomConfig`/`SubjectState`
 //!   (both already `Serialize`/`Deserialize` for exactly this purpose).
@@ -25,6 +26,14 @@
 //!   `affiliation_to_db_str`/`affiliation_from_db_str` pair, mirroring
 //!   `EntityType::as_db_str`/`from_db_str`'s exact convention, rather than a
 //!   JSON blob for a five-variant closed enum.
+//! - `clustering_muc_room_lifecycles` — one row per room incarnation. Its
+//!   closed `state` vocabulary is `active` | `dormant` | `tombstoned`; the
+//!   partial unique index permits at most one live (`active` or `dormant`)
+//!   incarnation per room while retaining tombstones for #1646's effect drain.
+//!   The nullable `clustering_muc_rooms.lifecycle_id`/`revision` snapshot
+//!   back-link is deliberately nullable forever: `NULL` is a legitimate
+//!   pre-lifecycle row. All lifecycle schema is inert in this slice; #1645 is
+//!   its first writer.
 //!
 //! **Fencing**: every `save_*` write runs [`PostgresMucRoomStore::assert_fenced`]
 //! — the exact `SELECT ... FOR SHARE` shape `sm_persistence_fenced::
@@ -54,6 +63,14 @@ use waddle_xmpp::{Affiliation, XmppError};
 use crate::clustering::relay::RelayHandle;
 use crate::clustering::NodeId;
 use crate::db::{Database, DatabaseError, Transaction};
+
+/// Dedicated transaction-scoped Postgres advisory lock for MUC store schema
+/// bootstrap. It is distinct from the clustering claims lock
+/// (`6_841_445_497_037_937_991`), migration-ledger lock
+/// (`6_841_445_497_037_937_992`), and lineage lock
+/// (`6_841_445_497_037_937_993`) because each protects a separate bootstrap
+/// invariant and should not serialize unrelated startup work.
+const MUC_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_994;
 
 fn db_err(error: DatabaseError) -> XmppError {
     // Durable MUC operations translate database failures into typed XMPP
@@ -162,8 +179,17 @@ impl PostgresMucRoomStore {
     }
 
     async fn ensure_schema(&self) -> Result<(), DatabaseError> {
-        let conn = self.db.guard().await?;
-        conn.execute(
+        let mut tx = self.db.begin().await?;
+        // The advisory-lock loser must observe the winner's committed DDL,
+        // even when the deployment's session default is stricter.
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await?;
+        tx.query(
+            "SELECT pg_advisory_xact_lock(?)",
+            crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
+        )
+        .await?;
+        tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_muc_rooms (
                 room_jid     TEXT PRIMARY KEY,
@@ -177,7 +203,7 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
-        conn.execute(
+        tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_muc_room_affiliations (
                 room_jid    TEXT NOT NULL,
@@ -191,7 +217,7 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
-        conn.execute(
+        tx.execute(
             r#"
             CREATE INDEX IF NOT EXISTS clustering_muc_room_affiliations_room_jid_idx
                 ON clustering_muc_room_affiliations (room_jid)
@@ -199,6 +225,77 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
+        tx.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS clustering_muc_room_lifecycles (
+                lifecycle_id TEXT PRIMARY KEY,
+                room_jid     TEXT NOT NULL,
+                revision     BIGINT NOT NULL CONSTRAINT clustering_muc_room_lifecycles_revision_min CHECK (revision >= 1),
+                state        TEXT NOT NULL CONSTRAINT clustering_muc_room_lifecycles_state_closed CHECK (state IN ('active','dormant','tombstoned')),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS clustering_muc_room_lifecycles_live_room_idx
+                ON clustering_muc_room_lifecycles (room_jid) WHERE state IN ('active','dormant')
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            "ALTER TABLE clustering_muc_rooms ADD COLUMN IF NOT EXISTS lifecycle_id TEXT",
+            (),
+        )
+        .await?;
+        tx.execute(
+            "ALTER TABLE clustering_muc_rooms ADD COLUMN IF NOT EXISTS revision BIGINT",
+            (),
+        )
+        .await?;
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'clustering_muc_rooms_lifecycle_pairing'
+                      AND conrelid = 'clustering_muc_rooms'::regclass
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms
+                        ADD CONSTRAINT clustering_muc_rooms_lifecycle_pairing
+                        CHECK ((lifecycle_id IS NULL) = (revision IS NULL));
+                END IF;
+            END $$
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'clustering_muc_rooms_revision_min'
+                      AND conrelid = 'clustering_muc_rooms'::regclass
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms
+                        ADD CONSTRAINT clustering_muc_rooms_revision_min
+                        CHECK (revision IS NULL OR revision >= 1);
+                END IF;
+            END $$
+            "#,
+            (),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -850,7 +947,292 @@ mod tests {
         conn.execute("DELETE FROM clustering_muc_room_affiliations", ())
             .await
             .expect("clean affiliations");
+        conn.execute("DELETE FROM clustering_muc_room_lifecycles", ())
+            .await
+            .expect("clean room lifecycles");
         Some((store, claim_store, db, me))
+    }
+
+    /// Creates a shared Postgres handle after removing only the MUC durable
+    /// schema, so concurrent `open` calls must bootstrap it from scratch.
+    /// Callers hold `clustering_control_plane_table_lock` to avoid racing the
+    /// existing Postgres-gated MUC tests that share this opt-in database.
+    async fn fresh_muc_schema_database() -> Option<Database> {
+        let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        let db = Database::from_config(
+            "muc-durable-fresh-schema-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("open test postgres");
+        let conn = db.guard().await.expect("guard");
+        conn.execute("DROP TABLE IF EXISTS clustering_muc_room_lifecycles", ())
+            .await
+            .expect("drop room lifecycles");
+        conn.execute("DROP TABLE IF EXISTS clustering_muc_room_affiliations", ())
+            .await
+            .expect("drop room affiliations");
+        conn.execute("DROP TABLE IF EXISTS clustering_muc_rooms", ())
+            .await
+            .expect("drop rooms");
+        Some(db)
+    }
+
+    async fn column_nullability(db: &Database, table: &str, column: &str) -> Option<String> {
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT is_nullable FROM information_schema.columns \
+                 WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+                crate::db_params![table, column],
+            )
+            .await
+            .expect("query column nullability");
+        rows.next()
+            .await
+            .expect("read column nullability")
+            .map(|row| row.get(0).expect("decode column nullability"))
+    }
+
+    async fn named_check_exists(db: &Database, table: &str, constraint: &str) -> bool {
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM pg_constraint \
+                 WHERE conrelid = to_regclass(?) AND conname = ? AND contype = 'c'",
+                crate::db_params![table, constraint],
+            )
+            .await
+            .expect("query named check constraint");
+        rows.next()
+            .await
+            .expect("read named check constraint")
+            .expect("named check constraint count row")
+            .get::<i64>(0)
+            .expect("decode named check constraint count")
+            == 1
+    }
+
+    #[tokio::test]
+    async fn concurrent_open_serializes_muc_schema_bootstrap() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = fresh_muc_schema_database().await else {
+            return;
+        };
+
+        let (first, second) = tokio::join!(
+            PostgresMucRoomStore::open(
+                db.clone(),
+                CancellationToken::new(),
+                SharedNodeIdentity::new(node_identity()),
+            ),
+            PostgresMucRoomStore::open(
+                db,
+                CancellationToken::new(),
+                SharedNodeIdentity::new(node_identity()),
+            )
+        );
+
+        assert!(
+            first.is_ok(),
+            "first concurrent MUC schema open must succeed"
+        );
+        assert!(
+            second.is_ok(),
+            "second concurrent MUC schema open must succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_open_is_idempotent() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(db) = fresh_muc_schema_database().await else {
+            return;
+        };
+
+        PostgresMucRoomStore::open(
+            db.clone(),
+            CancellationToken::new(),
+            SharedNodeIdentity::new(node_identity()),
+        )
+        .await
+        .expect("first MUC schema open");
+        PostgresMucRoomStore::open(
+            db,
+            CancellationToken::new(),
+            SharedNodeIdentity::new(node_identity()),
+        )
+        .await
+        .expect("second MUC schema open");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_schema_has_expected_catalog_shape() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((_store, _claim_store, db, _me)) = clean_store().await else {
+            return;
+        };
+
+        for (column, nullable) in [
+            ("lifecycle_id", "NO"),
+            ("room_jid", "NO"),
+            ("revision", "NO"),
+            ("state", "NO"),
+            ("created_at", "NO"),
+            ("updated_at", "NO"),
+        ] {
+            assert_eq!(
+                column_nullability(&db, "clustering_muc_room_lifecycles", column).await,
+                Some(nullable.to_string()),
+                "lifecycle column {column} must have expected nullability"
+            );
+        }
+        for constraint in [
+            "clustering_muc_room_lifecycles_revision_min",
+            "clustering_muc_room_lifecycles_state_closed",
+        ] {
+            assert!(
+                named_check_exists(&db, "clustering_muc_room_lifecycles", constraint).await,
+                "lifecycle check constraint {constraint} must exist"
+            );
+        }
+        for column in ["lifecycle_id", "revision"] {
+            assert_eq!(
+                column_nullability(&db, "clustering_muc_rooms", column).await,
+                Some("YES".to_string()),
+                "room snapshot back-link {column} must remain nullable"
+            );
+        }
+        for constraint in [
+            "clustering_muc_rooms_lifecycle_pairing",
+            "clustering_muc_rooms_revision_min",
+        ] {
+            assert!(
+                named_check_exists(&db, "clustering_muc_rooms", constraint).await,
+                "room check constraint {constraint} must exist"
+            );
+        }
+
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT i.indisunique, i.indpred IS NOT NULL \
+                 FROM pg_index i \
+                 JOIN pg_class index_relation ON index_relation.oid = i.indexrelid \
+                 WHERE index_relation.relname = ? \
+                   AND i.indrelid = to_regclass('clustering_muc_room_lifecycles')",
+                crate::db_params!["clustering_muc_room_lifecycles_live_room_idx"],
+            )
+            .await
+            .expect("query lifecycle index catalog");
+        let index = rows
+            .next()
+            .await
+            .expect("read lifecycle index catalog")
+            .expect("lifecycle partial unique index exists");
+        assert!(index
+            .get::<bool>(0)
+            .expect("decode lifecycle index uniqueness"));
+        assert!(index
+            .get::<bool>(1)
+            .expect("decode lifecycle index predicate"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_schema_rejects_invalid_invariants() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((_store, _claim_store, db, _me)) = clean_store().await else {
+            return;
+        };
+        let conn = db.guard().await.expect("guard");
+
+        assert!(conn
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params!["lifecycle-revision-zero", "revision-zero@muc.example.com", 0_i64, "active"],
+            )
+            .await
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params!["lifecycle-bogus-state", "bogus-state@muc.example.com", 1_i64, "bogus"],
+            )
+            .await
+            .is_err());
+
+        conn.execute(
+            "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+            crate::db_params!["live-active", "one-live@muc.example.com", 1_i64, "active"],
+        )
+        .await
+        .expect("insert first active lifecycle");
+        for (lifecycle_id, state) in [("second-active", "active"), ("second-dormant", "dormant")] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                    crate::db_params![lifecycle_id, "one-live@muc.example.com", 2_i64, state],
+                )
+                .await
+                .is_err(), "a second {state} lifecycle must be rejected");
+        }
+
+        for (lifecycle_id, room_jid, revision, state) in [
+            (
+                "tombstone-first",
+                "tombstone-and-live@muc.example.com",
+                1_i64,
+                "tombstoned",
+            ),
+            (
+                "live-after-tombstone",
+                "tombstone-and-live@muc.example.com",
+                2_i64,
+                "active",
+            ),
+            (
+                "tombstone-second",
+                "tombstone-and-live@muc.example.com",
+                3_i64,
+                "tombstoned",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params![lifecycle_id, room_jid, revision, state],
+            )
+            .await
+            .expect("allowed lifecycle state combination");
+        }
+
+        for (room_jid, lifecycle_id, revision) in [
+            (
+                "missing-revision@muc.example.com",
+                Some("lifecycle-missing-revision"),
+                None,
+            ),
+            ("missing-lifecycle@muc.example.com", None, Some(1_i64)),
+            (
+                "room-revision-zero@muc.example.com",
+                Some("lifecycle-revision-zero"),
+                Some(0_i64),
+            ),
+        ] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, ?, ?, ?, ?, ?)",
+                    crate::db_params![room_jid, "waddle", "channel", "{}", lifecycle_id, revision],
+                )
+                .await
+                .is_err(), "invalid room lifecycle pairing or revision must be rejected");
+        }
+        conn.execute(
+            "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json) VALUES (?, ?, ?, ?)",
+            crate::db_params!["pre-lifecycle@muc.example.com", "waddle", "channel", "{}"],
+        )
+        .await
+        .expect("a pre-lifecycle room row with both back-link columns NULL is valid");
     }
 
     #[tokio::test]
