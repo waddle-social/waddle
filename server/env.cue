@@ -455,6 +455,12 @@ schema.#Project & {
 					modules_yaml="$(mktemp)"
 					published_values="$(mktemp).yaml"
 					published_render="$(mktemp)"
+					lineage_default_render="$(mktemp)"
+					lineage_cluster_render="$(mktemp)"
+					missing_uuid_stderr="$(mktemp)"
+					malformed_uuid_stderr="$(mktemp)"
+					lineage_uuid="123e4567-e89b-12d3-a456-426614174000"
+					malformed_lineage_uuid="not-a-uuid"
 					chart_secret_args=(
 					  --set-string secret.sessionKey=ci-session-key
 					  --set-string secret.occupantIdSecret=ci-occupant-id-secret-32-bytes-long
@@ -487,6 +493,77 @@ schema.#Project & {
 					  --set spicedb.enabled=false \
 					  --set-string 'extraSecretRefs[0]=not-runtime-secrets' > /dev/null 2>&1; then
 					  echo "chart must reject arbitrary extraSecretRefs as proof of required runtime keys" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  "${chart_secret_args[@]}" \
+					  > "${lineage_default_render}" ; then
+					  :
+					else
+					  echo "chart template must succeed with default lineage settings when clustering is off" >&2
+					  exit 1
+					fi
+					if grep -q "WADDLE_DB_LINEAGE_ACTION" "${lineage_default_render}"; then
+					  echo "WADDLE_DB_LINEAGE_ACTION must not render when deployment.lineageAction is unset" >&2
+					  exit 1
+					fi
+					if ! grep -q 'WADDLE_DEPLOYMENT_UUID: ""' "${lineage_default_render}"; then
+					  echo "default chart render must provide an empty WADDLE_DEPLOYMENT_UUID" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set clustering.enabled=true \
+					  --set database.driver=postgres \
+					  --set deployment.uuid="${lineage_uuid}" \
+					  --set deployment.lineageAction=enroll \
+					  --set config.s3Endpoint=http://127.0.0.1 \
+					  --set config.s3Bucket=placeholder-bucket \
+					  --set-string secret.clusteringKeypairPool="one\\,two\\,three" \
+					  "${chart_secret_args[@]}" \
+					  > "${lineage_cluster_render}" ; then
+					  :
+					else
+					  echo "clustered chart render must succeed with valid deployment.uuid" >&2
+					  exit 1
+					fi
+					if ! grep -q "WADDLE_DEPLOYMENT_UUID: \"${lineage_uuid}\"" "${lineage_cluster_render}"; then
+					  echo "WADDLE_DEPLOYMENT_UUID must render in clustered deployments with valid UUID" >&2
+					  exit 1
+					fi
+					if ! grep -q 'WADDLE_DB_LINEAGE_ACTION: "enroll"' "${lineage_cluster_render}"; then
+					  echo "WADDLE_DB_LINEAGE_ACTION must render when deployment.lineageAction is set" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set clustering.enabled=true \
+					  --set database.driver=postgres \
+					  --set config.s3Endpoint=http://127.0.0.1 \
+					  --set config.s3Bucket=placeholder-bucket \
+					  --set-string secret.clusteringKeypairPool="one\\,two\\,three" \
+					  "${chart_secret_args[@]}" >/dev/null 2>"${missing_uuid_stderr}"; then
+					  echo "chart template must fail clustering without deployment.uuid" >&2
+					  exit 1
+					fi
+					if ! grep -q "clustering.enabled=true requires deployment.uuid to be set to a stable non-empty RFC-4122 UUID for lineage comparison." "${missing_uuid_stderr}"; then
+					  echo "chart template must explain clustering's deployment.uuid requirement" >&2
+					  exit 1
+					fi
+					if helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string deployment.uuid="${malformed_lineage_uuid}" \
+					  "${chart_secret_args[@]}" >/dev/null 2>"${malformed_uuid_stderr}"; then
+					  echo "chart template must fail malformed deployment.uuid" >&2
+					  exit 1
+					fi
+					if ! grep -q "deployment.uuid must be a lower-case RFC-4122 UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) when set; remove/clear it or provide a valid value" "${malformed_uuid_stderr}"; then
+					  echo "chart template must explain malformed deployment.uuid values" >&2
 					  exit 1
 					fi
 
