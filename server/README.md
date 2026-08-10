@@ -102,8 +102,16 @@ docker run --rm \
   -e WADDLE_XMPP_INBOX_DATABASE_URL=sqlite:///var/lib/waddle/inbox.db \
   -e WADDLE_SESSION_KEY="$(openssl rand -base64 48)" \
   -e WADDLE_OCCUPANT_ID_SECRET="$(openssl rand -base64 48)" \
+  -e WADDLE_DEPLOYMENT_UUID="$(uuidgen | tr 'A-Z' 'a-z')" \
+  -e WADDLE_DB_LINEAGE_ACTION=enroll \
   waddle-server:local
 ```
+
+`WADDLE_DEPLOYMENT_UUID` and the one-shot `WADDLE_DB_LINEAGE_ACTION=enroll`
+enroll the durable SQLite files' database lineage on first run (#1652);
+keep the UUID stable (store it next to your secrets) and drop the enroll
+action after the first successful start. Purely in-memory runs need
+neither. See `docs/operations/db-lineage.md`.
 
 `WADDLE_SESSION_KEY` is required for session token HMAC and extension launch
 signing. Keep it stable across restarts so existing sessions and extension

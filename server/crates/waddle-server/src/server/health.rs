@@ -206,13 +206,15 @@ pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> imp
     };
     match health_for_serving_generation(&state.node_lifecycle, readiness).await {
         Err(error) => {
-            // A not-Serving node reports the STORED startup attestation
-            // outcome instead of probing again: it is free, cannot double
-            // the request's deadline, and is exactly the diagnostic the
-            // operator needs (why the node never promoted).
+            // A not-Serving node reports the stored LATCHING report (live
+            // drift or startup-definitive failure) when one exists, else the
+            // startup attestation outcome: free, cannot double the request's
+            // deadline, and names the failure that actually took the node
+            // down.
             let lineage = state
-                .lineage_startup
+                .lineage_latched
                 .get()
+                .or_else(|| state.lineage_startup.get())
                 .cloned()
                 .ok_or(LineageStatus::Initializing);
             lifecycle_not_ready_response(&state.node_lifecycle, &error, lineage)
@@ -289,9 +291,32 @@ async fn lineage_readiness(state: &AppState) -> Result<LineageReport, LineageSta
     let Some(registry) = state.lineage_registry.get() else {
         return Err(LineageStatus::Initializing);
     };
-    Ok(registry
+    let report = registry
         .attest(&state.lineage_config, state.clustering_enabled)
-        .await)
+        .await;
+    // Live drift fails CLOSED, not just unready: a definitive lineage
+    // failure appearing while this node is Serving (database restored or
+    // replaced under the running process) latches the lifecycle — demoting
+    // the node and revoking its serving generation so existing WebSocket
+    // sessions and direct upgrades stop writing through the wrong database.
+    // Transport-only failures never latch (sticky-success already absorbs
+    // them on proven boundaries).
+    if !report.is_attested()
+        && !report.is_transient_only()
+        && state.node_lifecycle.is_ready()
+        && !state.node_lifecycle.startup_blocked()
+    {
+        for (store, status) in report.failures() {
+            tracing::error!(
+                store = %store,
+                status = status.as_str(),
+                "definitive lineage failure on a serving node; latching and revoking admission"
+            );
+        }
+        let _ = state.lineage_latched.set(report.clone());
+        state.node_lifecycle.latch_startup_block();
+    }
+    Ok(report)
 }
 
 fn lineage_json(lineage: Result<LineageReport, LineageStatus>) -> serde_json::Value {
@@ -747,6 +772,43 @@ mod readiness_generation_tests {
             .into_response();
         let json = response_json(response).await;
 
+        assert_eq!(json["status"], "not_ready");
+        assert_eq!(json["lineage"]["inbox"], "missing_lineage");
+    }
+
+    #[tokio::test]
+    async fn definitive_live_failure_latches_and_demotes_a_serving_node() {
+        let db = Database::in_memory("readiness-live-drift")
+            .await
+            .expect("open sqlite database");
+        ensure_table(&db).await.expect("bootstrap lineage table");
+        let pool = sqlite_pool("readiness-live-drift-global").await;
+        let state = Arc::new(test_state(pool, false));
+        let mut registry = LineageRegistryBuilder::default();
+        registry.register_probe(
+            DurableStore::Inbox,
+            Arc::new(DatabaseLineageAttestor::new(db)),
+        );
+        let _ = state.lineage_registry.set(registry.seal());
+        assert!(state.node_lifecycle.is_ready());
+
+        let response = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // The definitive failure latched the lifecycle: the node is demoted
+        // out of Serving (sockets revoked) and can never be re-promoted.
+        assert!(!state.node_lifecycle.is_ready());
+        assert!(state.node_lifecycle.startup_blocked());
+        state.node_lifecycle.serve();
+        assert!(!state.node_lifecycle.is_ready());
+
+        // Subsequent probes keep reporting the latching failure.
+        let response = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        let json = response_json(response).await;
         assert_eq!(json["status"], "not_ready");
         assert_eq!(json["lineage"]["inbox"], "missing_lineage");
     }

@@ -83,6 +83,11 @@ pub struct AppState {
     /// `create_websocket_state` after the registry seals. `create_router`
     /// consults it to gate Serving promotion and the janitor spawns.
     pub lineage_startup: OnceLock<crate::db::lineage::LineageReport>,
+    /// The report that LATCHED this node (startup-definitive or live drift
+    /// detected at readiness). Preferred over `lineage_startup` in
+    /// not-Serving readiness responses so the operator sees the failure
+    /// that actually took the node down, not a stale startup snapshot.
+    pub lineage_latched: OnceLock<crate::db::lineage::LineageReport>,
     /// Which `adopt=<uuid>` list entries actually matched a durable
     /// boundary. An entry that matched nothing is an operator typo (or a
     /// boundary that no longer exists) and must fail the startup gate loudly.
@@ -190,6 +195,7 @@ impl AppState {
             lineage_config,
             clustering_enabled,
             lineage_startup: OnceLock::new(),
+            lineage_latched: OnceLock::new(),
             lineage_adopt_matched: Mutex::new(std::collections::HashSet::new()),
         }
     }

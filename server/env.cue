@@ -895,6 +895,15 @@ schema.#Project & {
 					gitops_values="$(mktemp).yaml"
 					gitops_render="$(mktemp)"
 					yq -o=yaml '.spec.values' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > "${gitops_values}"
+					# Chart >= 0.4.4 hard-requires deployment.uuid for the clustered
+					# prod values (#1652). Refuse to PUBLISH until the infrastructure
+					# repo's HelmRelease carries the real value: publishing without it
+					# would leave Flux unable to render the chart, silently stalling
+					# every rollout. See docs/operations/db-lineage.md.
+					if ! yq -e '.spec.values.deployment.uuid' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null; then
+					  echo "refusing to publish: infrastructure helmrelease.yaml must set deployment.uuid (see docs/operations/db-lineage.md)" >&2
+					  exit 1
+					fi
 					cue vet . "${gitops_values}" -d '#PublishedValues' \
 					  -t serverImageDigest="${digest}" \
 					  -t linkBoardDigest="${link_board_digest}" \

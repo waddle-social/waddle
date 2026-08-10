@@ -23,6 +23,9 @@ When `image.digest` is empty, the chart falls back to `image.tag` or
 ```bash
 SESSION_KEY="<stable value from your secret manager>"
 OCCUPANT_ID_SECRET="<stable value from your secret manager>"
+# Stable per-deployment UUID for database lineage attestation — mint once
+# (uuidgen) and never change it across upgrades or rollbacks.
+DEPLOYMENT_UUID="<stable UUID from your secret manager>"
 
 helm upgrade --install waddle ./charts/waddle-server \
   --namespace waddle \
@@ -35,8 +38,16 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set ingress.tls[0].secretName=chat-example-com-tls \
   --set ingress.tls[0].hosts[0]=chat.example.com \
   --set-string secret.sessionKey="${SESSION_KEY}" \
-  --set-string secret.occupantIdSecret="${OCCUPANT_ID_SECRET}"
+  --set-string secret.occupantIdSecret="${OCCUPANT_ID_SECRET}" \
+  --set-string deployment.uuid="${DEPLOYMENT_UUID}" \
+  --set-string deployment.lineageAction=enroll
 ```
+
+`deployment.lineageAction=enroll` is a one-shot bootstrap for the FIRST
+install (or first upgrade to a lineage-aware chart) against a durable
+database: it enrolls the database's lineage so pods can become ready.
+Remove it in the next upgrade. Without enrollment, pods stay alive but
+permanently not-ready. See `docs/operations/db-lineage.md`.
 
 ## XMPP TLS secret (recommended)
 

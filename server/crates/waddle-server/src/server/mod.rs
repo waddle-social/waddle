@@ -145,12 +145,10 @@ pub async fn start_with_config(
         .ask(crate::permissions::EnsureSchema)
         .await
         .map_err(|error| anyhow::anyhow!("Failed to ensure permission schema: {}", error))?;
-    bootstrap_membership::reconcile_existing_accounts_or_warn(
-        db_pool.global_actor(),
-        &permission_actor,
-        &bootstrap_membership::BootstrapMembershipConfig::from_env(),
-    )
-    .await;
+    // Membership reconciliation (reads every user row and provisions
+    // permission tuples) moved behind the startup lineage attestation gate
+    // in `create_websocket_state` — it mutates application state and must
+    // not run against a database this node cannot vouch for.
     let inbox_database_storage = Arc::new(
         DatabaseInboxStorage::open(xmpp_config.inbox_database_url.as_deref())
             .await

@@ -398,7 +398,13 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
     let auth_page_router = routes::auth_page::router(auth_state.clone());
 
-    router = router
+    // Application routes live behind the same admission gate as WebSocket
+    // upgrades: a node held out of `Serving` (failed/latched lineage
+    // attestation, fencing, drain) must not accept HTTP requests that read
+    // or mutate application state through a database it cannot vouch for.
+    // Operational endpoints (health/readiness/metrics, ACME) stay ungated
+    // on the base router above.
+    let mut app_router = Router::new()
         .merge(auth_router)
         .merge(device_router)
         .merge(xmpp_oauth_router)
@@ -414,7 +420,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // a misconfigured staging that flips the flag without the token
     // does not mount the route.
     if let Some(auth) = build_test_profile_publish_auth(&auth_state.xmpp_domain) {
-        router = router.merge(crate::server::profile_publish_route::router(
+        app_router = app_router.merge(crate::server::profile_publish_route::router(
             websocket_state.clone(),
             auth,
         ));
@@ -427,20 +433,26 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // process RSS.
     if let Some(auth) = crate::server::state_inventory_route::debug_state_auth_from_env() {
         info!("Mounting /debug/state-inventory (WADDLE_DEBUG_STATE_TOKEN set)");
-        router = router.merge(crate::server::state_inventory_route::router(
+        app_router = app_router.merge(crate::server::state_inventory_route::router(
             websocket_state.clone(),
             auth,
         ));
     }
 
     // Always merge common routes required by XMPP, auth, upload, and operations.
-    let router = router
+    let app_router = app_router
         // Merge XMPP over WebSocket endpoint
         .merge(websocket_router)
         // Merge well-known endpoints for XMPP service discovery
         .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload
         .merge(upload_router)
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&websocket_state.deps.app_state),
+            admission_gate,
+        ));
+    let router = router
+        .merge(app_router)
         .layer(CompressionLayer::new())
         .layer(configure_cors())
         // These two observability layers stay outside CORS so preflight
@@ -737,6 +749,7 @@ async fn create_websocket_state(
                 "database lineage attestation failed; node stays unready until the cause is fixed and the pod is restarted"
             );
         }
+        let _ = state.lineage_latched.set(lineage_report.clone());
         state.node_lifecycle.latch_startup_block();
     }
     let _ = state.lineage_startup.set(lineage_report);
@@ -775,6 +788,12 @@ async fn create_websocket_state(
     )
     .await;
     if lineage_attested {
+        crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
+            state.db_pool.global_actor(),
+            &state.permission_actor,
+            &crate::server::bootstrap_membership::BootstrapMembershipConfig::from_env(),
+        )
+        .await;
         if let Err(error) = bootstrap_fresh_xmpp_topology(
             &state,
             Arc::clone(&pubsub_storage),
@@ -786,7 +805,9 @@ async fn create_websocket_state(
             warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
         }
     } else {
-        warn!("skipping XMPP topology bootstrap: lineage attestation failed");
+        warn!(
+            "skipping membership reconciliation and XMPP topology bootstrap: lineage attestation failed"
+        );
     }
     ensure_push_service_global_database_is_durable()?;
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
@@ -1009,6 +1030,31 @@ async fn create_websocket_state(
         }
     }
     Ok(websocket_state)
+}
+
+/// Refuse application-route requests while this node is not admitting
+/// clients — the same [`crate::clustering::NodeLifecycle`] gate WebSocket
+/// upgrades use. Keeps a lineage-latched, fenced, or draining node from
+/// reading or mutating application state over plain HTTP through a database
+/// it cannot vouch for. Operational endpoints are mounted outside this gate.
+async fn admission_gate(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    if let Err(error) = state.node_lifecycle.admit() {
+        warn!(%error, path = %request.uri().path(), "refusing application request: node not admitting");
+        use axum::response::IntoResponse as _;
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::response::Json(serde_json::json!({
+                "status": "not_ready",
+                "error": "node is not admitting application traffic",
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 /// Startup-only promotion plus the janitor fleet. Called exactly once per

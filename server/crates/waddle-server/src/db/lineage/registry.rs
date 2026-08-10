@@ -391,13 +391,15 @@ fn is_transport_error(error: &DatabaseError) -> bool {
             | sqlx::Error::PoolClosed
             | sqlx::Error::WorkerCrashed => true,
             // A Postgres restart/failover terminates in-flight queries with
-            // an ErrorResponse, not an I/O error: SQLSTATE class 57
-            // (operator intervention, e.g. 57P01 admin_shutdown) and class
-            // 08 (connection exception). Those are reachability, not an
-            // answer about the data.
-            sqlx::Error::Database(database_error) => database_error
-                .code()
-                .is_some_and(|code| code.starts_with("57") || code.starts_with("08")),
+            // an ErrorResponse, not an I/O error: the shutdown/connect codes
+            // of class 57 (57P01 admin_shutdown, 57P02 crash_shutdown,
+            // 57P03 cannot_connect_now) and class 08 (connection exception)
+            // are reachability, not an answer about the data. Deliberately
+            // NOT the whole class 57: 57014 query_canceled is an answer
+            // (statement_timeout behind a lock) and must stay definitive.
+            sqlx::Error::Database(database_error) => database_error.code().is_some_and(|code| {
+                matches!(code.as_ref(), "57P01" | "57P02" | "57P03") || code.starts_with("08")
+            }),
             _ => false,
         },
         _ => false,
@@ -509,6 +511,9 @@ mod transport_classification_tests {
         assert!(is_transport_error(&database_error("57P03")));
         // Class 08: connection exception.
         assert!(is_transport_error(&database_error("08006")));
+        // 57014 query_canceled is the DATABASE answering (statement_timeout
+        // behind a lock) — definitive, never sticky.
+        assert!(!is_transport_error(&database_error("57014")));
     }
 
     #[test]
