@@ -39,6 +39,13 @@ use super::{RoomConfig, SubjectState};
 use crate::ownership::{ClaimEpoch, Entity, NodeIdentity};
 use crate::XmppError;
 
+pub mod lifecycle;
+
+pub use lifecycle::{
+    EphemeralProjectionAuthorization, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId,
+    RoomLifecycleState, RoomMutationCommit, RoomRevision,
+};
+
 /// Boxed future returned by every [`MucDurableStore`] method, mirroring
 /// [`super::affiliation::DurableMembershipFuture`]'s exact shape and
 /// rationale.
