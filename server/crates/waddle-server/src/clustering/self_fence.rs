@@ -1467,8 +1467,13 @@ pub async fn run_node_lease<L>(
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
                         // before this node ever claims to be ready again.
-                        let owned_future = std::pin::pin!(local_claims.owned());
-                        let owned = tokio::select! {
+                        // Broad sweep (`terminal_sweep`, not `owned()`):
+                        // this pre-ready demotion must not silently shrink
+                        // when the user registry momentarily cannot be
+                        // enumerated — recovery would then flip ready with
+                        // stale local state left standing (#1680 round-3).
+                        let swept_future = std::pin::pin!(local_claims.terminal_sweep());
+                        let swept = tokio::select! {
                             biased;
                             _ = fatal_fence.cancelled() => {
                                 terminal_fence_context.finish(&identity, &fresh).await;
@@ -1478,9 +1483,9 @@ pub async fn run_node_lease<L>(
                                 terminal_fence_context.finish(&identity, &fresh).await;
                                 return;
                             }
-                            owned = owned_future => owned,
+                            swept = swept_future => swept,
                         };
-                        for entity in owned {
+                        for entity in swept {
                             local_claims.demote(&entity).await;
                         }
 

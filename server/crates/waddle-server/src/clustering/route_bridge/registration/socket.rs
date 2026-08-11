@@ -588,9 +588,10 @@ impl OrderedRelayDeliveryBridge {
         let jid = jid.clone();
         let owner = Arc::clone(owner);
         tokio::spawn(async move {
+            let key = (jid.clone(), Arc::as_ptr(&owner) as usize);
             {
                 let mut in_flight = bridge.remote_state_resyncs_in_flight.lock().await;
-                if !in_flight.insert(jid.clone()) {
+                if !in_flight.insert(key.clone()) {
                     return;
                 }
             }
@@ -618,7 +619,7 @@ impl OrderedRelayDeliveryBridge {
                 .remote_state_resyncs_in_flight
                 .lock()
                 .await
-                .remove(&jid);
+                .remove(&key);
         });
     }
 
