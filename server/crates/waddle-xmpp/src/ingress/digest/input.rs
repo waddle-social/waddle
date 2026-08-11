@@ -16,10 +16,10 @@ use super::limits::{
 };
 use crate::ingress::NormalizedTarget;
 
-const CLIENT_NS: &str = "jabber:client";
-const REPLY_NS: &str = "urn:xmpp:reply:0";
-const SID_NS: &str = "urn:xmpp:sid:0";
-const DELAY_NS: &str = "urn:xmpp:delay";
+use crate::xep::xep0203::NS_DELAY;
+use crate::xep::xep0461::NS_REPLY;
+use waddle_xmpp_core::xep0201::CLIENT_STANZA_NS;
+use waddle_xmpp_core::xep0359::NS_SID;
 
 /// Context which is unavailable after parsing or is specific to the receiving server.
 #[derive(Debug, Clone)]
@@ -179,15 +179,15 @@ impl DigestInput {
 
         for payload in &message.payloads {
             match (payload.ns().as_str(), payload.name()) {
-                (SID_NS, "origin-id") => {
+                (NS_SID, "origin-id") => {
                     if origin.is_some() {
                         return Err(DigestInputError::DuplicateOriginId);
                     }
                     origin = Some(validate_origin_id(payload)?);
                 }
-                (SID_NS, "stanza-id") => validate_stanza_id(payload, context)?,
-                (DELAY_NS, "delay") => {}
-                (REPLY_NS, "reply") => {
+                (NS_SID, "stanza-id") => validate_stanza_id(payload, context)?,
+                (NS_DELAY, "delay") => {}
+                (NS_REPLY, "reply") => {
                     if reply.is_some() {
                         return Err(DigestInputError::DuplicateReply);
                     }
@@ -198,7 +198,7 @@ impl DigestInput {
                 // TRIMS payload-form id text before `ThreadId::new` — unlike
                 // the typed-field fallback, which preserves bytes — so the
                 // digest mirrors that exact split.
-                (CLIENT_NS, "thread") => {
+                (CLIENT_STANZA_NS, "thread") => {
                     if thread.is_some() {
                         return Err(DigestInputError::DuplicateThread);
                     }
