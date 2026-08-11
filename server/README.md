@@ -201,3 +201,5 @@ This project is in active development. APIs and features are subject to change.
 ---
 
 Built with ❤️ by the Waddle community
+
+<!-- CI baseline probe for #1627: comment-only change to trigger server path filters. -->
