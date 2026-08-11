@@ -252,7 +252,7 @@ CREATE TABLE ingress_protocol_epoch (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     epoch BIGINT NOT NULL DEFAULT 0 CHECK (epoch BETWEEN 0 AND 4294967295),
     activated_at TIMESTAMPTZ NULL,
-    lineage_uuid TEXT NULL,
+    lineage_uuid UUID NULL,
     CHECK ((epoch = 0) = (activated_at IS NULL AND lineage_uuid IS NULL))
 );
 INSERT INTO ingress_protocol_epoch (id, epoch) VALUES (1, 0);
@@ -269,14 +269,20 @@ CREATE TABLE ingress_messages (
 CREATE INDEX ingress_messages_terminal_at_idx
     ON ingress_messages (terminal_at) WHERE terminal_at IS NOT NULL;
 
+-- Alias uniqueness rides a fixed-width SHA-256 of the length-prefixed
+-- (sender, target kind, target, origin-id) canonical encoding, computed by
+-- the substrate store.  A composite B-tree key over the raw columns can
+-- exceed PostgreSQL's index-row limit at maximum JID + origin-id lengths;
+-- the raw columns stay for audit and GC but carry no index.
 CREATE TABLE ingress_origin_aliases (
-    sender_bare_jid TEXT NOT NULL CHECK (sender_bare_jid <> ''),
+    alias_key_hash BYTEA PRIMARY KEY CHECK (octet_length(alias_key_hash) = 32),
+    sender_bare_jid TEXT NOT NULL
+        CHECK (sender_bare_jid <> '' AND octet_length(sender_bare_jid) <= 3071),
     target_kind INTEGER NOT NULL CHECK (target_kind IN (0, 1, 2)),
-    target_jid TEXT NOT NULL DEFAULT '',
+    target_jid TEXT NOT NULL DEFAULT '' CHECK (octet_length(target_jid) <= 3071),
     origin_id TEXT NOT NULL CHECK (origin_id <> '' AND octet_length(origin_id) <= 1024),
     message_key UUID NOT NULL REFERENCES ingress_messages (message_key),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (sender_bare_jid, target_kind, target_jid, origin_id),
     CHECK ((target_kind = 0) = (target_jid = ''))
 );
 CREATE INDEX ingress_origin_aliases_message_key_idx ON ingress_origin_aliases (message_key);

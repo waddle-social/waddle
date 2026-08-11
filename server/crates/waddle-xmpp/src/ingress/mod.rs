@@ -24,4 +24,4 @@ pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision};
 pub use keys::{DeliveryKey, MessageKey};
 pub use ordinal::IngressOrdinal;
 pub use stream::{IngressStreamId, SmIngressId};
-pub use target::NormalizedTarget;
+pub use target::{NormalizedTarget, NormalizedTargetStorage};

@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use jid::BareJid;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 use waddle_xmpp::ingress::{
@@ -204,11 +205,12 @@ pub async fn resolve_and_record_alias(
         .execute(
             r#"
             INSERT INTO ingress_origin_aliases
-                (sender_bare_jid, target_kind, target_jid, origin_id, message_key)
-            VALUES (?, ?, ?, ?, ?::uuid)
-            ON CONFLICT (sender_bare_jid, target_kind, target_jid, origin_id) DO NOTHING
+                (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key)
+            VALUES (?, ?, ?, ?, ?, ?::uuid)
+            ON CONFLICT (alias_key_hash) DO NOTHING
             "#,
             crate::db_params![
+                alias_key.hash.to_vec(),
                 &alias_key.sender,
                 alias_key.target_kind,
                 &alias_key.target,
@@ -368,10 +370,10 @@ pub async fn gc_expired_aliases(
             tx.commit().await.map_err(discard_database_error)?;
             continue;
         }
-        if has_live_non_alias_children(&mut tx, message_key).await? {
-            tx.commit().await.map_err(discard_database_error)?;
-            continue;
-        }
+        // Alias retention has elapsed: the aliases go unconditionally, even
+        // when live refs/deliveries keep the message row itself alive —
+        // otherwise a reused sender/target/origin-id would keep resolving
+        // against the stale message indefinitely.
         tx.execute(
             "DELETE FROM ingress_origin_aliases WHERE message_key = ?::uuid",
             crate::db_params![message_key.to_storage().to_string()],
@@ -406,6 +408,7 @@ pub async fn gc_expired_aliases(
 }
 
 struct AliasStorageKey {
+    hash: [u8; 32],
     sender: String,
     target_kind: i32,
     target: String,
@@ -414,12 +417,26 @@ struct AliasStorageKey {
 
 impl AliasStorageKey {
     fn new(sender: &BareJid, target: &NormalizedTarget, origin_id: &OriginId) -> Self {
-        let (target_kind, target) = target.to_storage();
+        let target_storage = target.to_storage();
+        let sender = sender.to_string();
+        let origin_id = origin_id.as_str().to_owned();
+        // Uniqueness rides a fixed-width SHA-256 of the length-prefixed
+        // canonical encoding: a composite B-tree key over the raw columns
+        // can exceed PostgreSQL's index-row limit at maximum JID and
+        // origin-id lengths.  Length prefixes keep the encoding injective.
+        let mut hasher = Sha256::new();
+        hasher.update(b"waddle:ingress-alias-key:v1\0");
+        for part in [sender.as_str(), target_storage.jid(), origin_id.as_str()] {
+            hasher.update(u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
+            hasher.update(part.as_bytes());
+        }
+        hasher.update(target_storage.kind().to_be_bytes());
         Self {
-            sender: sender.to_string(),
-            target_kind,
-            target,
-            origin_id: origin_id.as_str().to_owned(),
+            hash: hasher.finalize().into(),
+            sender,
+            target_kind: target_storage.kind(),
+            target: target_storage.jid().to_owned(),
+            origin_id,
         }
     }
 }
@@ -434,13 +451,10 @@ async fn locked_alias(
             SELECT m.message_key::text, m.digest_version, m.digest
             FROM ingress_origin_aliases a
             JOIN ingress_messages m USING (message_key)
-            WHERE a.sender_bare_jid = ?
-              AND a.target_kind = ?
-              AND a.target_jid = ?
-              AND a.origin_id = ?
+            WHERE a.alias_key_hash = ?
             FOR SHARE OF m
             "#,
-            crate::db_params![&key.sender, key.target_kind, &key.target, &key.origin_id],
+            crate::db_params![key.hash.to_vec()],
         )
         .await
         .map_err(discard_database_error)?;
@@ -548,31 +562,6 @@ async fn lock_eligible_terminal_message(
     row.get(0).map_err(discard_database_error)
 }
 
-async fn has_live_non_alias_children(
-    tx: &mut Transaction<'_>,
-    message_key: MessageKey,
-) -> Result<bool, IngressSubstrateError> {
-    let mut rows = tx
-        .query(
-            r#"
-            SELECT EXISTS (SELECT 1 FROM ingress_sm_refs WHERE message_key = ?::uuid)
-                OR EXISTS (SELECT 1 FROM ingress_deliveries WHERE message_key = ?::uuid)
-            "#,
-            crate::db_params![
-                message_key.to_storage().to_string(),
-                message_key.to_storage().to_string(),
-            ],
-        )
-        .await
-        .map_err(discard_database_error)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database)?;
-    row.get(0).map_err(discard_database_error)
-}
-
 fn discard_database_error(_: DatabaseError) -> IngressSubstrateError {
     IngressSubstrateError::Database
 }
@@ -615,9 +604,9 @@ mod tests {
                     .expect("fixture is a valid full JID"),
             ),
         ] {
-            let (kind, value) = target.to_storage();
+            let storage = target.to_storage();
             assert_eq!(
-                NormalizedTarget::from_storage(kind, &value),
+                NormalizedTarget::from_storage(storage.kind(), storage.jid()),
                 Ok(target),
                 "target codec must round trip every variant"
             );
@@ -888,11 +877,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_preserves_messages_with_live_sm_refs_or_deliveries() {
+    async fn gc_expires_aliases_but_preserves_messages_with_live_sm_refs_or_deliveries() {
         let Some(fixture) = Fixture::open("gc_live_children").await else {
             return;
         };
-        let key = fixture.record_message().await;
+        // Create the message through the alias path so the retention pass
+        // has an expired alias to remove.
+        let key = MessageKey::new();
+        let mut tx = fixture.store.begin().await.expect("begin alias insert");
+        fixture
+            .store
+            .resolve_and_record_alias(
+                &mut tx,
+                &sender(),
+                &target(),
+                &OriginId::new("expired-with-live-children"),
+                &digest(5),
+                || key,
+            )
+            .await
+            .expect("insert alias");
+        tx.commit().await.expect("commit alias insert");
+
         let terminal_at = timestamp(5);
         let mut tx = fixture.store.begin().await.expect("begin child writes");
         assert_eq!(
@@ -922,7 +928,53 @@ mod tests {
                 .deleted_messages,
             0
         );
+        // The expired alias is gone even though live children keep the
+        // message row itself alive.
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
         assert_eq!(fixture.count("ingress_messages").await, 1);
+        assert_eq!(fixture.count("ingress_sm_refs").await, 1);
+        assert_eq!(fixture.count("ingress_deliveries").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn alias_insert_succeeds_at_combined_maximum_key_lengths() {
+        let Some(fixture) = Fixture::open("alias_max_len").await else {
+            return;
+        };
+        // Maximum-length localparts/domains (1023 bytes each per RFC 7622)
+        // with a maximum-length origin-id: the fixed-width hash key must
+        // absorb what a composite B-tree tuple could not.
+        let long_domain = |label: &str| {
+            std::iter::repeat_n(label.repeat(62), 4)
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let long_sender: BareJid = format!("{}@{}", "a".repeat(1023), long_domain("b"))
+            .parse()
+            .expect("long sender JID is valid");
+        let long_target: BareJid = format!("{}@{}", "c".repeat(1023), long_domain("d"))
+            .parse()
+            .expect("long target JID is valid");
+        let origin = OriginId::new("o".repeat(1024));
+        let key = MessageKey::new();
+        let mut tx = fixture.store.begin().await.expect("begin max-length alias");
+        assert_eq!(
+            fixture
+                .store
+                .resolve_and_record_alias(
+                    &mut tx,
+                    &long_sender,
+                    &NormalizedTarget::Bare(long_target),
+                    &origin,
+                    &digest(6),
+                    || key,
+                )
+                .await
+                .expect("maximum-length alias key inserts"),
+            inserted(key)
+        );
+        tx.commit().await.expect("commit max-length alias");
         fixture.close().await;
     }
 
@@ -1525,7 +1577,7 @@ mod tests {
              LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$"
                 .to_string(),
             "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
-             lineage_uuid = 'x' WHERE id = 1"
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1"
                 .to_string(),
             "INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('rogue')".to_string(),
             "DROP TRIGGER ingress_messages_epoch_guard_dml ON ingress_messages".to_string(),

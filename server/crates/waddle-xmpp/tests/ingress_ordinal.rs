@@ -96,7 +96,8 @@ fn generation_epoch_and_revision_counters_are_checked() {
 #[test]
 fn normalized_target_storage_round_trips_all_target_shapes() {
     let absent = NormalizedTarget::Absent;
-    assert_eq!(absent.to_storage(), (0, String::new()));
+    let absent_storage = absent.to_storage();
+    assert_eq!((absent_storage.kind(), absent_storage.jid()), (0, ""));
     assert_eq!(NormalizedTarget::from_storage(0, ""), Ok(absent));
 
     let bare = NormalizedTarget::Bare(
@@ -104,9 +105,9 @@ fn normalized_target_storage_round_trips_all_target_shapes() {
             .parse()
             .expect("fixture is a valid bare JID"),
     );
-    let (bare_kind, bare_value) = bare.to_storage();
+    let bare_storage = bare.to_storage();
     assert_eq!(
-        NormalizedTarget::from_storage(bare_kind, &bare_value),
+        NormalizedTarget::from_storage(bare_storage.kind(), bare_storage.jid()),
         Ok(bare)
     );
 
@@ -115,9 +116,9 @@ fn normalized_target_storage_round_trips_all_target_shapes() {
             .parse()
             .expect("fixture is a valid full JID"),
     );
-    let (full_kind, full_value) = full.to_storage();
+    let full_storage = full.to_storage();
     assert_eq!(
-        NormalizedTarget::from_storage(full_kind, &full_value),
+        NormalizedTarget::from_storage(full_storage.kind(), full_storage.jid()),
         Ok(full)
     );
 }

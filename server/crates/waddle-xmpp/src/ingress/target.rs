@@ -12,18 +12,42 @@ pub enum NormalizedTarget {
     Full(jid::FullJid),
 }
 
+/// Opaque storage representation of a [`NormalizedTarget`].
+///
+/// The discriminator and JID text travel together so repository code cannot
+/// separate or recombine them untyped; the raw parts are only readable at
+/// the driver binding edge via the accessors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedTargetStorage {
+    kind: i32,
+    jid: String,
+}
+
+impl NormalizedTargetStorage {
+    /// Storage discriminator: 0 = absent, 1 = bare, 2 = full.
+    pub fn kind(&self) -> i32 {
+        self.kind
+    }
+
+    /// JID text; empty exactly when the target is absent.
+    pub fn jid(&self) -> &str {
+        &self.jid
+    }
+}
+
 impl NormalizedTarget {
     /// Encode this target in the Postgres ingress-alias representation.
     ///
     /// The tag order is frozen to SemanticDigest v1's target encoding:
     /// absent, bare, then full.  An absent target is stored with an empty
     /// value so the database's paired-kind CHECK remains total.
-    pub fn to_storage(&self) -> (i32, String) {
-        match self {
+    pub fn to_storage(&self) -> NormalizedTargetStorage {
+        let (kind, jid) = match self {
             Self::Absent => (0, String::new()),
             Self::Bare(jid) => (1, jid.to_string()),
             Self::Full(jid) => (2, jid.to_string()),
-        }
+        };
+        NormalizedTargetStorage { kind, jid }
     }
 
     /// Decode the Postgres ingress-alias representation without accepting
