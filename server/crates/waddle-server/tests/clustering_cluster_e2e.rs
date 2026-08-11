@@ -944,7 +944,6 @@ async fn cluster_exit_criteria_end_to_end() {
         "remote-origin frame should remain addressed to the owner-node full JID: \
          {remote_origin_delivered}"
     );
-    let _ = remote_target_client.close().await;
 
     let ordered_origin_node = NodeId::new(handle.node_id.as_str().to_string());
     let ordered_channel = ordered_channel(
@@ -975,15 +974,18 @@ async fn cluster_exit_criteria_end_to_end() {
         .deliver_ordered(first_ordered.clone())
         .await
         .expect("ordered relay first envelope");
-    assert!(matches!(
-        first_reply,
-        OrderedRelayReply::Ack(OrderedRelayAck {
-            sequence: OrderedRelaySequence(1),
-            duplicate: false,
-            next_expected: OrderedRelaySequence(2),
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            first_reply,
+            OrderedRelayReply::Ack(OrderedRelayAck {
+                sequence: OrderedRelaySequence(1),
+                duplicate: false,
+                next_expected: OrderedRelaySequence(2),
+                ..
+            })
+        ),
+        "first ordered envelope must ack sequence 1: {first_reply:?}"
+    );
     ordered_target_client
         .recv_matching(|frame| frame.contains("ordered-one"))
         .await
@@ -1032,6 +1034,42 @@ async fn cluster_exit_criteria_end_to_end() {
         "expected ordered relay gap NACK, got {gap_reply:?}"
     );
     drop(ordered_target_client);
+
+    // (Runs AFTER the ordered-relay protocol legs: the synthetic
+    // ordered-e2e-stream origin claim above is sessionless, and sleeping
+    // before those legs lets the orphan-reaper janitor reap it, which
+    // NACKs the first envelope with NotOwner{Origin}.)
+    // #1680 regression: the same-bare remote resource must SURVIVE node-lease
+    // reconcile ticks. `UserLocalClaims::owned()` used to hand every local
+    // socket's bare JID to reconcile, which reported the foreign-owned claim
+    // "lost" and force-detached this healthy live socket with <conflict/> on
+    // the next tick (node-lease heartbeat here: 300ms — sleep several ticks
+    // so the race is deterministic, not timing-lucky).
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let mut post_tick_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(remote_target_full.clone())));
+    post_tick_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "phase4 remote resource survives reconcile ticks".to_string(),
+    );
+    let post_tick_xml = waddle_xmpp::parser::message_to_string(&post_tick_message)
+        .expect("serialize typed post-tick message");
+    ordered_origin_client
+        .send(&post_tick_xml)
+        .await
+        .expect("origin sends post-tick message to same-bare remote resource");
+    let post_tick_delivered = remote_target_client
+        .recv_matching(|frame| frame.contains("phase4 remote resource survives reconcile ticks"))
+        .await
+        .expect(
+            "same-bare remote resource still receives after node-lease reconcile ticks \
+             (#1680: reconcile must not demote foreign-owned connections)",
+        );
+    assert!(
+        post_tick_delivered.contains(remote_target_full.as_str()),
+        "post-tick frame should remain addressed to the node-B full JID: {post_tick_delivered}"
+    );
+    let _ = remote_target_client.close().await;
 
     // --- Exit criterion: integrity under concurrent large + small payloads.
     // (Per-(origin→recipient) sequencing is Phase 4; Phase 2 asserts that

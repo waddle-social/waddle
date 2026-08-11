@@ -205,6 +205,14 @@ impl<'de> Deserialize<'de> for RemoteStanza {
 #[derive(Debug, Clone)]
 pub struct RemoteElement(pub minidom::Element);
 
+// Structural equality delegates to minidom's Element comparison; used by
+// the remote-resource resync convergence recheck (#1680).
+impl PartialEq for RemoteElement {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
 impl Serialize for RemoteElement {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let xml = waddle_xmpp::parser::element_to_string(&self.0).map_err(|error| {

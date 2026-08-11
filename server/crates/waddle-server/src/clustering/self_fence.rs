@@ -118,6 +118,20 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// Postgres round-trip.
     async fn owned(&self) -> Vec<Entity>;
 
+    /// Every entity whose LOCAL state should be torn down when this node
+    /// stops serving — the terminal self-fence / shutdown sweep. Broader
+    /// than [`Self::owned`]: implementors may include best-effort
+    /// transport-level enumeration (e.g. raw connection sweeps) that must
+    /// NEVER feed the per-tick reconcile, because reconcile demotes
+    /// everything this node does not own and a foreign-owned local
+    /// resource (a same-bare remote-hosted socket) would be spuriously
+    /// force-detached with `<conflict/>` (#1680). At terminal sites the
+    /// node is ceasing to serve, so sweeping every local resource is the
+    /// intent.
+    async fn terminal_sweep(&self) -> Vec<Entity> {
+        self.owned().await
+    }
+
     /// Demote local state for an entity Postgres no longer attributes to
     /// this node (claim stolen, or this node's own claim row is gone).
     /// Purely local: must succeed even when Postgres is unreachable — the
@@ -869,7 +883,7 @@ where
         // retires anything the bounded drain deliberately abandoned.
         self.live_identity.disable().await;
         self.local_claims.demote_owned_by(identity).await;
-        for entity in self.local_claims.owned().await {
+        for entity in self.local_claims.terminal_sweep().await {
             self.local_claims.demote(&entity).await;
         }
     }
@@ -888,7 +902,7 @@ where
         if registered_identity != prior_identity {
             self.local_claims.demote_owned_by(registered_identity).await;
         }
-        for entity in self.local_claims.owned().await {
+        for entity in self.local_claims.terminal_sweep().await {
             self.local_claims.demote(&entity).await;
         }
         mark_draining_bounded(self.lease, prior_identity, self.control_plane_budget).await;
@@ -1325,7 +1339,7 @@ pub async fn run_node_lease<L>(
 
         // Self-fenced (either trigger): stop serving before the lease
         // becomes stealable, then flip client-facing readiness.
-        for entity in local_claims.owned().await {
+        for entity in local_claims.terminal_sweep().await {
             local_claims.demote(&entity).await;
         }
         isolation.reset();
@@ -1453,8 +1467,13 @@ pub async fn run_node_lease<L>(
                         // snapshot missed it entirely. Re-running the sweep
                         // here catches anything acquired during that window
                         // before this node ever claims to be ready again.
-                        let owned_future = std::pin::pin!(local_claims.owned());
-                        let owned = tokio::select! {
+                        // Broad sweep (`terminal_sweep`, not `owned()`):
+                        // this pre-ready demotion must not silently shrink
+                        // when the user registry momentarily cannot be
+                        // enumerated — recovery would then flip ready with
+                        // stale local state left standing (#1680 round-3).
+                        let swept_future = std::pin::pin!(local_claims.terminal_sweep());
+                        let swept = tokio::select! {
                             biased;
                             _ = fatal_fence.cancelled() => {
                                 terminal_fence_context.finish(&identity, &fresh).await;
@@ -1464,9 +1483,9 @@ pub async fn run_node_lease<L>(
                                 terminal_fence_context.finish(&identity, &fresh).await;
                                 return;
                             }
-                            owned = owned_future => owned,
+                            swept = swept_future => swept,
                         };
-                        for entity in owned {
+                        for entity in swept {
                             local_claims.demote(&entity).await;
                         }
 

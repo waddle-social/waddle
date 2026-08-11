@@ -124,6 +124,16 @@ pub struct OrderedRelayDeliveryBridge {
     remote_owner_resources: Mutex<HashMap<jid::FullJid, RemoteOwnerRegistration>>,
     pending_remote_owner_retirements: Mutex<HashMap<jid::FullJid, RemoteOwnerRegistration>>,
     remote_owner_registration_locks: Mutex<HashMap<jid::FullJid, Arc<Mutex<()>>>>,
+    /// (Full JID, socket-owner identity) → dirty flag for resyncs in
+    /// flight (#1680): a failed/stale state update schedules exactly one
+    /// repair loop instead of killing the live socket. Keyed per socket
+    /// incarnation (the owner flag's pointer identity) so a replacement
+    /// socket's repair is never suppressed by a predecessor's; a failure
+    /// arriving while a loop runs sets the dirty flag, which the loop
+    /// consumes as another repair round before releasing the key — a
+    /// failure landing after the final convergence recheck is therefore
+    /// never dropped.
+    remote_state_resyncs_in_flight: Mutex<std::collections::HashMap<(jid::FullJid, usize), bool>>,
     #[cfg(test)]
     remote_owner_retirement_test_gate: OnceLock<Arc<RemoteOwnerRetirementTestGate>>,
     stop_token: CancellationToken,
@@ -144,6 +154,7 @@ impl OrderedRelayDeliveryBridge {
             remote_owner_resources: Mutex::new(HashMap::new()),
             pending_remote_owner_retirements: Mutex::new(HashMap::new()),
             remote_owner_registration_locks: Mutex::new(HashMap::new()),
+            remote_state_resyncs_in_flight: Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
             remote_owner_retirement_test_gate: OnceLock::new(),
             stop_token,

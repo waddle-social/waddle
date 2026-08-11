@@ -85,7 +85,7 @@ impl From<xmpp_parsers::presence::Show> for RemotePresenceShow {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RemotePresenceStateSnapshot {
     pub show: Option<RemotePresenceShow>,
     pub status: Option<String>,
@@ -148,7 +148,7 @@ impl RemoteResourceStateSnapshot {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RemoteResourceStateUpdate {
     Presence {
         available: bool,

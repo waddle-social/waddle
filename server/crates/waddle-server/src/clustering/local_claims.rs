@@ -744,29 +744,52 @@ impl UserLocalClaims {
 #[async_trait]
 impl LocallyClaimedEntities for UserLocalClaims {
     async fn owned(&self) -> Vec<Entity> {
-        let mut owned = Vec::new();
-        if let Some(registry) = self.registry.get() {
-            match registry
-                .ask(ListUsers)
-                .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
-                .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
-                .await
-            {
-                Ok(jids) => {
-                    owned.extend(
-                        jids.into_iter()
-                            .map(|jid| Entity::new(EntityType::UserActor, jid.to_string())),
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        "UserLocalClaims::owned: user registry list_users failed; \
-                         falling back to ConnectionRegistry resource enumeration"
-                    );
-                }
+        // Authoritative enumeration ONLY — this feeds the per-tick lease
+        // reconcile, which demotes every entity this node does not own.
+        // The user registry's mirror entries are the local-claim source of
+        // truth: every locally OWNED user has one, while a connection whose
+        // bare-JID UserActor claim belongs to another node (a same-bare
+        // remote-hosted resource) deliberately has none. Enumerating raw
+        // ConnectionRegistry sockets here made every reconcile tick demote
+        // such foreign-owned connections and force-detach the healthy live
+        // socket with <stream:error><conflict/> (#1680) — and a transient
+        // list failure must not resurrect that bug, so on failure this
+        // reports NOTHING (the reconcile pass skips users this tick and
+        // re-converges on the next one) instead of falling back to the
+        // transport sweep. The broad sweep lives in
+        // [`LocallyClaimedEntities::terminal_sweep`].
+        let Some(registry) = self.registry.get() else {
+            return Vec::new();
+        };
+        match registry
+            .ask(ListUsers)
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(jids) => jids
+                .into_iter()
+                .map(|jid| Entity::new(EntityType::UserActor, jid.to_string()))
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "UserLocalClaims::owned: user registry list_users failed; \
+                     skipping user reconcile this tick (no transport fallback: #1680)"
+                );
+                Vec::new()
             }
         }
+    }
+
+    async fn terminal_sweep(&self) -> Vec<Entity> {
+        // Terminal teardown: the node is ceasing to serve, so EVERY local
+        // resource must be swept — including raw ConnectionRegistry sockets
+        // the user registry cannot enumerate (its listing failed, it is
+        // unwired, or the resource is a remote-hosted mirror-less
+        // connection). Force-detaching foreign-owned sockets is correct
+        // here: their transport is dying with the node either way.
+        let mut owned = self.owned().await;
         if let Some(connection_registry) = self.connection_registry.get() {
             for jid in connection_registry.list_connections() {
                 let entity = Entity::new(EntityType::UserActor, jid.to_bare().to_string());
@@ -962,6 +985,13 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         owned.extend(self.room.owned().await);
         owned.extend(self.user.owned().await);
         owned
+    }
+
+    async fn terminal_sweep(&self) -> Vec<Entity> {
+        let mut swept = self.sm.terminal_sweep().await;
+        swept.extend(self.room.terminal_sweep().await);
+        swept.extend(self.user.terminal_sweep().await);
+        swept
     }
 
     async fn demote(&self, entity: &Entity) {
@@ -1257,8 +1287,49 @@ mod tests {
         );
     }
 
+    /// #1680 regression: a locally hosted resource whose bare-JID
+    /// UserActor claim belongs to ANOTHER node (a same-bare remote-hosted
+    /// resource) has a ConnectionRegistry socket but — by construction —
+    /// no local user-registry mirror entry. `owned()` must NOT report it
+    /// as a locally claimed entity when the registry listing succeeded:
+    /// reconcile would demote it on every node-lease tick and
+    /// force-detach the healthy live socket with `<conflict/>`.
     #[tokio::test]
-    async fn user_owned_falls_back_to_connection_registry_resources() {
+    async fn user_owned_excludes_foreign_owned_connections_when_registry_lists() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let mirrored = user_jid("locally-owned");
+        registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: mirrored.clone(),
+            })
+            .await
+            .expect("create locally owned user actor");
+
+        let remote_hosted: FullJid = "foreign-owned@example.com/deviceB"
+            .parse()
+            .expect("valid full JID");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        connection_registry.register(remote_hosted.clone(), outbound_tx);
+
+        assert_eq!(
+            user_local_claims.owned().await,
+            vec![Entity::new(EntityType::UserActor, mirrored.to_string())],
+            "a connection-registry-only bare JID is remote-hosted and must not \
+             be handed to reconcile as a local claim"
+        );
+    }
+
+    /// #1680: reconcile enumeration must be authoritative-only — an
+    /// un-enumerable user registry reports NOTHING (the tick skips users)
+    /// rather than falling back to the transport sweep, which would feed
+    /// foreign-owned connections to reconcile.
+    #[tokio::test]
+    async fn user_owned_reports_nothing_when_the_registry_cannot_be_enumerated() {
         let user_local_claims = UserLocalClaims::new();
         let connection_registry = Arc::new(ConnectionRegistry::new());
         user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
@@ -1271,6 +1342,25 @@ mod tests {
 
         assert_eq!(
             user_local_claims.owned().await,
+            Vec::new(),
+            "reconcile input must never contain transport-sweep entities (#1680)"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_terminal_sweep_includes_connection_registry_resources() {
+        let user_local_claims = UserLocalClaims::new();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let jid: FullJid = "fallback-owned@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        connection_registry.register(jid.clone(), outbound_tx);
+
+        assert_eq!(
+            user_local_claims.terminal_sweep().await,
             vec![Entity::new(EntityType::UserActor, jid.to_bare().to_string())],
             "terminal self-fence must still see live user resources when the user registry cannot be enumerated"
         );
