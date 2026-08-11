@@ -1,5 +1,7 @@
 //! Bounds for SemanticDigest input and canonical preimages.
 
+use crate::ingress::MAX_ORIGIN_ID_BYTES;
+
 /// Maximum element nesting depth in one retained extension tree (root is one).
 pub const MAX_DEPTH: usize = 16;
 /// Maximum number of element and text nodes across all retained extensions.
@@ -13,6 +15,6 @@ pub const MAX_NAME_LEN: usize = 1_024;
 /// Maximum entries in each body or subject language map.
 pub const MAX_LANG_ENTRIES: usize = 64;
 /// Maximum UTF-8 byte length of an origin, thread, or reply identifier.
-pub const MAX_ID_LEN: usize = 1_024;
+pub const MAX_ID_LEN: usize = MAX_ORIGIN_ID_BYTES;
 /// Maximum number of bytes in the complete v1 canonical preimage.
 pub const MAX_PREIMAGE_BYTES: usize = 262_144;
