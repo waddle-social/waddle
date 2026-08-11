@@ -789,3 +789,4 @@ pub fn extract_attr_after(xml: &str, marker: &str, attr: &str) -> Option<String>
     }
     None
 }
+// CI baseline probe for issue #1627 — comment-only, branch is deleted after the probe.
