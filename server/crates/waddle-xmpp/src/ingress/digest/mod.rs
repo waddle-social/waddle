@@ -2,6 +2,12 @@ use std::fmt;
 
 use crate::ingress::IngressTypeError;
 
+mod input;
+mod limits;
+pub mod v1;
+
+pub use input::{DigestContext, DigestInput, DigestInputError};
+
 /// Version of the canonical semantic-digest algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DigestVersion {
