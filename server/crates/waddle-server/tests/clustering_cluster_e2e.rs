@@ -944,6 +944,37 @@ async fn cluster_exit_criteria_end_to_end() {
         "remote-origin frame should remain addressed to the owner-node full JID: \
          {remote_origin_delivered}"
     );
+
+    // #1680 regression: the same-bare remote resource must SURVIVE node-lease
+    // reconcile ticks. `UserLocalClaims::owned()` used to hand every local
+    // socket's bare JID to reconcile, which reported the foreign-owned claim
+    // "lost" and force-detached this healthy live socket with <conflict/> on
+    // the next tick (node-lease heartbeat here: 300ms — sleep several ticks
+    // so the race is deterministic, not timing-lucky).
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let mut post_tick_message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(remote_target_full.clone())));
+    post_tick_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "phase4 remote resource survives reconcile ticks".to_string(),
+    );
+    let post_tick_xml = waddle_xmpp::parser::message_to_string(&post_tick_message)
+        .expect("serialize typed post-tick message");
+    ordered_origin_client
+        .send(&post_tick_xml)
+        .await
+        .expect("origin sends post-tick message to same-bare remote resource");
+    let post_tick_delivered = remote_target_client
+        .recv_matching(|frame| frame.contains("phase4 remote resource survives reconcile ticks"))
+        .await
+        .expect(
+            "same-bare remote resource still receives after node-lease reconcile ticks \
+             (#1680: reconcile must not demote foreign-owned connections)",
+        );
+    assert!(
+        post_tick_delivered.contains(remote_target_full.as_str()),
+        "post-tick frame should remain addressed to the node-B full JID: {post_tick_delivered}"
+    );
     let _ = remote_target_client.close().await;
 
     let ordered_origin_node = NodeId::new(handle.node_id.as_str().to_string());

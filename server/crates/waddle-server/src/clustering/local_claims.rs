@@ -745,6 +745,7 @@ impl UserLocalClaims {
 impl LocallyClaimedEntities for UserLocalClaims {
     async fn owned(&self) -> Vec<Entity> {
         let mut owned = Vec::new();
+        let mut registry_enumerated = false;
         if let Some(registry) = self.registry.get() {
             match registry
                 .ask(ListUsers)
@@ -753,6 +754,7 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 .await
             {
                 Ok(jids) => {
+                    registry_enumerated = true;
                     owned.extend(
                         jids.into_iter()
                             .map(|jid| Entity::new(EntityType::UserActor, jid.to_string())),
@@ -767,11 +769,23 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 }
             }
         }
-        if let Some(connection_registry) = self.connection_registry.get() {
-            for jid in connection_registry.list_connections() {
-                let entity = Entity::new(EntityType::UserActor, jid.to_bare().to_string());
-                if !owned.contains(&entity) {
-                    owned.push(entity);
+        // The ConnectionRegistry sweep is strictly a FALLBACK for when the
+        // user registry could not be enumerated (unwired or ask failure),
+        // so the terminal self-fence still sees live resources. When the
+        // registry listing succeeded it is authoritative: every locally
+        // OWNED user has a mirror entry there, while a connection whose
+        // bare-JID UserActor claim belongs to another node (a same-bare
+        // remote-hosted resource) deliberately has none. Reporting such a
+        // connection as locally claimed made every node-lease reconcile
+        // tick demote it and force-detach the healthy live socket with
+        // <stream:error><conflict/> (#1680).
+        if !registry_enumerated {
+            if let Some(connection_registry) = self.connection_registry.get() {
+                for jid in connection_registry.list_connections() {
+                    let entity = Entity::new(EntityType::UserActor, jid.to_bare().to_string());
+                    if !owned.contains(&entity) {
+                        owned.push(entity);
+                    }
                 }
             }
         }
@@ -1254,6 +1268,43 @@ mod tests {
         assert_eq!(
             owned,
             vec![Entity::new(EntityType::UserActor, jid.to_string())]
+        );
+    }
+
+    /// #1680 regression: a locally hosted resource whose bare-JID
+    /// UserActor claim belongs to ANOTHER node (a same-bare remote-hosted
+    /// resource) has a ConnectionRegistry socket but — by construction —
+    /// no local user-registry mirror entry. `owned()` must NOT report it
+    /// as a locally claimed entity when the registry listing succeeded:
+    /// reconcile would demote it on every node-lease tick and
+    /// force-detach the healthy live socket with `<conflict/>`.
+    #[tokio::test]
+    async fn user_owned_excludes_foreign_owned_connections_when_registry_lists() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let mirrored = user_jid("locally-owned");
+        registry
+            .ask(waddle_xmpp::registry::GetOrCreateUser {
+                bare_jid: mirrored.clone(),
+            })
+            .await
+            .expect("create locally owned user actor");
+
+        let remote_hosted: FullJid = "foreign-owned@example.com/deviceB"
+            .parse()
+            .expect("valid full JID");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        connection_registry.register(remote_hosted.clone(), outbound_tx);
+
+        assert_eq!(
+            user_local_claims.owned().await,
+            vec![Entity::new(EntityType::UserActor, mirrored.to_string())],
+            "a connection-registry-only bare JID is remote-hosted and must not \
+             be handed to reconcile as a local claim"
         );
     }
 

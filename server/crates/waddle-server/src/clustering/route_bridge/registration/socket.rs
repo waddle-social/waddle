@@ -509,23 +509,45 @@ impl OrderedRelayDeliveryBridge {
             Ok(RelayRemoteResourceUpdateReply {
                 status: RelayRemoteResourceUpdateStatus::Updated,
             }) => {}
-            Ok(RelayRemoteResourceUpdateReply { status }) => {
+            Ok(RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::StaleRegistration,
+            }) => {
+                // The owner positively reports this registration dead. Drop
+                // the local record so the next origin route re-registers via
+                // `refresh_remote_resource_origin` (same contract as the
+                // side-effect path) — but keep the live socket: a state
+                // update is not evidence the CLIENT is displaced, and
+                // killing it here spuriously kicked healthy resources with
+                // <conflict/> (#1680).
                 tracing::warn!(
                     jid = %jid,
-                    status = ?status,
-                    "clustered remote-resource state update failed closed; detaching socket"
+                    "clustered remote-resource state update hit a stale registration; \
+                     dropping the local record for re-registration, keeping the socket"
                 );
-                self.detach_stale_remote_socket_resource(jid, &registration)
+                self.remove_remote_socket_registration_if_current(jid, &registration)
                     .await;
+            }
+            Ok(RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::Unavailable,
+            }) => {
+                // Transient owner-side unavailability (mailbox timeout,
+                // registry ask failure). Staleness is unproven — keep both
+                // the registration and the socket; the next state change or
+                // origin route retries (#1680: never kill a live client on
+                // an ambiguous verdict).
+                tracing::warn!(
+                    jid = %jid,
+                    "clustered remote-resource state update unavailable at the owner; \
+                     keeping registration and socket, will retry on the next update"
+                );
             }
             Err(error) => {
                 tracing::warn!(
                     jid = %jid,
                     %error,
-                    "clustered remote-resource state update ask failed; detaching socket"
+                    "clustered remote-resource state update ask failed; \
+                     keeping registration and socket, will retry on the next update"
                 );
-                self.detach_stale_remote_socket_resource(jid, &registration)
-                    .await;
             }
         }
     }
@@ -651,37 +673,6 @@ impl OrderedRelayDeliveryBridge {
                 ),
             };
         RelayForceDetachRemoteUserResourceReply { outcome, status }
-    }
-
-    pub(super) async fn detach_stale_remote_socket_resource(
-        &self,
-        jid: &jid::FullJid,
-        registration: &RemoteSocketRegistration,
-    ) {
-        let Some(services) = self.services.get().cloned() else {
-            return;
-        };
-        {
-            let mut registrations = self.remote_socket_resources.lock().await;
-            if registrations.get(jid).is_some_and(|current| {
-                current.registration_id == registration.registration_id
-                    && current.socket_generation == registration.socket_generation
-            }) {
-                registrations.remove(jid);
-            }
-        }
-        let Some(entry) = services
-            .connection_registry
-            .entry_if_owner(jid, &registration.owner)
-        else {
-            return;
-        };
-        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
-        let _ = entry.force_detach_sender().try_send(ForceDetachRequest {
-            origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
-            requester_bare_jid: jid.to_bare(),
-            ack,
-        });
     }
 }
 
