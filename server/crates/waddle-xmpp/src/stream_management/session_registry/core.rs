@@ -2129,13 +2129,8 @@ impl InMemorySmSessionRegistry {
         let Some(mut updated) = current else {
             return Ok(false);
         };
-        if !mutate(&mut updated) {
-            // No-op mutation (stale or duplicate input): skip the durable
-            // snapshot entirely. Persistence restamps `detached_at`, so a
-            // persisted no-op would silently extend the session's resume
-            // window on every retry.
-            return Ok(true);
-        }
+        // PROBE: no-op mutations persist anyway (pre-596d692d behavior).
+        let _ = mutate(&mut updated);
 
         // Durable snapshot first, then publish the same typed state in memory.
         // The stream lock serializes this full-snapshot write with other appends
