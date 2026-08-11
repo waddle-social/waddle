@@ -1006,15 +1006,18 @@ async fn cluster_exit_criteria_end_to_end() {
         .deliver_ordered(first_ordered.clone())
         .await
         .expect("ordered relay first envelope");
-    assert!(matches!(
-        first_reply,
-        OrderedRelayReply::Ack(OrderedRelayAck {
-            sequence: OrderedRelaySequence(1),
-            duplicate: false,
-            next_expected: OrderedRelaySequence(2),
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            first_reply,
+            OrderedRelayReply::Ack(OrderedRelayAck {
+                sequence: OrderedRelaySequence(1),
+                duplicate: false,
+                next_expected: OrderedRelaySequence(2),
+                ..
+            })
+        ),
+        "first ordered envelope must ack sequence 1: {first_reply:?}"
+    );
     ordered_target_client
         .recv_matching(|frame| frame.contains("ordered-one"))
         .await
