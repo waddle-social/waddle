@@ -88,7 +88,6 @@ waddle-sfu = { path = "../waddle-sfu" }
 sqlx = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
 tokio-test = "0.4"
 tokio = { workspace = true }
 tempfile = "3.27"
