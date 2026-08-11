@@ -338,6 +338,32 @@ pub async fn gc_expired_aliases(
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
             .await
             .map_err(discard_database_error)?;
+        // GC is an epoch-aware writer: install the transaction-bound proof
+        // for whatever epoch is live so its deletes pass the V1009 guard at
+        // epoch >= 1 (a no-op at epoch 0).  The FOR SHARE epoch read holds
+        // to commit, so a concurrent activation waits and the proof cannot
+        // go stale mid-transaction.
+        let mut proof = tx
+            .query(
+                r#"
+                SELECT
+                    set_config(
+                        'waddle.protocol_epoch',
+                        (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE),
+                        true
+                    ),
+                    set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
+                "#,
+                (),
+            )
+            .await
+            .map_err(discard_database_error)?;
+        proof
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::Database)?;
+        drop(proof);
         if !lock_eligible_terminal_message(&mut tx, message_key, &cutoff).await? {
             tx.commit().await.map_err(discard_database_error)?;
             continue;
@@ -1026,13 +1052,42 @@ mod tests {
         expected.sort();
         assert_eq!(manifest, expected, "migration manifest and Rust list agree");
 
+        // Every live ingress_* table must be enrolled: an unlisted table
+        // would silently sit outside the activation boundary.
+        let mut live_rows = conn
+            .query(
+                "SELECT c.relname FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = current_schema() AND c.relkind = 'r' \
+                   AND c.relname LIKE 'ingress_%' ORDER BY c.relname",
+                (),
+            )
+            .await
+            .expect("enumerate live ingress tables");
+        let mut live = Vec::new();
+        while let Some(row) = live_rows.next().await.expect("read live table row") {
+            live.push(row.get::<String>(0).expect("decode live table name"));
+        }
+        let mut expected_live = expected.clone();
+        expected_live.push("ingress_epoch_guard_manifest".to_string());
+        expected_live.push("ingress_protocol_epoch".to_string());
+        expected_live.sort();
+        assert_eq!(
+            live, expected_live,
+            "every live ingress_* table is either guarded or the epoch/manifest table"
+        );
+
+        // Trigger shape is pinned, not just presence: BEFORE statement-level
+        // I/U/D (tgtype 30) plus BEFORE statement-level TRUNCATE (tgtype 34),
+        // both ENABLE ALWAYS and bound to the guard function.
         for table in EPOCH_GUARDED_TABLES {
             let mut trigger_rows = conn
                 .query(
-                    "SELECT tg.tgname, tg.tgenabled::text \
+                    "SELECT tg.tgname, tg.tgtype::int, tg.tgenabled::text, p.proname \
                      FROM pg_trigger tg \
                      JOIN pg_class c ON c.oid = tg.tgrelid \
                      JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     JOIN pg_proc p ON p.oid = tg.tgfoid \
                      WHERE n.nspname = current_schema() AND c.relname = ? \
                        AND NOT tg.tgisinternal ORDER BY tg.tgname",
                     crate::db_params![table],
@@ -1043,12 +1098,58 @@ mod tests {
             while let Some(row) = trigger_rows.next().await.expect("read trigger row") {
                 triggers.push((
                     row.get::<String>(0).expect("decode trigger name"),
-                    row.get::<String>(1).expect("decode trigger mode"),
+                    row.get::<i64>(1).expect("decode trigger type"),
+                    row.get::<String>(2).expect("decode trigger mode"),
+                    row.get::<String>(3).expect("decode trigger function"),
                 ));
             }
-            assert!(triggers.contains(&(format!("{table}_epoch_guard_dml"), "A".to_string())));
-            assert!(triggers.contains(&(format!("{table}_epoch_guard_truncate"), "A".to_string())));
+            assert!(
+                triggers.contains(&(
+                    format!("{table}_epoch_guard_dml"),
+                    30,
+                    "A".to_string(),
+                    "waddle_ingress_epoch_guard".to_string(),
+                )),
+                "{table} must carry the BEFORE-statement I/U/D guard: {triggers:?}"
+            );
+            assert!(
+                triggers.contains(&(
+                    format!("{table}_epoch_guard_truncate"),
+                    34,
+                    "A".to_string(),
+                    "waddle_ingress_epoch_guard".to_string(),
+                )),
+                "{table} must carry the BEFORE-statement TRUNCATE guard: {triggers:?}"
+            );
         }
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_installs_its_own_epoch_proof_and_collects_at_epoch_one() {
+        let Some(fixture) = Fixture::open("gc_epoch_one").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(7);
+        fixture.terminalize(key, terminal_at).await;
+        fixture
+            .db
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .await
+            .expect("activate epoch one");
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+            .await
+            .expect("GC proves its own transactions at epoch one");
+        assert_eq!(
+            outcome.deleted_messages, 1,
+            "GC collects normally after activation"
+        );
         fixture.close().await;
     }
 
