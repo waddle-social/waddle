@@ -105,6 +105,7 @@ aes-gcm = "0.10"
 hkdf = "0.13"
 
 # Utilities
+proptest = "1"
 uuid = { version = "1.23", features = ["v4", "v7", "serde", "js"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }

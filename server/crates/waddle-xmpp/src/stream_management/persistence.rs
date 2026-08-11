@@ -258,7 +258,12 @@ pub trait SmPersistenceStorage: Send + Sync {
     ) -> Result<(), SmPersistenceError>;
 
     /// Remove unacked entries up to and including `up_to_sequence`.
-    /// Called when an `<a h='N'/>` ack arrives.
+    ///
+    /// This contract uses raw numeric `<=` comparison in both the in-memory
+    /// and SQL implementations, so it is wrap-unsafe and deliberately does
+    /// not use the Stream Management sequence comparator. It has no
+    /// production callers; any future production caller must first make this
+    /// operation wrap-aware before wiring it into an acknowledgement path.
     async fn ack_through(
         &self,
         stream_id: &SmSessionId,
@@ -545,7 +550,13 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .lock()
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         let mut rows = guard.unacked.get(stream_id).cloned().unwrap_or_default();
-        rows.sort_by_key(|s| s.sequence);
+        if let Some(session) = guard.sessions.get(stream_id) {
+            rows.sort_by_key(|row| row.sequence.wrapping_sub(session.last_acked));
+        } else {
+            // Rows without a session are orphaned; retain deterministic numeric
+            // order because no acknowledgement floor remains to order by.
+            rows.sort_by_key(|row| row.sequence);
+        }
         Ok(rows)
     }
 

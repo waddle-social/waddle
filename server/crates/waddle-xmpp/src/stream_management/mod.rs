@@ -26,6 +26,7 @@
 
 pub mod persistence;
 mod replay;
+pub(crate) mod sequence;
 mod session_registry;
 mod stanzas;
 #[cfg(test)]

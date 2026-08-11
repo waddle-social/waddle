@@ -138,6 +138,12 @@ pub(super) fn persisted_to_detached(
         })
         .collect::<Result<_, SmRegistryError>>()?;
 
+    // The database's `ORDER BY sequence ASC` is only a stable numeric pre-sort:
+    // it is wrong after the counter wraps. This is the authoritative
+    // wrap-aware re-sort for every hydration caller, relative to `last_acked`.
+    let mut unacked_stanzas = unacked_stanzas;
+    unacked_stanzas.sort_by_key(|entry| entry.sequence.wrapping_sub(persisted.last_acked));
+
     Ok(DetachedSession {
         stream_id: persisted.stream_id.as_str().to_string(),
         user_id: persisted.user_id.clone(),
