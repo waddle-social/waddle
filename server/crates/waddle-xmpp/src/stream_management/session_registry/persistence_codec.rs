@@ -20,11 +20,15 @@ pub(super) fn detached_to_persisted(
         last_acked: session.last_acked,
         replay_gap_through: session.replay_gap_through,
         max_resume_time: session.max_resume_time,
-        // `detached_at: Instant` is process-relative; persistence
-        // captures the wall-clock moment of the persist write. The
-        // skew vs. the actual detach-event time is bounded by the
-        // store_session call latency (microseconds in practice).
-        detached_at: chrono::Utc::now(),
+        // `detached_at: Instant` is process-relative; translate the
+        // actual detach instant to wall clock (now minus elapsed) so
+        // re-persisting a session NEVER refreshes its durable detach
+        // time — a no-op append retried long after detach must not
+        // extend the resume window (gpt-5.6-sol round-2 finding on
+        // PR #1676).
+        detached_at: chrono::Utc::now()
+            - chrono::Duration::from_std(session.detached_at.elapsed())
+                .unwrap_or_else(|_| chrono::Duration::zero()),
         max_resume_duration: Duration::from_secs(
             session
                 .max_resume_time
