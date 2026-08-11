@@ -54,6 +54,10 @@ const REMOTE_STATE_RESYNC_MAX_BACKOFF: std::time::Duration = std::time::Duration
 /// refresh) owns the repair; an unbounded loop would pile on a
 /// struggling peer.
 const REMOTE_STATE_RESYNC_MAX_ATTEMPTS: u32 = 5;
+/// Additional full repair rounds a running resync will absorb for
+/// failures that arrive while it runs (recorded via the dirty flag).
+/// Keeps the loop bounded even under a continuous failure feed.
+const REMOTE_STATE_RESYNC_MAX_DIRTY_ROUNDS: u32 = 3;
 
 fn remote_resource_register_reply_timeout(configured: std::time::Duration) -> std::time::Duration {
     configured.max(REMOTE_OWNER_REGISTER_REPLY_TIMEOUT)
@@ -606,24 +610,50 @@ impl OrderedRelayDeliveryBridge {
             let key = (jid.clone(), Arc::as_ptr(&owner) as usize);
             {
                 let mut in_flight = bridge.remote_state_resyncs_in_flight.lock().await;
-                if !in_flight.insert(key.clone()) {
+                if let Some(dirty) = in_flight.get_mut(&key) {
+                    // A repair loop is already running: record this failure
+                    // as dirty work it must consume before releasing the
+                    // key, so a failure landing after its final recheck is
+                    // never dropped.
+                    *dirty = true;
                     return;
                 }
+                in_flight.insert(key.clone(), false);
             }
-            let mut backoff = REMOTE_STATE_RESYNC_DELAY;
-            for _ in 0..REMOTE_STATE_RESYNC_MAX_ATTEMPTS {
-                let cancelled = tokio::select! {
-                    _ = bridge.stop_token.cancelled() => true,
-                    _ = tokio::time::sleep(backoff) => false,
-                };
-                if cancelled {
-                    break;
+            for _round in 0..REMOTE_STATE_RESYNC_MAX_DIRTY_ROUNDS {
+                let mut backoff = REMOTE_STATE_RESYNC_DELAY;
+                let mut cancelled = false;
+                for _ in 0..REMOTE_STATE_RESYNC_MAX_ATTEMPTS {
+                    cancelled = tokio::select! {
+                        _ = bridge.stop_token.cancelled() => true,
+                        _ = tokio::time::sleep(backoff) => false,
+                    };
+                    if cancelled {
+                        break;
+                    }
+                    backoff = (backoff * 2).min(REMOTE_STATE_RESYNC_MAX_BACKOFF);
+                    if bridge.run_remote_state_resync_attempt(&jid, &owner).await {
+                        break;
+                    }
                 }
-                backoff = (backoff * 2).min(REMOTE_STATE_RESYNC_MAX_BACKOFF);
-                if bridge.run_remote_state_resync_attempt(&jid, &owner).await {
-                    break;
+                let mut in_flight = bridge.remote_state_resyncs_in_flight.lock().await;
+                match in_flight.get_mut(&key) {
+                    Some(dirty) if *dirty && !cancelled => {
+                        // New failures arrived while this round ran —
+                        // consume them as another full repair round.
+                        *dirty = false;
+                    }
+                    _ => {
+                        in_flight.remove(&key);
+                        return;
+                    }
                 }
             }
+            tracing::warn!(
+                jid = %jid,
+                "clustered remote-resource resync exhausted its dirty-round budget; \
+                 the next state change or origin-route refresh owns further repair"
+            );
             bridge
                 .remote_state_resyncs_in_flight
                 .lock()
@@ -669,11 +699,35 @@ impl OrderedRelayDeliveryBridge {
                 .await
             {
                 RemoteResourceRegisterOutcome::Registered => {
+                    if services
+                        .connection_registry
+                        .entry_if_owner(jid, owner)
+                        .is_none()
+                    {
+                        // The socket died while the registration committed:
+                        // cleanup already passed the then-missing map entry,
+                        // so retract the fresh token instead of leaving a
+                        // ghost owner mirror.
+                        let unregister = self
+                            .unregister_remote_user_resource_if_owner(jid, owner)
+                            .await;
+                        tracing::info!(
+                            jid = %jid,
+                            ?unregister,
+                            "clustered remote-resource resync retracted a re-registration \
+                             for a socket that died mid-commit"
+                        );
+                        return true;
+                    }
                     tracing::info!(
                         jid = %jid,
                         "clustered remote-resource resync re-registered a cleared registration"
                     );
-                    true
+                    // State may have moved while the registration snapshot
+                    // was in flight: run the full-state resync + recheck on
+                    // the next pass instead of treating registration
+                    // success as convergence.
+                    false
                 }
                 RemoteResourceRegisterOutcome::NotRemote => {
                     let Some(entry) = services.connection_registry.entry_if_owner(jid, owner)
@@ -709,9 +763,21 @@ impl OrderedRelayDeliveryBridge {
             socket_generation: registration.socket_generation,
             user_owner: registration.user_owner.clone(),
         };
-        if let Some(snapshot) = current_claim(&services, &user_entity(&jid.to_bare())).await {
-            let owner_moved = snapshot.owner_lease_fresh
-                && snapshot.owner.node_id != registration.user_owner.as_str();
+        let claim_snapshot = current_claim(&services, &user_entity(&jid.to_bare())).await;
+        let Some(snapshot) = claim_snapshot else {
+            // No readable claim: the authoritative owner is unknown, so an
+            // Updated from the recorded owner would prove nothing. Retry.
+            return false;
+        };
+        if !snapshot.owner_lease_fresh {
+            // The recorded owner's lease is stale — it may be mid-deposition
+            // and can still answer Updated while its self-fence cleanup
+            // runs. Retry until the claim resolves to a fresh owner
+            // (same node, or a move handled below).
+            return false;
+        }
+        {
+            let owner_moved = snapshot.owner.node_id != registration.user_owner.as_str();
             if owner_moved {
                 // Ownership moved — to this node (promotion) or to another
                 // remote node (the recorded owner is gone; asks to it can
@@ -782,6 +848,20 @@ impl OrderedRelayDeliveryBridge {
             services.connection_registry.get_presence_state(jid),
         );
         if recheck != updates {
+            return false;
+        }
+        // The recorded owner answered Updated — but if its claim was lost
+        // while the asks were in flight, the eventual new owner never saw
+        // this state. Convergence requires the same fresh owner AFTER the
+        // asks too; otherwise retry (the next pass takes the
+        // ownership-move refresh path).
+        let owner_still_current = current_claim(&services, &user_entity(&jid.to_bare()))
+            .await
+            .is_some_and(|snapshot| {
+                snapshot.owner_lease_fresh
+                    && snapshot.owner.node_id == registration.user_owner.as_str()
+            });
+        if !owner_still_current {
             return false;
         }
         tracing::info!(jid = %jid, "clustered remote-resource state resync converged");
