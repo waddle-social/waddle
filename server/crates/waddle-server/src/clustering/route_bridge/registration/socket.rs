@@ -223,11 +223,39 @@ impl OrderedRelayDeliveryBridge {
         };
         match reply.status {
             RelayRemoteResourceRegistrationStatus::Registered => {
-                if services
-                    .connection_registry
-                    .entry_if_owner(jid, &owner)
-                    .is_none()
-                {
+                // Commit atomically against BOTH socket ownership and map
+                // currency, under the map lock: a same-full-JID successor
+                // (replacement socket, higher generation) can register
+                // between the relay reply and this commit, and its map
+                // entry must never be overwritten by this older
+                // registration (codex round-4 on #1683). On a lost commit
+                // the fresh remote token is retracted so the owner is not
+                // left with a ghost mirror.
+                let committed = {
+                    let mut registrations = self.remote_socket_resources.lock().await;
+                    let socket_still_ours = services
+                        .connection_registry
+                        .entry_if_owner(jid, &owner)
+                        .is_some();
+                    let slot_available = registrations
+                        .get(jid)
+                        .is_none_or(|current| Arc::ptr_eq(&current.owner, &owner));
+                    if socket_still_ours && slot_available {
+                        registrations.insert(
+                            jid.clone(),
+                            RemoteSocketRegistration {
+                                registration_id,
+                                socket_generation,
+                                owner: Arc::clone(&owner),
+                                user_owner: user_owner.clone(),
+                            },
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !committed {
                     let mut handle = RelayHandle::new(user_owner.clone(), self.stop_token.clone())
                         .with_ask_timeouts(relay_mailbox_timeout, relay_reply_timeout);
                     let _ = handle
@@ -240,15 +268,6 @@ impl OrderedRelayDeliveryBridge {
                         .await;
                     return RemoteResourceRegisterOutcome::Failed;
                 }
-                self.remote_socket_resources.lock().await.insert(
-                    jid.clone(),
-                    RemoteSocketRegistration {
-                        registration_id,
-                        socket_generation,
-                        owner,
-                        user_owner,
-                    },
-                );
                 RemoteResourceRegisterOutcome::Registered
             }
             RelayRemoteResourceRegistrationStatus::NotOwner => {
@@ -649,16 +668,30 @@ impl OrderedRelayDeliveryBridge {
                     }
                 }
             }
-            tracing::warn!(
-                jid = %jid,
-                "clustered remote-resource resync exhausted its dirty-round budget; \
-                 the next state change or origin-route refresh owns further repair"
-            );
-            bridge
-                .remote_state_resyncs_in_flight
-                .lock()
-                .await
-                .remove(&key);
+            // Budget exhausted. If yet another failure marked the key dirty
+            // during the final round, hand it to a FRESH bounded loop
+            // instead of dropping it — the backoff floor rate-limits
+            // chained loops under a continuous failure feed.
+            let dirty_at_exhaustion = {
+                let mut in_flight = bridge.remote_state_resyncs_in_flight.lock().await;
+                let dirty = in_flight.get(&key).copied().unwrap_or(false);
+                in_flight.remove(&key);
+                dirty
+            };
+            if dirty_at_exhaustion && !bridge.stop_token.is_cancelled() {
+                tracing::warn!(
+                    jid = %jid,
+                    "clustered remote-resource resync exhausted its dirty-round budget \
+                     with pending dirty work; chaining a fresh bounded repair loop"
+                );
+                bridge.schedule_remote_state_resync(&jid, &owner);
+            } else {
+                tracing::warn!(
+                    jid = %jid,
+                    "clustered remote-resource resync exhausted its dirty-round budget; \
+                     the next state change or origin-route refresh owns further repair"
+                );
+            }
         });
     }
 
