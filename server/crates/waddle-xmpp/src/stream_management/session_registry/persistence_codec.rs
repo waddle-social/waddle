@@ -172,3 +172,76 @@ pub(super) fn persisted_to_detached(
         pending_subscribes_flushed: false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use xmpp_parsers::message::{Lang, Message};
+
+    use super::super::super::persistence::{PersistedSession, PersistedUnackedStanza};
+    use super::persisted_to_detached;
+
+    fn persisted_session(last_acked: u32, outbound_count: u32) -> PersistedSession {
+        PersistedSession {
+            stream_id: crate::pending_delivery::SmSessionId::new("codec-wrap".to_string()),
+            user_id: "alice".to_string(),
+            jid: "alice@example.com/web".parse().expect("full jid"),
+            inbound_count: 0,
+            outbound_count,
+            last_acked,
+            replay_gap_through: None,
+            max_resume_time: None,
+            detached_at: chrono::Utc::now(),
+            max_resume_duration: Duration::from_secs(300),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        }
+    }
+
+    fn persisted_row(sequence: u32) -> PersistedUnackedStanza {
+        let mut message = Message::new(None::<jid::Jid>);
+        message
+            .bodies
+            .insert(Lang::new(), format!("seq-{sequence}"));
+        PersistedUnackedStanza {
+            stream_id: crate::pending_delivery::SmSessionId::new("codec-wrap".to_string()),
+            sequence,
+            stanza: Box::new(crate::Stanza::Message(message)),
+            original_receipt_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The SQL backends return rows in numeric `ORDER BY sequence ASC`,
+    /// which is wrong across the 2^32 wrap (post-wrap low sequences sort
+    /// first). The codec's re-sort is the single authoritative fix for
+    /// every hydration caller; feed it exactly the numeric order SQL
+    /// produces and assert wrap order comes out.
+    #[test]
+    fn hydration_re_sorts_numeric_sql_order_into_wrap_order() {
+        let last_acked = u32::MAX - 2;
+        let wrapped: Vec<u32> = vec![0, 1, u32::MAX - 1, u32::MAX];
+        let session = persisted_session(last_acked, 1);
+        let rows: Vec<PersistedUnackedStanza> =
+            wrapped.iter().copied().map(persisted_row).collect();
+
+        let detached = persisted_to_detached(&session, &rows).expect("codec hydration");
+
+        let hydrated: Vec<u32> = detached
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect();
+        assert_eq!(
+            hydrated,
+            vec![u32::MAX - 1, u32::MAX, 0, 1],
+            "numeric ASC input must be re-sorted relative to last_acked"
+        );
+    }
+}

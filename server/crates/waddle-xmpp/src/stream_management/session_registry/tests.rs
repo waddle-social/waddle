@@ -4872,6 +4872,7 @@ async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
                         message_stanza_xml_with_id("race-append".to_string()),
                         Utc::now(),
                     );
+                    true
                 },
             )
             .await

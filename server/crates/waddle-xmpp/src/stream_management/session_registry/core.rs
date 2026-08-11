@@ -2098,7 +2098,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         predicate: impl Fn(&DetachedSession) -> bool,
-        mutate: impl FnOnce(&mut DetachedSession),
+        mutate: impl FnOnce(&mut DetachedSession) -> bool,
     ) -> Result<bool, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
@@ -2129,7 +2129,13 @@ impl InMemorySmSessionRegistry {
         let Some(mut updated) = current else {
             return Ok(false);
         };
-        mutate(&mut updated);
+        if !mutate(&mut updated) {
+            // No-op mutation (stale or duplicate input): skip the durable
+            // snapshot entirely. Persistence restamps `detached_at`, so a
+            // persisted no-op would silently extend the session's resume
+            // window on every retry.
+            return Ok(true);
+        }
 
         // Durable snapshot first, then publish the same typed state in memory.
         // The stream lock serializes this full-snapshot write with other appends
