@@ -829,7 +829,7 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("origin sends full-JID message to remote target");
     let delivered = ordered_target_client
-        .recv_matching(|frame| {
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("ordered-websocket-one") && frame.contains("phase4 cross-node route")
         })
         .await
@@ -843,7 +843,7 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("origin requests handled count after remote handoff");
     let origin_ack = ordered_origin_client
-        .recv_matching(|frame| {
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("<a") && (frame.contains("h=\"1\"") || frame.contains("h='1'"))
         })
         .await
@@ -904,7 +904,7 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("origin sends full-JID message to same-bare remote resource");
     let same_bare_delivered = remote_target_client
-        .recv_matching(|frame| {
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("ordered-remote-same-bare")
                 && frame.contains("phase4 same-bare remote resource")
         })
@@ -933,7 +933,7 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("same-bare remote resource sends to owner-node sibling resource");
     let remote_origin_delivered = ordered_target_client
-        .recv_matching(|frame| {
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("ordered-remote-origin")
                 && frame.contains("phase4 remote resource origin route")
         })
@@ -985,7 +985,9 @@ async fn cluster_exit_criteria_end_to_end() {
         })
     ));
     ordered_target_client
-        .recv_matching(|frame| frame.contains("ordered-one"))
+        .recv_matching_within(Duration::from_secs(30), |frame| {
+            frame.contains("ordered-one")
+        })
         .await
         .expect("target receives direct ordered relay envelope");
 
