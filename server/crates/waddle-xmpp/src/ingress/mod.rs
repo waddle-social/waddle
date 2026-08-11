@@ -12,7 +12,7 @@ mod stream;
 mod target;
 
 pub use alias::{resolve_alias, AliasConflict, AliasOutcome, AliasResolution, StoredAlias};
-pub use digest::{DigestVersion, SemanticDigest};
+pub use digest::{DigestContext, DigestInput, DigestInputError, DigestVersion, SemanticDigest};
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;
 pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision};
