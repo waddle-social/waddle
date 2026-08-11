@@ -20,6 +20,18 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 /// cutoff, keeping wall-clock decisions at its caller boundary.
 pub const ALIAS_RETENTION: Duration = Duration::days(8);
 
+/// Ingress tables protected by the epoch-proof triggers from migration V1009.
+///
+/// Keep this list in lock-step with the migration manifest: tests query the
+/// live catalog to ensure a newly-added ingress table cannot accidentally be
+/// left outside the activation boundary.
+pub const EPOCH_GUARDED_TABLES: [&str; 4] = [
+    "ingress_messages",
+    "ingress_origin_aliases",
+    "ingress_sm_refs",
+    "ingress_deliveries",
+];
+
 /// Fail-closed errors for the dark ingress substrate.
 ///
 /// The database adapter error is intentionally not retained as a source:
@@ -544,6 +556,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
+    use sqlx::Connection;
     use tokio::sync::Barrier;
     use waddle_xmpp::ingress::{AliasOutcome, AliasResolution};
 
@@ -887,6 +900,556 @@ mod tests {
         fixture.close().await;
     }
 
+    #[tokio::test]
+    async fn epoch_one_rejects_unproven_writes_and_accepts_transaction_bound_proof() {
+        let Some(fixture) = Fixture::open("epoch_proof").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        fixture
+            .db
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .await
+            .expect("activate epoch one");
+
+        for statement in [
+            format!(
+                "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+                Uuid::new_v4(),
+                key.to_storage()
+            ),
+            format!(
+                "UPDATE ingress_messages SET terminal_at = now() WHERE message_key = '{}'",
+                key.to_storage()
+            ),
+            format!(
+                "DELETE FROM ingress_messages WHERE message_key = '{}'",
+                key.to_storage()
+            ),
+            "TRUNCATE ingress_deliveries".to_string(),
+        ] {
+            assert!(
+                fixture.db.execute(&statement).await.is_err(),
+                "epoch-one protected operation must require proof: {statement}"
+            );
+        }
+
+        let mut tx = fixture
+            .store
+            .begin()
+            .await
+            .expect("begin proof transaction");
+        tx.execute("SET LOCAL waddle.protocol_epoch = '1'", ())
+            .await
+            .expect("set epoch proof");
+        tx.execute(
+            "SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+            (),
+        )
+        .await
+        .expect("set xid proof");
+        fixture
+            .store
+            .record_delivery(&mut tx, DeliveryKey::new(), key)
+            .await
+            .expect("proof authorizes protected write");
+        tx.commit().await.expect("commit proof transaction");
+
+        // A proof with a wrong epoch or no xid is intentionally incomplete.
+        let mut wrong_epoch = fixture
+            .store
+            .begin()
+            .await
+            .expect("begin wrong epoch proof");
+        wrong_epoch
+            .execute("SET LOCAL waddle.protocol_epoch = '0'", ())
+            .await
+            .expect("set wrong epoch proof");
+        assert!(fixture
+            .store
+            .record_delivery(&mut wrong_epoch, DeliveryKey::new(), key)
+            .await
+            .is_err());
+        drop(wrong_epoch); // dropping an uncommitted transaction rolls it back
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_and_manifest_tables_enforce_their_singleton_and_append_only_rules() {
+        let Some(fixture) = Fixture::open("epoch_invariants").await else {
+            return;
+        };
+        for statement in [
+            "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            "UPDATE ingress_protocol_epoch SET epoch = 1 WHERE id = 1",
+            "DELETE FROM ingress_protocol_epoch WHERE id = 1",
+            "TRUNCATE ingress_protocol_epoch",
+            "INSERT INTO ingress_protocol_epoch (id, epoch) VALUES (2, 0)",
+            "UPDATE ingress_epoch_guard_manifest SET table_name = 'bad' WHERE table_name = 'ingress_messages'",
+            "DELETE FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_messages'",
+            "TRUNCATE ingress_epoch_guard_manifest",
+        ] {
+            assert!(fixture.db.execute(statement).await.is_err(), "must reject: {statement}");
+        }
+        let mut tx = fixture.store.begin().await.expect("begin manifest probe");
+        tx.execute(
+            "INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_future_probe')",
+            (),
+        )
+        .await
+        .expect("manifest permits future enrollment");
+        drop(tx); // probe must leave the append-only manifest unchanged
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_guard_manifest_matches_rust_and_live_trigger_catalog() {
+        let Some(fixture) = Fixture::open("guard_manifest").await else {
+            return;
+        };
+        let conn = fixture.db.guard().await.expect("guard manifest database");
+        let mut rows = conn
+            .query(
+                "SELECT table_name FROM ingress_epoch_guard_manifest ORDER BY table_name",
+                (),
+            )
+            .await
+            .expect("read guard manifest");
+        let mut manifest = Vec::new();
+        while let Some(row) = rows.next().await.expect("read manifest row") {
+            manifest.push(row.get::<String>(0).expect("decode manifest table"));
+        }
+        let mut expected = EPOCH_GUARDED_TABLES.map(str::to_owned).to_vec();
+        expected.sort();
+        assert_eq!(manifest, expected, "migration manifest and Rust list agree");
+
+        for table in EPOCH_GUARDED_TABLES {
+            let mut trigger_rows = conn
+                .query(
+                    "SELECT tg.tgname, tg.tgenabled::text \
+                     FROM pg_trigger tg \
+                     JOIN pg_class c ON c.oid = tg.tgrelid \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = current_schema() AND c.relname = ? \
+                       AND NOT tg.tgisinternal ORDER BY tg.tgname",
+                    crate::db_params![table],
+                )
+                .await
+                .expect("read guard triggers");
+            let mut triggers = Vec::new();
+            while let Some(row) = trigger_rows.next().await.expect("read trigger row") {
+                triggers.push((
+                    row.get::<String>(0).expect("decode trigger name"),
+                    row.get::<String>(1).expect("decode trigger mode"),
+                ));
+            }
+            assert!(triggers.contains(&(format!("{table}_epoch_guard_dml"), "A".to_string())));
+            assert!(triggers.contains(&(format!("{table}_epoch_guard_truncate"), "A".to_string())));
+        }
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn guard_uses_its_table_schema_not_the_callers_search_path() {
+        let Some(fixture) = Fixture::open("hostile_search_path").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        // Independent short name: suffixing the fixture schema would exceed
+        // PostgreSQL's 63-byte identifier cap and silently truncate into a
+        // collision with the fixture schema itself.
+        let hostile = format!("waddle_test_hostile_{}", Uuid::new_v4().simple());
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open one hostile-search-path connection");
+        sqlx::query(&format!("CREATE SCHEMA {hostile}"))
+            .execute(&mut conn)
+            .await
+            .expect("create hostile schema");
+        sqlx::query(&format!(
+            "CREATE TABLE {hostile}.ingress_protocol_epoch (id INTEGER PRIMARY KEY, epoch BIGINT NOT NULL)"
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("create hostile epoch shadow");
+        sqlx::query(&format!(
+            "INSERT INTO {hostile}.ingress_protocol_epoch (id, epoch) VALUES (1, 1)"
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("seed hostile epoch shadow");
+        sqlx::query(&format!("SET search_path = {hostile}, {}", fixture.schema))
+            .execute(&mut conn)
+            .await
+            .expect("place hostile schema first");
+        sqlx::query(&format!(
+            "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+            Uuid::new_v4(),
+            key.to_storage()
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("epoch-zero guard must ignore hostile epoch-one shadow");
+        drop(conn);
+        fixture.close().await;
+    }
+
+    /// Poll `pg_stat_activity` until a backend is blocked on a heavyweight
+    /// lock while running a query containing `fragment`.  The fragment is a
+    /// bound parameter, so this poll's own query text never matches itself.
+    async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {
+        for _ in 0..400 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query LIKE $1",
+            )
+            .bind(format!("%{fragment}%"))
+            .fetch_one(admin)
+            .await
+            .expect("poll pg_stat_activity for a lock waiter");
+            if waiting > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("no blocked backend appeared for query fragment {fragment:?}");
+    }
+
+    #[tokio::test]
+    async fn session_level_guc_and_stale_xid_proofs_do_not_authorize_writes() {
+        let Some(fixture) = Fixture::open("epoch_proof_matrix").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        fixture
+            .db
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .await
+            .expect("activate epoch one");
+
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open one dedicated connection");
+        let insert = format!(
+            "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+            Uuid::new_v4(),
+            key.to_storage()
+        );
+
+        // Session-level SET of BOTH GUCs: the xid captured now belongs to
+        // this transaction, so it cannot prove any later transaction.
+        sqlx::query("SET waddle.protocol_epoch = '1'")
+            .execute(&mut conn)
+            .await
+            .expect("session-level epoch setting");
+        let stale_xid: String = sqlx::query_scalar(
+            "SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, false)",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("session-level xid setting");
+        assert!(
+            sqlx::query(&insert).execute(&mut conn).await.is_err(),
+            "a session-retained proof must not authorize a later transaction"
+        );
+
+        // Missing xid half of the proof.
+        let mut tx = conn.begin().await.expect("begin missing-xid transaction");
+        sqlx::query("SET LOCAL waddle.protocol_epoch = '1'")
+            .execute(&mut *tx)
+            .await
+            .expect("set epoch half only");
+        assert!(
+            sqlx::query(&insert).execute(&mut *tx).await.is_err(),
+            "the epoch GUC alone must not authorize a write"
+        );
+        drop(tx);
+
+        // Stale xid replayed as a literal from an earlier transaction.
+        let mut tx = conn.begin().await.expect("begin stale-xid transaction");
+        sqlx::query("SET LOCAL waddle.protocol_epoch = '1'")
+            .execute(&mut *tx)
+            .await
+            .expect("set epoch for stale proof");
+        sqlx::query("SELECT set_config('waddle.protocol_epoch_xid', $1, true)")
+            .bind(&stale_xid)
+            .execute(&mut *tx)
+            .await
+            .expect("replay stale xid literal");
+        assert!(
+            sqlx::query(&insert).execute(&mut *tx).await.is_err(),
+            "a stale xid proof must not authorize a write"
+        );
+        drop(tx);
+
+        // A correct transaction-local proof works — and does not survive
+        // into the next transaction on the SAME pooled connection.
+        let mut tx = conn.begin().await.expect("begin proven transaction");
+        sqlx::query("SET LOCAL waddle.protocol_epoch = '1'")
+            .execute(&mut *tx)
+            .await
+            .expect("set local epoch");
+        sqlx::query(
+            "SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("set local xid");
+        sqlx::query(&insert)
+            .execute(&mut *tx)
+            .await
+            .expect("transaction-bound proof authorizes the write");
+        tx.commit().await.expect("commit proven transaction");
+        assert!(
+            sqlx::query(&format!(
+                "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+                Uuid::new_v4(),
+                key.to_storage()
+            ))
+            .execute(&mut conn)
+            .await
+            .is_err(),
+            "SET LOCAL must not be retained past commit on the same connection"
+        );
+        drop(conn);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_activation_waits_behind_in_flight_epoch_zero_writes() {
+        let Some(fixture) = Fixture::open("activation_race").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+
+        // Transaction A: an epoch-0 protected write whose statement trigger
+        // took FOR SHARE on the epoch row, held until commit.
+        let mut writer = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open epoch-zero writer connection");
+        let mut tx = writer.begin().await.expect("begin epoch-zero write");
+        sqlx::query(&format!(
+            "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+            Uuid::new_v4(),
+            key.to_storage()
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("epoch-zero write starts before activation");
+
+        // Concurrent activation must block behind the in-flight write.
+        let flip_url = fixture.schema_url.clone();
+        let flip = tokio::spawn(async move {
+            let mut conn = sqlx::PgConnection::connect(&flip_url)
+                .await
+                .expect("open activation connection");
+            sqlx::query(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .execute(&mut conn)
+            .await
+            .expect("activation update completes after the writer commits");
+        });
+        wait_for_lock_waiter(&fixture.admin, "UPDATE ingress_protocol_epoch").await;
+        assert!(!flip.is_finished(), "activation must still be blocked");
+        tx.commit().await.expect("commit the epoch-zero write");
+        flip.await.expect("join activation task");
+
+        // First post-activation write without a proof is rejected.
+        assert!(
+            sqlx::query(&format!(
+                "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+                Uuid::new_v4(),
+                key.to_storage()
+            ))
+            .execute(&mut writer)
+            .await
+            .is_err(),
+            "the first post-activation write requires the transaction proof"
+        );
+        drop(writer);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_blocks_behind_an_in_flight_child_insert_and_skips_the_message() {
+        let Some(fixture) = Fixture::open("gc_ref_race").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(6);
+        fixture.terminalize(key, terminal_at).await;
+
+        // Child insert holds FOR SHARE on the message row, uncommitted.
+        let mut tx = fixture.store.begin().await.expect("begin child insert");
+        assert_eq!(
+            fixture
+                .store
+                .insert_sm_ref(&mut tx, IngressStreamId::new(), IngressOrdinal::FIRST, key)
+                .await
+                .expect("insert sm ref before GC"),
+            MessageWriteOutcome::Recorded
+        );
+
+        // Concurrent GC must block on that row's FOR UPDATE, then re-check
+        // children under the lock and skip the message.
+        let gc_store = fixture.store.clone();
+        let gc_now = terminal_at + ALIAS_RETENTION;
+        let gc = tokio::spawn(async move { gc_store.gc_expired_aliases(gc_now).await });
+        wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
+        assert!(
+            !gc.is_finished(),
+            "GC must still be blocked on the row lock"
+        );
+        tx.commit().await.expect("commit the child insert");
+        let outcome = gc
+            .await
+            .expect("join GC task")
+            .expect("GC completes after the writer commits");
+        assert_eq!(
+            outcome.deleted_messages, 0,
+            "GC re-checks children under the lock and skips the message"
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        assert_eq!(fixture.count("ingress_sm_refs").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn child_insert_blocked_behind_gc_deletion_observes_message_vanished() {
+        let Some(fixture) = Fixture::open("ref_gc_race").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+
+        // Simulate GC's deletion transaction: FOR UPDATE on the message row,
+        // held while a child insert arrives.
+        let mut gc_conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open GC connection");
+        let mut gc_tx = gc_conn.begin().await.expect("begin GC transaction");
+        sqlx::query(&format!(
+            "SELECT 1 FROM ingress_messages WHERE message_key = '{}' FOR UPDATE",
+            key.to_storage()
+        ))
+        .execute(&mut *gc_tx)
+        .await
+        .expect("GC locks the message row");
+
+        let insert_store = fixture.store.clone();
+        let insert = tokio::spawn(async move {
+            let mut tx = insert_store.begin().await?;
+            let outcome = insert_store
+                .insert_sm_ref(&mut tx, IngressStreamId::new(), IngressOrdinal::FIRST, key)
+                .await?;
+            tx.commit()
+                .await
+                .map_err(|_| IngressSubstrateError::Database)?;
+            Ok::<_, IngressSubstrateError>(outcome)
+        });
+        wait_for_lock_waiter(&fixture.admin, "FOR SHARE").await;
+        assert!(!insert.is_finished(), "child insert must wait behind GC");
+        sqlx::query(&format!(
+            "DELETE FROM ingress_messages WHERE message_key = '{}'",
+            key.to_storage()
+        ))
+        .execute(&mut *gc_tx)
+        .await
+        .expect("GC deletes the childless message");
+        gc_tx.commit().await.expect("commit GC deletion");
+        assert_eq!(
+            insert
+                .await
+                .expect("join child insert task")
+                .expect("child insert completes after GC commits"),
+            MessageWriteOutcome::MessageVanished,
+            "a child insert serialized behind GC observes the deletion"
+        );
+        drop(gc_conn);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn restricted_role_cannot_disable_or_replace_the_epoch_guard() {
+        let Some(fixture) = Fixture::open("restricted_role").await else {
+            return;
+        };
+        let role = format!("waddle_test_dml_{}", Uuid::new_v4().simple());
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open role-test connection");
+        sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+            .execute(&mut conn)
+            .await
+            .expect("create restricted DML role");
+        sqlx::query(&format!(
+            "GRANT USAGE ON SCHEMA {} TO {role}",
+            fixture.schema
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("grant schema usage");
+        for table in EPOCH_GUARDED_TABLES {
+            sqlx::query(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{table} TO {role}",
+                fixture.schema
+            ))
+            .execute(&mut conn)
+            .await
+            .expect("grant DML on protected table");
+        }
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.ingress_protocol_epoch TO {role}",
+            fixture.schema
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("grant epoch read");
+
+        sqlx::query(&format!("SET ROLE {role}"))
+            .execute(&mut conn)
+            .await
+            .expect("assume restricted role");
+        for statement in [
+            "ALTER TABLE ingress_messages DISABLE TRIGGER ingress_messages_epoch_guard_dml"
+                .to_string(),
+            "CREATE OR REPLACE FUNCTION waddle_ingress_epoch_guard() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$"
+                .to_string(),
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+             lineage_uuid = 'x' WHERE id = 1"
+                .to_string(),
+            "INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('rogue')".to_string(),
+            "DROP TRIGGER ingress_messages_epoch_guard_dml ON ingress_messages".to_string(),
+        ] {
+            assert!(
+                sqlx::query(&statement).execute(&mut conn).await.is_err(),
+                "the restricted role must not bypass the guard: {statement}"
+            );
+        }
+        sqlx::query("RESET ROLE")
+            .execute(&mut conn)
+            .await
+            .expect("reset role");
+        sqlx::query(&format!("DROP OWNED BY {role}"))
+            .execute(&mut conn)
+            .await
+            .expect("drop role grants");
+        sqlx::query(&format!("DROP ROLE {role}"))
+            .execute(&mut conn)
+            .await
+            .expect("drop restricted role");
+        drop(conn);
+        fixture.close().await;
+    }
+
     async fn race_alias(
         store: PostgresIngressSubstrate,
         sender: BareJid,
@@ -941,6 +1504,7 @@ mod tests {
         db: Database,
         admin: sqlx::PgPool,
         schema: String,
+        schema_url: String,
     }
 
     impl Fixture {
@@ -960,10 +1524,8 @@ mod tests {
                 .execute(&admin)
                 .await
                 .expect("create isolated postgres schema");
-            let mut config = DatabaseConfig::new(
-                DatabaseDriver::Postgres,
-                postgres_url_with_search_path(&database_url, &schema),
-            );
+            let schema_url = postgres_url_with_search_path(&database_url, &schema);
+            let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, schema_url.clone());
             config.pool_size = 10;
             let db = Database::from_config("ingress-substrate-test", &config)
                 .await
@@ -979,6 +1541,7 @@ mod tests {
                 db,
                 admin,
                 schema,
+                schema_url,
             })
         }
 

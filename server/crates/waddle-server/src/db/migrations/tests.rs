@@ -607,6 +607,32 @@ async fn ledger_aware_old_binary_fails_closed_against_newer_ledger() {
     ));
 }
 
+/// An artifact predating the ingress foundation pack cannot safely start
+/// after its ledger has recorded V1008/V1009; recovery is roll-forward only.
+#[tokio::test]
+async fn pre_ingress_catalog_refuses_the_v1008_v1009_ledger() {
+    let db = Database::in_memory("pre-ingress-catalog-migration-ledger")
+        .await
+        .unwrap();
+    MigrationRunner::single().run(&db).await.unwrap();
+    let pre_ingress_catalog = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1008),
+            )
+            .collect(),
+    );
+
+    let error = pre_ingress_catalog.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 1008, .. })
+    ));
+}
+
 #[tokio::test]
 async fn checksum_mismatch_fails_closed_without_applying_migrations() {
     let db = Database::in_memory("checksum-mismatch-migration-ledger")

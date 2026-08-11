@@ -37,7 +37,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 - [OK] ⚠ **#1643** `feat(server): durable principal fence for cross-node SM resume` (after #1642) — MERGED 375ba545 (PR #1666, 2026-08-07). Both #1610 defects root-caused; custody branch deleted. Owed: post-deploy Loki checks, follow-up #1667 (expired-claim promotion). Note for #1651: do NOT resurrect harvest's fail-closed runner policy as-is — it breaks the combined global+waddle test-runner history (see PR #1666 root-cause).
 - [ ] ⚠ **#1645** `fix(server): commit durable room state before memory mutation` (after #1644) — the inversion across every durable mutation kind; boundary lock ordering; retires `OwnershipLostAfterApply`/`PersistFailed` windows. Heavy adversarial review.
 - [OK] **#1652** `feat(server): database lineage attestation at readiness` — MERGED 0b59cfca (PR #1672, 2026-08-10); enrollment-gated rollout owed.
-- [] ⚠ **#1653** `feat(server): expand-only foundation schema with inert epoch guards` (after #1650 + #1651) — table pack + inert triggers + guard manifest; old-binary epoch-0 safety proof.
+- [OK] ⚠ **#1653** `feat(server): expand-only foundation schema with inert epoch guards` — PR #1686: table pack, inert transaction-bound guards, manifest, and epoch-0 compatibility proof.
 
 ## Wave 3
 
@@ -71,6 +71,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 ## Activation backlog (each its own issue when prerequisites land; prod activity needs explicit approval + named window + runbook)
 
 - [ ] Epoch 0→1 flip (guard coverage + no-old-writers verification; forward-only)
+- [ ] **#1689** Provision ingress-guard migration-owner/runtime-role split before the epoch 0→1 flip.
 - [ ] Cluster admission enablement
 - [ ] NOT NULL tightening of `sessions` auth-context columns
 - [ ] SASL2 stream-feature advertisement (P3.4)

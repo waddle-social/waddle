@@ -1,0 +1,255 @@
+//! PostgreSQL schema contracts adjacent to XEP-0359.
+//!
+//! XEP-0359 §3–4 requires a server which adds a stanza-id to preserve the
+//! opaque client origin-id.  Sender and target scoping below is Waddle's local
+//! deduplication policy, not an XEP-defined archive identity rule.
+
+use waddle_server::{
+    db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
+    ingress_substrate::PostgresIngressSubstrate,
+};
+use waddle_xmpp::ingress::{
+    AliasOutcome, AliasResolution, MessageKey, NormalizedTarget, SemanticDigest,
+    MAX_ORIGIN_ID_BYTES,
+};
+use waddle_xmpp_core::xep0359::OriginId;
+
+#[tokio::test]
+async fn origin_ids_are_opaque_bounded_and_preserved() {
+    let Some(fixture) = Fixture::open("opaque").await else {
+        return;
+    };
+    let sender = bare("romeo@example.com");
+    let opaque = OriginId::new("not-a-uuid: client/chosen value");
+    let digest = digest(1);
+    let key = MessageKey::new();
+    let mut tx = fixture.store.begin().await.expect("begin alias insert");
+    assert_eq!(
+        fixture
+            .store
+            .resolve_and_record_alias(
+                &mut tx,
+                &sender,
+                &NormalizedTarget::Absent,
+                &opaque,
+                &digest,
+                || key,
+            )
+            .await
+            .expect("opaque origin id accepted"),
+        AliasResolution::Aliased(AliasOutcome::Inserted(key))
+    );
+    tx.commit().await.expect("commit alias insert");
+
+    let accepted = OriginId::new("a".repeat(MAX_ORIGIN_ID_BYTES));
+    let mut tx = fixture.store.begin().await.expect("begin boundary insert");
+    assert!(fixture
+        .store
+        .resolve_and_record_alias(
+            &mut tx,
+            &sender,
+            &NormalizedTarget::Bare(bare("juliet@example.com")),
+            &accepted,
+            &digest,
+            MessageKey::new,
+        )
+        .await
+        .is_ok());
+    tx.commit().await.expect("commit accepted boundary");
+
+    let rejected = OriginId::new("b".repeat(MAX_ORIGIN_ID_BYTES + 1));
+    let mut tx = fixture
+        .store
+        .begin()
+        .await
+        .expect("begin rejected boundary");
+    assert!(fixture
+        .store
+        .resolve_and_record_alias(
+            &mut tx,
+            &sender,
+            &NormalizedTarget::Full(full("juliet@example.com/phone")),
+            &rejected,
+            &digest,
+            MessageKey::new,
+        )
+        .await
+        .is_err());
+    drop(tx); // the backend transaction rolls back unless committed
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn aliases_are_sender_and_target_scoped_without_silent_overwrite() {
+    let Some(fixture) = Fixture::open("scoped").await else {
+        return;
+    };
+    let origin = OriginId::new("same-client-id");
+    let first = insert(
+        &fixture,
+        bare("romeo@example.com"),
+        NormalizedTarget::Absent,
+        &origin,
+        digest(2),
+    )
+    .await;
+    let second = insert(
+        &fixture,
+        bare("juliet@example.com"),
+        NormalizedTarget::Absent,
+        &origin,
+        digest(2),
+    )
+    .await;
+    assert_ne!(first, second, "different senders own distinct alias keys");
+
+    for target in [
+        NormalizedTarget::Bare(bare("room@example.com")),
+        NormalizedTarget::Full(full("room@example.com/nick")),
+    ] {
+        let result = insert(
+            &fixture,
+            bare("romeo@example.com"),
+            target,
+            &origin,
+            digest(2),
+        )
+        .await;
+        assert_ne!(result, first, "target shape is part of Waddle's alias key");
+    }
+
+    let mut tx = fixture.store.begin().await.expect("begin conflict lookup");
+    let conflict = fixture
+        .store
+        .resolve_and_record_alias(
+            &mut tx,
+            &bare("romeo@example.com"),
+            &NormalizedTarget::Absent,
+            &origin,
+            &digest(3),
+            MessageKey::new,
+        )
+        .await
+        .expect("lookup completes");
+    tx.commit().await.expect("commit conflict lookup");
+    assert!(matches!(
+        conflict,
+        AliasResolution::Aliased(AliasOutcome::Conflict(_))
+    ));
+    assert_eq!(fixture.count("ingress_origin_aliases").await, 4);
+    fixture.close().await;
+}
+
+async fn insert(
+    fixture: &Fixture,
+    sender: jid::BareJid,
+    target: NormalizedTarget,
+    origin: &OriginId,
+    digest: SemanticDigest,
+) -> MessageKey {
+    let key = MessageKey::new();
+    let mut tx = fixture.store.begin().await.expect("begin alias insert");
+    let resolution = fixture
+        .store
+        .resolve_and_record_alias(&mut tx, &sender, &target, origin, &digest, || key)
+        .await
+        .expect("insert scoped alias");
+    tx.commit().await.expect("commit alias insert");
+    match resolution {
+        AliasResolution::Aliased(AliasOutcome::Inserted(key)) => key,
+        _ => panic!("fresh scoped alias must insert"),
+    }
+}
+
+fn digest(byte: u8) -> SemanticDigest {
+    SemanticDigest::from_storage(1, [byte; 32]).expect("valid fixture digest")
+}
+
+fn bare(value: &str) -> jid::BareJid {
+    value.parse().expect("valid fixture bare JID")
+}
+
+fn full(value: &str) -> jid::FullJid {
+    value.parse().expect("valid fixture full JID")
+}
+
+struct Fixture {
+    store: PostgresIngressSubstrate,
+    db: Database,
+    admin: sqlx::PgPool,
+    schema: String,
+}
+
+impl Fixture {
+    async fn open(name: &str) -> Option<Self> {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (XEP-0359 schema)");
+            return None;
+        };
+        let schema = format!(
+            "waddle_test_xep0359_{name}_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let admin = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect PostgreSQL");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .expect("create schema");
+        let db = Database::from_config(
+            "xep0359-schema-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, schema_url(&database_url, &schema)),
+        )
+        .await
+        .expect("open schema database");
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("apply migrations");
+        let store = PostgresIngressSubstrate::open(db.clone()).expect("open ingress store");
+        Some(Self {
+            store,
+            db,
+            admin,
+            schema,
+        })
+    }
+
+    async fn count(&self, table: &str) -> i64 {
+        let conn = self.db.guard().await.expect("database guard");
+        let mut rows = conn
+            .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+            .await
+            .expect("count rows");
+        rows.next()
+            .await
+            .expect("read count")
+            .expect("count row")
+            .get(0)
+            .expect("decode count")
+    }
+
+    async fn close(self) {
+        drop(self.store);
+        drop(self.db);
+        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
+            .execute(&self.admin)
+            .await
+            .expect("drop schema");
+    }
+}
+
+fn schema_url(database_url: &str, schema: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse PostgreSQL URL");
+    let values: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(values.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    url.to_string()
+}
