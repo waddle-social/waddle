@@ -12,7 +12,6 @@ mod core;
 mod cross_node_resume;
 mod persistence_codec;
 mod resources;
-mod sequence;
 mod session;
 mod tombstones;
 mod trait_impl;

@@ -829,7 +829,7 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("origin sends full-JID message to remote target");
     let delivered = ordered_target_client
-        .recv_matching(|frame| {
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("ordered-websocket-one") && frame.contains("phase4 cross-node route")
         })
         .await
@@ -843,7 +843,7 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("origin requests handled count after remote handoff");
     let origin_ack = ordered_origin_client
-        .recv_matching(|frame| {
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("<a") && (frame.contains("h=\"1\"") || frame.contains("h='1'"))
         })
         .await
@@ -904,7 +904,7 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("origin sends full-JID message to same-bare remote resource");
     let same_bare_delivered = remote_target_client
-        .recv_matching(|frame| {
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("ordered-remote-same-bare")
                 && frame.contains("phase4 same-bare remote resource")
         })
@@ -932,13 +932,67 @@ async fn cluster_exit_criteria_end_to_end() {
         .send(&remote_origin_xml)
         .await
         .expect("same-bare remote resource sends to owner-node sibling resource");
-    let remote_origin_delivered = ordered_target_client
-        .recv_matching(|frame| {
+    let remote_origin_result = ordered_target_client
+        .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("ordered-remote-origin")
                 && frame.contains("phase4 remote resource origin route")
         })
-        .await
-        .expect("owner-node sibling receives message originated by remote resource");
+        .await;
+    let remote_origin_delivered = match remote_origin_result {
+        Ok(frame) => frame,
+        Err(error) => {
+            // CI diagnostic for the repeatable zero-frame timeout on this
+            // leg (issue #1627 / PR #1676): determine which link is dead
+            // before panicking. Probe 1 exercises owner-node local
+            // delivery to the same sibling connection; probe 2 exercises
+            // node-B local echo back to the remote resource itself.
+            let mut probe_local = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+                ordered_target_full.clone(),
+            )));
+            probe_local.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                "diag local-path probe".to_string(),
+            );
+            let probe_local_xml = waddle_xmpp::parser::message_to_string(&probe_local)
+                .expect("serialize diag local probe");
+            ordered_origin_client
+                .send(&probe_local_xml)
+                .await
+                .expect("diag: origin sends local-path probe");
+            let local_probe = ordered_target_client
+                .recv_matching_within(Duration::from_secs(10), |frame| {
+                    frame.contains("diag local-path probe")
+                })
+                .await;
+            // Drain whatever node B pushed at the remote resource before
+            // (possibly) killing its socket — a stream error or <close/>
+            // here names the kill reason. Every diagnostic call is
+            // non-panicking so all collected evidence reaches the panic.
+            let mut remote_backlog: Vec<String> = Vec::new();
+            loop {
+                match remote_target_client
+                    .recv_timeout(Duration::from_secs(2))
+                    .await
+                {
+                    Ok(frame) => remote_backlog.push(frame),
+                    Err(recv_error) => {
+                        remote_backlog.push(format!("<recv error: {recv_error}>"));
+                        break;
+                    }
+                }
+                if remote_backlog.len() >= 20 {
+                    break;
+                }
+            }
+            let resend = remote_target_client.send(&remote_origin_xml).await;
+            panic!(
+                "owner-node sibling never received the remote-origin message: {error}\n\
+                 diag probe 1 (owner-node local delivery to the same sibling connection): {local_probe:?}\n\
+                 diag probe 2 (frames node B pushed at the remote resource before/while dying): {remote_backlog:#?}\n\
+                 diag probe 3 (re-send on the remote resource socket): {resend:?}"
+            );
+        }
+    };
     assert!(
         remote_origin_delivered.contains(ordered_target_full.as_str()),
         "remote-origin frame should remain addressed to the owner-node full JID: \
@@ -987,7 +1041,9 @@ async fn cluster_exit_criteria_end_to_end() {
         "first ordered envelope must ack sequence 1: {first_reply:?}"
     );
     ordered_target_client
-        .recv_matching(|frame| frame.contains("ordered-one"))
+        .recv_matching_within(Duration::from_secs(30), |frame| {
+            frame.contains("ordered-one")
+        })
         .await
         .expect("target receives direct ordered relay envelope");
 

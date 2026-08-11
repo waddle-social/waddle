@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use jid::FullJid;
 use xmpp_parsers::presence::Show;
 
-use super::sequence::sequence_gt;
+use super::super::sequence::sequence_gt;
 use super::DEFAULT_SESSION_TIMEOUT_SECS;
 
 /// One unacknowledged stanza retained on a detached SM session.
@@ -198,31 +198,49 @@ impl DetachedSession {
         });
     }
 
+    /// Record an explicitly sequenced outbound stanza while detached.
+    ///
+    /// Entries at or behind `last_acked` are rejected before mutating the
+    /// session: acknowledgement has already purged them, so admitting one
+    /// would either restore obsolete state or evict a still-valid entry.
+    ///
+    /// Returns whether the session mutated. Stale and duplicate sequences
+    /// are no-ops; callers that persist snapshots must skip the durable
+    /// write for them, because persistence restamps `detached_at` and a
+    /// no-op retry must not extend the session's resume window.
     pub fn record_detached_outbound_at(
         &mut self,
         sequence: u32,
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
-    ) {
-        self.outbound_count = self.outbound_count.max(sequence);
+    ) -> bool {
+        if !sequence_gt(sequence, self.last_acked) {
+            return false;
+        }
         if self
             .unacked_stanzas
             .iter()
             .any(|entry| entry.sequence == sequence)
         {
-            return;
+            return false;
         }
-        if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
-            let evicted = self.unacked_stanzas.remove(0);
-            self.note_detached_eviction(evicted.sequence);
-            self.mark_replay_gap_through(evicted.sequence);
+        if sequence_gt(sequence, self.outbound_count) {
+            self.outbound_count = sequence;
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
             sequence,
             stanza_xml,
             original_receipt_at,
         });
-        self.unacked_stanzas.sort_by_key(|entry| entry.sequence);
+        self.unacked_stanzas
+            .sort_by_key(|entry| entry.sequence.wrapping_sub(self.last_acked));
+        while self.unacked_stanzas.len() > crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE
+        {
+            let evicted = self.unacked_stanzas.remove(0);
+            self.note_detached_eviction(evicted.sequence);
+            self.mark_replay_gap_through(evicted.sequence);
+        }
+        true
     }
 
     /// Surface a detached-queue eviction that was previously silent (issue

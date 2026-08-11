@@ -467,3 +467,78 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
         "rows with no thread metadata must decode as `thread: None`"
     );
 }
+
+/// XEP-0201 conformance of the ingress semantic-digest boundary (#1650),
+/// in this XEP's dedicated suite per the repo test rule: digest thread
+/// normalization must match `ThreadId`'s consumer semantics — original
+/// bytes preserved, whitespace-only means no thread.
+mod ingress_digest_boundary {
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
+    use xmpp_parsers::message::{Message, Thread};
+
+    fn context() -> DigestContext {
+        DigestContext {
+            target: NormalizedTarget::Absent,
+            server_authorities: Vec::new(),
+            stanza_lang: None,
+        }
+    }
+
+    fn with_thread(id: &str) -> Message {
+        let mut message = Message::normal(None);
+        message.thread = Some(Thread {
+            id: id.to_owned(),
+            parent: None,
+        });
+        message
+    }
+
+    #[test]
+    fn thread_id_bytes_are_preserved_like_thread_id_new() {
+        let parsed = DigestInput::from_parsed(&with_thread("  padded-7  "), &context())
+            .expect("valid digest input");
+        assert_eq!(
+            parsed.thread().map(|thread| thread.id.as_str()),
+            Some("  padded-7  "),
+            "ThreadId preserves the original value; the digest boundary must too"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_thread_is_absent_like_thread_id_new() {
+        let parsed =
+            DigestInput::from_parsed(&with_thread("   "), &context()).expect("valid digest input");
+        assert!(parsed.thread().is_none());
+    }
+}
+
+/// The digest boundary mirrors `thread_info_from_message_in_stanza_ns`'s
+/// exact normalization split: PAYLOAD-form thread id text is trimmed
+/// (xep0201.rs consumer trims before `ThreadId::new`), while the typed
+/// field preserves bytes (covered above).
+#[test]
+fn payload_form_thread_id_padding_is_digest_neutral_like_the_consumer() {
+    use minidom::Element;
+    use waddle_xmpp::ingress::digest::v1;
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
+    use xmpp_parsers::message::Message;
+
+    let context = DigestContext {
+        target: NormalizedTarget::Absent,
+        server_authorities: Vec::new(),
+        stanza_lang: None,
+    };
+    let payload_thread = |id: &str| {
+        Message::normal(None).with_payloads(vec![Element::builder("thread", "jabber:client")
+            .append(id)
+            .build()])
+    };
+    let digest_of = |message: &Message| {
+        v1::digest(&DigestInput::from_parsed(message, &context).expect("valid input"))
+    };
+    assert_eq!(
+        digest_of(&payload_thread("  padded-9  ")),
+        digest_of(&payload_thread("padded-9")),
+        "the payload-form consumer trims, so padding must be digest-neutral here"
+    );
+}

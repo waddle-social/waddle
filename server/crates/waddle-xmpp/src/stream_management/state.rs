@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use tracing::warn;
 
-use super::unacked_queue::sequence_gt;
+use super::sequence::sequence_gt;
 use super::{
     DetachedSession, UnackedPushResult, UnackedQueue, DEFAULT_ACK_REQUEST_THRESHOLD,
     DEFAULT_MAX_UNACKED_QUEUE_SIZE,
@@ -320,8 +320,13 @@ impl StreamManagementState {
     /// half-space as "valid", and the numeric `<= h` range-delete on
     /// pending rows would then destroy every claimed row (round-2
     /// concurrency review on #1099).
+    /// The 2^31 antipode (`h == last_acked + 0x8000_0000`) counts as
+    /// regressed: neither strictly ahead nor behind, it must be ignored
+    /// inert here rather than fall through to `ack_exceeds_outbound`,
+    /// which would escalate it to a stream error (behavior pinned by
+    /// `sm_live_ack_at_half_window_distance_is_ignored_not_acknowledged`).
     pub fn ack_regresses_last_acked(&self, h: u32) -> bool {
-        sequence_gt(self.last_acked, h)
+        h != self.last_acked && !sequence_gt(h, self.last_acked)
     }
 
     /// Get the current inbound count for sending in an <a/> response.

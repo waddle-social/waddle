@@ -207,3 +207,57 @@ fn xep0203_delay_lives_in_stanza_payloads_not_body() {
 // `pending_delivery::tests::xep0160_promoted_stanzas_carry_original_receipt_time_in_delay`.
 // Those live in the server crate where `flush_for_resource` and the
 // promotion path are reachable.
+
+/// XEP-0203 conformance of the ingress semantic-digest boundary (#1650),
+/// in this XEP's dedicated suite per the repo test rule: exactly the
+/// `{urn:xmpp:delay}delay` expanded name is excluded from digest material
+/// (retry-added delay must be digest-neutral), while OTHER element names
+/// in the delay namespace remain digest-sensitive extensions.
+mod ingress_digest_boundary {
+    use minidom::{rxml::xml_ncname, Element};
+    use waddle_xmpp::ingress::digest::v1;
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
+    use xmpp_parsers::message::Message;
+
+    const DELAY_NS: &str = "urn:xmpp:delay";
+
+    fn context() -> DigestContext {
+        DigestContext {
+            target: NormalizedTarget::Absent,
+            server_authorities: Vec::new(),
+            stanza_lang: None,
+        }
+    }
+
+    fn digest_of(message: &Message) -> waddle_xmpp::ingress::SemanticDigest {
+        v1::digest(&DigestInput::from_parsed(message, &context()).expect("valid input"))
+    }
+
+    #[test]
+    fn delay_element_is_digest_neutral() {
+        let bare = Message::normal(None);
+        let delayed =
+            Message::normal(None).with_payloads(vec![Element::builder("delay", DELAY_NS)
+                .attr(xml_ncname!("from").to_owned(), "server.example")
+                .attr(xml_ncname!("stamp").to_owned(), "2026-08-11T00:00:00Z")
+                .build()]);
+        assert_eq!(
+            digest_of(&bare),
+            digest_of(&delayed),
+            "retry-added XEP-0203 delay must never change semantic identity"
+        );
+    }
+
+    #[test]
+    fn other_names_in_the_delay_namespace_stay_digest_sensitive() {
+        let bare = Message::normal(None);
+        let custom =
+            Message::normal(None)
+                .with_payloads(vec![Element::builder("not-delay", DELAY_NS).build()]);
+        assert_ne!(
+            digest_of(&bare),
+            digest_of(&custom),
+            "only the exact {{urn:xmpp:delay}}delay expanded name is excluded"
+        );
+    }
+}

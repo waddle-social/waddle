@@ -29,6 +29,7 @@ pub mod carbons;
 pub mod commands;
 pub mod disco;
 pub mod inbox;
+pub mod ingress;
 pub mod mam;
 pub mod metrics;
 pub mod muc;

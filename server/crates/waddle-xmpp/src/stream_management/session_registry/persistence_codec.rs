@@ -20,11 +20,15 @@ pub(super) fn detached_to_persisted(
         last_acked: session.last_acked,
         replay_gap_through: session.replay_gap_through,
         max_resume_time: session.max_resume_time,
-        // `detached_at: Instant` is process-relative; persistence
-        // captures the wall-clock moment of the persist write. The
-        // skew vs. the actual detach-event time is bounded by the
-        // store_session call latency (microseconds in practice).
-        detached_at: chrono::Utc::now(),
+        // `detached_at: Instant` is process-relative; translate the
+        // actual detach instant to wall clock (now minus elapsed) so
+        // re-persisting a session NEVER refreshes its durable detach
+        // time — a no-op append retried long after detach must not
+        // extend the resume window (gpt-5.6-sol round-2 finding on
+        // PR #1676).
+        detached_at: chrono::Utc::now()
+            - chrono::Duration::from_std(session.detached_at.elapsed())
+                .unwrap_or_else(|_| chrono::Duration::zero()),
         max_resume_duration: Duration::from_secs(
             session
                 .max_resume_time
@@ -138,6 +142,12 @@ pub(super) fn persisted_to_detached(
         })
         .collect::<Result<_, SmRegistryError>>()?;
 
+    // The database's `ORDER BY sequence ASC` is only a stable numeric pre-sort:
+    // it is wrong after the counter wraps. This is the authoritative
+    // wrap-aware re-sort for every hydration caller, relative to `last_acked`.
+    let mut unacked_stanzas = unacked_stanzas;
+    unacked_stanzas.sort_by_key(|entry| entry.sequence.wrapping_sub(persisted.last_acked));
+
     Ok(DetachedSession {
         stream_id: persisted.stream_id.as_str().to_string(),
         user_id: persisted.user_id.clone(),
@@ -165,4 +175,77 @@ pub(super) fn persisted_to_detached(
         // subscribes once after a restart — acceptable.
         pending_subscribes_flushed: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use xmpp_parsers::message::{Lang, Message};
+
+    use super::super::super::persistence::{PersistedSession, PersistedUnackedStanza};
+    use super::persisted_to_detached;
+
+    fn persisted_session(last_acked: u32, outbound_count: u32) -> PersistedSession {
+        PersistedSession {
+            stream_id: crate::pending_delivery::SmSessionId::new("codec-wrap".to_string()),
+            user_id: "alice".to_string(),
+            jid: "alice@example.com/web".parse().expect("full jid"),
+            inbound_count: 0,
+            outbound_count,
+            last_acked,
+            replay_gap_through: None,
+            max_resume_time: None,
+            detached_at: chrono::Utc::now(),
+            max_resume_duration: Duration::from_secs(300),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        }
+    }
+
+    fn persisted_row(sequence: u32) -> PersistedUnackedStanza {
+        let mut message = Message::new(None::<jid::Jid>);
+        message
+            .bodies
+            .insert(Lang::new(), format!("seq-{sequence}"));
+        PersistedUnackedStanza {
+            stream_id: crate::pending_delivery::SmSessionId::new("codec-wrap".to_string()),
+            sequence,
+            stanza: Box::new(crate::Stanza::Message(message)),
+            original_receipt_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The SQL backends return rows in numeric `ORDER BY sequence ASC`,
+    /// which is wrong across the 2^32 wrap (post-wrap low sequences sort
+    /// first). The codec's re-sort is the single authoritative fix for
+    /// every hydration caller; feed it exactly the numeric order SQL
+    /// produces and assert wrap order comes out.
+    #[test]
+    fn hydration_re_sorts_numeric_sql_order_into_wrap_order() {
+        let last_acked = u32::MAX - 2;
+        let wrapped: Vec<u32> = vec![0, 1, u32::MAX - 1, u32::MAX];
+        let session = persisted_session(last_acked, 1);
+        let rows: Vec<PersistedUnackedStanza> =
+            wrapped.iter().copied().map(persisted_row).collect();
+
+        let detached = persisted_to_detached(&session, &rows).expect("codec hydration");
+
+        let hydrated: Vec<u32> = detached
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect();
+        assert_eq!(
+            hydrated,
+            vec![u32::MAX - 1, u32::MAX, 0, 1],
+            "numeric ASC input must be re-sorted relative to last_acked"
+        );
+    }
 }
