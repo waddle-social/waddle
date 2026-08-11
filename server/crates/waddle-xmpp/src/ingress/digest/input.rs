@@ -138,6 +138,12 @@ impl DigestInput {
                     }
                     reply = Some(parse_reply(payload)?);
                 }
+                // The reattached XEP-0201 thread element (frame.rs). Its
+                // `parent` was trimmed by the parse layer
+                // (`extract_thread_parent`): the parsed shape defines
+                // whitespace-padded parents as equivalent, and the digest
+                // hashes the parsed semantics — no further normalization
+                // happens here.
                 (CLIENT_NS, "thread") => {
                     if thread.is_some() {
                         return Err(DigestInputError::DuplicateThread);

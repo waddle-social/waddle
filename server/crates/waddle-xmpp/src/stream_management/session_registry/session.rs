@@ -203,21 +203,26 @@ impl DetachedSession {
     /// Entries at or behind `last_acked` are rejected before mutating the
     /// session: acknowledgement has already purged them, so admitting one
     /// would either restore obsolete state or evict a still-valid entry.
+    ///
+    /// Returns whether the session mutated. Stale and duplicate sequences
+    /// are no-ops; callers that persist snapshots must skip the durable
+    /// write for them, because persistence restamps `detached_at` and a
+    /// no-op retry must not extend the session's resume window.
     pub fn record_detached_outbound_at(
         &mut self,
         sequence: u32,
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
-    ) {
+    ) -> bool {
         if !sequence_gt(sequence, self.last_acked) {
-            return;
+            return false;
         }
         if self
             .unacked_stanzas
             .iter()
             .any(|entry| entry.sequence == sequence)
         {
-            return;
+            return false;
         }
         if sequence_gt(sequence, self.outbound_count) {
             self.outbound_count = sequence;
@@ -235,6 +240,7 @@ impl DetachedSession {
             self.note_detached_eviction(evicted.sequence);
             self.mark_replay_gap_through(evicted.sequence);
         }
+        true
     }
 
     /// Surface a detached-queue eviction that was previously silent (issue
