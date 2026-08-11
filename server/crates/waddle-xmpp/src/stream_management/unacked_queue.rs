@@ -9,6 +9,8 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
+use super::sequence::{sequence_gt, sequence_lte};
+
 /// An unacknowledged stanza waiting for client acknowledgment.
 #[derive(Debug, Clone)]
 pub struct UnackedStanza {
@@ -137,6 +139,11 @@ impl UnackedQueue {
 
     /// Remove all stanzas with sequence <= h (they've been acknowledged).
     pub fn acknowledge(&mut self, h: u32) {
+        // A real acknowledgement at the ambiguous 2^31 antipode is rejected
+        // by the exact SM acknowledgement window before it reaches this FIFO
+        // queue. The shared comparator still resolves that degenerate input
+        // consistently: neither direction is strictly greater, so both
+        // directions satisfy `sequence_lte`.
         // Remove stanzas from front while their sequence <= h
         while let Some(front) = self.stanzas.front() {
             if sequence_lte(front.sequence, h) {
@@ -154,6 +161,9 @@ impl UnackedQueue {
     /// receipt time so the resume path can stamp the XEP-0203
     /// `<delay/>` with the true send time (issue #1178).
     pub fn get_unacked_after(&self, h: u32) -> Vec<super::ReplayStanza> {
+        // Resume handling validates `h` against its exact SM window before
+        // replay. Thus the comparator's 2^31 antipode is not a replayable
+        // client acknowledgement in normal protocol operation.
         self.stanzas
             .iter()
             .filter(|s| sequence_gt(s.sequence, h))
@@ -218,26 +228,6 @@ impl UnackedQueue {
     pub fn newest_sequence(&self) -> Option<u32> {
         self.stanzas.back().map(|s| s.sequence)
     }
-}
-
-/// Check if sequence a <= b, handling wrap-around.
-///
-/// XEP-0198 specifies that sequence numbers wrap at 2^32.
-/// Per RFC 1982-like comparison, we use a window of 2^31.
-pub(super) fn sequence_lte(a: u32, b: u32) -> bool {
-    // If a == b, it's equal
-    if a == b {
-        return true;
-    }
-
-    // Otherwise, a < b if (b - a) mod 2^32 < 2^31
-    let diff = b.wrapping_sub(a);
-    diff < 0x8000_0000
-}
-
-/// Check if sequence a > b, handling wrap-around.
-pub(super) fn sequence_gt(a: u32, b: u32) -> bool {
-    !sequence_lte(a, b)
 }
 
 #[cfg(test)]

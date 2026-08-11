@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use tracing::warn;
 
-use super::unacked_queue::sequence_gt;
+use super::sequence::sequence_gt;
 use super::{
     DetachedSession, UnackedPushResult, UnackedQueue, DEFAULT_ACK_REQUEST_THRESHOLD,
     DEFAULT_MAX_UNACKED_QUEUE_SIZE,
