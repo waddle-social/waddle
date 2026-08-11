@@ -41,11 +41,19 @@ fn remote_resource_register_error_is_retryable(error: &RelayAskError) -> bool {
 /// map entries and relay traffic.
 const REMOTE_UNREGISTER_OWNER_LOOKUP_MISS_TERMINAL_STREAK: u32 = 5;
 
-/// Delay before the one-shot remote-registration resync (#1680): long
-/// enough to outlive the transient owner-side hiccup that failed the
-/// original state update, short enough that the replicated presence
-/// mirror cannot stay stale across a user-visible window.
+/// First resync delay (#1680): long enough to outlive the transient
+/// owner-side hiccup that failed the original state update, short enough
+/// that the replicated presence mirror cannot stay stale across a
+/// user-visible window. Doubles per attempt up to the cap below.
 const REMOTE_STATE_RESYNC_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// Backoff cap for the bounded resync loop.
+const REMOTE_STATE_RESYNC_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(16);
+/// Bounded attempts: with doubling backoff this spans ~30s. Past that
+/// the owner has been unavailable long enough that its own recovery
+/// (janitor convergence, the next real state change, or an origin-route
+/// refresh) owns the repair; an unbounded loop would pile on a
+/// struggling peer.
+const REMOTE_STATE_RESYNC_MAX_ATTEMPTS: u32 = 5;
 
 fn remote_resource_register_reply_timeout(configured: std::time::Duration) -> std::time::Duration {
     configured.max(REMOTE_OWNER_REGISTER_REPLY_TIMEOUT)
@@ -507,7 +515,7 @@ impl OrderedRelayDeliveryBridge {
                 jid: jid.clone(),
                 registration_id: registration.registration_id,
                 socket_generation: registration.socket_generation,
-                update,
+                update: update.clone(),
                 trace: RelayTraceContext::default(),
             })
             .await
@@ -522,39 +530,38 @@ impl OrderedRelayDeliveryBridge {
                 // evidence the CLIENT is displaced, and killing the live
                 // socket here spuriously kicked healthy resources with
                 // <conflict/> (#1680). Keep the record (the refresh path
-                // needs it to recover the owner token) and schedule a full
-                // re-registration: a fresh registration id displaces the
-                // stale owner mirror and replicates the current snapshot.
+                // needs it to recover the owner token) and hand recovery
+                // to the resync loop, which routes a proven-stale
+                // registration through `refresh_remote_resource_origin`.
                 tracing::warn!(
                     jid = %jid,
                     "clustered remote-resource state update hit a stale registration; \
-                     keeping the socket and scheduling re-registration"
+                     keeping the socket and scheduling a resync"
                 );
-                self.schedule_remote_state_resync(jid, &registration.owner);
+                self.schedule_remote_state_resync(jid, &registration.owner, update);
             }
             Ok(RelayRemoteResourceUpdateReply {
                 status: RelayRemoteResourceUpdateStatus::Unavailable,
             }) => {
                 // Transient owner-side unavailability. Staleness is
-                // unproven — keep registration and socket, and schedule a
-                // full-snapshot re-registration so a dropped update (e.g.
-                // an unavailable-presence flip) cannot leave the owner
-                // mirror permanently stale (#1680).
+                // unproven — keep registration and socket, and retry the
+                // update so a dropped flip (e.g. unavailable presence)
+                // cannot leave the owner mirror permanently stale (#1680).
                 tracing::warn!(
                     jid = %jid,
                     "clustered remote-resource state update unavailable at the owner; \
-                     keeping the socket and scheduling a state resync"
+                     keeping the socket and scheduling a resync"
                 );
-                self.schedule_remote_state_resync(jid, &registration.owner);
+                self.schedule_remote_state_resync(jid, &registration.owner, update);
             }
             Err(error) => {
                 tracing::warn!(
                     jid = %jid,
                     %error,
                     "clustered remote-resource state update ask failed; \
-                     keeping the socket and scheduling a state resync"
+                     keeping the socket and scheduling a resync"
                 );
-                self.schedule_remote_state_resync(jid, &registration.owner);
+                self.schedule_remote_state_resync(jid, &registration.owner, update);
             }
         }
     }
@@ -576,14 +583,27 @@ impl OrderedRelayDeliveryBridge {
             .map(|_| registration)
     }
 
-    /// Schedule exactly one delayed full re-registration for a remote-hosted
-    /// resource whose state update failed or hit a stale registration
-    /// (#1680). `try_register_remote_user_resource` snapshots the CURRENT
-    /// connection state at run time (coalescing any interim changes), mints
-    /// a fresh registration id (displacing a stale owner mirror), and is
-    /// idempotent — so this heals both the registration and the replicated
-    /// presence without ever touching the live socket.
-    fn schedule_remote_state_resync(self: &Arc<Self>, jid: &jid::FullJid, owner: &Arc<AtomicBool>) {
+    /// Schedule one bounded resync loop for a remote-hosted resource whose
+    /// state update failed or hit a stale registration (#1680). The loop
+    /// RE-SENDS the update on the SAME registration id — never a fresh
+    /// registration: re-registering while the owner mirror is intact mints
+    /// a higher socket generation, and the owner's displaced-mirror
+    /// retirement would relay a force-detach that matches this very socket
+    /// (the exact `<conflict/>` kill this issue removes). Each attempt
+    /// re-validates the current registration and socket ownership, rebuilds
+    /// the update payload from the CURRENT connection state (coalescing
+    /// interim changes so a retried delta can never regress newer state),
+    /// and defers to `refresh_remote_resource_origin` — which atomically
+    /// re-checks registration currency — for the two cases where
+    /// re-registration IS correct: the owner proves the registration stale
+    /// (its mirror is a different registration, so displacement cannot hit
+    /// this socket), or ownership moved to this node (local promotion).
+    fn schedule_remote_state_resync(
+        self: &Arc<Self>,
+        jid: &jid::FullJid,
+        owner: &Arc<AtomicBool>,
+        failed_update: RemoteResourceStateUpdate,
+    ) {
         let bridge = Arc::clone(self);
         let jid = jid.clone();
         let owner = Arc::clone(owner);
@@ -595,24 +615,21 @@ impl OrderedRelayDeliveryBridge {
                     return;
                 }
             }
-            let cancelled = tokio::select! {
-                _ = bridge.stop_token.cancelled() => true,
-                _ = tokio::time::sleep(REMOTE_STATE_RESYNC_DELAY) => false,
-            };
-            if !cancelled {
-                let entry = bridge
-                    .services
-                    .get()
-                    .and_then(|services| services.connection_registry.entry_if_owner(&jid, &owner));
-                if let Some(entry) = entry {
-                    let outcome = bridge
-                        .try_register_remote_user_resource(&jid, entry, owner)
-                        .await;
-                    tracing::info!(
-                        jid = %jid,
-                        ?outcome,
-                        "clustered remote-resource state resync re-registration finished"
-                    );
+            let mut backoff = REMOTE_STATE_RESYNC_DELAY;
+            for _ in 0..REMOTE_STATE_RESYNC_MAX_ATTEMPTS {
+                let cancelled = tokio::select! {
+                    _ = bridge.stop_token.cancelled() => true,
+                    _ = tokio::time::sleep(backoff) => false,
+                };
+                if cancelled {
+                    break;
+                }
+                backoff = (backoff * 2).min(REMOTE_STATE_RESYNC_MAX_BACKOFF);
+                if bridge
+                    .run_remote_state_resync_attempt(&jid, &owner, &failed_update)
+                    .await
+                {
+                    break;
                 }
             }
             bridge
@@ -621,6 +638,124 @@ impl OrderedRelayDeliveryBridge {
                 .await
                 .remove(&key);
         });
+    }
+
+    /// One resync attempt. Returns `true` when the loop should stop:
+    /// converged, handed to the refresh path, or the registration/socket
+    /// is gone (a successor owns recovery). `false` = transient, retry.
+    async fn run_remote_state_resync_attempt(
+        self: &Arc<Self>,
+        jid: &jid::FullJid,
+        owner: &Arc<AtomicBool>,
+        failed_update: &RemoteResourceStateUpdate,
+    ) -> bool {
+        let registration = {
+            let registrations = self.remote_socket_resources.lock().await;
+            registrations
+                .get(jid)
+                .filter(|registration| Arc::ptr_eq(&registration.owner, owner))
+                .cloned()
+        };
+        let Some(registration) = registration else {
+            return true;
+        };
+        let Some(services) = self.services.get().cloned() else {
+            return true;
+        };
+        let Some(entry) = services.connection_registry.entry_if_owner(jid, owner) else {
+            return true;
+        };
+        let origin = RemoteResourceOriginSnapshot {
+            jid: jid.clone(),
+            registration_id: registration.registration_id,
+            socket_generation: registration.socket_generation,
+            user_owner: registration.user_owner.clone(),
+        };
+        if let Some(snapshot) = current_claim(&services, &user_entity(&jid.to_bare())).await {
+            if snapshot.owner_lease_fresh && snapshot.owner == services.node_identity.current() {
+                // Ownership moved to this node (former owner gone): the
+                // refresh path mirror-registers the live entry locally and
+                // retires the obsolete remote registration.
+                let refresh = self.refresh_remote_resource_origin(&origin).await;
+                tracing::info!(
+                    jid = %jid,
+                    ?refresh,
+                    "clustered remote-resource resync promoted a now-locally-owned resource"
+                );
+                return true;
+            }
+        }
+        let update = Self::rebuild_state_update(
+            &entry,
+            services.connection_registry.get_presence_state(jid),
+            failed_update,
+        );
+        let mut handle = RelayHandle::new(registration.user_owner.clone(), self.stop_token.clone())
+            .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        match handle
+            .update_remote_user_resource(RelayUpdateRemoteUserResource {
+                jid: jid.clone(),
+                registration_id: registration.registration_id,
+                socket_generation: registration.socket_generation,
+                update,
+                trace: RelayTraceContext::default(),
+            })
+            .await
+        {
+            Ok(RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::Updated,
+            }) => {
+                tracing::info!(jid = %jid, "clustered remote-resource state resync converged");
+                true
+            }
+            Ok(RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::StaleRegistration,
+            }) => {
+                // Proven stale: the owner's mirror is a DIFFERENT
+                // registration, so the refresh path's re-registration
+                // displaces that foreign mirror — never this socket.
+                let refresh = self.refresh_remote_resource_origin(&origin).await;
+                tracing::info!(
+                    jid = %jid,
+                    ?refresh,
+                    "clustered remote-resource resync refreshed a proven-stale registration"
+                );
+                true
+            }
+            Ok(RelayRemoteResourceUpdateReply {
+                status: RelayRemoteResourceUpdateStatus::Unavailable,
+            }) => false,
+            Err(error) => {
+                tracing::debug!(jid = %jid, %error, "remote-resource resync attempt failed");
+                false
+            }
+        }
+    }
+
+    /// Rebuild the failed update's variant from the CURRENT connection
+    /// state so a resync can never replay stale values over newer ones.
+    fn rebuild_state_update(
+        entry: &ConnectionEntry,
+        presence_state: Option<waddle_xmpp::registry::PresenceState>,
+        failed_update: &RemoteResourceStateUpdate,
+    ) -> RemoteResourceStateUpdate {
+        use std::sync::atomic::Ordering;
+        match failed_update {
+            RemoteResourceStateUpdate::Presence { .. } => RemoteResourceStateUpdate::Presence {
+                available: entry.presence_available.load(Ordering::Relaxed),
+                priority: entry.presence_priority.load(Ordering::Relaxed),
+                state: presence_state.map(RemotePresenceStateSnapshot::from),
+            },
+            RemoteResourceStateUpdate::Carbons { .. } => RemoteResourceStateUpdate::Carbons {
+                enabled: entry.carbons_enabled.load(Ordering::Relaxed),
+            },
+            RemoteResourceStateUpdate::RosterInterested => {
+                RemoteResourceStateUpdate::RosterInterested
+            }
+            RemoteResourceStateUpdate::BlocklistInterested => {
+                RemoteResourceStateUpdate::BlocklistInterested
+            }
+        }
     }
 
     pub(super) async fn remove_remote_socket_registration_if_current(
