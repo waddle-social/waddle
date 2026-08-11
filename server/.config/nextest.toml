@@ -12,6 +12,18 @@
 [test-groups]
 postgres = { max-threads = 1 }
 
+# The clustering e2e binaries run an in-process + spawned-server cluster
+# with real-time lease heartbeats (1s interval, 10s TTL) and the
+# cross-node stale-retirement bounds from #1294. Co-scheduled CPU-heavy
+# tests can starve those heartbeats until a live remote resource is
+# conflict-force-detached mid-test (#1627: the phase-4 legs then time
+# out with zero frames). Same rationale as the xmpp_e2e_cue reservation
+# below: give them the machine. Settings resolve per-key from the first
+# matching override, so these binaries still join the postgres group.
+[[profile.default.overrides]]
+filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume))'
+threads-required = 'num-cpus'
+
 [[profile.default.overrides]]
 filter = '''
 package(waddle-server) & (
