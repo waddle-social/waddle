@@ -21,6 +21,15 @@
 //! Retained trees carry only their local attributes: v1 intentionally does not
 //! materialize inherited `xml:lang`, so inherited and explicitly repeated
 //! language can conflict rather than falsely deduplicate.
+//!
+//! Thread and reply identifiers enter the preimage whitespace-TRIMMED, with
+//! an empty-after-trim thread id meaning ABSENT and an empty-after-trim
+//! reply id rejected — matching the XEP-0201/0461 consumers so a retry
+//! differing only in id padding cannot digest into an alias conflict.
+//!
+//! The preimage never exists as a byte buffer: typed fields stream straight
+//! into the hasher, with the running byte count enforcing the preimage
+//! bound.
 
 use minidom::{Element, Node};
 use sha2::{Digest, Sha256};
@@ -35,19 +44,19 @@ const DOMAIN: &[u8] = b"waddle:semantic-digest:v1\0";
 const ELEMENT_TAG: u8 = 0xe0;
 const TEXT_TAG: u8 = 0x01;
 
-/// Calculate the frozen version-one digest for validated input.
+/// The frozen version-one digest of validated input (computed once,
+/// streaming, at construction).
 pub fn digest(input: &DigestInput) -> SemanticDigest {
-    let mut hasher = Sha256::new();
-    hasher.update(&input.preimage);
-    SemanticDigest::from_parts(DigestVersion::V1, hasher.finalize().into())
+    input.digest.clone()
 }
 
-pub(crate) fn encode(input: &DigestInput) -> Result<Vec<u8>, DigestInputError> {
-    let mut output = Vec::new();
-    let mut writer = PreimageWriter::new(&mut output);
+pub(super) fn digest_fields(
+    input: &super::input::DigestFields,
+) -> Result<SemanticDigest, DigestInputError> {
+    let mut writer = PreimageWriter::new();
     writer.bytes(DOMAIN)?;
     writer.byte(message_type(input.message_type.clone()))?;
-    writer.option_str(input.stanza_lang.as_deref())?;
+    writer.option_str(input.stanza_lang.as_ref().map(|lang| lang.0.as_str()))?;
     match &input.target {
         NormalizedTarget::Absent => writer.byte(0)?,
         NormalizedTarget::Bare(jid) => {
@@ -87,7 +96,10 @@ pub(crate) fn encode(input: &DigestInput) -> Result<Vec<u8>, DigestInputError> {
     for extension in &input.extensions {
         writer.element(extension)?;
     }
-    Ok(output)
+    Ok(SemanticDigest::from_parts(
+        DigestVersion::V1,
+        writer.finish(),
+    ))
 }
 
 fn message_type(value: MessageType) -> u8 {
@@ -100,25 +112,33 @@ fn message_type(value: MessageType) -> u8 {
     }
 }
 
-struct PreimageWriter<'a> {
-    output: &'a mut Vec<u8>,
+struct PreimageWriter {
+    hasher: Sha256,
+    written: usize,
 }
 
-impl<'a> PreimageWriter<'a> {
-    fn new(output: &'a mut Vec<u8>) -> Self {
-        Self { output }
+impl PreimageWriter {
+    fn new() -> Self {
+        Self {
+            hasher: Sha256::new(),
+            written: 0,
+        }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.hasher.finalize().into()
     }
 
     fn bytes(&mut self, value: &[u8]) -> Result<(), DigestInputError> {
         let next_len = self
-            .output
-            .len()
+            .written
             .checked_add(value.len())
             .ok_or(DigestInputError::PreimageTooLarge)?;
         if next_len > MAX_PREIMAGE_BYTES {
             return Err(DigestInputError::PreimageTooLarge);
         }
-        self.output.extend_from_slice(value);
+        self.written = next_len;
+        self.hasher.update(value);
         Ok(())
     }
 

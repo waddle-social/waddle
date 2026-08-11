@@ -170,11 +170,11 @@ fn target_and_stanza_language_are_sensitive() {
     );
 
     let with_lang = DigestContext {
-        stanza_lang: Some("nb-NO".to_owned()),
+        stanza_lang: Some(Lang("nb-NO".to_owned())),
         ..context()
     };
     let other_lang = DigestContext {
-        stanza_lang: Some("en".to_owned()),
+        stanza_lang: Some(Lang("en".to_owned())),
         ..context()
     };
     assert_ne!(absent, digest(&message, &with_lang));
@@ -563,7 +563,7 @@ fn frozen_v1_golden_vectors_have_independent_hand_preimages() {
             DigestContext {
                 target: NormalizedTarget::Bare("alice@example".parse().expect("JID")),
                 server_authorities: Vec::new(),
-                stanza_lang: Some("nb".to_owned()),
+                stanza_lang: Some(Lang("nb".to_owned())),
             },
             hand_base_preimage(1, Some("nb"), Some((1, "alice@example")), Some("hei")),
             "99cd018687705639f790e337ea2948965b7394c5c30d411969b360c5744e106b",
@@ -577,4 +577,55 @@ fn frozen_v1_golden_vectors_have_independent_hand_preimages() {
         );
         assert_eq!(hex(&digest(&message, &context)), expected);
     }
+}
+
+/// Codex review on PR #1676: thread and reply identifiers are normalized
+/// exactly like their XEP-0201/0461 consumers (trimmed; empty-after-trim
+/// thread = absent, empty-after-trim reply id = rejected), so a retry
+/// differing only in id padding digests EQUAL instead of raising a
+/// spurious `AliasConflict`.
+#[test]
+fn thread_and_reply_id_padding_is_digest_neutral() {
+    let mut padded_thread = Message::normal(None);
+    padded_thread.thread = Some(Thread {
+        id: "  thread-7  ".to_owned(),
+        parent: None,
+    });
+    let mut trimmed_thread = Message::normal(None);
+    trimmed_thread.thread = Some(Thread {
+        id: "thread-7".to_owned(),
+        parent: None,
+    });
+    assert_eq!(
+        digest(&padded_thread, &context()),
+        digest(&trimmed_thread, &context()),
+        "thread id padding must be digest-neutral (consumers trim)"
+    );
+
+    let padded_reply = with_payloads(vec![reply("  r1  ", None)]);
+    let trimmed_reply = with_payloads(vec![reply("r1", None)]);
+    assert_eq!(
+        digest(&padded_reply, &context()),
+        digest(&trimmed_reply, &context()),
+        "reply id padding must be digest-neutral (the 0461 parser trims)"
+    );
+
+    let mut whitespace_thread = Message::normal(None);
+    whitespace_thread.thread = Some(Thread {
+        id: "   ".to_owned(),
+        parent: None,
+    });
+    let mut absent_thread = Message::normal(None);
+    absent_thread.thread = None;
+    assert_eq!(
+        digest(&whitespace_thread, &context()),
+        digest(&absent_thread, &context()),
+        "whitespace-only thread id means no thread to every consumer"
+    );
+
+    let whitespace_reply = with_payloads(vec![reply("   ", None)]);
+    assert_error!(
+        DigestInput::from_parsed(&whitespace_reply, &context()),
+        DigestInputError::ReplyMalformed
+    );
 }

@@ -278,3 +278,88 @@ fn xep0359_typed_stanza_id_round_trips_through_element() {
     assert_eq!(element.attr("id"), Some("mam-id-typed"));
     assert_eq!(element.attr("by"), Some("alice@example.com"));
 }
+
+/// XEP-0359 conformance of the ingress semantic-digest boundary (#1650):
+/// the digest validator's origin-id/stanza-id handling is part of this
+/// XEP's dedicated suite so it cannot drift from the canonical parser
+/// unnoticed (repo XEP custom test-suite hard rule).
+mod ingress_digest_boundary {
+    use minidom::{rxml::xml_ncname, Element};
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, DigestInputError, NormalizedTarget};
+    use waddle_xmpp_core::xep0359::NS_SID;
+    use xmpp_parsers::message::Message;
+
+    fn context_with_authority(by: &str) -> DigestContext {
+        DigestContext {
+            target: NormalizedTarget::Absent,
+            server_authorities: vec![by.parse().expect("authority bare jid")],
+            stanza_lang: None,
+        }
+    }
+
+    fn context() -> DigestContext {
+        DigestContext {
+            target: NormalizedTarget::Absent,
+            server_authorities: Vec::new(),
+            stanza_lang: None,
+        }
+    }
+
+    fn origin_element(id: &str) -> Element {
+        Element::builder("origin-id", NS_SID)
+            .attr(xml_ncname!("id").to_owned(), id)
+            .build()
+    }
+
+    fn message_with(payloads: Vec<Element>) -> Message {
+        Message::normal(None).with_payloads(payloads)
+    }
+
+    #[test]
+    fn duplicate_origin_id_is_rejected() {
+        let message = message_with(vec![origin_element("o1"), origin_element("o1")]);
+        assert!(matches!(
+            DigestInput::from_parsed(&message, &context()),
+            Err(DigestInputError::DuplicateOriginId)
+        ));
+    }
+
+    #[test]
+    fn origin_id_value_stays_opaque_but_structure_is_strict() {
+        // XEP-0359 §security: the id VALUE is opaque — a non-UUID is fine.
+        let opaque = message_with(vec![origin_element("not-a-uuid!")]);
+        assert!(DigestInput::from_parsed(&opaque, &context()).is_ok());
+
+        // The schema permits ONLY the id attribute.
+        let with_by = message_with(vec![Element::builder("origin-id", NS_SID)
+            .attr(xml_ncname!("id").to_owned(), "o1")
+            .attr(xml_ncname!("by").to_owned(), "evil@example.com")
+            .build()]);
+        assert!(matches!(
+            DigestInput::from_parsed(&with_by, &context()),
+            Err(DigestInputError::MalformedOriginId)
+        ));
+
+        let empty = message_with(vec![origin_element("")]);
+        assert!(matches!(
+            DigestInput::from_parsed(&empty, &context()),
+            Err(DigestInputError::MalformedOriginId)
+        ));
+    }
+
+    #[test]
+    fn forged_server_stanza_id_is_a_typed_strip_and_retry_error() {
+        let forged = message_with(vec![Element::builder("stanza-id", NS_SID)
+            .attr(xml_ncname!("id").to_owned(), "s1")
+            .attr(xml_ncname!("by").to_owned(), "server.example")
+            .build()]);
+        assert!(matches!(
+            DigestInput::from_parsed(&forged, &context_with_authority("server.example")),
+            Err(DigestInputError::ForgedServerStanzaId { .. })
+        ));
+        // A foreign (non-authority) stanza-id is excluded from digest
+        // material, never an error — untrusted ids must not change
+        // semantic identity.
+        assert!(DigestInput::from_parsed(&forged, &context()).is_ok());
+    }
+}
