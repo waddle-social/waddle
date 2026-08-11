@@ -84,7 +84,7 @@ pub(super) fn digest_fields(
         None => writer.byte(0)?,
         Some(reply) => {
             writer.byte(1)?;
-            writer.str(&reply.id)?;
+            writer.str(reply.id.as_str())?;
             match &reply.to {
                 None => writer.byte(0)?,
                 Some(to) => {

@@ -7,7 +7,7 @@ use minidom::{Element, Node};
 use thiserror::Error;
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
-use waddle_xmpp_core::mam::ThreadId;
+use waddle_xmpp_core::mam::{RichMessageId, ThreadId};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use super::limits::{
@@ -46,10 +46,12 @@ pub struct DigestThread {
     pub parent: Option<ThreadId>,
 }
 
-/// A strict XEP-0461 reply reference.
+/// A strict XEP-0461 reply reference. The id is the canonical
+/// [`RichMessageId`] — original bytes preserved, nonblank enforced —
+/// matching the archive paths that store and replay it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestReply {
-    pub id: String,
+    pub id: RichMessageId,
     pub to: Option<Jid>,
 }
 
@@ -325,18 +327,18 @@ fn parse_reply(element: &Element) -> Result<DigestReply, DigestInputError> {
     let Some(id) = element.attr("id") else {
         return Err(DigestInputError::ReplyMalformed);
     };
-    // Reply ids preserve their ORIGINAL bytes: the archive paths retain
-    // and replay the raw attribute (`RichMessageId::new` only checks
-    // trimmed emptiness), so trimming here would falsely digest-equal
-    // replies whose archived ids observably differ. A whitespace-only id
-    // (no reply to every consumer) is still rejected rather than hashed.
-    if id.trim().is_empty() {
+    // Reply ids preserve their ORIGINAL bytes via the canonical
+    // `RichMessageId` (the archive paths store and replay the raw
+    // attribute), so trimming would falsely digest-equal replies whose
+    // archived ids observably differ. Whitespace-only — no reply to every
+    // consumer — is rejected rather than hashed.
+    let Some(id) = RichMessageId::new(id) else {
         return Err(DigestInputError::ReplyMalformed);
-    }
-    if id.len() > MAX_ID_LEN {
+    };
+    if id.as_str().len() > MAX_ID_LEN {
         return Err(DigestInputError::IdLengthExceeded);
     }
-    if id.is_empty()
+    if id.as_str().is_empty()
         || element.children().next().is_some()
         || !element.text().is_empty()
         || element.attrs().iter().any(|((namespace, name), _)| {
@@ -353,10 +355,7 @@ fn parse_reply(element: &Element) -> Result<DigestReply, DigestInputError> {
             .map_err(|_| DigestInputError::ReplyMalformed)?,
         None => None,
     };
-    Ok(DigestReply {
-        id: id.to_owned(),
-        to,
-    })
+    Ok(DigestReply { id, to })
 }
 
 fn validate_element(
