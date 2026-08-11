@@ -35,7 +35,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema)
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1007));
+    assert_eq!(version, Some(1009));
 }
 
 #[tokio::test]
@@ -148,7 +148,10 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
 
     let runner = MigrationRunner::waddle();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1002, 1003, 1004, 1005, 1006, 1007]);
+    assert_eq!(
+        applied,
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+    );
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -167,7 +170,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1007));
+    assert_eq!(version, Some(1009));
 }
 
 #[tokio::test]
@@ -226,7 +229,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1007 (the waddle
+    // so the runner also reports applying 1001 through 1009 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -235,7 +238,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
     );
 
     // Column exists.
@@ -298,7 +301,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1007),
+        Some(1009),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -456,7 +459,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.unwrap(),
-        vec![1002, 1003, 1004, 1005, 1006, 1007]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
     assert_eq!(
@@ -541,7 +544,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 18);
+    assert_eq!(runner.migrations.len(), 20);
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -551,7 +554,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 18);
+    assert_eq!(migration_ledger_row_count(&db).await, 20);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -793,7 +796,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.expect("adopt and run migrations"),
-        vec![1002, 1003, 1004, 1005, 1006, 1007]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
     assert_eq!(
@@ -908,7 +911,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 18);
+    assert_eq!(runner.migrations.len(), 20);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -922,7 +925,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 18);
+    assert_eq!(migration_ledger_row_count(&db).await, 20);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1028,6 +1031,53 @@ async fn postgres_concurrent_migration_runners_record_one_complete_ledger() {
 
     drop(db_b);
     drop(db_a);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_incompatible_ingress_schema_drift_fails_without_recording_new_migrations() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (incompatible ingress schema drift)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("ingress_schema_drift");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
+        .await
+        .expect("create migration ledger");
+    conn.execute("CREATE TABLE ingress_messages (wrong_shape INTEGER)", ())
+        .await
+        .expect("create incompatible ingress_messages table");
+    drop(conn);
+
+    let error = MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect_err("incompatible ingress table must make V1008 fail");
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationApply { version: 1008, .. }
+    ));
+
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM _migrations WHERE version IN (?, ?)",
+            crate::db_params![1008_i64, 1009_i64],
+        )
+        .await
+        .expect("query ingress migration ledger rows");
+    let row = rows
+        .next()
+        .await
+        .expect("read ingress migration ledger rows")
+        .expect("ingress migration ledger row");
+    let recorded: i64 = row.get(0).expect("decode ingress migration ledger rows");
+    assert_eq!(recorded, 0, "failed V1008 must not record V1008 or V1009");
+    drop(conn);
+
+    drop(db);
     drop_postgres_schema(&admin, &schema).await;
 }
 
@@ -1344,7 +1394,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
@@ -1418,7 +1468,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     let applied = MigrationRunner::global().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
     );
 
     let conn = db.guard().await.unwrap();
@@ -1808,7 +1858,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
     );
 
     let conn = db.guard().await.expect("postgres guard");
@@ -2077,7 +2127,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         .run(&db)
         .await
         .expect("run waddle migration");
-    assert_eq!(applied, vec![1003, 1004, 1005, 1006, 1007]);
+    assert_eq!(applied, vec![1003, 1004, 1005, 1006, 1007, 1008, 1009]);
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
 
     let oversized_int4 = i64::from(i32::MAX) + 1;
