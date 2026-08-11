@@ -582,6 +582,48 @@ impl WsXmppClient {
         }
     }
 
+    /// Receive the first frame matching a predicate under one overall
+    /// budget instead of the per-frame [`RECV_TIMEOUT`].
+    ///
+    /// For load-sensitive multi-node suites (issue #1627): the budget
+    /// spans the whole wait, and a timeout error carries every frame
+    /// that was discarded while waiting, so a genuinely misrouted
+    /// stanza is distinguishable from slow delivery on a saturated
+    /// runner.
+    pub async fn recv_matching_within<F: Fn(&str) -> bool>(
+        &mut self,
+        budget: Duration,
+        predicate: F,
+    ) -> Result<String, String> {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut skipped: Vec<String> = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "Timeout waiting for matching frame after {budget:?}; \
+                     {} non-matching frames were discarded: {skipped:?}",
+                    skipped.len()
+                ));
+            }
+            match self.recv_timeout(remaining).await {
+                Ok(frame) => {
+                    if predicate(&frame) {
+                        return Ok(frame);
+                    }
+                    skipped.push(frame);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "{error} (budget {budget:?}; {} non-matching frames \
+                         were discarded: {skipped:?})",
+                        skipped.len()
+                    ));
+                }
+            }
+        }
+    }
+
     pub async fn close(mut self) -> Result<(), String> {
         let close =
             xmpp_parsers::minidom::Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing")
