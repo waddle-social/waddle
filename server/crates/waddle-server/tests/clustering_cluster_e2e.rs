@@ -964,28 +964,32 @@ async fn cluster_exit_criteria_end_to_end() {
                     frame.contains("diag local-path probe")
                 })
                 .await;
-            let mut probe_echo = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
-                remote_target_full.clone(),
-            )));
-            probe_echo.bodies.insert(
-                xmpp_parsers::message::Lang::new(),
-                "diag node-b echo probe".to_string(),
-            );
-            let probe_echo_xml = waddle_xmpp::parser::message_to_string(&probe_echo)
-                .expect("serialize diag echo probe");
-            remote_target_client
-                .send(&probe_echo_xml)
-                .await
-                .expect("diag: remote resource sends self-echo probe");
-            let echo_probe = remote_target_client
-                .recv_matching_within(Duration::from_secs(10), |frame| {
-                    frame.contains("diag node-b echo probe")
-                })
-                .await;
+            // Drain whatever node B pushed at the remote resource before
+            // (possibly) killing its socket — a stream error or <close/>
+            // here names the kill reason. Every diagnostic call is
+            // non-panicking so all collected evidence reaches the panic.
+            let mut remote_backlog: Vec<String> = Vec::new();
+            loop {
+                match remote_target_client
+                    .recv_timeout(Duration::from_secs(2))
+                    .await
+                {
+                    Ok(frame) => remote_backlog.push(frame),
+                    Err(recv_error) => {
+                        remote_backlog.push(format!("<recv error: {recv_error}>"));
+                        break;
+                    }
+                }
+                if remote_backlog.len() >= 20 {
+                    break;
+                }
+            }
+            let resend = remote_target_client.send(&remote_origin_xml).await;
             panic!(
                 "owner-node sibling never received the remote-origin message: {error}\n\
                  diag probe 1 (owner-node local delivery to the same sibling connection): {local_probe:?}\n\
-                 diag probe 2 (node-B local self-echo from the remote resource): {echo_probe:?}"
+                 diag probe 2 (frames node B pushed at the remote resource before/while dying): {remote_backlog:#?}\n\
+                 diag probe 3 (re-send on the remote resource socket): {resend:?}"
             );
         }
     };
