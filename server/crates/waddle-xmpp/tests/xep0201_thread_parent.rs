@@ -511,3 +511,34 @@ mod ingress_digest_boundary {
         assert!(parsed.thread().is_none());
     }
 }
+
+/// The digest boundary mirrors `thread_info_from_message_in_stanza_ns`'s
+/// exact normalization split: PAYLOAD-form thread id text is trimmed
+/// (xep0201.rs consumer trims before `ThreadId::new`), while the typed
+/// field preserves bytes (covered above).
+#[test]
+fn payload_form_thread_id_padding_is_digest_neutral_like_the_consumer() {
+    use minidom::Element;
+    use waddle_xmpp::ingress::digest::v1;
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
+    use xmpp_parsers::message::Message;
+
+    let context = DigestContext {
+        target: NormalizedTarget::Absent,
+        server_authorities: Vec::new(),
+        stanza_lang: None,
+    };
+    let payload_thread = |id: &str| {
+        Message::normal(None).with_payloads(vec![Element::builder("thread", "jabber:client")
+            .append(id)
+            .build()])
+    };
+    let digest_of = |message: &Message| {
+        v1::digest(&DigestInput::from_parsed(message, &context).expect("valid input"))
+    };
+    assert_eq!(
+        digest_of(&payload_thread("  padded-9  ")),
+        digest_of(&payload_thread("padded-9")),
+        "the payload-form consumer trims, so padding must be digest-neutral here"
+    );
+}

@@ -193,14 +193,17 @@ impl DigestInput {
                     }
                     reply = Some(parse_reply(payload)?);
                 }
-                // The reattached XEP-0201 thread element (frame.rs), under
-                // the same verbatim-id / absent-if-blank normalization as
-                // the typed field above.
+                // The reattached XEP-0201 thread element (frame.rs). The
+                // downstream consumer (`thread_info_from_message_in_stanza_ns`)
+                // TRIMS payload-form id text before `ThreadId::new` — unlike
+                // the typed-field fallback, which preserves bytes — so the
+                // digest mirrors that exact split.
                 (CLIENT_NS, "thread") => {
                     if thread.is_some() {
                         return Err(DigestInputError::DuplicateThread);
                     }
-                    thread = digest_thread(&payload.text(), payload.attr("parent")).transpose()?;
+                    thread =
+                        digest_thread(payload.text().trim(), payload.attr("parent")).transpose()?;
                 }
                 _ => {
                     validate_element(payload, 1, &mut node_count)?;
