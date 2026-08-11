@@ -181,3 +181,63 @@ fn xep0461_set_reply_replaces_existing_reply() {
         "exactly one reply payload survives the set; no duplicates"
     );
 }
+
+/// XEP-0461 conformance of the ingress semantic-digest boundary (#1650),
+/// in this XEP's dedicated suite per the repo test rule: strict reply
+/// parsing with original id bytes preserved (the archive paths retain and
+/// replay the raw attribute) and whitespace-only ids rejected.
+mod ingress_digest_boundary {
+    use minidom::{rxml::xml_ncname, Element};
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, DigestInputError, NormalizedTarget};
+    use waddle_xmpp::xep::xep0461::NS_REPLY;
+    use xmpp_parsers::message::Message;
+
+    fn context() -> DigestContext {
+        DigestContext {
+            target: NormalizedTarget::Absent,
+            server_authorities: Vec::new(),
+            stanza_lang: None,
+        }
+    }
+
+    fn with_reply(id: &str) -> Message {
+        Message::normal(None).with_payloads(vec![Element::builder("reply", NS_REPLY)
+            .attr(xml_ncname!("id").to_owned(), id)
+            .build()])
+    }
+
+    #[test]
+    fn reply_id_bytes_are_preserved_like_the_archive_paths() {
+        let parsed =
+            DigestInput::from_parsed(&with_reply("  r-9  "), &context()).expect("valid input");
+        assert_eq!(
+            parsed.reply().map(|reply| reply.id.as_str()),
+            Some("  r-9  "),
+            "archive consumers retain the raw reply id; the digest boundary must too"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_reply_id_is_rejected() {
+        assert!(matches!(
+            DigestInput::from_parsed(&with_reply("   "), &context()),
+            Err(DigestInputError::ReplyMalformed)
+        ));
+    }
+
+    #[test]
+    fn duplicate_reply_elements_are_rejected() {
+        let message = Message::normal(None).with_payloads(vec![
+            Element::builder("reply", NS_REPLY)
+                .attr(xml_ncname!("id").to_owned(), "a")
+                .build(),
+            Element::builder("reply", NS_REPLY)
+                .attr(xml_ncname!("id").to_owned(), "b")
+                .build(),
+        ]);
+        assert!(matches!(
+            DigestInput::from_parsed(&message, &context()),
+            Err(DigestInputError::DuplicateReply)
+        ));
+    }
+}

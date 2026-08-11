@@ -22,10 +22,12 @@
 //! materialize inherited `xml:lang`, so inherited and explicitly repeated
 //! language can conflict rather than falsely deduplicate.
 //!
-//! Thread and reply identifiers enter the preimage whitespace-TRIMMED, with
-//! an empty-after-trim thread id meaning ABSENT and an empty-after-trim
-//! reply id rejected — matching the XEP-0201/0461 consumers so a retry
-//! differing only in id padding cannot digest into an alias conflict.
+//! Thread and reply identifiers enter the preimage with their ORIGINAL
+//! bytes preserved — the XEP-0201/0461 consumers (`ThreadId`,
+//! `RichMessageId`, the archive paths) retain and replay the raw value, so
+//! ids differing in padding have observably different archived semantics
+//! and MUST digest differently. Whitespace-only is normalized exactly like
+//! those consumers: no thread / a rejected reply.
 //!
 //! The preimage never exists as a byte buffer: typed fields stream straight
 //! into the hasher, with the running byte count enforcing the preimage
@@ -74,8 +76,8 @@ pub(super) fn digest_fields(
         None => writer.byte(0)?,
         Some(thread) => {
             writer.byte(1)?;
-            writer.str(&thread.id)?;
-            writer.option_str(thread.parent.as_deref())?;
+            writer.str(thread.id.as_str())?;
+            writer.option_str(thread.parent.as_ref().map(|parent| parent.as_str()))?;
         }
     }
     match &input.reply {

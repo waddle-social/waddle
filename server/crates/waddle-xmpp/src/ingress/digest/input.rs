@@ -7,6 +7,9 @@ use minidom::{Element, Node};
 use thiserror::Error;
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
+use waddle_xmpp_core::mam::ThreadId;
+use waddle_xmpp_core::xep0359::OriginId;
+
 use super::limits::{
     MAX_ATTRS_PER_ELEMENT, MAX_DEPTH, MAX_ID_LEN, MAX_LANG_ENTRIES, MAX_NAME_LEN, MAX_TEXT_LEN,
     MAX_TOTAL_NODES,
@@ -33,11 +36,14 @@ pub struct DigestContext {
     pub stanza_lang: Option<Lang>,
 }
 
-/// A thread identifier and its optional XEP-0201 parent.
+/// A thread identifier and its optional XEP-0201 parent, in the canonical
+/// workspace shape ([`ThreadId`] preserves the original value and treats
+/// whitespace-only as absent — exactly the semantics every downstream
+/// consumer applies).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestThread {
-    pub id: String,
-    pub parent: Option<String>,
+    pub id: ThreadId,
+    pub parent: Option<ThreadId>,
 }
 
 /// A strict XEP-0461 reply reference.
@@ -48,19 +54,64 @@ pub struct DigestReply {
 }
 
 /// Fully validated, typed pre-enrichment view of a message. The digest is
-/// computed (streaming) at construction; the typed fields remain readable
-/// for the consuming packets that bind this substrate later (#1654+).
+/// computed (streaming) at construction, so the fields are IMMUTABLE —
+/// read access goes through the accessors below, keeping the cached
+/// digest coherent with the values it was computed from.
 #[derive(Debug, Clone)]
 pub struct DigestInput {
-    pub message_type: MessageType,
-    pub stanza_lang: Option<Lang>,
-    pub target: NormalizedTarget,
-    pub bodies: BTreeMap<Lang, String>,
-    pub subjects: BTreeMap<Lang, String>,
-    pub thread: Option<DigestThread>,
-    pub reply: Option<DigestReply>,
-    pub extensions: Vec<Element>,
+    message_type: MessageType,
+    stanza_lang: Option<Lang>,
+    target: NormalizedTarget,
+    bodies: BTreeMap<Lang, String>,
+    subjects: BTreeMap<Lang, String>,
+    thread: Option<DigestThread>,
+    reply: Option<DigestReply>,
+    extensions: Vec<Element>,
+    /// The validated XEP-0359 origin-id, typed, extracted exactly once —
+    /// the alias binding consumes this instead of re-scanning payloads.
+    /// EXCLUDED from digest material (its value never enters the hash).
+    origin: Option<OriginId>,
     pub(crate) digest: super::SemanticDigest,
+}
+
+impl DigestInput {
+    pub fn message_type(&self) -> &MessageType {
+        &self.message_type
+    }
+
+    pub fn stanza_lang(&self) -> Option<&Lang> {
+        self.stanza_lang.as_ref()
+    }
+
+    pub fn target(&self) -> &NormalizedTarget {
+        &self.target
+    }
+
+    pub fn bodies(&self) -> &BTreeMap<Lang, String> {
+        &self.bodies
+    }
+
+    pub fn subjects(&self) -> &BTreeMap<Lang, String> {
+        &self.subjects
+    }
+
+    pub fn thread(&self) -> Option<&DigestThread> {
+        self.thread.as_ref()
+    }
+
+    pub fn reply(&self) -> Option<&DigestReply> {
+        self.reply.as_ref()
+    }
+
+    pub fn extensions(&self) -> &[Element] {
+        &self.extensions
+    }
+
+    /// The validated origin-id (None = the stanza carried none): the typed
+    /// value the alias substrate keys `StoredAlias` lookups on.
+    pub fn origin(&self) -> Option<&OriginId> {
+        self.origin.as_ref()
+    }
 }
 
 /// Reasons parsed message material cannot safely form a semantic digest.
@@ -108,17 +159,18 @@ impl DigestInput {
         validate_langmap(&message.subjects)?;
         validate_name_opt(context.stanza_lang.as_ref().map(|lang| lang.0.as_str()))?;
 
-        // Thread ids/parents are whitespace-trimmed and empty-after-trim is
-        // ABSENT, matching every downstream XEP-0201 consumer
-        // (`ThreadId::new` trims and rejects empty): a retry differing only
-        // in id padding must not digest into an `AliasConflict`.
+        // Thread ids preserve their ORIGINAL bytes (only whitespace-only is
+        // absent), exactly like `ThreadId::new` and every archive/routing
+        // consumer built on it — trimming here would falsely digest-equal
+        // messages whose archived thread ids observably differ. Parents come
+        // pre-trimmed by the parse layer.
         let mut thread = message
             .thread
             .as_ref()
             .and_then(|thread| digest_thread(&thread.id, thread.parent.as_deref()))
             .transpose()?;
 
-        let mut origin_count = 0usize;
+        let mut origin = None;
         let mut reply = None;
         let mut extensions = Vec::with_capacity(message.payloads.len());
         let mut node_count = 0usize;
@@ -126,11 +178,10 @@ impl DigestInput {
         for payload in &message.payloads {
             match (payload.ns().as_str(), payload.name()) {
                 (SID_NS, "origin-id") => {
-                    origin_count += 1;
-                    if origin_count > 1 {
+                    if origin.is_some() {
                         return Err(DigestInputError::DuplicateOriginId);
                     }
-                    validate_origin_id(payload)?;
+                    origin = Some(validate_origin_id(payload)?);
                 }
                 (SID_NS, "stanza-id") => validate_stanza_id(payload, context)?,
                 (DELAY_NS, "delay") => {}
@@ -141,8 +192,8 @@ impl DigestInput {
                     reply = Some(parse_reply(payload)?);
                 }
                 // The reattached XEP-0201 thread element (frame.rs), under
-                // the same trim/empty-is-absent normalization as the typed
-                // field above.
+                // the same verbatim-id / absent-if-blank normalization as
+                // the typed field above.
                 (CLIENT_NS, "thread") => {
                     if thread.is_some() {
                         return Err(DigestInputError::DuplicateThread);
@@ -188,6 +239,7 @@ impl DigestInput {
             thread,
             reply,
             extensions,
+            origin,
             digest,
         })
     }
@@ -206,26 +258,22 @@ pub(super) struct DigestFields {
     pub(super) extensions: Vec<Element>,
 }
 
-/// XEP-0201-consumer-aligned thread normalization: trim id and parent,
-/// empty-after-trim id = no thread, empty-after-trim parent = no parent.
+/// XEP-0201-consumer-aligned thread normalization, via the canonical
+/// [`ThreadId`]: the ORIGINAL id bytes are preserved (archive replay emits
+/// them verbatim), whitespace-only means no thread, and the parent (already
+/// trimmed by the parse layer) gets the same treatment.
 fn digest_thread(id: &str, parent: Option<&str>) -> Option<Result<DigestThread, DigestInputError>> {
-    let id = id.trim();
-    if id.is_empty() {
-        return None;
-    }
-    if let Err(error) = validate_id(id) {
+    let id = ThreadId::new(id)?;
+    if let Err(error) = validate_id(id.as_str()) {
         return Some(Err(error));
     }
-    let parent = parent.map(str::trim).filter(|parent| !parent.is_empty());
-    if let Some(parent) = parent {
-        if let Err(error) = validate_id(parent) {
+    let parent = parent.map(str::trim).and_then(ThreadId::new);
+    if let Some(parent) = &parent {
+        if let Err(error) = validate_id(parent.as_str()) {
             return Some(Err(error));
         }
     }
-    Some(Ok(DigestThread {
-        id: id.to_owned(),
-        parent: parent.map(str::to_owned),
-    }))
+    Some(Ok(DigestThread { id, parent }))
 }
 
 fn validate_langmap(map: &BTreeMap<Lang, String>) -> Result<(), DigestInputError> {
@@ -239,7 +287,7 @@ fn validate_langmap(map: &BTreeMap<Lang, String>) -> Result<(), DigestInputError
     Ok(())
 }
 
-fn validate_origin_id(element: &Element) -> Result<(), DigestInputError> {
+fn validate_origin_id(element: &Element) -> Result<OriginId, DigestInputError> {
     let Some(id) = element.attr("id") else {
         return Err(DigestInputError::MalformedOriginId);
     };
@@ -253,7 +301,7 @@ fn validate_origin_id(element: &Element) -> Result<(), DigestInputError> {
     {
         return Err(DigestInputError::MalformedOriginId);
     }
-    Ok(())
+    Ok(OriginId::new(id))
 }
 
 fn validate_stanza_id(element: &Element, context: &DigestContext) -> Result<(), DigestInputError> {
@@ -277,11 +325,14 @@ fn parse_reply(element: &Element) -> Result<DigestReply, DigestInputError> {
     let Some(id) = element.attr("id") else {
         return Err(DigestInputError::ReplyMalformed);
     };
-    // The established XEP-0461 parser trims the id and rejects empty;
-    // digest identity must match its normalization so padded-vs-unpadded
-    // retries cannot digest into an AliasConflict, and a whitespace-only
-    // id (no reply to every consumer) is rejected rather than hashed.
-    let id = id.trim();
+    // Reply ids preserve their ORIGINAL bytes: the archive paths retain
+    // and replay the raw attribute (`RichMessageId::new` only checks
+    // trimmed emptiness), so trimming here would falsely digest-equal
+    // replies whose archived ids observably differ. A whitespace-only id
+    // (no reply to every consumer) is still rejected rather than hashed.
+    if id.trim().is_empty() {
+        return Err(DigestInputError::ReplyMalformed);
+    }
     if id.len() > MAX_ID_LEN {
         return Err(DigestInputError::IdLengthExceeded);
     }

@@ -579,13 +579,14 @@ fn frozen_v1_golden_vectors_have_independent_hand_preimages() {
     }
 }
 
-/// Codex review on PR #1676: thread and reply identifiers are normalized
-/// exactly like their XEP-0201/0461 consumers (trimmed; empty-after-trim
-/// thread = absent, empty-after-trim reply id = rejected), so a retry
-/// differing only in id padding digests EQUAL instead of raising a
-/// spurious `AliasConflict`.
+/// Codex review on PR #1676 (round 2): thread and reply identifiers keep
+/// their ORIGINAL bytes — the archive consumers (`ThreadId`,
+/// `RichMessageId`) preserve and replay the raw value, so padding
+/// differences are observable semantics and MUST digest differently.
+/// Whitespace-only follows the consumers exactly: no thread / rejected
+/// reply.
 #[test]
-fn thread_and_reply_id_padding_is_digest_neutral() {
+fn thread_and_reply_ids_hash_verbatim_with_consumer_blank_handling() {
     let mut padded_thread = Message::normal(None);
     padded_thread.thread = Some(Thread {
         id: "  thread-7  ".to_owned(),
@@ -596,18 +597,18 @@ fn thread_and_reply_id_padding_is_digest_neutral() {
         id: "thread-7".to_owned(),
         parent: None,
     });
-    assert_eq!(
+    assert_ne!(
         digest(&padded_thread, &context()),
         digest(&trimmed_thread, &context()),
-        "thread id padding must be digest-neutral (consumers trim)"
+        "archived thread ids differ, so their digests must differ"
     );
 
     let padded_reply = with_payloads(vec![reply("  r1  ", None)]);
     let trimmed_reply = with_payloads(vec![reply("r1", None)]);
-    assert_eq!(
+    assert_ne!(
         digest(&padded_reply, &context()),
         digest(&trimmed_reply, &context()),
-        "reply id padding must be digest-neutral (the 0461 parser trims)"
+        "archived reply ids differ, so their digests must differ"
     );
 
     let mut whitespace_thread = Message::normal(None);
@@ -627,5 +628,26 @@ fn thread_and_reply_id_padding_is_digest_neutral() {
     assert_error!(
         DigestInput::from_parsed(&whitespace_reply, &context()),
         DigestInputError::ReplyMalformed
+    );
+}
+
+/// The validated typed origin-id flows out of the digest boundary exactly
+/// once — the alias binding keys `StoredAlias` lookups on it without
+/// re-scanning payloads — while its VALUE stays excluded from the digest.
+#[test]
+fn validated_origin_id_is_exposed_typed_and_digest_neutral() {
+    let with_origin = with_payloads(vec![origin("origin-7")]);
+    let parsed = input(&with_origin, &context());
+    assert_eq!(
+        parsed.origin().map(|origin| origin.as_str()),
+        Some("origin-7")
+    );
+
+    let without_origin = with_payloads(vec![]);
+    assert!(input(&without_origin, &context()).origin().is_none());
+    assert_eq!(
+        digest(&with_origin, &context()),
+        digest(&without_origin, &context()),
+        "the origin-id value never enters the hash"
     );
 }
