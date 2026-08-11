@@ -932,13 +932,63 @@ async fn cluster_exit_criteria_end_to_end() {
         .send(&remote_origin_xml)
         .await
         .expect("same-bare remote resource sends to owner-node sibling resource");
-    let remote_origin_delivered = ordered_target_client
+    let remote_origin_result = ordered_target_client
         .recv_matching_within(Duration::from_secs(30), |frame| {
             frame.contains("ordered-remote-origin")
                 && frame.contains("phase4 remote resource origin route")
         })
-        .await
-        .expect("owner-node sibling receives message originated by remote resource");
+        .await;
+    let remote_origin_delivered = match remote_origin_result {
+        Ok(frame) => frame,
+        Err(error) => {
+            // CI diagnostic for the repeatable zero-frame timeout on this
+            // leg (issue #1627 / PR #1676): determine which link is dead
+            // before panicking. Probe 1 exercises owner-node local
+            // delivery to the same sibling connection; probe 2 exercises
+            // node-B local echo back to the remote resource itself.
+            let mut probe_local = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+                ordered_target_full.clone(),
+            )));
+            probe_local.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                "diag local-path probe".to_string(),
+            );
+            let probe_local_xml = waddle_xmpp::parser::message_to_string(&probe_local)
+                .expect("serialize diag local probe");
+            ordered_origin_client
+                .send(&probe_local_xml)
+                .await
+                .expect("diag: origin sends local-path probe");
+            let local_probe = ordered_target_client
+                .recv_matching_within(Duration::from_secs(10), |frame| {
+                    frame.contains("diag local-path probe")
+                })
+                .await;
+            let mut probe_echo = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+                remote_target_full.clone(),
+            )));
+            probe_echo.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                "diag node-b echo probe".to_string(),
+            );
+            let probe_echo_xml = waddle_xmpp::parser::message_to_string(&probe_echo)
+                .expect("serialize diag echo probe");
+            remote_target_client
+                .send(&probe_echo_xml)
+                .await
+                .expect("diag: remote resource sends self-echo probe");
+            let echo_probe = remote_target_client
+                .recv_matching_within(Duration::from_secs(10), |frame| {
+                    frame.contains("diag node-b echo probe")
+                })
+                .await;
+            panic!(
+                "owner-node sibling never received the remote-origin message: {error}\n\
+                 diag probe 1 (owner-node local delivery to the same sibling connection): {local_probe:?}\n\
+                 diag probe 2 (node-B local self-echo from the remote resource): {echo_probe:?}"
+            );
+        }
+    };
     assert!(
         remote_origin_delivered.contains(ordered_target_full.as_str()),
         "remote-origin frame should remain addressed to the owner-node full JID: \
