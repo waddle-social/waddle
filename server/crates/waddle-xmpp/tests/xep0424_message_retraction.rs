@@ -489,3 +489,82 @@ async fn xep0424_groupchat_retransmit_after_retraction_hits_tombstone() {
         Some(ArchivedRichPayload::Tombstone(_))
     ));
 }
+
+/// XEP-0424 tombstones remain terminal when the retry is archived through a
+/// caller-owned Postgres transaction.
+#[tokio::test]
+async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
+    use sqlx::postgres::PgPoolOptions;
+    use waddle_xmpp::mam::{
+        store_archived_message_on_connection, MamStorage, MamTxStoreOutcome, SqlxMamStorage,
+    };
+    use waddle_xmpp_core::mam::{
+        ArchivedMessage, ArchivedMucSender, ArchivedRichMessage, ArchivedTombstone,
+    };
+    use waddle_xmpp_core::types::{Affiliation, Role};
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping XEP-0424 Postgres tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
+        return;
+    };
+    let storage = SqlxMamStorage::open(&url)
+        .await
+        .expect("initialize MAM schema");
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&url)
+        .await
+        .expect("connect Postgres");
+    let room: jid::BareJid = format!("retract-tx-{}@conference.example.com", uuid::Uuid::now_v7())
+        .parse()
+        .expect("room JID");
+    let original_id = format!("retract-tx-{}", uuid::Uuid::now_v7());
+    let message = |id: String| ArchivedMessage {
+        id,
+        body: Some("retracted transaction fixture".to_string()),
+        origin_id: Some(OriginId::new("retract-tx-origin")),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        rich: Some(ArchivedRichMessage {
+            muc_sender: Some(ArchivedMucSender {
+                jid: "alice@example.com/session".parse().expect("sender JID"),
+                affiliation: Affiliation::Member,
+                role: Role::Participant,
+            }),
+            ..ArchivedRichMessage::default()
+        }),
+        ..ArchivedMessage::for_test(
+            format!("{room}/alice").parse().expect("occupant JID"),
+            jid::Jid::from(room.clone()),
+        )
+    };
+    let mut insert_tx = pool.begin().await.expect("begin insert transaction");
+    store_archived_message_on_connection(&mut insert_tx, &room, &message(original_id.clone()))
+        .await
+        .expect("store original");
+    insert_tx.commit().await.expect("commit original");
+    assert!(storage
+        .replace_with_tombstone(
+            &original_id,
+            ArchivedTombstone {
+                retraction_id: None,
+                stamp: chrono::Utc::now(),
+                moderation: None,
+                sender_scope: None,
+            },
+        )
+        .await
+        .expect("replace original with tombstone"));
+    let mut retry_tx = pool.begin().await.expect("begin retry transaction");
+    assert!(matches!(
+        store_archived_message_on_connection(
+            &mut retry_tx,
+            &room,
+            &message(format!("retract-retry-{}", uuid::Uuid::now_v7())),
+        )
+        .await
+        .expect("retry against tombstone"),
+        MamTxStoreOutcome::TombstoneHit(ref stanza_id) if stanza_id.id == original_id
+    ));
+    retry_tx.commit().await.expect("commit retry transaction");
+}
