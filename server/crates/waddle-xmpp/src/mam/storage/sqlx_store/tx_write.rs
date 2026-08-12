@@ -193,6 +193,14 @@ mod tests {
             .expect("valid test archive JID")
     }
 
+    /// Archive ids are the GLOBAL `mam_messages` primary key and the test
+    /// database persists across runs, so every fixture id must be minted
+    /// per run — a constant id collides with a committed row from an
+    /// earlier invocation and turns the insert into a `Conflict`.
+    fn unique_id(prefix: &str) -> String {
+        format!("{prefix}-{}", uuid::Uuid::now_v7())
+    }
+
     async fn count_rows(pool: &sqlx::PgPool, archive: &jid::BareJid) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM mam_messages WHERE room_jid = $1")
             .bind(archive.to_string())
@@ -216,7 +224,9 @@ mod tests {
             .await
             .expect("connect Postgres test pool");
         let archive = unique_archive();
-        let inserted = fixture(&archive, "rolled-back-id", Some("rolled-back-origin"));
+        let rolled_back_id = unique_id("rolled-back");
+        let rolled_back_origin = unique_id("rolled-back-origin");
+        let inserted = fixture(&archive, &rolled_back_id, Some(&rolled_back_origin));
 
         let mut rollback_tx = pool.begin().await.expect("begin rollback transaction");
         let rollback_outcome =
@@ -225,7 +235,7 @@ mod tests {
                 .expect("insert inside transaction");
         assert!(matches!(
             rollback_outcome,
-            MamTxStoreOutcome::Inserted(ref stanza_id) if stanza_id.id == "rolled-back-id"
+            MamTxStoreOutcome::Inserted(ref stanza_id) if stanza_id.id == rolled_back_id
         ));
         rollback_tx
             .rollback()
@@ -233,7 +243,9 @@ mod tests {
             .expect("roll back archive insert");
         assert_eq!(count_rows(&pool, &archive).await, 0);
 
-        let committed = fixture(&archive, "committed-id", Some("committed-origin"));
+        let committed_id = unique_id("committed");
+        let committed_origin = unique_id("committed-origin");
+        let committed = fixture(&archive, &committed_id, Some(&committed_origin));
         let mut commit_tx = pool.begin().await.expect("begin commit transaction");
         assert!(matches!(
             store_archived_message_on_connection(&mut commit_tx, &archive, &committed)
@@ -245,16 +257,18 @@ mod tests {
         assert_eq!(count_rows(&pool, &archive).await, 1);
 
         let mut dedup_tx = pool.begin().await.expect("begin dedup transaction");
-        let retry = fixture(&archive, "retry-id", Some("committed-origin"));
+        let retry_id = unique_id("retry");
+        let retry = fixture(&archive, &retry_id, Some(&committed_origin));
         assert!(matches!(
             store_archived_message_on_connection(&mut dedup_tx, &archive, &retry)
                 .await
                 .expect("deduplicate retry"),
-            MamTxStoreOutcome::Existing(ref stanza_id) if stanza_id.id == "committed-id"
+            MamTxStoreOutcome::Existing(ref stanza_id) if stanza_id.id == committed_id
         ));
         dedup_tx.commit().await.expect("commit dedup transaction");
 
-        let conflicting = fixture(&archive, "conflict-id", None);
+        let conflict_id = unique_id("conflict");
+        let conflicting = fixture(&archive, &conflict_id, None);
         let mut conflict_seed_tx = pool.begin().await.expect("begin conflict seed transaction");
         store_archived_message_on_connection(&mut conflict_seed_tx, &archive, &conflicting)
             .await
@@ -264,10 +278,11 @@ mod tests {
             .await
             .expect("commit conflict seed");
         let mut conflict_tx = pool.begin().await.expect("begin conflict transaction");
-        let conflict = fixture(&archive, "conflict-id", Some("different-origin"));
+        let different_origin = unique_id("different-origin");
+        let conflict = fixture(&archive, &conflict_id, Some(&different_origin));
         assert!(matches!(
             store_archived_message_on_connection(&mut conflict_tx, &archive, &conflict).await,
-            Err(MamTxStoreError::Conflict { ref archive_id }) if archive_id == "conflict-id"
+            Err(MamTxStoreError::Conflict { ref archive_id }) if *archive_id == conflict_id
         ));
         conflict_tx
             .rollback()
@@ -281,19 +296,20 @@ mod tests {
             sender_scope: None,
         };
         assert!(storage
-            .replace_with_tombstone("committed-id", tombstone)
+            .replace_with_tombstone(&committed_id, tombstone)
             .await
             .expect("replace committed row with tombstone"));
         let mut tombstone_tx = pool
             .begin()
             .await
             .expect("begin tombstone retry transaction");
-        let tombstone_retry = fixture(&archive, "tombstone-retry", Some("committed-origin"));
+        let tombstone_retry_id = unique_id("tombstone-retry");
+        let tombstone_retry = fixture(&archive, &tombstone_retry_id, Some(&committed_origin));
         assert!(matches!(
             store_archived_message_on_connection(&mut tombstone_tx, &archive, &tombstone_retry)
                 .await
                 .expect("recognize tombstone retry"),
-            MamTxStoreOutcome::TombstoneHit(ref stanza_id) if stanza_id.id == "committed-id"
+            MamTxStoreOutcome::TombstoneHit(ref stanza_id) if stanza_id.id == committed_id
         ));
         tombstone_tx
             .commit()
@@ -318,8 +334,11 @@ mod tests {
             .await
             .expect("connect Postgres test pool");
         let archive = unique_archive();
-        let first = fixture(&archive, "race-first", Some("race-origin"));
-        let second = fixture(&archive, "race-second", Some("race-origin"));
+        let race_first_id = unique_id("race-first");
+        let race_second_id = unique_id("race-second");
+        let race_origin = unique_id("race-origin");
+        let first = fixture(&archive, &race_first_id, Some(&race_origin));
+        let second = fixture(&archive, &race_second_id, Some(&race_origin));
 
         let (first_opened_tx, first_opened_rx) = oneshot::channel();
         let (second_opened_tx, second_opened_rx) = oneshot::channel();
@@ -374,7 +393,7 @@ mod tests {
         ));
         assert!(matches!(
             second_task.await.expect("second task completed"),
-            MamTxStoreOutcome::Existing(ref stanza_id) if stanza_id.id == "race-first"
+            MamTxStoreOutcome::Existing(ref stanza_id) if stanza_id.id == race_first_id
         ));
         assert_eq!(count_rows(&pool, &archive).await, 1);
     }
