@@ -1,3 +1,5 @@
+#[cfg(feature = "clustering")]
+use chrono::{TimeZone, Utc};
 use sqlx::Connection;
 use uuid::Uuid;
 use waddle_xmpp::{
@@ -9,7 +11,19 @@ use waddle_xmpp::{
     ownership::{ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity},
     pending_delivery::SmSessionId,
 };
+#[cfg(feature = "clustering")]
+use waddle_xmpp::{
+    inbox::{
+        storage::{GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey},
+        ConversationKind, InboxEntry,
+    },
+    mam::{ArchivedMessage, MamTxStoreOutcome},
+};
 use waddle_xmpp_core::xep0359::OriginId;
+#[cfg(feature = "clustering")]
+use waddle_xmpp_core::xep0359::StanzaId;
+#[cfg(feature = "clustering")]
+use xmpp_parsers::message::MessageType;
 
 use super::{
     CanonicalMessageRepository, DeliveryEffectRepository, IngressUowError,
@@ -17,7 +31,8 @@ use super::{
 };
 #[cfg(feature = "clustering")]
 use super::{
-    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, IngressUowTransaction,
+    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, InboxRepository,
+    IngressUowTransaction, MamArchiveRepository,
 };
 use crate::{
     config::LineageConfig,
@@ -64,6 +79,25 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     transaction.commit().await.expect("commit spanning proof");
 
     fixture.assert_spanning_rows(&values, 1).await;
+
+    let mut retry = archived_message(&values);
+    retry.id = format!("retry-{}", values.mam_id);
+    let mut retry_transaction = fixture.begin().await;
+    match MamArchiveRepository::store(&mut retry_transaction, &values.archive_jid, &retry)
+        .await
+        .expect("deduplicate MAM retry")
+    {
+        MamTxStoreOutcome::Existing(stanza_id) => {
+            assert_eq!(stanza_id.id, values.mam_id);
+            assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
+        }
+        outcome => panic!("expected existing MAM archive row, got {outcome:?}"),
+    }
+    retry_transaction
+        .commit()
+        .await
+        .expect("commit MAM dedup proof");
+    assert_eq!(fixture.count("mam_messages").await, 1);
     fixture.close().await;
 }
 
@@ -362,6 +396,178 @@ async fn claim_fence_from_another_live_transaction_is_rejected() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
+async fn room_claim_fence_authorizes_a_transaction_bound_mam_archive_write() {
+    let Some(fixture) = Fixture::open("room_claim_fence").await else {
+        return;
+    };
+    let values = FixtureValues::new("room-claim-fence");
+    fixture.seed_room_claim(&values).await;
+
+    let mut transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_room_claim(
+        &mut transaction,
+        &values.archive_jid,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("exact room claim mints fence");
+    match MamArchiveRepository::store_fenced(
+        &mut transaction,
+        &fence,
+        &values.archive_jid,
+        &archived_message(&values),
+    )
+    .await
+    .expect("store under room claim fence")
+    {
+        MamTxStoreOutcome::Inserted(stanza_id) => {
+            assert_eq!(stanza_id.id, values.mam_id);
+            assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
+        }
+        outcome => panic!("expected inserted MAM archive row, got {outcome:?}"),
+    }
+    transaction.commit().await.expect("commit room archive");
+    assert_eq!(fixture.count("mam_messages").await, 1);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn room_claim_fence_rejects_a_different_archive_room() {
+    let Some(fixture) = Fixture::open("room_claim_wrong_room").await else {
+        return;
+    };
+    let values = FixtureValues::new("room-claim-wrong-room");
+    fixture.seed_room_claim(&values).await;
+    let wrong_archive: jid::BareJid = "wrong-room@conference.example.com"
+        .parse()
+        .expect("valid wrong-room archive JID");
+
+    let mut transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_room_claim(
+        &mut transaction,
+        &values.archive_jid,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("mint room fence");
+    assert!(matches!(
+        MamArchiveRepository::store_fenced(
+            &mut transaction,
+            &fence,
+            &wrong_archive,
+            &archived_message(&values),
+        )
+        .await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    transaction
+        .commit()
+        .await
+        .expect("commit rejected room write");
+    assert_eq!(fixture.count("mam_messages").await, 0);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn room_claim_fence_requires_a_persisted_room_claim() {
+    let Some(fixture) = Fixture::open("room_claim_missing").await else {
+        return;
+    };
+    let values = FixtureValues::new("room-claim-missing");
+    let mut transaction = fixture.begin().await;
+    assert!(matches!(
+        ClaimRepository::assert_room_claim(
+            &mut transaction,
+            &values.archive_jid,
+            &values.owner,
+            values.claim_epoch,
+        )
+        .await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(transaction);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn room_claim_fence_requires_a_bound_node_identity() {
+    let Some(fixture) = Fixture::open("room_claim_unbound").await else {
+        return;
+    };
+    let values = FixtureValues::new("room-claim-unbound");
+    fixture.seed_room_claim(&values).await;
+    let unbound = PostgresIngressUnitOfWork::open(fixture.db.clone(), fixture.lineage.clone())
+        .expect("open unbound unit of work");
+    let mut transaction = unbound.begin().await.expect("begin unbound transaction");
+    assert!(matches!(
+        ClaimRepository::assert_room_claim(
+            &mut transaction,
+            &values.archive_jid,
+            &values.owner,
+            values.claim_epoch,
+        )
+        .await,
+        Err(IngressUowError::NodeIdentityUnbound)
+    ));
+    drop(transaction);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn room_claim_fence_from_another_live_transaction_is_rejected() {
+    let Some(fixture) = Fixture::open("room_claim_replay").await else {
+        return;
+    };
+    let values = FixtureValues::new("room-claim-replay");
+    fixture.seed_room_claim(&values).await;
+
+    let mut minting_transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_room_claim(
+        &mut minting_transaction,
+        &values.archive_jid,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("mint room fence in first transaction");
+    let mut other_transaction = fixture.begin().await;
+    assert!(matches!(
+        MamArchiveRepository::store_fenced(
+            &mut other_transaction,
+            &fence,
+            &values.archive_jid,
+            &archived_message(&values),
+        )
+        .await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(other_transaction);
+    assert!(matches!(
+        MamArchiveRepository::store_fenced(
+            &mut minting_transaction,
+            &fence,
+            &values.archive_jid,
+            &archived_message(&values),
+        )
+        .await
+        .expect("store in minting transaction"),
+        MamTxStoreOutcome::Inserted(_)
+    ));
+    minting_transaction
+        .commit()
+        .await
+        .expect("commit minting transaction");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
 async fn handled_frontier_uses_wrapping_single_step_cas() {
     let Some(fixture) = Fixture::open("frontier_cas").await else {
         return;
@@ -438,8 +644,8 @@ async fn handled_frontier_uses_wrapping_single_step_cas() {
 
 #[cfg(feature = "clustering")]
 async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
-    insert_mam_identity(transaction, values).await;
-    insert_inbox_entry(transaction, values).await;
+    store_mam_message(transaction, values).await;
+    upsert_inbox_entry(transaction, values).await;
     // The alias miss path mints the canonical message row itself; recording
     // `values.message_key` separately first would collide on the primary key.
     assert!(matches!(
@@ -469,41 +675,80 @@ async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values
 }
 
 #[cfg(feature = "clustering")]
-async fn insert_mam_identity(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
-    transaction
-        .transaction_mut()
-        .execute(
-            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, message_type) VALUES (?, ?, now(), ?, ?, ?, ?)",
-            crate::db_params![
-                values.mam_id.clone(),
-                "room@example.com".to_string(),
-                values.sender.to_string(),
-                "juliet@example.com".to_string(),
-                "proof message".to_string(),
-                "chat".to_string(),
-            ],
-        )
+async fn store_mam_message(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
+    match MamArchiveRepository::store(transaction, &values.archive_jid, &archived_message(values))
         .await
-        .expect("seed MAM identity in UoW");
+        .expect("store MAM identity in UoW")
+    {
+        MamTxStoreOutcome::Inserted(stanza_id) => {
+            assert_eq!(stanza_id.id, values.mam_id);
+            assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
+        }
+        outcome => panic!("expected MAM identity insertion, got {outcome:?}"),
+    }
 }
 
 #[cfg(feature = "clustering")]
-async fn insert_inbox_entry(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
-    transaction
-        .transaction_mut()
-        .execute(
-            "INSERT INTO inbox_entries (user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated) VALUES (?, ?, ?, ?, ?, ?)",
-            crate::db_params![
-                values.principal.bare_jid().to_string(),
-                "juliet@example.com".to_string(),
-                "proof-thread".to_string(),
-                "direct".to_string(),
-                values.message_key.to_storage().to_string(),
-                1_i64,
-            ],
-        )
-        .await
-        .expect("seed inbox entry in UoW");
+async fn upsert_inbox_entry(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
+    let entry = InboxEntry::new(
+        values.recipient.clone(),
+        ConversationKind::Direct,
+        values.message_key.to_storage().to_string(),
+        1,
+    );
+    let stored = InboxRepository::upsert_with_groupchat_notification_recovery(
+        transaction,
+        values.principal.bare_jid(),
+        entry,
+        true,
+        groupchat_notification_recovery(values),
+    )
+    .await
+    .expect("upsert inbox entry and recovery in UoW");
+    assert_eq!(stored.partner, values.recipient);
+    assert_eq!(stored.unread, 1);
+}
+
+#[cfg(feature = "clustering")]
+fn archived_message(values: &FixtureValues) -> ArchivedMessage {
+    ArchivedMessage {
+        id: values.mam_id.clone(),
+        timestamp: Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("fixed fixture timestamp"),
+        from: values.sender.clone().into(),
+        to: values.recipient.clone().into(),
+        body: Some("proof message".to_string()),
+        stanza_id: None,
+        thread: None,
+        reply: None,
+        origin_id: Some(values.origin_id.clone()),
+        message_type: MessageType::Chat,
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: None,
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn groupchat_notification_recovery(values: &FixtureValues) -> GroupchatNotificationRecovery {
+    GroupchatNotificationRecovery {
+        key: GroupchatNotificationRecoveryKey {
+            recipient: values.principal.bare_jid().clone(),
+            room: values.archive_jid.clone(),
+            thread_id: None,
+            archive_stanza_id: StanzaId::new(
+                values.mam_id.clone(),
+                jid::Jid::from(values.archive_jid.clone()),
+            ),
+        },
+        sender_jid: jid::Jid::from(values.sender.clone()),
+        is_live_occupant: true,
+        room_members_only: false,
+        sender_can_broadcast_channel_mention: false,
+        created_at_ms: 1,
+    }
 }
 
 #[cfg(feature = "clustering")]
@@ -513,6 +758,8 @@ struct FixtureValues {
     claim_epoch: ClaimEpoch,
     principal: AuthenticatedPrincipalRef,
     sender: jid::BareJid,
+    recipient: jid::BareJid,
+    archive_jid: jid::BareJid,
     target: NormalizedTarget,
     origin_id: OriginId,
     digest: SemanticDigest,
@@ -527,6 +774,12 @@ struct FixtureValues {
 impl FixtureValues {
     fn new(name: &str) -> Self {
         let bare_jid: jid::BareJid = "romeo@example.com".parse().expect("valid fixture bare JID");
+        let recipient: jid::BareJid = "juliet@example.com"
+            .parse()
+            .expect("valid fixture recipient JID");
+        let archive_jid: jid::BareJid = format!("room-{name}@conference.example.com")
+            .parse()
+            .expect("valid fixture archive JID");
         Self {
             stream_id: SmSessionId::new(format!("stream-{name}")),
             owner: NodeIdentity::new("node-a", "node-a-epoch"),
@@ -541,11 +794,9 @@ impl FixtureValues {
                 PrincipalAuthEpoch::new(9),
             ),
             sender: bare_jid,
-            target: NormalizedTarget::Bare(
-                "juliet@example.com"
-                    .parse()
-                    .expect("valid fixture target JID"),
-            ),
+            target: NormalizedTarget::Bare(recipient.clone()),
+            recipient,
+            archive_jid,
             origin_id: OriginId::new(format!("origin-{name}")),
             digest: digest(42),
             message_key: MessageKey::new(),
@@ -659,6 +910,22 @@ impl Fixture {
     }
 
     #[cfg(feature = "clustering")]
+    async fn seed_room_claim(&self, values: &FixtureValues) {
+        self.execute(
+            "INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch, claim_epoch) VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                room_claim_entity(&values.archive_jid),
+                EntityType::RoomActor.as_db_str().to_string(),
+                values.owner.node_id.clone(),
+                values.owner.node_epoch.clone(),
+                values.claim_epoch.0,
+            ],
+        )
+        .await
+        .expect("seed exact room claim");
+    }
+
+    #[cfg(feature = "clustering")]
     async fn seed_claim_and_session(&self, values: &FixtureValues, inbound_count: u32) {
         self.seed_claim(values).await;
         self.execute(
@@ -694,6 +961,7 @@ impl Fixture {
             "ingress_deliveries",
             "mam_messages",
             "inbox_entries",
+            "groupchat_notification_recovery",
         ] {
             assert_eq!(
                 self.count(table).await,
@@ -917,6 +1185,11 @@ fn sm_claim_entity(stream_id: &SmSessionId) -> String {
         EntityType::SmSession.as_db_str(),
         stream_id.as_str()
     )
+}
+
+#[cfg(feature = "clustering")]
+fn room_claim_entity(room: &jid::BareJid) -> String {
+    format!("{}:{room}", EntityType::RoomActor.as_db_str())
 }
 
 fn digest(byte: u8) -> SemanticDigest {

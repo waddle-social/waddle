@@ -34,7 +34,7 @@ pub struct DatabaseInboxStorage {
 
 /// Typed failures while decoding an inbox row from the database.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum InboxDecodeError {
+pub enum InboxDecodeError {
     #[error(transparent)]
     Database(#[from] crate::db::DatabaseError),
     #[error("invalid partner JID: {source}")]
@@ -48,7 +48,7 @@ pub(crate) enum InboxDecodeError {
 
 /// Errors returned by the transaction-taking inbox write helpers.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum InboxTxError {
+pub enum InboxTxError {
     #[error(transparent)]
     Database(#[from] crate::db::DatabaseError),
     #[error(transparent)]

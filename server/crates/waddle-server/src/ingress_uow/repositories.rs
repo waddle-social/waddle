@@ -1,16 +1,96 @@
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use uuid::Uuid;
+use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
+use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::ingress::{
     AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget, SemanticDigest,
     SmIngressId,
 };
+use waddle_xmpp::mam::{ArchivedMessage, MamTxStoreOutcome};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::{
     ingress_substrate::{self, MessageWriteOutcome, TerminalizeOutcome},
     ingress_uow::{IngressUowError, IngressUowTransaction},
 };
+
+/// Repository for MAM archive rows written inside the ingress transaction.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MamArchiveRepository;
+
+impl MamArchiveRepository {
+    pub async fn store(
+        transaction: &mut IngressUowTransaction<'_>,
+        archive_jid: &BareJid,
+        message: &ArchivedMessage,
+    ) -> Result<MamTxStoreOutcome, IngressUowError> {
+        let outcome = {
+            let connection = transaction
+                .transaction_mut()
+                .postgres_connection()
+                .ok_or(IngressUowError::PostgresRequired)?;
+            waddle_xmpp::mam::store_archived_message_on_connection(connection, archive_jid, message)
+                .await?
+        };
+        Ok(outcome)
+    }
+
+    /// Store a room archive row only after the exact room claim has been
+    /// asserted in this transaction.
+    #[cfg(feature = "clustering")]
+    pub async fn store_fenced(
+        transaction: &mut IngressUowTransaction<'_>,
+        fence: &RoomClaimFence<'_>,
+        archive_jid: &BareJid,
+        message: &ArchivedMessage,
+    ) -> Result<MamTxStoreOutcome, IngressUowError> {
+        if fence.transaction_identity != transaction.identity() || fence.room != *archive_jid {
+            return Err(IngressUowError::ClaimFenceMissing);
+        }
+        Self::store(transaction, archive_jid, message).await
+    }
+}
+
+/// Repository for inbox projections written inside the ingress transaction.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InboxRepository;
+
+impl InboxRepository {
+    pub async fn upsert(
+        transaction: &mut IngressUowTransaction<'_>,
+        user: &BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+    ) -> Result<InboxEntry, IngressUowError> {
+        crate::inbox::upsert_in_transaction(
+            transaction.transaction_mut(),
+            user,
+            entry,
+            increment_unread,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Upsert an inbox row and its groupchat notification recovery item in
+    /// the same ingress transaction.
+    pub async fn upsert_with_groupchat_notification_recovery(
+        transaction: &mut IngressUowTransaction<'_>,
+        user: &BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+        recovery: GroupchatNotificationRecovery,
+    ) -> Result<InboxEntry, IngressUowError> {
+        let entry = Self::upsert(transaction, user, entry, increment_unread).await?;
+        crate::inbox::insert_groupchat_notification_recovery_in_transaction(
+            transaction.transaction_mut(),
+            recovery,
+        )
+        .await?;
+        Ok(entry)
+    }
+}
 
 /// Repository for canonical ingress messages and their origin-id aliases.
 #[derive(Debug, Default, Clone, Copy)]
@@ -182,6 +262,27 @@ pub struct SmClaimFence<'transaction> {
     _transaction: PhantomData<&'transaction IngressUowTransaction<'transaction>>,
 }
 
+/// Non-forgeable proof that this transaction holds one exact room claim under
+/// current local node authority.
+///
+/// It can only be minted after both the node-authority currency check
+/// (against the canonical `SharedNodeIdentity` bound at
+/// [`super::PostgresIngressUnitOfWork::open_with_node_identity`]) and the
+/// `FOR SHARE` claim assertion. The minted `CurrentNodeIdentityGuard` is
+/// retained by the transaction itself — not this independently droppable
+/// value — so identity rotation or terminal disable cannot complete until
+/// the transaction commits or rolls back, the same
+/// publication-after-revocation gate the fenced room archive path holds
+/// through its transactions. Its lifetime is tied to the unit of work so a
+/// caller cannot carry it into another one.
+#[cfg(feature = "clustering")]
+#[derive(Debug)]
+pub struct RoomClaimFence<'transaction> {
+    room: BareJid,
+    transaction_identity: Uuid,
+    _transaction: PhantomData<&'transaction IngressUowTransaction<'transaction>>,
+}
+
 #[cfg(feature = "clustering")]
 impl ClaimRepository {
     /// Assert the exact `(entity, node id, node incarnation, claim epoch)`
@@ -226,6 +327,49 @@ impl ClaimRepository {
         transaction.retain_authority(authority);
         Ok(SmClaimFence {
             stream_id: stream_id.clone(),
+            transaction_identity: transaction.identity(),
+            _transaction: PhantomData,
+        })
+    }
+
+    /// Assert the exact `(entity, node id, node incarnation, claim epoch)`
+    /// row under `FOR SHARE`, after proving `owner` is still this node's
+    /// current, active identity per the transaction's bound canonical
+    /// identity source. Locks are taken in the fixed order
+    /// epoch (at [`super::PostgresIngressUnitOfWork::begin`]) → exact claim
+    /// (here) → room archive/child rows (fenced repositories).
+    pub async fn assert_room_claim<'transaction>(
+        transaction: &mut IngressUowTransaction<'transaction>,
+        room: &BareJid,
+        owner: &NodeIdentity,
+        claim_epoch: ClaimEpoch,
+    ) -> Result<RoomClaimFence<'transaction>, IngressUowError> {
+        let Some(node_identity) = transaction.bound_node_identity().cloned() else {
+            return Err(IngressUowError::NodeIdentityUnbound);
+        };
+        let Some(authority) = node_identity.guard_if_current(owner).await else {
+            return Err(IngressUowError::ClaimFenceMissing);
+        };
+        let entity = format!("{}:{}", EntityType::RoomActor.as_db_str(), room);
+        let mut rows = transaction
+            .transaction_mut()
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    entity,
+                    authority.identity().node_id.clone(),
+                    authority.identity().node_epoch.clone(),
+                    claim_epoch.0,
+                ],
+            )
+            .await?;
+        if rows.next().await?.is_none() {
+            return Err(IngressUowError::ClaimFenceMissing);
+        }
+        drop(rows);
+        transaction.retain_authority(authority);
+        Ok(RoomClaimFence {
+            room: room.clone(),
             transaction_identity: transaction.identity(),
             _transaction: PhantomData,
         })

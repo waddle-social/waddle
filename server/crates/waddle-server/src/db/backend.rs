@@ -505,13 +505,6 @@ impl<'a> Transaction<'a> {
     /// Reach the raw Postgres connection for repositories that compose
     /// crate-external, connection-taking SQL (MAM archive writes) into this
     /// transaction. Returns `None` on SQLite.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the ingress unit-of-work composes this lane's accessor in a follow-up change"
-        )
-    )]
     pub(crate) fn postgres_connection(&mut self) -> Option<&mut sqlx::PgConnection> {
         match &mut self.inner {
             TransactionInner::Postgres(tx) => Some(&mut **tx),
