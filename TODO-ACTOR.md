@@ -27,7 +27,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 - [OK] **#1294** cross-node resume takes over the UserActor claim — MERGED cd9ba752 (PR #1668, 2026-08-09; squash-rebased onto post-#1669 main). Owed: post-deploy Loki checks.
 - [OK] **#1389** conflict-close surfaces as terminal "replaced by newer sign-in" — MERGED with #1294 in PR #1668 (superseded-session recovery: witnesses, banner on all surfaces, successor convergence).
 - [OK] **#1644** `feat(server): room lifecycle and revision types with expand-only schema` — MERGED e436da56 (PR #1673, 2026-08-11). Store-owned ensure_schema DDL, no migration version (#1651 freeze intact); codex-bot review loop clean at 7c8dd1d2. #1645-binding notes in the PR desc. Unblocks #1645.
-- [ ] ⚠ **#1650** `feat(server): typed ingress identity domain and versioned semantic digest` — ten identity types + SemanticDigest v1 canonicalizer + property suites; **fixes and closes #1137** (wrap-aware comparator at the three plain-`>` sites).
+- [OK] ⚠ **#1650** `feat(server): typed ingress identity domain and versioned semantic digest` — ten identity types + SemanticDigest v1 canonicalizer + property suites; **fixes and closes #1137** (wrap-aware comparator at the three plain-`>` sites).
 - [OK] **#1651** `fix(server): append-only migration ledger with checksum enforcement` — MERGED 43860571 (PR #1671, 2026-08-10). Codex review clean at bf8f7949. **Rolling-deploy constraint: do not add a new migration version until ledger-aware binaries are fully rolled out** (a pre-ledger pod seeing an unknown version would reset the ledger). Unblocks #1652 and (with #1650) #1653.
 - [ ] **#1648** `feat(server): closed observation variants and bounded cluster metrics` — audit-and-map the four metric families; **consumes then closes PR #1238**.
 - [ ] **#1649** `feat(chat): closed telemetry observations with source-level identity removal` — Faro identity removed at source; native surfaces verified telemetry-off.
@@ -37,7 +37,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 - [OK] ⚠ **#1643** `feat(server): durable principal fence for cross-node SM resume` (after #1642) — MERGED 375ba545 (PR #1666, 2026-08-07). Both #1610 defects root-caused; custody branch deleted. Owed: post-deploy Loki checks, follow-up #1667 (expired-claim promotion). Note for #1651: do NOT resurrect harvest's fail-closed runner policy as-is — it breaks the combined global+waddle test-runner history (see PR #1666 root-cause).
 - [ ] ⚠ **#1645** `fix(server): commit durable room state before memory mutation` (after #1644) — the inversion across every durable mutation kind; boundary lock ordering; retires `OwnershipLostAfterApply`/`PersistFailed` windows. Heavy adversarial review.
 - [OK] **#1652** `feat(server): database lineage attestation at readiness` — MERGED 0b59cfca (PR #1672, 2026-08-10); enrollment-gated rollout owed.
-- [ ] ⚠ **#1653** `feat(server): expand-only foundation schema with inert epoch guards` (after #1650 + #1651) — table pack + inert triggers + guard manifest; old-binary epoch-0 safety proof.
+- [OK] ⚠ **#1653** `feat(server): expand-only foundation schema with inert epoch guards` — PR #1686: table pack, inert transaction-bound guards, manifest, and epoch-0 compatibility proof.
 
 ## Wave 3
 
@@ -71,6 +71,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 ## Activation backlog (each its own issue when prerequisites land; prod activity needs explicit approval + named window + runbook)
 
 - [ ] Epoch 0→1 flip (guard coverage + no-old-writers verification; forward-only)
+- [ ] **#1689** Provision ingress-guard migration-owner/runtime-role split before the epoch 0→1 flip.
 - [ ] Cluster admission enablement
 - [ ] NOT NULL tightening of `sessions` auth-context columns
 - [ ] SASL2 stream-feature advertisement (P3.4)

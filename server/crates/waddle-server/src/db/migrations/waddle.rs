@@ -241,6 +241,223 @@ CREATE TABLE IF NOT EXISTS muc_pending_invites (
 );
 "#;
 
+/// PostgreSQL-only ingress foundation tables. SQLite keeps its migration
+/// ledger in sync with a no-op because the ingress substrate is Postgres-only.
+pub const V1008_INGRESS_FOUNDATION_TABLES: &str = r#"
+SELECT 1;
+"#;
+
+pub const V1008_INGRESS_FOUNDATION_TABLES_POSTGRES: &str = r#"
+CREATE TABLE ingress_protocol_epoch (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch BIGINT NOT NULL DEFAULT 0 CHECK (epoch BETWEEN 0 AND 4294967295),
+    activated_at TIMESTAMPTZ NULL,
+    lineage_uuid UUID NULL,
+    CHECK ((epoch = 0) = (activated_at IS NULL AND lineage_uuid IS NULL))
+);
+INSERT INTO ingress_protocol_epoch (id, epoch) VALUES (1, 0);
+
+CREATE TABLE ingress_messages (
+    message_key UUID PRIMARY KEY,
+    digest_version INTEGER NOT NULL CHECK (digest_version = 1),
+    digest BYTEA NOT NULL CHECK (octet_length(digest) = 32),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    terminal_at TIMESTAMPTZ NULL,
+    row_revision NUMERIC(20,0) NOT NULL DEFAULT 0
+        CHECK (row_revision >= 0 AND row_revision <= 18446744073709551615)
+);
+CREATE INDEX ingress_messages_terminal_at_idx
+    ON ingress_messages (terminal_at) WHERE terminal_at IS NOT NULL;
+
+-- Alias uniqueness rides a fixed-width SHA-256 of the length-prefixed
+-- (sender, target kind, target, origin-id) canonical encoding, computed by
+-- the substrate store.  A composite B-tree key over the raw columns can
+-- exceed PostgreSQL's index-row limit at maximum JID + origin-id lengths;
+-- the raw columns stay for audit and GC but carry no index.
+CREATE TABLE ingress_origin_aliases (
+    alias_key_hash BYTEA PRIMARY KEY CHECK (octet_length(alias_key_hash) = 32),
+    sender_bare_jid TEXT NOT NULL
+        CHECK (sender_bare_jid <> '' AND octet_length(sender_bare_jid) <= 3071),
+    target_kind INTEGER NOT NULL CHECK (target_kind IN (0, 1, 2)),
+    target_jid TEXT NOT NULL DEFAULT '' CHECK (octet_length(target_jid) <= 3071),
+    origin_id TEXT NOT NULL CHECK (origin_id <> '' AND octet_length(origin_id) <= 1024),
+    message_key UUID NOT NULL REFERENCES ingress_messages (message_key),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((target_kind = 0) = (target_jid = ''))
+);
+CREATE INDEX ingress_origin_aliases_message_key_idx ON ingress_origin_aliases (message_key);
+
+CREATE TABLE ingress_sm_refs (
+    sm_ingress_id UUID NOT NULL,
+    ingress_ordinal NUMERIC(20,0) NOT NULL
+        CHECK (ingress_ordinal >= 1 AND ingress_ordinal <= 18446744073709551615),
+    message_key UUID NOT NULL REFERENCES ingress_messages (message_key),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (sm_ingress_id, ingress_ordinal)
+);
+CREATE INDEX ingress_sm_refs_message_key_idx ON ingress_sm_refs (message_key);
+
+CREATE TABLE ingress_deliveries (
+    delivery_key UUID PRIMARY KEY,
+    message_key UUID NOT NULL REFERENCES ingress_messages (message_key),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    row_revision NUMERIC(20,0) NOT NULL DEFAULT 0
+        CHECK (row_revision >= 0 AND row_revision <= 18446744073709551615)
+);
+CREATE INDEX ingress_deliveries_message_key_idx ON ingress_deliveries (message_key);
+"#;
+
+/// PostgreSQL-only inert ingress epoch guards. SQLite keeps its migration
+/// ledger in sync with a no-op because the ingress substrate is Postgres-only.
+pub const V1009_INERT_INGRESS_EPOCH_GUARDS: &str = r#"
+SELECT 1;
+"#;
+
+pub const V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES: &str = r#"
+CREATE FUNCTION waddle_ingress_epoch_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    live_epoch BIGINT;
+    tx_epoch TEXT;
+    tx_xid TEXT;
+BEGIN
+    EXECUTE pg_catalog.format(
+        'SELECT epoch FROM %I.ingress_protocol_epoch WHERE id = 1 FOR SHARE',
+        TG_TABLE_SCHEMA
+    ) INTO live_epoch;
+    IF live_epoch IS NULL THEN
+        RAISE EXCEPTION 'waddle: ingress_protocol_epoch row missing; refusing % on %.%',
+            TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END IF;
+    IF live_epoch = 0 THEN
+        RETURN NULL;
+    END IF;
+    tx_epoch := current_setting('waddle.protocol_epoch', true);
+    tx_xid := current_setting('waddle.protocol_epoch_xid', true);
+    IF tx_epoch IS NULL OR tx_epoch <> live_epoch::text
+       OR tx_xid IS NULL OR tx_xid <> pg_current_xact_id()::text THEN
+        RAISE EXCEPTION 'waddle: % on %.% requires a transaction-local epoch proof (SET LOCAL waddle.protocol_epoch = %; SELECT set_config(''waddle.protocol_epoch_xid'', pg_current_xact_id()::text, true))',
+            TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME, live_epoch;
+    END IF;
+    RETURN NULL;
+END $$;
+
+-- TRUNCATE acquires the table's ACCESS EXCLUSIVE lock BEFORE its trigger
+-- runs, so a truncate trigger that then requested the epoch row would invert
+-- the global epoch-first lock order and could deadlock against row-wise GC
+-- with an activation queued between them.  TRUNCATE is never a sanctioned
+-- operation on the protected correctness tables (deletes are row-wise and
+-- epoch-proven), so it is rejected unconditionally without taking any lock.
+CREATE FUNCTION waddle_ingress_truncate_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    RAISE EXCEPTION 'waddle: TRUNCATE is not permitted on %.%',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME;
+END $$;
+
+CREATE TRIGGER ingress_messages_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_messages
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_messages_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_messages
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_dml;
+ALTER TABLE ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_origin_aliases_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_origin_aliases
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_origin_aliases_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_origin_aliases
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_dml;
+ALTER TABLE ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_sm_refs_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_sm_refs
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_sm_refs_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_sm_refs
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_sm_refs ENABLE ALWAYS TRIGGER ingress_sm_refs_epoch_guard_dml;
+ALTER TABLE ingress_sm_refs ENABLE ALWAYS TRIGGER ingress_sm_refs_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_deliveries_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_deliveries
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_deliveries_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_deliveries
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_deliveries ENABLE ALWAYS TRIGGER ingress_deliveries_epoch_guard_dml;
+ALTER TABLE ingress_deliveries ENABLE ALWAYS TRIGGER ingress_deliveries_epoch_guard_truncate;
+
+CREATE FUNCTION waddle_ingress_protocol_epoch_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.epoch <> 0 AND (NEW.activated_at IS NULL OR NEW.lineage_uuid IS NULL) THEN
+            RAISE EXCEPTION 'waddle: nonzero ingress protocol epochs require activation metadata';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        -- One advance per transaction: each row version validates +1
+        -- independently, so without this transaction-local sentinel a
+        -- duplicated activation statement would commit a two-epoch jump
+        -- that no deployment ever observed.
+        IF current_setting('waddle.protocol_epoch_advance_xid', true)
+               = pg_current_xact_id()::text THEN
+            RAISE EXCEPTION 'waddle: only one ingress protocol epoch advance per transaction';
+        END IF;
+        IF NEW.epoch <> OLD.epoch + 1 THEN
+            RAISE EXCEPTION 'waddle: ingress protocol epoch must advance exactly one step';
+        END IF;
+        IF NEW.activated_at IS NULL OR NEW.lineage_uuid IS NULL THEN
+            RAISE EXCEPTION 'waddle: nonzero ingress protocol epochs require activation metadata';
+        END IF;
+        PERFORM set_config('waddle.protocol_epoch_advance_xid', pg_current_xact_id()::text, true);
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'waddle: refusing % on ingress_protocol_epoch', TG_OP;
+END $$;
+
+CREATE TRIGGER ingress_protocol_epoch_guard_row
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_protocol_epoch
+FOR EACH ROW EXECUTE FUNCTION waddle_ingress_protocol_epoch_guard();
+CREATE TRIGGER ingress_protocol_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_protocol_epoch
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_protocol_epoch_guard();
+ALTER TABLE ingress_protocol_epoch ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_row;
+ALTER TABLE ingress_protocol_epoch ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_truncate;
+
+CREATE TABLE ingress_epoch_guard_manifest (
+    table_name TEXT PRIMARY KEY
+);
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES
+    ('ingress_messages'),
+    ('ingress_origin_aliases'),
+    ('ingress_sm_refs'),
+    ('ingress_deliveries');
+
+CREATE FUNCTION waddle_ingress_epoch_guard_manifest_append_only() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'waddle: ingress epoch guard manifest is append-only';
+END $$;
+
+CREATE TRIGGER ingress_epoch_guard_manifest_append_only_row
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_epoch_guard_manifest
+FOR EACH ROW EXECUTE FUNCTION waddle_ingress_epoch_guard_manifest_append_only();
+CREATE TRIGGER ingress_epoch_guard_manifest_append_only_truncate
+BEFORE TRUNCATE ON ingress_epoch_guard_manifest
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard_manifest_append_only();
+ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row;
+ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_truncate;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -288,6 +505,18 @@ pub fn all() -> Vec<Migration> {
             description: "Persist outstanding MUC mediated invitations".to_string(),
             sql_sqlite: V1007_ADD_MUC_PENDING_INVITES,
             sql_postgres: V1007_ADD_MUC_PENDING_INVITES_POSTGRES,
+        },
+        Migration {
+            version: 1008,
+            description: "Create PostgreSQL ingress foundation tables".to_string(),
+            sql_sqlite: V1008_INGRESS_FOUNDATION_TABLES,
+            sql_postgres: V1008_INGRESS_FOUNDATION_TABLES_POSTGRES,
+        },
+        Migration {
+            version: 1009,
+            description: "Add inert PostgreSQL ingress epoch guards".to_string(),
+            sql_sqlite: V1009_INERT_INGRESS_EPOCH_GUARDS,
+            sql_postgres: V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES,
         },
     ]
 }

@@ -11,6 +11,11 @@ mod ordinal;
 mod stream;
 mod target;
 
+/// Maximum UTF-8 byte length of an XEP-0359 origin-id accepted by ingress.
+///
+/// This is shared by the ingress validator and the Postgres schema contract.
+pub const MAX_ORIGIN_ID_BYTES: usize = 1024;
+
 pub use alias::{resolve_alias, AliasConflict, AliasOutcome, AliasResolution, StoredAlias};
 pub use digest::{DigestContext, DigestInput, DigestInputError, DigestVersion, SemanticDigest};
 pub use epoch::ProtocolEpoch;
@@ -19,4 +24,4 @@ pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision};
 pub use keys::{DeliveryKey, MessageKey};
 pub use ordinal::IngressOrdinal;
 pub use stream::{IngressStreamId, SmIngressId};
-pub use target::NormalizedTarget;
+pub use target::{NormalizedTarget, NormalizedTargetStorage};

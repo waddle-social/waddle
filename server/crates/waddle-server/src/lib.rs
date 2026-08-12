@@ -10,6 +10,9 @@ pub mod db;
 pub mod dnd_projection;
 pub mod dnd_reader;
 pub mod inbox;
+/// Dark Postgres-only ingress identity substrate (#1653), consumed by tests
+/// now and by #1654 repositories later.
+pub mod ingress_substrate;
 /// Postgres-backed durable MUC room ownership state (ADR-0017 Phase 3
 /// Slice 7). Gated behind the `clustering` Cargo feature for the same
 /// reason as `sm_persistence_fenced`: it depends on `clustering::relay`/

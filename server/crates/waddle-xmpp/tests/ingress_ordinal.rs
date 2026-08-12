@@ -1,6 +1,7 @@
 use proptest::prelude::*;
 use waddle_xmpp::ingress::{
-    ConnectionGeneration, EntityGeneration, IngressOrdinal, ProtocolEpoch, RowRevision,
+    ConnectionGeneration, EntityGeneration, IngressOrdinal, IngressTypeError, NormalizedTarget,
+    ProtocolEpoch, RowRevision,
 };
 
 #[test]
@@ -90,4 +91,54 @@ fn generation_epoch_and_revision_counters_are_checked() {
         1
     );
     assert_eq!(ProtocolEpoch::from_storage(u32::MAX).next(), None);
+}
+
+#[test]
+fn normalized_target_storage_round_trips_all_target_shapes() {
+    let absent = NormalizedTarget::Absent;
+    let absent_storage = absent.to_storage();
+    assert_eq!((absent_storage.kind(), absent_storage.jid()), (0, ""));
+    assert_eq!(NormalizedTarget::from_storage(0, ""), Ok(absent));
+
+    let bare = NormalizedTarget::Bare(
+        "romeo@example.com"
+            .parse()
+            .expect("fixture is a valid bare JID"),
+    );
+    let bare_storage = bare.to_storage();
+    assert_eq!(
+        NormalizedTarget::from_storage(bare_storage.kind(), bare_storage.jid()),
+        Ok(bare)
+    );
+
+    let full = NormalizedTarget::Full(
+        "romeo@example.com/phone"
+            .parse()
+            .expect("fixture is a valid full JID"),
+    );
+    let full_storage = full.to_storage();
+    assert_eq!(
+        NormalizedTarget::from_storage(full_storage.kind(), full_storage.jid()),
+        Ok(full)
+    );
+}
+
+#[test]
+fn normalized_target_storage_rejects_unknown_or_malformed_values() {
+    assert_eq!(
+        NormalizedTarget::from_storage(3, "romeo@example.com"),
+        Err(IngressTypeError::InvalidNormalizedTargetStorage { kind: 3 })
+    );
+    assert_eq!(
+        NormalizedTarget::from_storage(0, "romeo@example.com"),
+        Err(IngressTypeError::InvalidNormalizedTargetStorage { kind: 0 })
+    );
+    assert_eq!(
+        NormalizedTarget::from_storage(1, "romeo@example.com/phone"),
+        Err(IngressTypeError::InvalidNormalizedTargetStorage { kind: 1 })
+    );
+    assert_eq!(
+        NormalizedTarget::from_storage(2, "not a jid"),
+        Err(IngressTypeError::InvalidNormalizedTargetStorage { kind: 2 })
+    );
 }
