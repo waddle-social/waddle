@@ -183,7 +183,9 @@ impl PostgresIngressSubstrate {
 /// so a write path that first locked a message row can never wait on the
 /// epoch behind a queued activation while GC (epoch-first by construction)
 /// waits on that same message row — the three-party deadlock cycle.
-async fn acquire_epoch_lock_first(tx: &mut Transaction<'_>) -> Result<(), IngressSubstrateError> {
+pub(crate) async fn acquire_epoch_lock_first(
+    tx: &mut Transaction<'_>,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
     let mut rows = tx
         .query(
             "SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE",
@@ -191,11 +193,16 @@ async fn acquire_epoch_lock_first(tx: &mut Transaction<'_>) -> Result<(), Ingres
         )
         .await
         .map_err(discard_database_error)?;
-    rows.next()
+    let live_epoch: i64 = rows
+        .next()
         .await
         .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database)?;
-    Ok(())
+        .ok_or(IngressSubstrateError::Database)?
+        .get(0)
+        .map_err(discard_database_error)?;
+    Ok(ProtocolEpoch::from_storage(
+        u32::try_from(live_epoch).map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)?,
+    ))
 }
 
 /// Insert a message's immutable semantic digest.
@@ -235,7 +242,7 @@ pub async fn resolve_and_record_alias(
     digest: &SemanticDigest,
     mint: impl FnOnce() -> MessageKey,
 ) -> Result<AliasResolution, IngressSubstrateError> {
-    acquire_epoch_lock_first(tx).await?;
+    let _ = acquire_epoch_lock_first(tx).await?;
     let alias_key = AliasStorageKey::new(sender, target, origin_id);
     if let Some(stored) = locked_alias(tx, &alias_key).await? {
         return Ok(resolve_alias(true, digest, Some(&stored), mint));
@@ -295,7 +302,7 @@ pub async fn insert_sm_ref(
     ordinal: IngressOrdinal,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    acquire_epoch_lock_first(tx).await?;
+    let _ = acquire_epoch_lock_first(tx).await?;
     if !lock_message_for_child(tx, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
@@ -347,7 +354,7 @@ pub async fn record_delivery(
     delivery_key: DeliveryKey,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    acquire_epoch_lock_first(tx).await?;
+    let _ = acquire_epoch_lock_first(tx).await?;
     if !lock_message_for_child(tx, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
@@ -387,7 +394,7 @@ pub async fn terminalize_message(
     message_key: MessageKey,
     proven_terminal_at: DateTime<Utc>,
 ) -> Result<TerminalizeOutcome, IngressSubstrateError> {
-    acquire_epoch_lock_first(tx).await?;
+    let _ = acquire_epoch_lock_first(tx).await?;
     let changed = tx
         .execute(
             r#"
@@ -468,24 +475,8 @@ async fn gc_candidate_batch(
         // go stale mid-transaction.  The proof only claims epochs this
         // binary was built for: a future activation past
         // supported_protocol_epoch() must fence this GC, not be auto-claimed.
-        let mut epoch_rows = tx
-            .query(
-                "SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE",
-                (),
-            )
-            .await
-            .map_err(discard_database_error)?;
-        let live_epoch: i64 = epoch_rows
-            .next()
-            .await
-            .map_err(discard_database_error)?
-            .ok_or(IngressSubstrateError::Database)?
-            .get(0)
-            .map_err(discard_database_error)?;
-        drop(epoch_rows);
-        let live_epoch =
-            u32::try_from(live_epoch).map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)?;
-        if live_epoch > supported_protocol_epoch().to_storage() {
+        let live_epoch = acquire_epoch_lock_first(&mut tx).await?;
+        if live_epoch > supported_protocol_epoch() {
             return Err(IngressSubstrateError::UnsupportedLiveEpoch);
         }
         let mut proof = tx
@@ -495,7 +486,7 @@ async fn gc_candidate_batch(
                     set_config('waddle.protocol_epoch', ?, true),
                     set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
                 "#,
-                crate::db_params![live_epoch.to_string()],
+                crate::db_params![live_epoch.to_storage().to_string()],
             )
             .await
             .map_err(discard_database_error)?;
