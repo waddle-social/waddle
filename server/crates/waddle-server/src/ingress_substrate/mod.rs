@@ -1182,6 +1182,12 @@ mod tests {
             "UPDATE ingress_epoch_guard_manifest SET table_name = 'bad' WHERE table_name = 'ingress_messages'",
             "DELETE FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_messages'",
             "TRUNCATE ingress_epoch_guard_manifest",
+            // TRUNCATE on protected tables is rejected at EVERY epoch by the
+            // lock-free truncate guard (its trigger must never request the
+            // epoch row: TRUNCATE's ACCESS EXCLUSIVE is taken first, which
+            // would invert the epoch-first lock order).
+            "TRUNCATE ingress_messages",
+            "TRUNCATE ingress_sm_refs",
         ] {
             assert!(fixture.db.execute(statement).await.is_err(), "must reject: {statement}");
         }
@@ -1282,9 +1288,9 @@ mod tests {
                     format!("{table}_epoch_guard_truncate"),
                     34,
                     "A".to_string(),
-                    "waddle_ingress_epoch_guard".to_string(),
+                    "waddle_ingress_truncate_guard".to_string(),
                 )),
-                "{table} must carry the BEFORE-statement TRUNCATE guard: {triggers:?}"
+                "{table} must carry the lock-free BEFORE-statement TRUNCATE reject: {triggers:?}"
             );
         }
         fixture.close().await;

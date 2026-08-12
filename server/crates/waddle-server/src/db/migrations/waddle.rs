@@ -342,12 +342,25 @@ BEGIN
     RETURN NULL;
 END $$;
 
+-- TRUNCATE acquires the table's ACCESS EXCLUSIVE lock BEFORE its trigger
+-- runs, so a truncate trigger that then requested the epoch row would invert
+-- the global epoch-first lock order and could deadlock against row-wise GC
+-- with an activation queued between them.  TRUNCATE is never a sanctioned
+-- operation on the protected correctness tables (deletes are row-wise and
+-- epoch-proven), so it is rejected unconditionally without taking any lock.
+CREATE FUNCTION waddle_ingress_truncate_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    RAISE EXCEPTION 'waddle: TRUNCATE is not permitted on %.%',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME;
+END $$;
+
 CREATE TRIGGER ingress_messages_epoch_guard_dml
 BEFORE INSERT OR UPDATE OR DELETE ON ingress_messages
 FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
 CREATE TRIGGER ingress_messages_epoch_guard_truncate
 BEFORE TRUNCATE ON ingress_messages
-FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
 ALTER TABLE ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_dml;
 ALTER TABLE ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_truncate;
 
@@ -356,7 +369,7 @@ BEFORE INSERT OR UPDATE OR DELETE ON ingress_origin_aliases
 FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
 CREATE TRIGGER ingress_origin_aliases_epoch_guard_truncate
 BEFORE TRUNCATE ON ingress_origin_aliases
-FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
 ALTER TABLE ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_dml;
 ALTER TABLE ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_truncate;
 
@@ -365,7 +378,7 @@ BEFORE INSERT OR UPDATE OR DELETE ON ingress_sm_refs
 FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
 CREATE TRIGGER ingress_sm_refs_epoch_guard_truncate
 BEFORE TRUNCATE ON ingress_sm_refs
-FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
 ALTER TABLE ingress_sm_refs ENABLE ALWAYS TRIGGER ingress_sm_refs_epoch_guard_dml;
 ALTER TABLE ingress_sm_refs ENABLE ALWAYS TRIGGER ingress_sm_refs_epoch_guard_truncate;
 
@@ -374,7 +387,7 @@ BEFORE INSERT OR UPDATE OR DELETE ON ingress_deliveries
 FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
 CREATE TRIGGER ingress_deliveries_epoch_guard_truncate
 BEFORE TRUNCATE ON ingress_deliveries
-FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
 ALTER TABLE ingress_deliveries ENABLE ALWAYS TRIGGER ingress_deliveries_epoch_guard_dml;
 ALTER TABLE ingress_deliveries ENABLE ALWAYS TRIGGER ingress_deliveries_epoch_guard_truncate;
 

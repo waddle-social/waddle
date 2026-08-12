@@ -35,6 +35,12 @@ statement in every write path; a writer that locks a message row before the
 trigger's epoch request can deadlock against garbage collection (epoch-first)
 with an activation queued between them.
 
+`TRUNCATE` is rejected unconditionally on the protected tables at every
+epoch. Its ACCESS EXCLUSIVE table lock is acquired before any trigger runs,
+so a truncate trigger cannot participate in the epoch-first order — instead
+of coordinating it, the guard forbids it; deletes are row-wise and
+epoch-proven.
+
 ## Activation checklist: epoch 0 to 1
 
 Do not flip the epoch until all of these are true:
