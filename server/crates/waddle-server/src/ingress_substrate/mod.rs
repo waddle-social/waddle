@@ -505,7 +505,7 @@ async fn gc_candidate_batch(
             .map_err(discard_database_error)?
             .ok_or(IngressSubstrateError::Database)?;
         drop(proof);
-        if !lock_eligible_terminal_message(&mut tx, message_key, &cutoff).await? {
+        if !lock_eligible_terminal_message(&mut tx, message_key, cutoff).await? {
             tx.commit().await.map_err(discard_database_error)?;
             continue;
         }
