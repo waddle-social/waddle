@@ -42,7 +42,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
         return;
     };
     let values = FixtureValues::new("spanning-proof");
-    fixture.seed_claim_and_session(&values, 0).await;
+    fixture.seed_claim(&values).await;
 
     let mut transaction = fixture.begin().await;
     let fence = ClaimRepository::assert_sm_claim(
@@ -53,6 +53,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     )
     .await
     .expect("exact claim mints fence");
+    insert_session_in_uow(&mut transaction, &values, 0).await;
     assert_eq!(
         HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, 1)
             .await
@@ -73,7 +74,7 @@ async fn dropping_uow_rolls_back_spanning_writes() {
         return;
     };
     let values = FixtureValues::new("atomicity");
-    fixture.seed_claim_and_session(&values, 0).await;
+    fixture.seed_claim(&values).await;
 
     {
         let mut transaction = fixture.begin().await;
@@ -85,6 +86,7 @@ async fn dropping_uow_rolls_back_spanning_writes() {
         )
         .await
         .expect("exact claim mints fence");
+        insert_session_in_uow(&mut transaction, &values, 0).await;
         HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, 1)
             .await
             .expect("advance handled frontier");
@@ -92,7 +94,7 @@ async fn dropping_uow_rolls_back_spanning_writes() {
     }
 
     fixture.assert_spanning_rows(&values, 0).await;
-    fixture.assert_frontier(&values.stream_id, 0).await;
+    fixture.assert_session_absent(&values.stream_id).await;
     fixture.close().await;
 }
 
@@ -246,6 +248,49 @@ async fn claim_fence_blocks_a_concurrent_claim_update_until_commit() {
     assert!(!update.is_finished(), "claim update must still be waiting");
     transaction.commit().await.expect("release claim fence");
     update.await.expect("join competing claim update");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn claim_fence_from_another_live_transaction_is_rejected() {
+    let Some(fixture) = Fixture::open("claim_fence_replay").await else {
+        return;
+    };
+    let values = FixtureValues::new("claim-fence-replay");
+    fixture.seed_claim_and_session(&values, 0).await;
+
+    let mut minting_transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_sm_claim(
+        &mut minting_transaction,
+        &values.stream_id,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("mint fence in the first live transaction");
+
+    // A fence minted by one live transaction must not authorize fenced
+    // writes in another live transaction, even for the same stream.
+    let mut other_transaction = fixture.begin().await;
+    assert!(matches!(
+        HandledFrontierRepository::advance(&mut other_transaction, &fence, &values.stream_id, 1)
+            .await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(other_transaction);
+
+    // The same fence keeps working in the transaction that minted it.
+    assert_eq!(
+        HandledFrontierRepository::advance(&mut minting_transaction, &fence, &values.stream_id, 1)
+            .await
+            .expect("advance in the minting transaction"),
+        HandledFrontierOutcome::Advanced
+    );
+    minting_transaction
+        .commit()
+        .await
+        .expect("commit minting transaction");
     fixture.close().await;
 }
 
@@ -515,7 +560,7 @@ impl Fixture {
     }
 
     #[cfg(feature = "clustering")]
-    async fn seed_claim_and_session(&self, values: &FixtureValues, inbound_count: u32) {
+    async fn seed_claim(&self, values: &FixtureValues) {
         self.execute(
                 "INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch, claim_epoch) VALUES (?, ?, ?, ?, ?)",
                 crate::db_params![
@@ -528,33 +573,14 @@ impl Fixture {
             )
             .await
             .expect("seed exact SM claim");
+    }
+
+    #[cfg(feature = "clustering")]
+    async fn seed_claim_and_session(&self, values: &FixtureValues, inbound_count: u32) {
+        self.seed_claim(values).await;
         self.execute(
-            r#"INSERT INTO sm_sessions (
-                    stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked,
-                    detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested,
-                    blocklist_interested, presence_available, presence_priority, bare_jid,
-                    auth_context_id, auth_context_version, principal_auth_epoch
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
-            crate::db_params![
-                values.stream_id.as_str().to_string(),
-                "romeo".to_string(),
-                "romeo@example.com/phone".to_string(),
-                i64::from(inbound_count),
-                0_i64,
-                0_i64,
-                0_i64,
-                0_i64,
-                0_i64,
-                0_i64,
-                0_i64,
-                0_i64,
-                0_i64,
-                values.principal.bare_jid().to_string(),
-                values.principal.auth_context_id().as_uuid().to_string(),
-                i64::try_from(values.principal.auth_context_version().get())
-                    .expect("version fits i64"),
-                i64::try_from(values.principal.auth_epoch().get()).expect("epoch fits i64"),
-            ],
+            SESSION_INSERT_SQL,
+            session_insert_params(values, inbound_count),
         )
         .await
         .expect("seed SM session with typed principal identity");
@@ -681,23 +707,15 @@ impl Fixture {
     }
 
     #[cfg(feature = "clustering")]
-    async fn assert_frontier(&self, stream_id: &SmSessionId, expected: u32) {
-        let conn = self.db.guard().await.expect("database guard");
-        let mut rows = conn
-            .query(
-                "SELECT inbound_count FROM sm_sessions WHERE stream_id = ?",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
-            .await
-            .expect("read frontier");
-        let row = rows
-            .next()
-            .await
-            .expect("read frontier row")
-            .expect("frontier row exists");
-        assert_eq!(
-            row.get::<i64>(0).expect("decode frontier"),
-            i64::from(expected)
+    async fn assert_session_absent(&self, stream_id: &SmSessionId) {
+        assert!(
+            !self
+                .row_exists(
+                    "SELECT 1 FROM sm_sessions WHERE stream_id = ?",
+                    crate::db_params![stream_id.as_str().to_string()],
+                )
+                .await,
+            "principal-bearing session row must roll back with the UoW"
         );
     }
 
@@ -760,6 +778,56 @@ fn fixture_lineage_config() -> LineageConfig {
 }
 
 #[cfg(feature = "clustering")]
+const SESSION_INSERT_SQL: &str = r#"INSERT INTO sm_sessions (
+        stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked,
+        detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested,
+        blocklist_interested, presence_available, presence_priority, bare_jid,
+        auth_context_id, auth_context_version, principal_auth_epoch
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#;
+
+#[cfg(feature = "clustering")]
+fn session_insert_params(values: &FixtureValues, inbound_count: u32) -> Vec<crate::db::Value> {
+    crate::db_params![
+        values.stream_id.as_str().to_string(),
+        "romeo".to_string(),
+        "romeo@example.com/phone".to_string(),
+        i64::from(inbound_count),
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+        values.principal.bare_jid().to_string(),
+        values.principal.auth_context_id().as_uuid().to_string(),
+        i64::try_from(values.principal.auth_context_version().get()).expect("version fits i64"),
+        i64::try_from(values.principal.auth_epoch().get()).expect("epoch fits i64"),
+    ]
+}
+
+/// Insert the principal-bearing session row INSIDE the unit of work, after
+/// the exact claim fence, so the spanning proof actually spans exact
+/// principal identity (sol implementation-review finding 1).
+#[cfg(feature = "clustering")]
+async fn insert_session_in_uow(
+    transaction: &mut IngressUowTransaction<'_>,
+    values: &FixtureValues,
+    inbound_count: u32,
+) {
+    transaction
+        .transaction_mut()
+        .execute(
+            SESSION_INSERT_SQL,
+            session_insert_params(values, inbound_count),
+        )
+        .await
+        .expect("insert principal-bearing SM session inside the UoW");
+}
+
+#[cfg(feature = "clustering")]
 fn sm_claim_entity(stream_id: &SmSessionId) -> String {
     format!(
         "{}:{}",
@@ -788,6 +856,8 @@ fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
 
 #[cfg(feature = "clustering")]
 async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {
+    // Time-based budget (~10s), matching the ingress_substrate helper: the
+    // competing backend must connect and reach the lock before we assert.
     for _ in 0..400 {
         let waiting: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1",
@@ -799,7 +869,7 @@ async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {
         if waiting > 0 {
             return;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("no blocked backend appeared for query fragment {fragment:?}");
 }
