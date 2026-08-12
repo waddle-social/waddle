@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 use waddle_xmpp::ingress::{
-    resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, IngressStreamId, MessageKey,
-    NormalizedTarget, SemanticDigest, StoredAlias,
+    resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
+    NormalizedTargetStorage, SemanticDigest, SmIngressId, StoredAlias,
 };
 use waddle_xmpp_core::xep0359::OriginId;
 
@@ -120,11 +120,11 @@ impl PostgresIngressSubstrate {
     pub async fn insert_sm_ref(
         &self,
         tx: &mut Transaction<'_>,
-        stream_id: IngressStreamId,
+        sm_ingress_id: SmIngressId,
         ordinal: IngressOrdinal,
         message_key: MessageKey,
     ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-        insert_sm_ref(tx, stream_id, ordinal, message_key).await
+        insert_sm_ref(tx, sm_ingress_id, ordinal, message_key).await
     }
 
     pub async fn record_delivery(
@@ -237,8 +237,8 @@ pub async fn resolve_and_record_alias(
             crate::db_params![
                 alias_key.hash.to_vec(),
                 &alias_key.sender,
-                alias_key.target_kind,
-                &alias_key.target,
+                alias_key.target.kind(),
+                alias_key.target.jid(),
                 &alias_key.origin_id,
                 candidate_key.to_storage().to_string(),
             ],
@@ -265,7 +265,7 @@ pub async fn resolve_and_record_alias(
 /// Attach a stream-management ordinal to a live message.
 pub async fn insert_sm_ref(
     tx: &mut Transaction<'_>,
-    stream_id: IngressStreamId,
+    sm_ingress_id: SmIngressId,
     ordinal: IngressOrdinal,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
@@ -275,11 +275,11 @@ pub async fn insert_sm_ref(
     }
     tx.execute(
         r#"
-        INSERT INTO ingress_sm_refs (ingress_stream_id, ingress_ordinal, message_key)
+        INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, message_key)
         VALUES (?::uuid, ?::numeric, ?::uuid)
         "#,
         crate::db_params![
-            stream_id.to_storage().to_string(),
+            sm_ingress_id.to_storage().to_string(),
             ordinal.to_storage().to_string(),
             message_key.to_storage().to_string(),
         ],
@@ -358,9 +358,35 @@ pub async fn gc_expired_aliases(
         return Err(IngressSubstrateError::PostgresRequired);
     }
     let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
-    let candidates = expired_candidates(db, &cutoff).await?;
     let mut deleted_messages = 0usize;
 
+    loop {
+        // Bounded batches of rows with work left to do: expired rows kept
+        // alive by refs/deliveries stop matching once their aliases are gone,
+        // so retained history does not grow the scan or the candidate vector.
+        let candidates = expired_candidates(db, &cutoff).await?;
+        if candidates.is_empty() {
+            break;
+        }
+        let batch_len = candidates.len();
+        deleted_messages += gc_candidate_batch(db, &cutoff, candidates).await?;
+        if batch_len < GC_BATCH_LIMIT {
+            break;
+        }
+    }
+
+    Ok(AliasGcOutcome { deleted_messages })
+}
+
+/// Upper bound on messages examined per GC scan.
+const GC_BATCH_LIMIT: usize = 256;
+
+async fn gc_candidate_batch(
+    db: &Database,
+    cutoff: &str,
+    candidates: Vec<MessageKey>,
+) -> Result<usize, IngressSubstrateError> {
+    let mut deleted_messages = 0usize;
     for message_key in candidates {
         let mut tx = db.begin().await.map_err(discard_database_error)?;
         // First statement: Postgres's default READ COMMITTED mode is required
@@ -432,20 +458,19 @@ pub async fn gc_expired_aliases(
             usize::try_from(deleted).map_err(|_| IngressSubstrateError::Database)?;
     }
 
-    Ok(AliasGcOutcome { deleted_messages })
+    Ok(deleted_messages)
 }
 
 struct AliasStorageKey {
     hash: [u8; 32],
     sender: String,
-    target_kind: i32,
-    target: String,
+    target: NormalizedTargetStorage,
     origin_id: String,
 }
 
 impl AliasStorageKey {
     fn new(sender: &BareJid, target: &NormalizedTarget, origin_id: &OriginId) -> Self {
-        let target_storage = target.to_storage();
+        let target = target.to_storage();
         let sender = sender.to_string();
         let origin_id = origin_id.as_str().to_owned();
         // Uniqueness rides a fixed-width SHA-256 of the length-prefixed
@@ -454,16 +479,15 @@ impl AliasStorageKey {
         // origin-id lengths.  Length prefixes keep the encoding injective.
         let mut hasher = Sha256::new();
         hasher.update(b"waddle:ingress-alias-key:v1\0");
-        for part in [sender.as_str(), target_storage.jid(), origin_id.as_str()] {
+        for part in [sender.as_str(), target.jid(), origin_id.as_str()] {
             hasher.update(u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
             hasher.update(part.as_bytes());
         }
-        hasher.update(target_storage.kind().to_be_bytes());
+        hasher.update(target.kind().to_be_bytes());
         Self {
             hash: hasher.finalize().into(),
             sender,
-            target_kind: target_storage.kind(),
-            target: target_storage.jid().to_owned(),
+            target,
             origin_id,
         }
     }
@@ -546,12 +570,26 @@ async fn expired_candidates(
     let mut rows = conn
         .query(
             r#"
-            SELECT message_key::text
-            FROM ingress_messages
-            WHERE terminal_at IS NOT NULL AND terminal_at <= ?::timestamptz
-            ORDER BY terminal_at, message_key
+            SELECT m.message_key::text
+            FROM ingress_messages m
+            WHERE m.terminal_at IS NOT NULL AND m.terminal_at <= ?::timestamptz
+              AND (
+                  EXISTS (
+                      SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
+                  )
+                  OR (
+                      NOT EXISTS (
+                          SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
+                      )
+                  )
+              )
+            ORDER BY m.terminal_at, m.message_key
+            LIMIT ?
             "#,
-            crate::db_params![cutoff],
+            crate::db_params![cutoff, GC_BATCH_LIMIT as i64],
         )
         .await
         .map_err(discard_database_error)?;
@@ -617,7 +655,7 @@ mod tests {
             Uuid::parse_str("018e68e7-6a5f-7d4d-a0bc-64dc70a9ce10").expect("fixture UUID is valid");
         assert_eq!(MessageKey::from_storage(uuid).to_storage(), uuid);
         assert_eq!(DeliveryKey::from_storage(uuid).to_storage(), uuid);
-        assert_eq!(IngressStreamId::from_storage(uuid).to_storage(), uuid);
+        assert_eq!(SmIngressId::from_storage(uuid).to_storage(), uuid);
 
         for target in [
             NormalizedTarget::Absent,
@@ -866,7 +904,7 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .insert_sm_ref(&mut tx, IngressStreamId::new(), IngressOrdinal::FIRST, key)
+                .insert_sm_ref(&mut tx, SmIngressId::new(), IngressOrdinal::FIRST, key)
                 .await
                 .expect("record vanished child"),
             MessageWriteOutcome::MessageVanished
@@ -932,7 +970,7 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .insert_sm_ref(&mut tx, IngressStreamId::new(), IngressOrdinal::FIRST, key)
+                .insert_sm_ref(&mut tx, SmIngressId::new(), IngressOrdinal::FIRST, key)
                 .await
                 .expect("insert sm ref"),
             MessageWriteOutcome::Recorded
@@ -962,6 +1000,53 @@ mod tests {
         assert_eq!(fixture.count("ingress_messages").await, 1);
         assert_eq!(fixture.count("ingress_sm_refs").await, 1);
         assert_eq!(fixture.count("ingress_deliveries").await, 1);
+        // Alias-less retained rows drop out of the candidate scan: a second
+        // pass finds no work and touches nothing.
+        assert_eq!(
+            fixture
+                .store
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+                .await
+                .expect("re-run GC over retained history")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sm_refs_are_keyed_by_sm_ingress_identity_not_transport_stream() {
+        let Some(fixture) = Fixture::open("sm_ref_identity").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let sm_id = SmIngressId::new();
+        let mut tx = fixture.store.begin().await.expect("begin first ref");
+        assert_eq!(
+            fixture
+                .store
+                .insert_sm_ref(&mut tx, sm_id, IngressOrdinal::FIRST, key)
+                .await
+                .expect("record the first handled-stanza reference"),
+            MessageWriteOutcome::Recorded
+        );
+        tx.commit().await.expect("commit first ref");
+
+        // An XEP-0198 resume continues the SAME SM ingress identity on a new
+        // transport stream: replaying the same durable ordinal must collide
+        // with the original reference instead of minting a second row.
+        let mut tx = fixture.store.begin().await.expect("begin replayed ref");
+        assert!(
+            fixture
+                .store
+                .insert_sm_ref(&mut tx, sm_id, IngressOrdinal::FIRST, key)
+                .await
+                .is_err(),
+            "the same (SmIngressId, ordinal) must dedupe against its original reference"
+        );
+        drop(tx);
+        assert_eq!(fixture.count("ingress_sm_refs").await, 1);
         fixture.close().await;
     }
 
@@ -1473,7 +1558,7 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .insert_sm_ref(&mut tx, IngressStreamId::new(), IngressOrdinal::FIRST, key)
+                .insert_sm_ref(&mut tx, SmIngressId::new(), IngressOrdinal::FIRST, key)
                 .await
                 .expect("insert sm ref before GC"),
             MessageWriteOutcome::Recorded
@@ -1528,7 +1613,7 @@ mod tests {
         let insert = tokio::spawn(async move {
             let mut tx = insert_store.begin().await?;
             let outcome = insert_store
-                .insert_sm_ref(&mut tx, IngressStreamId::new(), IngressOrdinal::FIRST, key)
+                .insert_sm_ref(&mut tx, SmIngressId::new(), IngressOrdinal::FIRST, key)
                 .await?;
             tx.commit()
                 .await

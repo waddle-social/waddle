@@ -288,12 +288,12 @@ CREATE TABLE ingress_origin_aliases (
 CREATE INDEX ingress_origin_aliases_message_key_idx ON ingress_origin_aliases (message_key);
 
 CREATE TABLE ingress_sm_refs (
-    ingress_stream_id UUID NOT NULL,
+    sm_ingress_id UUID NOT NULL,
     ingress_ordinal NUMERIC(20,0) NOT NULL
         CHECK (ingress_ordinal >= 1 AND ingress_ordinal <= 18446744073709551615),
     message_key UUID NOT NULL REFERENCES ingress_messages (message_key),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (ingress_stream_id, ingress_ordinal)
+    PRIMARY KEY (sm_ingress_id, ingress_ordinal)
 );
 CREATE INDEX ingress_sm_refs_message_key_idx ON ingress_sm_refs (message_key);
 
