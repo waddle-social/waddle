@@ -152,7 +152,9 @@ async fn lookup_message_key(
 use std::marker::PhantomData;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::{
-    ownership::{ClaimEpoch, EntityType, NodeIdentity},
+    ownership::{
+        ClaimEpoch, CurrentNodeIdentityGuard, EntityType, NodeIdentity, SharedNodeIdentity,
+    },
     pending_delivery::SmSessionId,
 };
 
@@ -161,26 +163,41 @@ use waddle_xmpp::{
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaimRepository;
 
-/// Non-forgeable proof that this transaction holds one exact SM claim.
+/// Non-forgeable proof that this transaction holds one exact SM claim under
+/// current local node authority.
 ///
-/// It can only be minted after the `FOR SHARE` claim assertion. Its lifetime
-/// is tied to the unit of work so a caller cannot carry it into another one.
+/// It can only be minted after both the [`SharedNodeIdentity`] currency
+/// check and the `FOR SHARE` claim assertion. It retains the
+/// [`CurrentNodeIdentityGuard`] until dropped, so identity rotation or
+/// terminal disable cannot complete while this transaction can still write
+/// under the fence — the same publication-after-revocation gate the fenced
+/// SM persistence path holds through its transactions. Its lifetime is tied
+/// to the unit of work so a caller cannot carry it into another one.
 #[cfg(feature = "clustering")]
-#[derive(Debug)]
 pub struct SmClaimFence<'transaction> {
     stream_id: SmSessionId,
     transaction_identity: Uuid,
+    _authority: CurrentNodeIdentityGuard,
     _transaction: PhantomData<&'transaction IngressUowTransaction<'transaction>>,
 }
 
 #[cfg(feature = "clustering")]
 impl ClaimRepository {
+    /// Assert the exact `(entity, node id, node incarnation, claim epoch)`
+    /// row under `FOR SHARE`, after proving `owner` is still this node's
+    /// current, active identity. Locks are taken in the fixed order
+    /// epoch (at [`super::PostgresIngressUnitOfWork::begin`]) → exact claim
+    /// (here) → `sm_sessions`/child rows (fenced repositories).
     pub async fn assert_sm_claim<'transaction>(
         transaction: &mut IngressUowTransaction<'transaction>,
+        node_identity: &SharedNodeIdentity,
         stream_id: &SmSessionId,
         owner: &NodeIdentity,
         claim_epoch: ClaimEpoch,
     ) -> Result<SmClaimFence<'transaction>, IngressUowError> {
+        let Some(authority) = node_identity.guard_if_current(owner).await else {
+            return Err(IngressUowError::ClaimFenceMissing);
+        };
         let entity = format!(
             "{}:{}",
             EntityType::SmSession.as_db_str(),
@@ -192,8 +209,8 @@ impl ClaimRepository {
                 "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
                 crate::db_params![
                     entity,
-                    owner.node_id.clone(),
-                    owner.node_epoch.clone(),
+                    authority.identity().node_id.clone(),
+                    authority.identity().node_epoch.clone(),
                     claim_epoch.0,
                 ],
             )
@@ -204,6 +221,7 @@ impl ClaimRepository {
         Ok(SmClaimFence {
             stream_id: stream_id.clone(),
             transaction_identity: transaction.identity(),
+            _authority: authority,
             _transaction: PhantomData,
         })
     }

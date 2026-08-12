@@ -6,7 +6,7 @@ use waddle_xmpp::{
         AliasOutcome, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
         ProtocolEpoch, SemanticDigest, SmIngressId,
     },
-    ownership::{ClaimEpoch, ClaimStore, EntityType, NodeIdentity},
+    ownership::{ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity},
     pending_delivery::SmSessionId,
 };
 use waddle_xmpp_core::xep0359::OriginId;
@@ -47,6 +47,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     let mut transaction = fixture.begin().await;
     let fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
+        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -80,6 +81,7 @@ async fn dropping_uow_rolls_back_spanning_writes() {
         let mut transaction = fixture.begin().await;
         let fence = ClaimRepository::assert_sm_claim(
             &mut transaction,
+            &values.node_identity,
             &values.stream_id,
             &values.owner,
             values.claim_epoch,
@@ -207,7 +209,14 @@ async fn claim_fence_requires_the_exact_owner_incarnation_and_epoch() {
     ] {
         let mut transaction = fixture.begin().await;
         assert!(matches!(
-            ClaimRepository::assert_sm_claim(&mut transaction, stream_id, owner, claim_epoch).await,
+            ClaimRepository::assert_sm_claim(
+                &mut transaction,
+                &values.node_identity,
+                stream_id,
+                owner,
+                claim_epoch
+            )
+            .await,
             Err(IngressUowError::ClaimFenceMissing)
         ));
     }
@@ -225,6 +234,7 @@ async fn claim_fence_blocks_a_concurrent_claim_update_until_commit() {
     let mut transaction = fixture.begin().await;
     let _fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
+        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -253,6 +263,57 @@ async fn claim_fence_blocks_a_concurrent_claim_update_until_commit() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
+async fn claim_fence_requires_current_local_node_authority() {
+    let Some(fixture) = Fixture::open("claim_fence_authority").await else {
+        return;
+    };
+    let values = FixtureValues::new("claim-fence-authority");
+    fixture.seed_claim_and_session(&values, 0).await;
+
+    // Rotation to a new incarnation revokes minting under the old identity
+    // even though the old clustering_claims row still exists.
+    let rotated = SharedNodeIdentity::new(values.owner.clone());
+    rotated
+        .rotate(NodeIdentity::new(
+            values.owner.node_id.clone(),
+            "rotated-epoch",
+        ))
+        .await;
+    let mut transaction = fixture.begin().await;
+    assert!(matches!(
+        ClaimRepository::assert_sm_claim(
+            &mut transaction,
+            &rotated,
+            &values.stream_id,
+            &values.owner,
+            values.claim_epoch
+        )
+        .await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(transaction);
+
+    // Terminal disable revokes minting the same way.
+    let disabled = SharedNodeIdentity::new(values.owner.clone());
+    disabled.disable().await;
+    let mut transaction = fixture.begin().await;
+    assert!(matches!(
+        ClaimRepository::assert_sm_claim(
+            &mut transaction,
+            &disabled,
+            &values.stream_id,
+            &values.owner,
+            values.claim_epoch
+        )
+        .await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(transaction);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
 async fn claim_fence_from_another_live_transaction_is_rejected() {
     let Some(fixture) = Fixture::open("claim_fence_replay").await else {
         return;
@@ -263,6 +324,7 @@ async fn claim_fence_from_another_live_transaction_is_rejected() {
     let mut minting_transaction = fixture.begin().await;
     let fence = ClaimRepository::assert_sm_claim(
         &mut minting_transaction,
+        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -305,6 +367,7 @@ async fn handled_frontier_uses_wrapping_single_step_cas() {
     let mut transaction = fixture.begin().await;
     let fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
+        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -349,6 +412,7 @@ async fn handled_frontier_uses_wrapping_single_step_cas() {
     let mut missing_transaction = fixture.begin().await;
     let missing_fence = ClaimRepository::assert_sm_claim(
         &mut missing_transaction,
+        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -444,6 +508,7 @@ async fn insert_inbox_entry(transaction: &mut IngressUowTransaction<'_>, values:
 struct FixtureValues {
     stream_id: SmSessionId,
     owner: NodeIdentity,
+    node_identity: SharedNodeIdentity,
     claim_epoch: ClaimEpoch,
     principal: AuthenticatedPrincipalRef,
     sender: jid::BareJid,
@@ -464,6 +529,7 @@ impl FixtureValues {
         Self {
             stream_id: SmSessionId::new(format!("stream-{name}")),
             owner: NodeIdentity::new("node-a", "node-a-epoch"),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::new("node-a", "node-a-epoch")),
             claim_epoch: ClaimEpoch(11),
             principal: AuthenticatedPrincipalRef::new(
                 bare_jid.clone(),
