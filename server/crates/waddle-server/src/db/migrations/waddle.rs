@@ -401,12 +401,21 @@ BEGIN
         RETURN NEW;
     END IF;
     IF TG_OP = 'UPDATE' THEN
+        -- One advance per transaction: each row version validates +1
+        -- independently, so without this transaction-local sentinel a
+        -- duplicated activation statement would commit a two-epoch jump
+        -- that no deployment ever observed.
+        IF current_setting('waddle.protocol_epoch_advance_xid', true)
+               = pg_current_xact_id()::text THEN
+            RAISE EXCEPTION 'waddle: only one ingress protocol epoch advance per transaction';
+        END IF;
         IF NEW.epoch <> OLD.epoch + 1 THEN
             RAISE EXCEPTION 'waddle: ingress protocol epoch must advance exactly one step';
         END IF;
         IF NEW.activated_at IS NULL OR NEW.lineage_uuid IS NULL THEN
             RAISE EXCEPTION 'waddle: nonzero ingress protocol epochs require activation metadata';
         END IF;
+        PERFORM set_config('waddle.protocol_epoch_advance_xid', pg_current_xact_id()::text, true);
         RETURN NEW;
     END IF;
     RAISE EXCEPTION 'waddle: refusing % on ingress_protocol_epoch', TG_OP;

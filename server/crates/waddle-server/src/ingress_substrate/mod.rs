@@ -10,7 +10,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use waddle_xmpp::ingress::{
     resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
-    NormalizedTargetStorage, SemanticDigest, SmIngressId, StoredAlias,
+    NormalizedTargetStorage, ProtocolEpoch, SemanticDigest, SmIngressId, StoredAlias,
 };
 use waddle_xmpp_core::xep0359::OriginId;
 
@@ -20,6 +20,18 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 /// terminal.  The garbage collector receives `now` and binds the derived
 /// cutoff, keeping wall-clock decisions at its caller boundary.
 pub const ALIAS_RETENTION: Duration = Duration::days(8);
+
+/// Highest protocol epoch whose write semantics this binary implements:
+/// the substrate's retention, locking, and proof contracts are built for
+/// the epoch-1 activation this slice installs.
+///
+/// The GC's self-installed proof claims at most this epoch; a live epoch
+/// beyond it fails closed so a future activation fences old collectors
+/// instead of being claimed automatically.  Bump only in the slice that
+/// teaches the substrate the new epoch's semantics.
+pub fn supported_protocol_epoch() -> ProtocolEpoch {
+    ProtocolEpoch::from_storage(1)
+}
 
 /// Ingress tables protected by the epoch-proof triggers from migration V1009.
 ///
@@ -50,12 +62,21 @@ pub enum IngressSubstrateError {
     InvalidStoredDigest,
     #[error("ingress alias disappeared during concurrent resolution")]
     AliasMissingAfterConflict,
+    #[error("ingress sm ordinal is already bound to a different message")]
+    SmOrdinalConflict,
+    #[error("ingress delivery key is already bound to a different message")]
+    DeliveryKeyConflict,
+    #[error("live ingress protocol epoch exceeds what this binary supports")]
+    UnsupportedLiveEpoch,
 }
 
 /// Outcome of adding a child identity that requires a live message row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageWriteOutcome {
     Recorded,
+    /// The identical identity pair was already durable (ambiguous-commit
+    /// retry); nothing was written.
+    AlreadyRecorded,
     MessageVanished,
 }
 
@@ -236,10 +257,10 @@ pub async fn resolve_and_record_alias(
             "#,
             crate::db_params![
                 alias_key.hash.to_vec(),
-                &alias_key.sender,
+                alias_key.sender.to_string(),
                 alias_key.target.kind(),
                 alias_key.target.jid(),
-                &alias_key.origin_id,
+                alias_key.origin_id.as_str(),
                 candidate_key.to_storage().to_string(),
             ],
         )
@@ -263,6 +284,11 @@ pub async fn resolve_and_record_alias(
 }
 
 /// Attach a stream-management ordinal to a live message.
+///
+/// Idempotent for ambiguous-commit retries: replaying the identical
+/// `(SmIngressId, ordinal) -> MessageKey` reference reports
+/// [`MessageWriteOutcome::AlreadyRecorded`], while the same ordinal bound
+/// to a DIFFERENT message is the typed [`IngressSubstrateError::SmOrdinalConflict`].
 pub async fn insert_sm_ref(
     tx: &mut Transaction<'_>,
     sm_ingress_id: SmIngressId,
@@ -273,23 +299,49 @@ pub async fn insert_sm_ref(
     if !lock_message_for_child(tx, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
-    tx.execute(
+    let inserted = tx
+        .execute(
+            r#"
+            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, message_key)
+            VALUES (?::uuid, ?::numeric, ?::uuid)
+            ON CONFLICT (sm_ingress_id, ingress_ordinal) DO NOTHING
+            "#,
+            crate::db_params![
+                sm_ingress_id.to_storage().to_string(),
+                ordinal.to_storage().to_string(),
+                message_key.to_storage().to_string(),
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    if inserted == 1 {
+        return Ok(MessageWriteOutcome::Recorded);
+    }
+    let existing = stored_child_message_key(
+        tx,
         r#"
-        INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, message_key)
-        VALUES (?::uuid, ?::numeric, ?::uuid)
+        SELECT message_key::text FROM ingress_sm_refs
+        WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric
         "#,
         crate::db_params![
             sm_ingress_id.to_storage().to_string(),
             ordinal.to_storage().to_string(),
-            message_key.to_storage().to_string(),
         ],
     )
-    .await
-    .map_err(discard_database_error)?;
-    Ok(MessageWriteOutcome::Recorded)
+    .await?;
+    if existing == Some(message_key) {
+        Ok(MessageWriteOutcome::AlreadyRecorded)
+    } else {
+        Err(IngressSubstrateError::SmOrdinalConflict)
+    }
 }
 
 /// Record a delivery/effect identity for a live message.
+///
+/// Idempotent for ambiguous-commit retries, mirroring [`insert_sm_ref`]:
+/// the identical `DeliveryKey -> MessageKey` pair reports
+/// [`MessageWriteOutcome::AlreadyRecorded`]; the same key bound to a
+/// different message is [`IngressSubstrateError::DeliveryKeyConflict`].
 pub async fn record_delivery(
     tx: &mut Transaction<'_>,
     delivery_key: DeliveryKey,
@@ -299,19 +351,34 @@ pub async fn record_delivery(
     if !lock_message_for_child(tx, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
-    tx.execute(
-        r#"
-        INSERT INTO ingress_deliveries (delivery_key, message_key)
-        VALUES (?::uuid, ?::uuid)
-        "#,
-        crate::db_params![
-            delivery_key.to_storage().to_string(),
-            message_key.to_storage().to_string(),
-        ],
+    let inserted = tx
+        .execute(
+            r#"
+            INSERT INTO ingress_deliveries (delivery_key, message_key)
+            VALUES (?::uuid, ?::uuid)
+            ON CONFLICT (delivery_key) DO NOTHING
+            "#,
+            crate::db_params![
+                delivery_key.to_storage().to_string(),
+                message_key.to_storage().to_string(),
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    if inserted == 1 {
+        return Ok(MessageWriteOutcome::Recorded);
+    }
+    let existing = stored_child_message_key(
+        tx,
+        "SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid",
+        crate::db_params![delivery_key.to_storage().to_string()],
     )
-    .await
-    .map_err(discard_database_error)?;
-    Ok(MessageWriteOutcome::Recorded)
+    .await?;
+    if existing == Some(message_key) {
+        Ok(MessageWriteOutcome::AlreadyRecorded)
+    } else {
+        Err(IngressSubstrateError::DeliveryKeyConflict)
+    }
 }
 
 /// Record a terminal proof once; later calls preserve the first proof time.
@@ -395,22 +462,40 @@ async fn gc_candidate_batch(
             .await
             .map_err(discard_database_error)?;
         // GC is an epoch-aware writer: install the transaction-bound proof
-        // for whatever epoch is live so its deletes pass the V1009 guard at
+        // for the live epoch so its deletes pass the V1009 guard at
         // epoch >= 1 (a no-op at epoch 0).  The FOR SHARE epoch read holds
         // to commit, so a concurrent activation waits and the proof cannot
-        // go stale mid-transaction.
+        // go stale mid-transaction.  The proof only claims epochs this
+        // binary was built for: a future activation past
+        // supported_protocol_epoch() must fence this GC, not be auto-claimed.
+        let mut epoch_rows = tx
+            .query(
+                "SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE",
+                (),
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let live_epoch: i64 = epoch_rows
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::Database)?
+            .get(0)
+            .map_err(discard_database_error)?;
+        drop(epoch_rows);
+        let live_epoch =
+            u32::try_from(live_epoch).map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)?;
+        if live_epoch > supported_protocol_epoch().to_storage() {
+            return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+        }
         let mut proof = tx
             .query(
                 r#"
                 SELECT
-                    set_config(
-                        'waddle.protocol_epoch',
-                        (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE),
-                        true
-                    ),
+                    set_config('waddle.protocol_epoch', ?, true),
                     set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
                 "#,
-                (),
+                crate::db_params![live_epoch.to_string()],
             )
             .await
             .map_err(discard_database_error)?;
@@ -461,25 +546,27 @@ async fn gc_candidate_batch(
     Ok(deleted_messages)
 }
 
-struct AliasStorageKey {
+/// Typed alias identity held until the driver binding edge: the sender and
+/// origin-id stay borrowed as their protocol types; textual forms are read
+/// only while hashing and inside `db_params!`.
+struct AliasStorageKey<'a> {
     hash: [u8; 32],
-    sender: String,
+    sender: &'a BareJid,
     target: NormalizedTargetStorage,
-    origin_id: String,
+    origin_id: &'a OriginId,
 }
 
-impl AliasStorageKey {
-    fn new(sender: &BareJid, target: &NormalizedTarget, origin_id: &OriginId) -> Self {
+impl<'a> AliasStorageKey<'a> {
+    fn new(sender: &'a BareJid, target: &NormalizedTarget, origin_id: &'a OriginId) -> Self {
         let target = target.to_storage();
-        let sender = sender.to_string();
-        let origin_id = origin_id.as_str().to_owned();
         // Uniqueness rides a fixed-width SHA-256 of the length-prefixed
         // canonical encoding: a composite B-tree key over the raw columns
         // can exceed PostgreSQL's index-row limit at maximum JID and
         // origin-id lengths.  Length prefixes keep the encoding injective.
+        let sender_text = sender.to_string();
         let mut hasher = Sha256::new();
         hasher.update(b"waddle:ingress-alias-key:v1\0");
-        for part in [sender.as_str(), target.jid(), origin_id.as_str()] {
+        for part in [sender_text.as_str(), target.jid(), origin_id.as_str()] {
             hasher.update(u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
             hasher.update(part.as_bytes());
         }
@@ -495,7 +582,7 @@ impl AliasStorageKey {
 
 async fn locked_alias(
     tx: &mut Transaction<'_>,
-    key: &AliasStorageKey,
+    key: &AliasStorageKey<'_>,
 ) -> Result<Option<StoredAlias>, IngressSubstrateError> {
     let mut rows = tx
         .query(
@@ -532,6 +619,27 @@ fn decode_stored_alias(row: &Row) -> Result<StoredAlias, IngressSubstrateError> 
     let digest = SemanticDigest::from_storage(digest_version, digest)
         .map_err(|_| IngressSubstrateError::InvalidStoredDigest)?;
     Ok(StoredAlias { key, digest })
+}
+
+/// Read the message key a child row (sm ref / delivery) is bound to.
+async fn stored_child_message_key(
+    tx: &mut Transaction<'_>,
+    sql: &str,
+    params: impl crate::db::IntoParams,
+) -> Result<Option<MessageKey>, IngressSubstrateError> {
+    let mut rows = tx
+        .query(sql, params)
+        .await
+        .map_err(discard_database_error)?;
+    let Some(row) = rows.next().await.map_err(discard_database_error)? else {
+        return Ok(None);
+    };
+    let key_text: String = row.get(0).map_err(discard_database_error)?;
+    key_text
+        .parse::<Uuid>()
+        .map(MessageKey::from_storage)
+        .map(Some)
+        .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)
 }
 
 async fn lock_message_for_child(
@@ -1034,19 +1142,123 @@ mod tests {
         tx.commit().await.expect("commit first ref");
 
         // An XEP-0198 resume continues the SAME SM ingress identity on a new
-        // transport stream: replaying the same durable ordinal must collide
-        // with the original reference instead of minting a second row.
+        // transport stream: replaying the identical durable reference is an
+        // idempotent AlreadyRecorded, so an ambiguous-commit retry can finish
+        // its unit of work.
         let mut tx = fixture.store.begin().await.expect("begin replayed ref");
-        assert!(
+        assert_eq!(
             fixture
                 .store
                 .insert_sm_ref(&mut tx, sm_id, IngressOrdinal::FIRST, key)
                 .await
-                .is_err(),
-            "the same (SmIngressId, ordinal) must dedupe against its original reference"
+                .expect("identical replay is idempotent"),
+            MessageWriteOutcome::AlreadyRecorded
+        );
+        tx.commit().await.expect("commit replayed ref");
+
+        // The same ordinal bound to a DIFFERENT message is a typed identity
+        // conflict, distinguishable from outages and from AlreadyRecorded.
+        let other = fixture.record_message().await;
+        let mut tx = fixture.store.begin().await.expect("begin conflicting ref");
+        assert!(
+            matches!(
+                fixture
+                    .store
+                    .insert_sm_ref(&mut tx, sm_id, IngressOrdinal::FIRST, other)
+                    .await,
+                Err(IngressSubstrateError::SmOrdinalConflict)
+            ),
+            "a different message under the same (SmIngressId, ordinal) must conflict"
         );
         drop(tx);
         assert_eq!(fixture.count("ingress_sm_refs").await, 1);
+
+        // record_delivery mirrors the same idempotency contract.
+        let delivery = DeliveryKey::new();
+        let mut tx = fixture.store.begin().await.expect("begin delivery");
+        assert_eq!(
+            fixture
+                .store
+                .record_delivery(&mut tx, delivery, key)
+                .await
+                .expect("record delivery"),
+            MessageWriteOutcome::Recorded
+        );
+        assert_eq!(
+            fixture
+                .store
+                .record_delivery(&mut tx, delivery, key)
+                .await
+                .expect("identical delivery replay is idempotent"),
+            MessageWriteOutcome::AlreadyRecorded
+        );
+        assert!(matches!(
+            fixture
+                .store
+                .record_delivery(&mut tx, delivery, other)
+                .await,
+            Err(IngressSubstrateError::DeliveryKeyConflict)
+        ));
+        drop(tx);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_advances_at_most_once_per_transaction_and_future_epochs_fence_gc() {
+        let Some(fixture) = Fixture::open("epoch_single_advance").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(8);
+        fixture.terminalize(key, terminal_at).await;
+
+        // A duplicated activation statement inside ONE transaction must not
+        // commit a two-epoch jump no deployment ever observed.
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open activation connection");
+        let mut tx = conn.begin().await.expect("begin double-advance tx");
+        sqlx::query(
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("first advance in the transaction");
+        assert!(
+            sqlx::query(
+                "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .execute(&mut *tx)
+            .await
+            .is_err(),
+            "a second epoch advance in the same transaction must be rejected"
+        );
+        drop(tx);
+
+        // Advance to epoch 2 through two sanctioned transactions; the live
+        // epoch now exceeds what this binary supports, so its GC fails
+        // closed instead of auto-claiming the future epoch.
+        for statement in [
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut conn)
+                .await
+                .expect("sanctioned single-step advance");
+        }
+        assert!(matches!(
+            fixture
+                .store
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+                .await,
+            Err(IngressSubstrateError::UnsupportedLiveEpoch)
+        ));
+        drop(conn);
         fixture.close().await;
     }
 
