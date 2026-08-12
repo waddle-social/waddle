@@ -2,7 +2,7 @@ use std::path::Path;
 
 use sqlx::postgres::PgPool;
 use sqlx::sqlite::SqlitePool;
-use sqlx::Row;
+use sqlx::{Connection as _, Row};
 
 use crate::mam::storage::MamStorageError;
 
@@ -216,13 +216,16 @@ async fn execute_sqlite_batch(pool: &SqlitePool, sql: &str) -> Result<(), MamSto
     Ok(())
 }
 
-async fn execute_postgres_batch(pool: &PgPool, sql: &str) -> Result<(), MamStorageError> {
+async fn execute_postgres_batch(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+) -> Result<(), MamStorageError> {
     for statement in sql
         .split(';')
         .map(str::trim)
         .filter(|statement| !statement.is_empty())
     {
-        sqlx::query(statement).execute(pool).await?;
+        sqlx::query(statement).execute(&mut *conn).await?;
     }
     Ok(())
 }
@@ -343,25 +346,64 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
     Ok(())
 }
 
+/// Serializes concurrent PostgreSQL schema initialization. Two callers
+/// racing the `IF NOT EXISTS` DDL below (server replicas booting
+/// together, or test processes sharing one database) collide on the
+/// catalog's own unique indexes (`pg_type_typname_nsp_index`) even
+/// though every statement is individually idempotent.
+///
+/// A session-scoped `pg_advisory_lock` guards the whole batch while every
+/// statement keeps its original autocommit granularity: bundling the DDL
+/// into one transaction instead would accumulate `ACCESS EXCLUSIVE` locks
+/// across statements (`ADD COLUMN IF NOT EXISTS` takes it even when the
+/// column exists) and deadlock against concurrent archive readers and
+/// writers — observed as `deadlock detected` under parallel test suites.
+const POSTGRES_SCHEMA_INIT_LOCK: i64 = 0x7761_6464_6d61_6d31; // "waddmam1"
+
 pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStorageError> {
-    execute_postgres_batch(pool, POSTGRES_MAM_SCHEMA).await?;
+    let mut conn = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(POSTGRES_SCHEMA_INIT_LOCK)
+        .execute(&mut *conn)
+        .await?;
+    let ensured = ensure_postgres_schema_locked(&mut conn).await;
+    let unlocked = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(POSTGRES_SCHEMA_INIT_LOCK)
+        .execute(&mut *conn)
+        .await;
+    if ensured.is_err() || unlocked.is_err() {
+        // The session advisory lock must never return to the pool still
+        // held — a later checkout would wedge every other initializer.
+        // Detaching closes the connection, which releases session locks.
+        let connection = conn.detach();
+        drop(connection.close().await);
+    }
+    ensured?;
+    unlocked?;
+    Ok(())
+}
+
+async fn ensure_postgres_schema_locked(
+    conn: &mut sqlx::PgConnection,
+) -> Result<(), MamStorageError> {
+    execute_postgres_batch(&mut *conn, POSTGRES_MAM_SCHEMA).await?;
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS rich_payload TEXT")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS stanza_xml TEXT")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS nickname_generation BIGINT")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS parent_thread_id TEXT")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS origin_dedup_sender_scope TEXT")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS origin_dedup_fingerprint TEXT")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     // RFC 6121 §5.2.3 / XEP-0313 §3: `body` is nullable. Older
     // production deployments were created with `body TEXT NOT NULL`
@@ -389,15 +431,15 @@ pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStora
            AND table_name = 'mam_messages' \
            AND column_name = 'body'",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     let needs_drop = is_nullable
         .as_deref()
         .is_some_and(|v| v.eq_ignore_ascii_case("NO"));
     if needs_drop {
         sqlx::query("ALTER TABLE mam_messages ALTER COLUMN body DROP NOT NULL")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
     }
-    execute_postgres_batch(pool, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await
+    execute_postgres_batch(&mut *conn, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await
 }

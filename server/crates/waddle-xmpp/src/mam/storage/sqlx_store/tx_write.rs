@@ -41,8 +41,8 @@ pub enum MamTxStoreError {
     Database(#[from] sqlx::Error),
     #[error("MAM archive encoding error: {0}")]
     Encoding(#[from] MamTxEncodingError),
-    #[error("MAM archive id conflicted without a matching origin-id row: {archive_id}")]
-    Conflict { archive_id: String },
+    #[error("MAM archive id conflicted without a matching origin-id row: {}", stanza_id.id)]
+    Conflict { stanza_id: StanzaId },
 }
 
 /// Store an archived message on a caller-owned Postgres connection.
@@ -122,7 +122,9 @@ pub async fn store_archived_message_on_connection(
         return Ok(tx_outcome(outcome, archive_jid));
     }
 
-    Err(MamTxStoreError::Conflict { archive_id })
+    Err(MamTxStoreError::Conflict {
+        stanza_id: stanza_id(archive_id, archive_jid),
+    })
 }
 
 fn tx_outcome(outcome: StoreOutcome, archive_jid: &BareJid) -> MamTxStoreOutcome {
@@ -282,7 +284,7 @@ mod tests {
         let conflict = fixture(&archive, &conflict_id, Some(&different_origin));
         assert!(matches!(
             store_archived_message_on_connection(&mut conflict_tx, &archive, &conflict).await,
-            Err(MamTxStoreError::Conflict { ref archive_id }) if *archive_id == conflict_id
+            Err(MamTxStoreError::Conflict { ref stanza_id }) if stanza_id.id == conflict_id
         ));
         conflict_tx
             .rollback()

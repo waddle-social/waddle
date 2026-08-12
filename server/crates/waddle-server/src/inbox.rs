@@ -33,6 +33,11 @@ pub struct DatabaseInboxStorage {
 }
 
 /// Typed failures while decoding an inbox row from the database.
+///
+/// Public deliberately: [`crate::ingress_uow::IngressUowError`] carries
+/// [`InboxTxError`] (and through it this type) transparently, so the
+/// unit-of-work error surface can stay fully typed instead of collapsing
+/// to stringly diagnostics at the repository boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum InboxDecodeError {
     #[error(transparent)]
@@ -47,6 +52,9 @@ pub enum InboxDecodeError {
 }
 
 /// Errors returned by the transaction-taking inbox write helpers.
+///
+/// Public deliberately — see [`InboxDecodeError`]; the transaction
+/// helpers themselves stay `pub(crate)`.
 #[derive(Debug, thiserror::Error)]
 pub enum InboxTxError {
     #[error(transparent)]

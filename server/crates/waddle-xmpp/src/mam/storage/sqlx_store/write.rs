@@ -118,22 +118,28 @@ pub(super) async fn store_message(
             }
         }
         MamDatabaseBackend::Postgres(pool) => {
-            let mut conn = pool.acquire().await?;
-            if let Err(error) = insert_postgres_message_on_connection(
-                &mut conn,
-                PostgresMessageInsert {
-                    archive_id: &archive_id,
-                    archive_jid,
-                    message,
-                    rich_payload: rich_payload.as_deref(),
-                    nickname_generation,
-                    origin_dedup_sender_scope: origin_dedup_sender_scope_bind.as_deref(),
-                    origin_dedup_fingerprint: origin_dedup_fingerprint.as_deref(),
-                },
-                PostgresInsertConflict::Error,
-            )
-            .await
-            {
+            // Release the checkout before the dedup fallback below queries
+            // the pool again: holding it across that re-query lets N
+            // concurrent conflicting writers each pin one of the pool's
+            // connections while waiting for another.
+            let inserted = {
+                let mut conn = pool.acquire().await?;
+                insert_postgres_message_on_connection(
+                    &mut conn,
+                    PostgresMessageInsert {
+                        archive_id: &archive_id,
+                        archive_jid,
+                        message,
+                        rich_payload: rich_payload.as_deref(),
+                        nickname_generation,
+                        origin_dedup_sender_scope: origin_dedup_sender_scope_bind.as_deref(),
+                        origin_dedup_fingerprint: origin_dedup_fingerprint.as_deref(),
+                    },
+                    PostgresInsertConflict::Error,
+                )
+                .await
+            };
+            if let Err(error) = inserted {
                 if let Some(outcome) = find_existing_origin_id_match(
                     backend,
                     archive_jid,
