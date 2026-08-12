@@ -29,6 +29,12 @@ in-flight epoch-0 writes: once the activation commits, the next write observes
 the new epoch and requires the proof. The manifest is append-only and records
 every protected `ingress_*` table; catalog tests verify its rows and triggers.
 
+Writers must follow one lock order — **epoch row, then message row, then child
+rows**. The substrate acquires the epoch row `FOR SHARE` as its first
+statement in every write path; a writer that locks a message row before the
+trigger's epoch request can deadlock against garbage collection (epoch-first)
+with an activation queued between them.
+
 ## Activation checklist: epoch 0 to 1
 
 Do not flip the epoch until all of these are true:

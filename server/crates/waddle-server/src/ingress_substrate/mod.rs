@@ -153,6 +153,30 @@ impl PostgresIngressSubstrate {
     }
 }
 
+/// Acquire the singleton epoch row `FOR SHARE` as the first lock of a
+/// substrate write transaction.
+///
+/// Global lock order: **epoch row, then message row, then child rows**.
+/// The V1009 guard trigger requests the epoch row `FOR SHARE` during every
+/// protected write; taking it up front keeps that request already granted,
+/// so a write path that first locked a message row can never wait on the
+/// epoch behind a queued activation while GC (epoch-first by construction)
+/// waits on that same message row — the three-party deadlock cycle.
+async fn acquire_epoch_lock_first(tx: &mut Transaction<'_>) -> Result<(), IngressSubstrateError> {
+    let mut rows = tx
+        .query(
+            "SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE",
+            (),
+        )
+        .await
+        .map_err(discard_database_error)?;
+    rows.next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::Database)?;
+    Ok(())
+}
+
 /// Insert a message's immutable semantic digest.
 pub async fn record_message(
     tx: &mut Transaction<'_>,
@@ -190,6 +214,7 @@ pub async fn resolve_and_record_alias(
     digest: &SemanticDigest,
     mint: impl FnOnce() -> MessageKey,
 ) -> Result<AliasResolution, IngressSubstrateError> {
+    acquire_epoch_lock_first(tx).await?;
     let alias_key = AliasStorageKey::new(sender, target, origin_id);
     if let Some(stored) = locked_alias(tx, &alias_key).await? {
         return Ok(resolve_alias(true, digest, Some(&stored), mint));
@@ -244,6 +269,7 @@ pub async fn insert_sm_ref(
     ordinal: IngressOrdinal,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    acquire_epoch_lock_first(tx).await?;
     if !lock_message_for_child(tx, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
@@ -269,6 +295,7 @@ pub async fn record_delivery(
     delivery_key: DeliveryKey,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    acquire_epoch_lock_first(tx).await?;
     if !lock_message_for_child(tx, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
@@ -293,6 +320,7 @@ pub async fn terminalize_message(
     message_key: MessageKey,
     proven_terminal_at: DateTime<Utc>,
 ) -> Result<TerminalizeOutcome, IngressSubstrateError> {
+    acquire_epoch_lock_first(tx).await?;
     let changed = tx
         .execute(
             r#"

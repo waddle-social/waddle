@@ -336,7 +336,7 @@ BEGIN
     tx_xid := current_setting('waddle.protocol_epoch_xid', true);
     IF tx_epoch IS NULL OR tx_epoch <> live_epoch::text
        OR tx_xid IS NULL OR tx_xid <> pg_current_xact_id()::text THEN
-        RAISE EXCEPTION 'waddle: % on %.% requires a transaction-local epoch proof (SET LOCAL waddle.protocol_epoch = %; SET LOCAL waddle.protocol_epoch_xid = pg_current_xact_id())',
+        RAISE EXCEPTION 'waddle: % on %.% requires a transaction-local epoch proof (SET LOCAL waddle.protocol_epoch = %; SELECT set_config(''waddle.protocol_epoch_xid'', pg_current_xact_id()::text, true))',
             TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME, live_epoch;
     END IF;
     RETURN NULL;
