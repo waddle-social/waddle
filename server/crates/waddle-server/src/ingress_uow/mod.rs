@@ -1,17 +1,22 @@
 //! Atomic PostgreSQL ingress write boundary.
 //!
 //! A transaction takes locks in the fixed order epoch, exact ownership claim,
-//! then `sm_sessions` and ingress child rows. Dropping an uncommitted
-//! [`IngressUowTransaction`] rolls it back through [`crate::db::Transaction`].
+//! then fenced child rows such as `sm_sessions`, room archives, and ingress
+//! projections. Dropping an uncommitted [`IngressUowTransaction`] rolls it
+//! back through [`crate::db::Transaction`].
 
 mod error;
 mod repositories;
 
 pub use error::IngressUowError;
-pub use repositories::{CanonicalMessageRepository, DeliveryEffectRepository, SmIngressRepository};
+pub use repositories::{
+    CanonicalMessageRepository, DeliveryEffectRepository, InboxRepository, MamArchiveRepository,
+    SmIngressRepository,
+};
 #[cfg(feature = "clustering")]
 pub use repositories::{
-    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, SmClaimFence,
+    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, RoomClaimFence,
+    SmClaimFence,
 };
 
 use crate::{
@@ -19,6 +24,7 @@ use crate::{
     db::{lineage, Database, DatabaseDriver, Transaction},
     ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch},
 };
+#[cfg(feature = "clustering")]
 use uuid::Uuid;
 use waddle_xmpp::ingress::ProtocolEpoch;
 #[cfg(feature = "clustering")]
@@ -108,6 +114,7 @@ impl PostgresIngressUnitOfWork {
             transaction,
             protocol_epoch,
             lineage,
+            #[cfg(feature = "clustering")]
             identity: Uuid::new_v4(),
             #[cfg(feature = "clustering")]
             node_identity: self.node_identity.clone(),
@@ -128,6 +135,7 @@ pub struct IngressUowTransaction<'a> {
     /// Private capability identity that binds an in-transaction claim fence
     /// to this exact transaction, not merely another transaction sharing the
     /// same pool lifetime.
+    #[cfg(feature = "clustering")]
     identity: Uuid,
     /// The canonical identity source bound at [`PostgresIngressUnitOfWork`]
     /// construction; `None` when this unit of work cannot mint fences.
@@ -166,6 +174,7 @@ impl<'a> IngressUowTransaction<'a> {
         &mut self.transaction
     }
 
+    #[cfg(feature = "clustering")]
     fn identity(&self) -> Uuid {
         self.identity
     }

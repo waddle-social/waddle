@@ -18,6 +18,256 @@ async fn groupchat_notification_recovery_row_count(storage: &DatabaseInboxStorag
     row.get(0).expect("decode recovery row count")
 }
 
+async fn groupchat_notification_recovery_row_count_for_user(
+    storage: &DatabaseInboxStorage,
+    user: &BareJid,
+) -> i64 {
+    let mut rows = storage
+        .query(
+            "SELECT COUNT(*) FROM groupchat_notification_recovery WHERE recipient_bare_jid = ?",
+            crate::db_params![user.to_string()],
+        )
+        .await
+        .expect("count recovery rows for user");
+    let row = rows
+        .next()
+        .await
+        .expect("advance user recovery count row")
+        .expect("user recovery count row");
+    row.get(0).expect("decode user recovery row count")
+}
+
+fn groupchat_notification_recovery(
+    recipient: BareJid,
+    room: BareJid,
+    stanza_id: &str,
+) -> GroupchatNotificationRecovery {
+    GroupchatNotificationRecovery {
+        key: GroupchatNotificationRecoveryKey {
+            recipient,
+            room: room.clone(),
+            thread_id: None,
+            archive_stanza_id: StanzaId::new(stanza_id, room.into()),
+        },
+        sender_jid: "room@muc.example.com/alice".parse().expect("sender jid"),
+        is_live_occupant: true,
+        room_members_only: false,
+        sender_can_broadcast_channel_mention: true,
+        created_at_ms: 42,
+    }
+}
+
+#[tokio::test]
+async fn upsert_in_transaction_rolls_back_or_commits_with_unread_increment() {
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let database = storage.database();
+    let user = jid("me@example.com");
+    let partner = jid("alice@example.com");
+
+    {
+        let mut tx = database.begin().await.expect("begin rollback transaction");
+        let entry = upsert_in_transaction(
+            &mut tx,
+            &user,
+            InboxEntry::new(partner.clone(), ConversationKind::Direct, "rollback", 10),
+            true,
+        )
+        .await
+        .expect("upsert in rollback transaction");
+        assert_eq!(entry.unread, 1);
+    }
+    assert!(storage
+        .list(&user)
+        .await
+        .expect("list after rollback")
+        .is_empty());
+
+    let mut tx = database.begin().await.expect("begin commit transaction");
+    let first = upsert_in_transaction(
+        &mut tx,
+        &user,
+        InboxEntry::new(partner.clone(), ConversationKind::Direct, "first", 20),
+        true,
+    )
+    .await
+    .expect("first upsert in commit transaction");
+    let second = upsert_in_transaction(
+        &mut tx,
+        &user,
+        InboxEntry::new(partner.clone(), ConversationKind::Direct, "second", 30),
+        true,
+    )
+    .await
+    .expect("second upsert in commit transaction");
+    assert_eq!(first.unread, 1);
+    assert_eq!(second.unread, 2);
+    tx.commit().await.expect("commit transaction");
+
+    let entries = storage.list(&user).await.expect("list after commit");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].last_stanza_id, "second");
+    assert_eq!(entries[0].unread, 2);
+}
+
+#[tokio::test]
+async fn groupchat_notification_recovery_in_transaction_rolls_back_or_commits() {
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let database = storage.database();
+    let user = jid("me@example.com");
+    let room = jid("room@muc.example.com");
+
+    {
+        let mut tx = database.begin().await.expect("begin rollback transaction");
+        upsert_in_transaction(
+            &mut tx,
+            &user,
+            InboxEntry::new(room.clone(), ConversationKind::MucRoom, "rollback", 10),
+            true,
+        )
+        .await
+        .expect("upsert before rollback");
+        insert_groupchat_notification_recovery_in_transaction(
+            &mut tx,
+            groupchat_notification_recovery(user.clone(), room.clone(), "rollback"),
+        )
+        .await
+        .expect("insert recovery before rollback");
+    }
+    assert!(storage
+        .list(&user)
+        .await
+        .expect("list after rollback")
+        .is_empty());
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 0);
+
+    let mut tx = database.begin().await.expect("begin commit transaction");
+    upsert_in_transaction(
+        &mut tx,
+        &user,
+        InboxEntry::new(room.clone(), ConversationKind::MucRoom, "commit", 20),
+        true,
+    )
+    .await
+    .expect("upsert before commit");
+    let recovery = groupchat_notification_recovery(user.clone(), room, "commit");
+    insert_groupchat_notification_recovery_in_transaction(&mut tx, recovery.clone())
+        .await
+        .expect("insert recovery before commit");
+    tx.commit().await.expect("commit transaction");
+
+    assert_eq!(
+        storage.list(&user).await.expect("list after commit").len(),
+        1
+    );
+    assert_eq!(
+        storage
+            .list_pending_groupchat_notification_recoveries(16)
+            .await
+            .expect("list committed recovery"),
+        vec![recovery]
+    );
+}
+
+#[tokio::test]
+async fn transaction_taking_inbox_helpers_work_on_postgres() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed transaction-taking inbox helpers)"
+        );
+        return;
+    };
+
+    let storage = DatabaseInboxStorage::open(Some(&database_url))
+        .await
+        .expect("open postgres storage");
+    let database = storage.database();
+    let run_id = uuid::Uuid::new_v4();
+    let user = jid(&format!("inbox-tx-{run_id}@example.com"));
+    let room = jid(&format!("room-{run_id}@muc.example.com"));
+
+    {
+        let mut tx = database
+            .begin()
+            .await
+            .expect("begin postgres rollback transaction");
+        upsert_in_transaction(
+            &mut tx,
+            &user,
+            InboxEntry::new(room.clone(), ConversationKind::MucRoom, "rollback", 10),
+            true,
+        )
+        .await
+        .expect("upsert postgres rollback transaction");
+        insert_groupchat_notification_recovery_in_transaction(
+            &mut tx,
+            groupchat_notification_recovery(user.clone(), room.clone(), "rollback"),
+        )
+        .await
+        .expect("insert postgres recovery before rollback");
+    }
+    assert!(storage
+        .list(&user)
+        .await
+        .expect("list postgres rollback result")
+        .is_empty());
+    assert_eq!(
+        groupchat_notification_recovery_row_count_for_user(&storage, &user).await,
+        0
+    );
+
+    let mut tx = database
+        .begin()
+        .await
+        .expect("begin postgres commit transaction");
+    let entry = upsert_in_transaction(
+        &mut tx,
+        &user,
+        InboxEntry::new(room.clone(), ConversationKind::MucRoom, "commit", 20),
+        true,
+    )
+    .await
+    .expect("upsert postgres commit transaction");
+    let recovery = groupchat_notification_recovery(user.clone(), room.clone(), "commit");
+    insert_groupchat_notification_recovery_in_transaction(&mut tx, recovery)
+        .await
+        .expect("insert postgres recovery before commit");
+    tx.commit().await.expect("commit postgres transaction");
+
+    assert_eq!(entry.unread, 1);
+    assert_eq!(
+        storage
+            .list(&user)
+            .await
+            .expect("list postgres commit result")
+            .len(),
+        1
+    );
+    assert_eq!(
+        groupchat_notification_recovery_row_count_for_user(&storage, &user).await,
+        1
+    );
+
+    storage
+        .execute(
+            "DELETE FROM groupchat_notification_recovery WHERE recipient_bare_jid = ?",
+            crate::db_params![user.to_string()],
+        )
+        .await
+        .expect("delete postgres recovery test rows");
+    storage
+        .execute(
+            "DELETE FROM inbox_entries WHERE user_jid = ?",
+            crate::db_params![user.to_string()],
+        )
+        .await
+        .expect("delete postgres inbox test rows");
+}
+
 #[tokio::test]
 async fn sqlx_inbox_storage_round_trips_entries() {
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))

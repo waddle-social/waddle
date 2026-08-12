@@ -5,9 +5,16 @@
 use waddle_ws_test_support as ws_common;
 
 use jid::Jid;
+use sqlx::PgPool;
 use tokio::sync::Mutex;
+use waddle_server::{
+    config::LineageConfig,
+    db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
+    ingress_uow::{MamArchiveRepository, PostgresIngressUnitOfWork},
+};
 use waddle_xmpp::mam::{
-    ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, MamStorageError, SqlxMamStorage,
+    ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, MamStorageError, MamTxStoreOutcome,
+    SqlxMamStorage,
 };
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
 use xmpp_parsers::message::MessageType;
@@ -650,6 +657,114 @@ async fn dm_archived_in_sender_personal_archive() {
 // "unknown@invalid" data-loss bug).
 
 const ARCHIVE: &str = "room@conference.example.com";
+
+#[tokio::test]
+async fn xep_0313_uow_mam_write_is_queryable_through_the_archive_read_path() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (XEP-0313 UoW MAM)");
+        return;
+    };
+    let schema = format!("waddle_test_xep0313_uow_{}", uuid::Uuid::new_v4().simple());
+    let admin = PgPool::connect(&database_url)
+        .await
+        .expect("connect PostgreSQL admin pool");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create isolated PostgreSQL schema");
+    let schema_url = postgres_url_with_search_path(&database_url, &schema);
+    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, schema_url.clone());
+    config.pool_size = 2;
+    let db = Database::from_config("xep0313-uow-mam", &config)
+        .await
+        .expect("open isolated PostgreSQL database");
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("apply server migrations");
+    let lineage_config = LineageConfig {
+        deployment_uuid: Some(
+            "018f47b2-4b2e-7a3a-9a4c-52a5a6a90031"
+                .parse()
+                .expect("valid fixture deployment UUID"),
+        ),
+        action: None,
+    };
+    lineage::enroll(&db, &lineage_config)
+        .await
+        .expect("enroll fixture lineage");
+    let storage = SqlxMamStorage::open(&schema_url)
+        .await
+        .expect("initialize MAM storage schema");
+    let archive: jid::BareJid = format!("uow-{}@conference.example.com", uuid::Uuid::new_v4())
+        .parse()
+        .expect("valid archive JID");
+    let archive_id = format!("uow-mam-{}", uuid::Uuid::new_v4());
+    let message = ArchivedMessage {
+        id: archive_id.clone(),
+        body: Some("unit-of-work MAM archive row".to_string()),
+        origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new(format!(
+            "origin-{archive_id}"
+        ))),
+        message_type: MessageType::Groupchat,
+        ..ArchivedMessage::for_test(
+            format!("{archive}/romeo")
+                .parse()
+                .expect("valid fixture sender JID"),
+            jid::Jid::from(archive.clone()),
+        )
+    };
+    let uow = PostgresIngressUnitOfWork::open(db.clone(), lineage_config)
+        .expect("open PostgreSQL ingress unit of work");
+    let mut transaction = uow.begin().await.expect("begin ingress unit of work");
+    match MamArchiveRepository::store(&mut transaction, &archive, &message)
+        .await
+        .expect("store MAM archive in ingress unit of work")
+    {
+        MamTxStoreOutcome::Inserted(stanza_id) => {
+            assert_eq!(stanza_id.id, archive_id);
+            assert_eq!(stanza_id.by, jid::Jid::from(archive.clone()));
+        }
+        outcome => panic!("expected inserted MAM archive row, got {outcome:?}"),
+    }
+    transaction
+        .commit()
+        .await
+        .expect("commit ingress unit of work");
+
+    let result = storage
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
+        .await
+        .expect("read UoW-written MAM archive row");
+    assert_eq!(result.messages.len(), 1);
+    assert_eq!(result.messages[0].id, archive_id);
+    assert_eq!(
+        result.messages[0].body.as_deref(),
+        Some("unit-of-work MAM archive row")
+    );
+
+    drop(uow);
+    drop(storage);
+    drop(db);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop isolated PostgreSQL schema");
+}
+
+fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse PostgreSQL URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    url.to_string()
+}
 
 fn archive_bare() -> jid::BareJid {
     ARCHIVE

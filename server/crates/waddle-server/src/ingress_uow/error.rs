@@ -20,12 +20,16 @@ pub enum IngressUowError {
     #[error("ingress unit of work database operation failed")]
     Database(#[from] DatabaseError),
     #[error(transparent)]
+    MamStore(#[from] waddle_xmpp::mam::MamTxStoreError),
+    #[error(transparent)]
+    Inbox(#[from] crate::inbox::InboxTxError),
+    #[error(transparent)]
     Substrate(#[from] IngressSubstrateError),
     #[cfg(feature = "clustering")]
     #[error("this unit of work has no bound canonical node identity")]
     NodeIdentityUnbound,
     #[cfg(feature = "clustering")]
-    #[error("the exact SM ownership claim is not held")]
+    #[error("the exact ownership claim is not held")]
     ClaimFenceMissing,
     #[cfg(feature = "clustering")]
     #[error("the SM stream does not exist")]

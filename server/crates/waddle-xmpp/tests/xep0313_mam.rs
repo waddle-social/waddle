@@ -396,3 +396,66 @@ fn xep0313_result_envelope_from_is_the_room_jid() {
     assert_eq!(envelopes[0].from.as_ref(), Some(&archive));
     assert_eq!(envelopes[0].to.as_ref(), Some(&requester));
 }
+
+/// XEP-0313 archive writes can participate in the ingress transaction: an
+/// uncommitted row is not visible after the caller rolls the transaction back.
+#[tokio::test]
+async fn xep0313_tx_archive_write_rolls_back_with_caller_transaction() {
+    use sqlx::postgres::PgPoolOptions;
+    use waddle_xmpp::mam::{
+        store_archived_message_on_connection, MamTxStoreOutcome, SqlxMamStorage,
+    };
+    use waddle_xmpp_core::mam::{ArchivedMucSender, ArchivedRichMessage};
+    use waddle_xmpp_core::types::{Affiliation, Role};
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping XEP-0313 Postgres tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
+        return;
+    };
+    SqlxMamStorage::open(&url)
+        .await
+        .expect("initialize MAM schema");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect Postgres");
+    let archive: BareJid = format!("mam-tx-{}@conference.example.com", uuid::Uuid::now_v7())
+        .parse()
+        .expect("archive JID");
+    let id = format!("mam-tx-{}", uuid::Uuid::now_v7());
+    let message = ArchivedMessage {
+        id: id.clone(),
+        body: Some("transactional archive".to_string()),
+        origin_id: Some(OriginId::new("mam-tx-origin")),
+        message_type: MessageType::Groupchat,
+        rich: Some(ArchivedRichMessage {
+            muc_sender: Some(ArchivedMucSender {
+                jid: "alice@example.com/session".parse().expect("sender JID"),
+                affiliation: Affiliation::Member,
+                role: Role::Participant,
+            }),
+            ..ArchivedRichMessage::default()
+        }),
+        ..ArchivedMessage::for_test(
+            format!("{archive}/alice").parse().expect("occupant JID"),
+            Jid::from(archive.clone()),
+        )
+    };
+    let mut tx = pool.begin().await.expect("begin transaction");
+    assert!(matches!(
+        store_archived_message_on_connection(&mut tx, &archive, &message)
+            .await
+            .expect("store archive row"),
+        MamTxStoreOutcome::Inserted(ref stanza_id)
+            if stanza_id.id == id && stanza_id.by == archive
+    ));
+    tx.rollback().await.expect("roll back transaction");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mam_messages WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back row");
+    assert_eq!(count, 0);
+}

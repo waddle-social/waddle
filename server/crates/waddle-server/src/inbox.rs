@@ -32,6 +32,51 @@ pub struct DatabaseInboxStorage {
     db: Database,
 }
 
+/// Typed failures while decoding an inbox row from the database.
+///
+/// Public deliberately: [`crate::ingress_uow::IngressUowError`] carries
+/// [`InboxTxError`] (and through it this type) transparently, so the
+/// unit-of-work error surface can stay fully typed instead of collapsing
+/// to stringly diagnostics at the repository boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum InboxDecodeError {
+    #[error(transparent)]
+    Database(#[from] crate::db::DatabaseError),
+    #[error("invalid partner JID: {source}")]
+    PartnerJid {
+        #[source]
+        source: jid::Error,
+    },
+    #[error("unknown inbox conversation kind '{value}'")]
+    UnknownConversationKind { value: String },
+}
+
+/// Errors returned by the transaction-taking inbox write helpers.
+///
+/// Public deliberately — see [`InboxDecodeError`]; the transaction
+/// helpers themselves stay `pub(crate)`.
+#[derive(Debug, thiserror::Error)]
+pub enum InboxTxError {
+    #[error(transparent)]
+    Database(#[from] crate::db::DatabaseError),
+    #[error(transparent)]
+    Decode(#[from] InboxDecodeError),
+    #[error("RETURNING produced no row")]
+    ReturningRowMissing,
+}
+
+impl From<InboxTxError> for InboxStorageError {
+    fn from(error: InboxTxError) -> Self {
+        Self::Other(error.to_string())
+    }
+}
+
+impl From<InboxDecodeError> for InboxStorageError {
+    fn from(error: InboxDecodeError) -> Self {
+        Self::Other(error.to_string())
+    }
+}
+
 impl DatabaseInboxStorage {
     pub fn database(&self) -> Database {
         self.db.clone()
@@ -201,6 +246,43 @@ fn groupchat_notification_recovery_params(
     ]
 }
 
+/// Upsert an inbox entry using the caller's transaction and return the
+/// post-upsert state.
+pub(crate) async fn upsert_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    user: &BareJid,
+    entry: InboxEntry,
+    increment_unread: bool,
+) -> Result<InboxEntry, InboxTxError> {
+    let increment = i64::from(u8::from(increment_unread));
+    let thread_id = entry.thread_id.as_deref().unwrap_or("");
+    let is_thread = i64::from(u8::from(!thread_id.is_empty()));
+    let sql = upsert_sql();
+    let mut rows = tx
+        .query(&sql, upsert_params(user, &entry, increment, is_thread))
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(InboxTxError::ReturningRowMissing)?;
+
+    Ok(decode_row(&row)?)
+}
+
+/// Insert a groupchat notification recovery item using the caller's
+/// transaction.
+pub(crate) async fn insert_groupchat_notification_recovery_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    recovery: GroupchatNotificationRecovery,
+) -> Result<(), InboxTxError> {
+    tx.execute(
+        insert_groupchat_notification_recovery_sql(),
+        groupchat_notification_recovery_params(&recovery),
+    )
+    .await?;
+    Ok(())
+}
+
 fn decode_groupchat_notification_recovery(
     row: &crate::db::Row,
 ) -> Result<GroupchatNotificationRecovery, InboxStorageError> {
@@ -348,7 +430,7 @@ impl InboxStorage for DatabaseInboxStorage {
             .map_err(|error| InboxStorageError::Other(error.to_string()))?
             .ok_or_else(|| InboxStorageError::Other("RETURNING produced no row".to_string()))?;
 
-        decode_row(&row)
+        decode_row(&row).map_err(InboxStorageError::from)
     }
 
     #[instrument(skip(self, entry, recovery, user), fields(user = %user, partner = %entry.partner))]
@@ -359,32 +441,18 @@ impl InboxStorage for DatabaseInboxStorage {
         increment_unread: bool,
         recovery: Option<GroupchatNotificationRecovery>,
     ) -> Result<InboxEntry, InboxStorageError> {
-        let increment = i64::from(u8::from(increment_unread));
-        let thread_id = entry.thread_id.as_deref().unwrap_or("");
-        let is_thread = i64::from(u8::from(!thread_id.is_empty()));
-        let sql = upsert_sql();
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-        let mut rows = tx
-            .query(&sql, upsert_params(user, &entry, increment, is_thread))
+        let updated = upsert_in_transaction(&mut tx, user, entry, increment_unread)
             .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?
-            .ok_or_else(|| InboxStorageError::Other("RETURNING produced no row".to_string()))?;
-        let updated = decode_row(&row)?;
+            .map_err(InboxStorageError::from)?;
         if let Some(recovery) = recovery {
-            tx.execute(
-                insert_groupchat_notification_recovery_sql(),
-                groupchat_notification_recovery_params(&recovery),
-            )
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+            insert_groupchat_notification_recovery_in_transaction(&mut tx, recovery)
+                .await
+                .map_err(InboxStorageError::from)?;
         }
         tx.commit()
             .await
