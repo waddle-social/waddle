@@ -502,6 +502,23 @@ impl<'a> Transaction<'a> {
         Ok(Self { inner })
     }
 
+    /// Reach the raw Postgres connection for repositories that compose
+    /// crate-external, connection-taking SQL (MAM archive writes) into this
+    /// transaction. Returns `None` on SQLite.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the ingress unit-of-work composes this lane's accessor in a follow-up change"
+        )
+    )]
+    pub(crate) fn postgres_connection(&mut self) -> Option<&mut sqlx::PgConnection> {
+        match &mut self.inner {
+            TransactionInner::Postgres(tx) => Some(&mut **tx),
+            TransactionInner::Sqlite(_) => None,
+        }
+    }
+
     /// Execute a write statement inside the transaction.
     pub async fn execute(
         &mut self,
@@ -808,6 +825,40 @@ mod tests {
 
         assert_execute_batch_rollback_atomicity(&db, "tx_execute_batch_rollback", false).await;
 
+        drop(db);
+        drop_postgres_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_postgres_connection_returns_none_for_sqlite_memory() {
+        let db = Database::in_memory("connection-guard-postgres-connection-sqlite")
+            .await
+            .expect("open sqlite test database");
+        let mut tx = db.begin().await.expect("begin sqlite transaction");
+
+        assert!(
+            tx.postgres_connection().is_none(),
+            "SQLite-backed transactions must not expose a PostgreSQL connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn transaction_postgres_connection_returns_connection_for_postgres() {
+        let Some((db, admin, schema)) =
+            isolated_postgres_test_db("connection-guard-postgres-connection", "guard_pg_conn")
+                .await
+        else {
+            return;
+        };
+
+        let mut tx = db.begin().await.expect("begin postgres transaction");
+
+        assert!(
+            tx.postgres_connection().is_some(),
+            "Postgres-backed transactions must expose their raw PostgreSQL connection"
+        );
+
+        drop(tx);
         drop(db);
         drop_postgres_schema(&admin, &schema).await;
     }
