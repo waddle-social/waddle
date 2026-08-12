@@ -19,5 +19,7 @@ mod tests;
 
 pub use error::MamStorageError;
 pub use in_memory::InMemoryMamStorage;
-pub use sqlx_store::SqlxMamStorage;
+pub use sqlx_store::{
+    store_archived_message_on_connection, MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage,
+};
 pub use traits::{MamArchiveKind, MamStorage, StoreOutcome, TerminalTombstoneOutcome};

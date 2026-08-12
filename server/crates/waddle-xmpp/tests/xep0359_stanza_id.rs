@@ -279,6 +279,49 @@ fn xep0359_typed_stanza_id_round_trips_through_element() {
     assert_eq!(element.attr("by"), Some("alice@example.com"));
 }
 
+/// XEP-0359 §3: the connection-taking archive API returns the archive as the
+/// assigning authority, rather than inheriting the message sender's JID.
+#[tokio::test]
+async fn xep0359_tx_archive_outcome_keeps_archive_as_stanza_id_authority() {
+    use sqlx::postgres::PgPoolOptions;
+    use waddle_xmpp::mam::{
+        store_archived_message_on_connection, MamTxStoreOutcome, SqlxMamStorage,
+    };
+    use waddle_xmpp_core::mam::ArchivedMessage;
+
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping XEP-0359 Postgres tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
+        return;
+    };
+    SqlxMamStorage::open(&url)
+        .await
+        .expect("initialize MAM schema");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect Postgres");
+    let archive = bare(&format!("sid-tx-{}@example.com", uuid::Uuid::now_v7()));
+    let id = format!("sid-tx-{}", uuid::Uuid::now_v7());
+    let message = ArchivedMessage {
+        id: id.clone(),
+        ..ArchivedMessage::for_test(
+            "alice@example.com/device".parse().expect("sender JID"),
+            Jid::from(archive.clone()),
+        )
+    };
+    let mut tx = pool.begin().await.expect("begin transaction");
+    let outcome = store_archived_message_on_connection(&mut tx, &archive, &message)
+        .await
+        .expect("store archive row");
+    assert!(matches!(
+        outcome,
+        MamTxStoreOutcome::Inserted(ref stanza_id)
+            if stanza_id.id == id && stanza_id.by == archive
+    ));
+    tx.rollback().await.expect("roll back transaction");
+}
+
 /// XEP-0359 conformance of the ingress semantic-digest boundary (#1650):
 /// the digest validator's origin-id/stanza-id handling is part of this
 /// XEP's dedicated suite so it cannot drift from the canonical parser

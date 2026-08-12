@@ -1,6 +1,6 @@
 use jid::BareJid;
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgRow;
+use sqlx::postgres::{PgConnection, PgRow};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Postgres, QueryBuilder, Sqlite, Transaction};
 use tracing::{debug, warn};
@@ -118,37 +118,22 @@ pub(super) async fn store_message(
             }
         }
         MamDatabaseBackend::Postgres(pool) => {
-            let mut query = QueryBuilder::<Postgres>::new(
-                "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
-            );
-            query.push_values(std::iter::once(()), |mut builder, _| {
-                builder
-                    .push_bind(&archive_id)
-                    .push_bind(archive_jid_str.as_str())
-                    .push_bind(message.timestamp)
-                    .push_bind(from_jid_str.as_str())
-                    .push_bind(to_jid_str.as_str())
-                    .push_bind(message.body.as_deref())
-                    .push_bind(message.stanza_id.as_ref().map(|s| s.id.as_str()))
-                    .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
-                    .push_bind(reply_to_id_bind)
-                    .push_bind(reply_to_jid_owned.as_deref())
-                    .push_bind(message.origin_id.as_ref().map(|o| o.id.as_str()))
-                    .push_bind(message_type)
-                    .push_bind(message.stanza_xml.as_deref())
-                    .push_bind(rich_payload.as_deref())
-                    .push_bind(nickname_generation)
-                    .push_bind(
-                        message
-                            .thread
-                            .as_ref()
-                            .and_then(|t| t.parent.as_ref())
-                            .map(|p| p.as_str()),
-                    )
-                    .push_bind(origin_dedup_sender_scope_bind.as_deref())
-                    .push_bind(origin_dedup_fingerprint.as_deref());
-            });
-            if let Err(error) = query.build().execute(pool).await {
+            let mut conn = pool.acquire().await?;
+            if let Err(error) = insert_postgres_message_on_connection(
+                &mut conn,
+                PostgresMessageInsert {
+                    archive_id: &archive_id,
+                    archive_jid,
+                    message,
+                    rich_payload: rich_payload.as_deref(),
+                    nickname_generation,
+                    origin_dedup_sender_scope: origin_dedup_sender_scope_bind.as_deref(),
+                    origin_dedup_fingerprint: origin_dedup_fingerprint.as_deref(),
+                },
+                PostgresInsertConflict::Error,
+            )
+            .await
+            {
                 if let Some(outcome) = find_existing_origin_id_match(
                     backend,
                     archive_jid,
@@ -211,17 +196,7 @@ pub(super) async fn store_message_fenced(
     } else {
         message.id.clone()
     };
-    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
     let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
-    let archive_jid_str = archive_jid.to_string();
-    let from_jid_str = message.from.to_string();
-    let to_jid_str = message.to.to_string();
-    let reply_to_id_bind = message.reply.as_ref().map(|r| r.id.as_str());
-    let reply_to_jid_owned: Option<String> = message
-        .reply
-        .as_ref()
-        .and_then(|r| r.to.as_ref())
-        .map(|jid| jid.to_string());
 
     let mut tx = pool.begin().await?;
 
@@ -240,7 +215,7 @@ pub(super) async fn store_message_fenced(
             entity: fence.entity.clone(),
         });
     }
-    if let Some(outcome) = find_existing_origin_id_match_postgres_tx(
+    if let Some(outcome) = find_existing_origin_id_match_postgres_on_connection(
         &mut tx,
         archive_jid,
         message,
@@ -252,37 +227,21 @@ pub(super) async fn store_message_fenced(
         return Ok(outcome);
     }
 
-    let mut query = QueryBuilder::<Postgres>::new(
-        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
-    );
-    query.push_values(std::iter::once(()), |mut builder, _| {
-        builder
-            .push_bind(&archive_id)
-            .push_bind(archive_jid_str.as_str())
-            .push_bind(message.timestamp)
-            .push_bind(from_jid_str.as_str())
-            .push_bind(to_jid_str.as_str())
-            .push_bind(message.body.as_deref())
-            .push_bind(message.stanza_id.as_ref().map(|s| s.id.as_str()))
-            .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
-            .push_bind(reply_to_id_bind)
-            .push_bind(reply_to_jid_owned.as_deref())
-            .push_bind(message.origin_id.as_ref().map(|o| o.id.as_str()))
-            .push_bind(message_type)
-            .push_bind(message.stanza_xml.as_deref())
-            .push_bind(rich_payload.as_deref())
-            .push_bind(nickname_generation)
-            .push_bind(
-                message
-                    .thread
-                    .as_ref()
-                    .and_then(|t| t.parent.as_ref())
-                    .map(|p| p.as_str()),
-            )
-            .push_bind(origin_dedup_sender_scope_bind.as_deref())
-            .push_bind(origin_dedup_fingerprint.as_deref());
-    });
-    if let Err(error) = query.build().execute(&mut *tx).await {
+    if let Err(error) = insert_postgres_message_on_connection(
+        &mut tx,
+        PostgresMessageInsert {
+            archive_id: &archive_id,
+            archive_jid,
+            message,
+            rich_payload: rich_payload.as_deref(),
+            nickname_generation,
+            origin_dedup_sender_scope: origin_dedup_sender_scope_bind.as_deref(),
+            origin_dedup_fingerprint: origin_dedup_fingerprint.as_deref(),
+        },
+        PostgresInsertConflict::Error,
+    )
+    .await
+    {
         let _ = tx.rollback().await;
         // A concurrent origin-id insert can still win after our pre-check.
         // Re-prove ownership in a fresh transaction before accepting its
@@ -295,7 +254,7 @@ pub(super) async fn store_message_fenced(
                 entity: fence.entity.clone(),
             });
         }
-        let existing_outcome = find_existing_origin_id_match_postgres_tx(
+        let existing_outcome = find_existing_origin_id_match_postgres_on_connection(
             &mut dedup_tx,
             archive_jid,
             message,
@@ -335,12 +294,12 @@ async fn claim_fence_is_held(
     .is_some())
 }
 
-async fn find_existing_origin_id_match_postgres_tx(
-    tx: &mut Transaction<'_, Postgres>,
+pub(super) async fn find_existing_origin_id_match_postgres_on_connection(
+    conn: &mut PgConnection,
     archive_jid: &BareJid,
     message: &ArchivedMessage,
     origin_dedup_fingerprint: Option<&str>,
-) -> Result<Option<StoreOutcome>, MamStorageError> {
+) -> Result<Option<StoreOutcome>, sqlx::Error> {
     let Some(origin_id) = message.origin_id.as_ref() else {
         return Ok(None);
     };
@@ -361,7 +320,7 @@ async fn find_existing_origin_id_match_postgres_tx(
         groupchat_from,
         origin_dedup_fingerprint,
     );
-    let rows: Vec<PgRow> = builder.build().fetch_all(&mut **tx).await?;
+    let rows: Vec<PgRow> = builder.build().fetch_all(conn).await?;
     let candidates = rows
         .iter()
         .filter_map(|row| match decode_postgres_message_row(row) {
@@ -373,6 +332,103 @@ async fn find_existing_origin_id_match_postgres_tx(
         })
         .collect::<Vec<_>>();
     Ok(matching_store_outcome(&candidates, message))
+}
+
+pub(super) enum PostgresInsertConflict {
+    Error,
+    DoNothing,
+}
+
+pub(super) struct PostgresMessageInsert<'a> {
+    pub archive_id: &'a str,
+    pub archive_jid: &'a BareJid,
+    pub message: &'a ArchivedMessage,
+    pub rich_payload: Option<&'a str>,
+    pub nickname_generation: Option<i64>,
+    pub origin_dedup_sender_scope: Option<&'a str>,
+    pub origin_dedup_fingerprint: Option<&'a str>,
+}
+
+pub(super) async fn insert_postgres_message_on_connection(
+    conn: &mut PgConnection,
+    insert: PostgresMessageInsert<'_>,
+    conflict: PostgresInsertConflict,
+) -> Result<Option<String>, sqlx::Error> {
+    let archive_jid_str = insert.archive_jid.to_string();
+    let from_jid_str = insert.message.from.to_string();
+    let to_jid_str = insert.message.to.to_string();
+    let reply_to_id = insert.message.reply.as_ref().map(|reply| reply.id.as_str());
+    let reply_to_jid = insert
+        .message
+        .reply
+        .as_ref()
+        .and_then(|reply| reply.to.as_ref())
+        .map(jid::Jid::to_string);
+    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&insert.message.message_type);
+
+    let mut query = QueryBuilder::<Postgres>::new(
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
+    );
+    query.push_values(std::iter::once(()), |mut builder, _| {
+        builder
+            .push_bind(insert.archive_id)
+            .push_bind(archive_jid_str.as_str())
+            .push_bind(insert.message.timestamp)
+            .push_bind(from_jid_str.as_str())
+            .push_bind(to_jid_str.as_str())
+            .push_bind(insert.message.body.as_deref())
+            .push_bind(
+                insert
+                    .message
+                    .stanza_id
+                    .as_ref()
+                    .map(|stanza_id| stanza_id.id.as_str()),
+            )
+            .push_bind(
+                insert
+                    .message
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.id.as_str()),
+            )
+            .push_bind(reply_to_id)
+            .push_bind(reply_to_jid.as_deref())
+            .push_bind(
+                insert
+                    .message
+                    .origin_id
+                    .as_ref()
+                    .map(|origin_id| origin_id.id.as_str()),
+            )
+            .push_bind(message_type)
+            .push_bind(insert.message.stanza_xml.as_deref())
+            .push_bind(insert.rich_payload)
+            .push_bind(insert.nickname_generation)
+            .push_bind(
+                insert
+                    .message
+                    .thread
+                    .as_ref()
+                    .and_then(|thread| thread.parent.as_ref())
+                    .map(|parent| parent.as_str()),
+            )
+            .push_bind(insert.origin_dedup_sender_scope)
+            .push_bind(insert.origin_dedup_fingerprint);
+    });
+
+    match conflict {
+        PostgresInsertConflict::Error => {
+            query.build().execute(conn).await?;
+            Ok(Some(insert.archive_id.to_string()))
+        }
+        PostgresInsertConflict::DoNothing => {
+            query.push(" ON CONFLICT DO NOTHING RETURNING id");
+            query
+                .build_query_scalar::<String>()
+                .fetch_optional(conn)
+                .await
+        }
+    }
 }
 
 async fn find_existing_origin_id_match(
@@ -491,7 +547,7 @@ fn push_origin_dedup_filter<'args, DB>(
     builder.push(" ORDER BY timestamp ASC, id ASC");
 }
 
-fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
+pub(super) fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
     let mut hasher = Sha256::new();
     update_hash_part(
         &mut hasher,
@@ -549,7 +605,7 @@ fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
     hex
 }
 
-fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<jid::BareJid> {
+pub(super) fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<jid::BareJid> {
     if !matches!(message.message_type, MessageType::Groupchat) || message.origin_id.is_none() {
         return None;
     }
