@@ -377,7 +377,11 @@ async fn validate_column_set(
     Ok(())
 }
 
-async fn verify_in_transaction(
+/// Verify lineage while preserving the caller's existing transaction boundary.
+///
+/// Callers that compose durable writes with lineage attestation must invoke
+/// this before their writes and let the transaction drop on an error.
+pub(crate) async fn verify_in_transaction(
     tx: &mut Transaction<'_>,
     driver: DatabaseDriver,
     config: &LineageConfig,
