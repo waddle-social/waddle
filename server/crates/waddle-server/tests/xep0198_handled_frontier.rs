@@ -33,7 +33,6 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 struct Fixture {
     db: Database,
     uow: PostgresIngressUnitOfWork,
-    node_identity: SharedNodeIdentity,
     owner: NodeIdentity,
     claim_epoch: ClaimEpoch,
     admin: sqlx::PgPool,
@@ -84,13 +83,17 @@ impl Fixture {
         lineage::enroll(&db, &lineage_config)
             .await
             .expect("enroll fixture lineage");
-        let uow = PostgresIngressUnitOfWork::open(db.clone(), lineage_config)
-            .expect("open postgres ingress unit of work");
         let owner = NodeIdentity::new("node-0198", "node-0198-epoch");
+        let node_identity = SharedNodeIdentity::new(owner.clone());
+        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+            db.clone(),
+            lineage_config,
+            node_identity.clone(),
+        )
+        .expect("open postgres ingress unit of work");
         Some(Self {
             db,
             uow,
-            node_identity: SharedNodeIdentity::new(owner.clone()),
             owner,
             claim_epoch: ClaimEpoch(198),
             admin,
@@ -152,15 +155,9 @@ impl Fixture {
         transaction: &mut waddle_server::ingress_uow::IngressUowTransaction<'transaction>,
         stream_id: &SmSessionId,
     ) -> SmClaimFence<'transaction> {
-        ClaimRepository::assert_sm_claim(
-            transaction,
-            &self.node_identity,
-            stream_id,
-            &self.owner,
-            self.claim_epoch,
-        )
-        .await
-        .expect("mint claim fence under current node authority")
+        ClaimRepository::assert_sm_claim(transaction, stream_id, &self.owner, self.claim_epoch)
+            .await
+            .expect("mint claim fence under current node authority")
     }
 
     async fn stored_frontier(&self, stream_id: &SmSessionId) -> i64 {

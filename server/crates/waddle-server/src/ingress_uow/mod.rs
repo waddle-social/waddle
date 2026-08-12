@@ -21,21 +21,50 @@ use crate::{
 };
 use uuid::Uuid;
 use waddle_xmpp::ingress::ProtocolEpoch;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 
 /// PostgreSQL-only factory for ingress transactions bound to one lineage policy.
 #[derive(Clone)]
 pub struct PostgresIngressUnitOfWork {
     db: Database,
     lineage: LineageConfig,
+    /// The server's canonical node identity source. Bound once at
+    /// construction so claim fences can only be minted against the real
+    /// rotation gate, never a caller-constructed one.
+    #[cfg(feature = "clustering")]
+    node_identity: Option<SharedNodeIdentity>,
 }
 
 impl PostgresIngressUnitOfWork {
     /// Open against the main PostgreSQL database pool.
+    ///
+    /// A unit of work opened this way cannot mint claim fences; use
+    /// [`Self::open_with_node_identity`] where fenced SM writes are needed.
     pub fn open(db: Database, lineage: LineageConfig) -> Result<Self, IngressUowError> {
         if db.driver() != DatabaseDriver::Postgres {
             return Err(IngressUowError::PostgresRequired);
         }
-        Ok(Self { db, lineage })
+        Ok(Self {
+            db,
+            lineage,
+            #[cfg(feature = "clustering")]
+            node_identity: None,
+        })
+    }
+
+    /// Open with the server's canonical [`SharedNodeIdentity`] bound, so
+    /// claim fences mint under — and transactions retain — the real
+    /// rotation gate.
+    #[cfg(feature = "clustering")]
+    pub fn open_with_node_identity(
+        db: Database,
+        lineage: LineageConfig,
+        node_identity: SharedNodeIdentity,
+    ) -> Result<Self, IngressUowError> {
+        let mut uow = Self::open(db, lineage)?;
+        uow.node_identity = Some(node_identity);
+        Ok(uow)
     }
 
     /// Begin an attested, epoch-proven ingress transaction.
@@ -80,6 +109,10 @@ impl PostgresIngressUnitOfWork {
             protocol_epoch,
             lineage,
             identity: Uuid::new_v4(),
+            #[cfg(feature = "clustering")]
+            node_identity: self.node_identity.clone(),
+            #[cfg(feature = "clustering")]
+            authority_guards: Vec::new(),
         })
     }
 }
@@ -96,6 +129,16 @@ pub struct IngressUowTransaction<'a> {
     /// to this exact transaction, not merely another transaction sharing the
     /// same pool lifetime.
     identity: Uuid,
+    /// The canonical identity source bound at [`PostgresIngressUnitOfWork`]
+    /// construction; `None` when this unit of work cannot mint fences.
+    #[cfg(feature = "clustering")]
+    node_identity: Option<SharedNodeIdentity>,
+    /// Node-authority guards minted for this transaction's claim fences.
+    /// Held here — not on the independently droppable fence — so identity
+    /// rotation or terminal disable cannot complete until this transaction
+    /// commits or rolls back, never between a fenced write and its commit.
+    #[cfg(feature = "clustering")]
+    authority_guards: Vec<CurrentNodeIdentityGuard>,
 }
 
 impl<'a> IngressUowTransaction<'a> {
@@ -125,6 +168,19 @@ impl<'a> IngressUowTransaction<'a> {
 
     fn identity(&self) -> Uuid {
         self.identity
+    }
+
+    /// The canonical node-identity source this transaction may mint claim
+    /// fences against.
+    #[cfg(feature = "clustering")]
+    fn bound_node_identity(&self) -> Option<&SharedNodeIdentity> {
+        self.node_identity.as_ref()
+    }
+
+    /// Retain a minted node-authority guard until this transaction ends.
+    #[cfg(feature = "clustering")]
+    fn retain_authority(&mut self, guard: CurrentNodeIdentityGuard) {
+        self.authority_guards.push(guard);
     }
 }
 

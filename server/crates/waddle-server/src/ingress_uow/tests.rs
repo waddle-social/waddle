@@ -47,7 +47,6 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     let mut transaction = fixture.begin().await;
     let fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
-        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -81,7 +80,6 @@ async fn dropping_uow_rolls_back_spanning_writes() {
         let mut transaction = fixture.begin().await;
         let fence = ClaimRepository::assert_sm_claim(
             &mut transaction,
-            &values.node_identity,
             &values.stream_id,
             &values.owner,
             values.claim_epoch,
@@ -209,14 +207,7 @@ async fn claim_fence_requires_the_exact_owner_incarnation_and_epoch() {
     ] {
         let mut transaction = fixture.begin().await;
         assert!(matches!(
-            ClaimRepository::assert_sm_claim(
-                &mut transaction,
-                &values.node_identity,
-                stream_id,
-                owner,
-                claim_epoch
-            )
-            .await,
+            ClaimRepository::assert_sm_claim(&mut transaction, stream_id, owner, claim_epoch).await,
             Err(IngressUowError::ClaimFenceMissing)
         ));
     }
@@ -234,7 +225,6 @@ async fn claim_fence_blocks_a_concurrent_claim_update_until_commit() {
     let mut transaction = fixture.begin().await;
     let _fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
-        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -270,10 +260,11 @@ async fn claim_fence_requires_current_local_node_authority() {
     let values = FixtureValues::new("claim-fence-authority");
     fixture.seed_claim_and_session(&values, 0).await;
 
-    // Rotation to a new incarnation revokes minting under the old identity
-    // even though the old clustering_claims row still exists.
-    let rotated = SharedNodeIdentity::new(values.owner.clone());
-    rotated
+    // Rotation of the bound canonical identity to a new incarnation revokes
+    // minting under the old identity even though the old clustering_claims
+    // row still exists.
+    fixture
+        .node_identity
         .rotate(NodeIdentity::new(
             values.owner.node_id.clone(),
             "rotated-epoch",
@@ -283,7 +274,6 @@ async fn claim_fence_requires_current_local_node_authority() {
     assert!(matches!(
         ClaimRepository::assert_sm_claim(
             &mut transaction,
-            &rotated,
             &values.stream_id,
             &values.owner,
             values.claim_epoch
@@ -294,19 +284,34 @@ async fn claim_fence_requires_current_local_node_authority() {
     drop(transaction);
 
     // Terminal disable revokes minting the same way.
-    let disabled = SharedNodeIdentity::new(values.owner.clone());
-    disabled.disable().await;
+    fixture.node_identity.rotate(values.owner.clone()).await;
+    fixture.node_identity.disable().await;
     let mut transaction = fixture.begin().await;
     assert!(matches!(
         ClaimRepository::assert_sm_claim(
             &mut transaction,
-            &disabled,
             &values.stream_id,
             &values.owner,
             values.claim_epoch
         )
         .await,
         Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(transaction);
+
+    // A unit of work with no bound canonical identity cannot mint at all.
+    let unbound = PostgresIngressUnitOfWork::open(fixture.db.clone(), fixture.lineage.clone())
+        .expect("open unbound unit of work");
+    let mut transaction = unbound.begin().await.expect("begin unbound transaction");
+    assert!(matches!(
+        ClaimRepository::assert_sm_claim(
+            &mut transaction,
+            &values.stream_id,
+            &values.owner,
+            values.claim_epoch
+        )
+        .await,
+        Err(IngressUowError::NodeIdentityUnbound)
     ));
     drop(transaction);
     fixture.close().await;
@@ -324,7 +329,6 @@ async fn claim_fence_from_another_live_transaction_is_rejected() {
     let mut minting_transaction = fixture.begin().await;
     let fence = ClaimRepository::assert_sm_claim(
         &mut minting_transaction,
-        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -367,7 +371,6 @@ async fn handled_frontier_uses_wrapping_single_step_cas() {
     let mut transaction = fixture.begin().await;
     let fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
-        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -412,7 +415,6 @@ async fn handled_frontier_uses_wrapping_single_step_cas() {
     let mut missing_transaction = fixture.begin().await;
     let missing_fence = ClaimRepository::assert_sm_claim(
         &mut missing_transaction,
-        &values.node_identity,
         &values.stream_id,
         &values.owner,
         values.claim_epoch,
@@ -508,7 +510,6 @@ async fn insert_inbox_entry(transaction: &mut IngressUowTransaction<'_>, values:
 struct FixtureValues {
     stream_id: SmSessionId,
     owner: NodeIdentity,
-    node_identity: SharedNodeIdentity,
     claim_epoch: ClaimEpoch,
     principal: AuthenticatedPrincipalRef,
     sender: jid::BareJid,
@@ -529,7 +530,6 @@ impl FixtureValues {
         Self {
             stream_id: SmSessionId::new(format!("stream-{name}")),
             owner: NodeIdentity::new("node-a", "node-a-epoch"),
-            node_identity: SharedNodeIdentity::new(NodeIdentity::new("node-a", "node-a-epoch")),
             claim_epoch: ClaimEpoch(11),
             principal: AuthenticatedPrincipalRef::new(
                 bare_jid.clone(),
@@ -560,6 +560,10 @@ impl FixtureValues {
 struct Fixture {
     db: Database,
     uow: PostgresIngressUnitOfWork,
+    lineage: LineageConfig,
+    /// The canonical identity source bound into `uow` (clustering only).
+    #[cfg(feature = "clustering")]
+    node_identity: SharedNodeIdentity,
     admin: sqlx::PgPool,
     schema: String,
     schema_url: String,
@@ -597,11 +601,24 @@ impl Fixture {
         lineage::enroll(&db, &lineage)
             .await
             .expect("enroll fixture lineage before UoW use");
+        #[cfg(feature = "clustering")]
+        let node_identity = SharedNodeIdentity::new(NodeIdentity::new("node-a", "node-a-epoch"));
+        #[cfg(feature = "clustering")]
+        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+            db.clone(),
+            lineage.clone(),
+            node_identity.clone(),
+        )
+        .expect("open fixture UoW");
+        #[cfg(not(feature = "clustering"))]
         let uow =
             PostgresIngressUnitOfWork::open(db.clone(), lineage.clone()).expect("open fixture UoW");
         Some(Self {
             db,
             uow,
+            lineage,
+            #[cfg(feature = "clustering")]
+            node_identity,
             admin,
             schema,
             schema_url,

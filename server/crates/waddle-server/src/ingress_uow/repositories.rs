@@ -152,9 +152,7 @@ async fn lookup_message_key(
 use std::marker::PhantomData;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::{
-    ownership::{
-        ClaimEpoch, CurrentNodeIdentityGuard, EntityType, NodeIdentity, SharedNodeIdentity,
-    },
+    ownership::{ClaimEpoch, EntityType, NodeIdentity},
     pending_delivery::SmSessionId,
 };
 
@@ -166,18 +164,21 @@ pub struct ClaimRepository;
 /// Non-forgeable proof that this transaction holds one exact SM claim under
 /// current local node authority.
 ///
-/// It can only be minted after both the [`SharedNodeIdentity`] currency
-/// check and the `FOR SHARE` claim assertion. It retains the
-/// [`CurrentNodeIdentityGuard`] until dropped, so identity rotation or
-/// terminal disable cannot complete while this transaction can still write
-/// under the fence — the same publication-after-revocation gate the fenced
-/// SM persistence path holds through its transactions. Its lifetime is tied
-/// to the unit of work so a caller cannot carry it into another one.
+/// It can only be minted after both the node-authority currency check
+/// (against the canonical `SharedNodeIdentity` bound at
+/// [`super::PostgresIngressUnitOfWork::open_with_node_identity`]) and the
+/// `FOR SHARE` claim assertion. The minted `CurrentNodeIdentityGuard` is
+/// retained by the transaction itself — not this independently droppable
+/// value — so identity rotation or terminal disable cannot complete until
+/// the transaction commits or rolls back, the same
+/// publication-after-revocation gate the fenced SM persistence path holds
+/// through its transactions. Its lifetime is tied to the unit of work so a
+/// caller cannot carry it into another one.
 #[cfg(feature = "clustering")]
+#[derive(Debug)]
 pub struct SmClaimFence<'transaction> {
     stream_id: SmSessionId,
     transaction_identity: Uuid,
-    _authority: CurrentNodeIdentityGuard,
     _transaction: PhantomData<&'transaction IngressUowTransaction<'transaction>>,
 }
 
@@ -185,16 +186,19 @@ pub struct SmClaimFence<'transaction> {
 impl ClaimRepository {
     /// Assert the exact `(entity, node id, node incarnation, claim epoch)`
     /// row under `FOR SHARE`, after proving `owner` is still this node's
-    /// current, active identity. Locks are taken in the fixed order
+    /// current, active identity per the transaction's bound canonical
+    /// identity source. Locks are taken in the fixed order
     /// epoch (at [`super::PostgresIngressUnitOfWork::begin`]) → exact claim
     /// (here) → `sm_sessions`/child rows (fenced repositories).
     pub async fn assert_sm_claim<'transaction>(
         transaction: &mut IngressUowTransaction<'transaction>,
-        node_identity: &SharedNodeIdentity,
         stream_id: &SmSessionId,
         owner: &NodeIdentity,
         claim_epoch: ClaimEpoch,
     ) -> Result<SmClaimFence<'transaction>, IngressUowError> {
+        let Some(node_identity) = transaction.bound_node_identity().cloned() else {
+            return Err(IngressUowError::NodeIdentityUnbound);
+        };
         let Some(authority) = node_identity.guard_if_current(owner).await else {
             return Err(IngressUowError::ClaimFenceMissing);
         };
@@ -218,10 +222,11 @@ impl ClaimRepository {
         if rows.next().await?.is_none() {
             return Err(IngressUowError::ClaimFenceMissing);
         }
+        drop(rows);
+        transaction.retain_authority(authority);
         Ok(SmClaimFence {
             stream_id: stream_id.clone(),
             transaction_identity: transaction.identity(),
-            _authority: authority,
             _transaction: PhantomData,
         })
     }

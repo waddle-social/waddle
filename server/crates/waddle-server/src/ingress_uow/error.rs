@@ -22,6 +22,9 @@ pub enum IngressUowError {
     #[error(transparent)]
     Substrate(#[from] IngressSubstrateError),
     #[cfg(feature = "clustering")]
+    #[error("this unit of work has no bound canonical node identity")]
+    NodeIdentityUnbound,
+    #[cfg(feature = "clustering")]
     #[error("the exact SM ownership claim is not held")]
     ClaimFenceMissing,
     #[cfg(feature = "clustering")]
