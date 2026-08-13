@@ -1114,7 +1114,7 @@ async fn displaced_sessions_are_promoted_and_confirmed() {
     let registry = ConnectionRegistry::new();
     let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
-    promote_displaced_sessions(
+    let outcome = promote_displaced_sessions(
         displaced,
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
@@ -1127,6 +1127,13 @@ async fn displaced_sessions_are_promoted_and_confirmed() {
     )
     .await;
 
+    // Terminal completion is reported so callers evict per-stream state
+    // (the ingress-shadow enrollment gate) that nothing else will ever
+    // see again.
+    assert_eq!(
+        outcome.completed_stream_ids().collect::<Vec<_>>(),
+        vec!["stream-oldest"],
+    );
     // The displaced queue landed in pending delivery — no message lost.
     assert_eq!(pending.count(&bare("alice@example.com")).await.unwrap(), 1);
     // Confirmed: durable SM rows for the displaced session are gone.

@@ -616,7 +616,7 @@ async fn cleanup_connection_shutdown_inner(
                             .await
                         {
                             Ok(Some(displaced)) => {
-                                crate::sm_promotion::promote_displaced_sessions(
+                                let outcome = crate::sm_promotion::promote_displaced_sessions(
                                     vec![displaced],
                                     crate::sm_promotion::DisplacedPromotionDeps {
                                         sm_registry: &state.deps.protocol.sm_session_registry,
@@ -638,6 +638,11 @@ async fn cleanup_connection_shutdown_inner(
                                     },
                                 )
                                 .await;
+                                for completed in outcome.completed_stream_ids() {
+                                    state.deps.protocol.ingress_shadow.forget_stream(
+                                        &waddle_xmpp::pending_delivery::SmSessionId::new(completed),
+                                    );
+                                }
                             }
                             Ok(None) => {}
                             Err(error) => {
@@ -1602,6 +1607,13 @@ async fn refuse_detach_without_principal(
             },
         )
         .await;
+        for completed in outcome.completed_stream_ids() {
+            state
+                .deps
+                .protocol
+                .ingress_shadow
+                .forget_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(completed));
+        }
         (
             conn.sm_state
                 .stream_id
@@ -2203,6 +2215,12 @@ pub(super) async fn cleanup_invalidated_detached_session(
     detached: waddle_xmpp::stream_management::DetachedSession,
     replacement_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
+    // Terminal invalidation: this stream can never resume, so its ingress-
+    // shadow enrollment gate must not outlive it (a fresh bind mints a new
+    // stream id, and the expiry janitor never sees an invalidated session).
+    state.deps.protocol.ingress_shadow.forget_stream(
+        &waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone()),
+    );
     // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
     // DashMap entry. It gates whether we attempt cleanup at all: if the
     // replacement (the freshly-bound session that triggered this invalidation)
