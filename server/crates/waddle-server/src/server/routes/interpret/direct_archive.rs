@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::mam::StoreOutcome;
 
 const DM_CALL_PENDING_TTL_SECS: i64 = 30 * 60;
@@ -57,6 +58,14 @@ pub(super) async fn archive_direct(
         to.clone(),
         &message,
     );
+    deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
+        archive: archive_jid.clone(),
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+            archived.id.clone(),
+            jid::Jid::from(archive_jid.clone()),
+        ),
+        by: archive_jid.clone(),
+    });
     let requested_archive_id = archived.id.clone();
     match mam_storage.store_message(&archive_jid, &archived).await {
         Ok(outcome) => {

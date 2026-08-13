@@ -34,6 +34,7 @@ use xmpp_parsers::message::Message;
 
 use crate::notification_activity::{NotificationChatState, NotificationPresenceShow};
 use crate::server::routes::websocket::WebSocketState;
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::xep::xep0085::{ChatState, ChatStateCarrier};
 use waddle_xmpp::xep::xep0203::has_delay;
 
@@ -96,6 +97,10 @@ pub(super) async fn record_chat_state_activity(
         );
         return;
     }
+    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+        owner: sender.clone(),
+        audience: Vec::new(),
+    });
     let Some(store) = activity_store(deps) else {
         return;
     };
@@ -144,6 +149,10 @@ pub(super) async fn record_read_marker_activity(
     owner: &BareJid,
     conversation: &BareJid,
 ) {
+    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+        owner: owner.clone(),
+        audience: Vec::new(),
+    });
     let Some(store) = activity_store(deps) else {
         return;
     };
@@ -190,6 +199,10 @@ pub(super) async fn record_outbound_message_activity(
         );
         return;
     }
+    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+        owner: sender.clone(),
+        audience: Vec::new(),
+    });
     let Some(store) = activity_store(deps) else {
         return;
     };

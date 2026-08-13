@@ -33,6 +33,9 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
+use crate::ingress_shadow::{
+    IngressEffectCapture, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
+};
 use crate::server::routes::websocket::muc_invites::{
     claim_invite, record_invite, OutstandingInvite, RecordOutcome,
 };
@@ -48,6 +51,7 @@ pub(super) async fn handle_muc_mediated_invite(
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
     authenticated_session: Option<&Session>,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     if incoming.type_ != MessageType::Normal {
         return None;
@@ -199,6 +203,11 @@ pub(super) async fn handle_muc_mediated_invite(
         }
     };
     if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
+        if let Some(capture) = ingress_effect_capture {
+            capture.record_marker(ShadowDecisionMarker::AuthorizationDenied {
+                reason: ShadowAuthorizationDeniedReason::BlockedSender,
+            });
+        }
         return Some(vec![]);
     }
 
@@ -308,7 +317,9 @@ pub(super) async fn handle_muc_mediated_invite(
         &inbound_invite,
     ));
 
-    if let Err(error) = deliver_muc_user_message(state, &invitee, invite).await {
+    if let Err(error) =
+        deliver_muc_user_message(state, &invitee, invite, ingress_effect_capture).await
+    {
         // Neither a live socket nor the durable queue accepted the
         // invitation — undo everything (ledger row, membership grant)
         // and tell the inviter, instead of reporting a success that
@@ -427,12 +438,14 @@ pub(super) async fn deliver_muc_user_message(
     state: &WebSocketState,
     recipient: &jid::BareJid,
     message: Message,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Result<(), MucUserDeliveryError> {
     let resources = waddle_xmpp::registry::get_resources_for_user(
         &state.deps.protocol.user_registry,
         recipient,
     )
     .await;
+    super::record_route_direct_intent(ingress_effect_capture, recipient.clone(), resources.clone());
     let mut delivered = false;
     for resource in &resources {
         if state
@@ -531,4 +544,59 @@ fn error_frame(
         StanzaError::new(error_type, condition, "en", text),
     );
     stanza_to_string(reply).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
+    use waddle_xmpp::ingress::IngressEffectIntent;
+
+    #[tokio::test]
+    async fn deliver_muc_user_message_records_live_direct_route_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let (bob_tx, _bob_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &bob_phone, bob_tx).await;
+
+        let mut message = Message::new(Some(jid::Jid::from(recipient.clone())));
+        message.type_ = MessageType::Normal;
+
+        deliver_muc_user_message(state.as_ref(), &recipient, message, Some(&capture))
+            .await
+            .expect("delivery succeeds");
+
+        assert!(capture
+            .snapshot()
+            .intents
+            .contains(&IngressEffectIntent::RouteDirect {
+                recipient,
+                fanout: vec![bob_phone],
+            }));
+    }
+
+    #[tokio::test]
+    async fn deliver_muc_user_message_records_offline_direct_route_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let recipient: jid::BareJid = "offline@example.com".parse().expect("recipient");
+        let mut message = Message::new(Some(jid::Jid::from(recipient.clone())));
+        message.type_ = MessageType::Normal;
+
+        deliver_muc_user_message(state.as_ref(), &recipient, message, Some(&capture))
+            .await
+            .expect("offline queue succeeds");
+
+        assert!(capture
+            .snapshot()
+            .intents
+            .contains(&IngressEffectIntent::RouteDirect {
+                recipient,
+                fanout: Vec::new(),
+            }));
+    }
 }

@@ -92,6 +92,7 @@ use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::inbox::InboxEntry;
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::mam::projection::build_direct_archived_message;
 use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::mam::{
@@ -190,7 +191,8 @@ use groupchat_validation::{
 #[cfg(feature = "clustering")]
 pub use handoff::OrderedRelayHandoffHandle;
 pub use handoff::{
-    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
+    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, ParkedIngressShadowSubmission,
+    SmInboundCompletionTracker,
 };
 use offline_delivery::queue_offline_delivery;
 #[cfg(test)]

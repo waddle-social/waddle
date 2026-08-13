@@ -114,6 +114,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
         sfu: None,
+        ingress_effect_capture: None,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(alice));

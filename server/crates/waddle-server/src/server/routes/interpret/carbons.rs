@@ -1,4 +1,11 @@
 use super::*;
+use waddle_xmpp::ingress::IngressEffectIntent;
+
+pub(crate) struct CarbonRegistryDeps<'a> {
+    pub ingress_effect_capture: Option<&'a crate::ingress_shadow::IngressEffectCapture>,
+    pub sm_session_registry: Option<&'a Arc<InMemorySmSessionRegistry>>,
+    pub web_socket_state: Option<&'a WebSocketState>,
+}
 
 pub(super) async fn send_carbons(
     registry: &ConnectionRegistry,
@@ -18,7 +25,7 @@ pub(super) async fn send_carbons(
             .as_ref()
         {
             for source_jid in &exclude {
-                if bridge
+                if let Some(outcome) = bridge
                     .try_fanout_remote_user_carbons(
                         source_jid,
                         &owner,
@@ -28,6 +35,22 @@ pub(super) async fn send_carbons(
                     )
                     .await
                 {
+                    match outcome {
+                        crate::clustering::route_bridge::RemoteCarbonFanout::Applied(
+                            carbon_recipients,
+                        ) => {
+                            if let (Some(capture), Some(excluded_source)) = (
+                                deps.ingress_effect_capture.as_ref(),
+                                exclude.first().cloned(),
+                            ) {
+                                capture.record_intent(IngressEffectIntent::Carbons {
+                                    carbon_recipients,
+                                    excluded_source,
+                                });
+                            }
+                        }
+                        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {}
+                    }
                     return;
                 }
             }
@@ -35,8 +58,11 @@ pub(super) async fn send_carbons(
     }
     send_carbons_to_registry(
         registry,
-        deps.sm_session_registry,
-        deps.web_socket_state,
+        CarbonRegistryDeps {
+            ingress_effect_capture: deps.ingress_effect_capture.as_ref(),
+            sm_session_registry: deps.sm_session_registry,
+            web_socket_state: deps.web_socket_state,
+        },
         owner,
         message,
         kind,
@@ -47,13 +73,12 @@ pub(super) async fn send_carbons(
 
 pub(crate) async fn send_carbons_to_registry(
     registry: &ConnectionRegistry,
-    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    web_socket_state: Option<&WebSocketState>,
+    deps: CarbonRegistryDeps<'_>,
     owner: BareJid,
     message: Box<Message>,
     kind: CarbonKind,
     exclude: Vec<FullJid>,
-) {
+) -> Vec<FullJid> {
     // Per XEP-0280 §5, a carbon copy is the original
     // <message/> wrapped in <sent>/<received> →
     // <forwarded xmlns='urn:xmpp:forward:0'> → original.
@@ -87,7 +112,7 @@ pub(crate) async fn send_carbons_to_registry(
     // resources via
     // `record_stanza_for_detached_bound_resource`; the
     // interpreter does the same here.
-    let detached_targets: Vec<jid::FullJid> = match sm_session_registry {
+    let detached_targets: Vec<jid::FullJid> = match deps.sm_session_registry {
         Some(sm) => sm
             .detached_carbon_resources_for_user(&owner, &exclude)
             .await
@@ -102,13 +127,30 @@ pub(crate) async fn send_carbons_to_registry(
             }),
         None => Vec::new(),
     };
+    let mut carbon_recipients = live_targets.clone();
+    let detached_only = detached_targets
+        .iter()
+        .filter(|target| !carbon_recipients.contains(*target))
+        .cloned()
+        .collect::<Vec<_>>();
+    carbon_recipients.extend(detached_only);
+    if let Some(excluded_source) = exclude.first().cloned() {
+        if !carbon_recipients.is_empty() {
+            if let Some(capture) = deps.ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::Carbons {
+                    carbon_recipients: carbon_recipients.clone(),
+                    excluded_source,
+                });
+            }
+        }
+    }
     if live_targets.is_empty() && detached_targets.is_empty() {
         debug!(
             owner = %owner,
             kind = ?kind,
             "SendCarbons: no carbon-enabled resources to fan out to"
         );
-        return;
+        return Vec::new();
     }
     for target in live_targets {
         let envelope = match build_carbon_envelope(kind, &message, &owner_str, &target) {
@@ -125,7 +167,7 @@ pub(crate) async fn send_carbons_to_registry(
         };
         let stanza = Stanza::Message(envelope);
         if let Some(outcome) =
-            try_deliver_registered_remote_resource(web_socket_state, &target, &stanza).await
+            try_deliver_registered_remote_resource(deps.web_socket_state, &target, &stanza).await
         {
             match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
@@ -184,7 +226,7 @@ pub(crate) async fn send_carbons_to_registry(
     }
     // Detached pass — queue the same envelope for replay
     // when the resource resumes its XEP-0198 session.
-    if let Some(sm) = sm_session_registry {
+    if let Some(sm) = deps.sm_session_registry {
         for target in detached_targets {
             let envelope = match build_carbon_envelope(kind, &message, &owner_str, &target) {
                 Ok(env) => env,
@@ -229,6 +271,7 @@ pub(crate) async fn send_carbons_to_registry(
             }
         }
     }
+    carbon_recipients
 }
 
 async fn try_deliver_registered_remote_resource(

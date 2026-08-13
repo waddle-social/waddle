@@ -58,6 +58,19 @@ pub(super) struct SmEnableCommit {
     max: u32,
 }
 
+fn try_enqueue_shadow_stream_enrollment(
+    resumable: bool,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    mut try_enroll: impl FnMut(
+        waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> crate::ingress_shadow::IngressShadowDisposition,
+) {
+    if !resumable {
+        return;
+    }
+    let _ = try_enroll(stream_id.clone());
+}
+
 impl SmEnableCommit {
     fn new(
         claim_guard: Option<SmEnableClaimGuard>,
@@ -97,6 +110,13 @@ impl SmEnableCommit {
         if let Some(guard) = self.claim_guard.take() {
             guard.commit();
         }
+        try_enqueue_shadow_stream_enrollment(self.resume, &self.stream_id, |stream_id| {
+            state
+                .deps
+                .protocol
+                .ingress_shadow
+                .try_enroll_stream(stream_id)
+        });
         if !registry_published {
             debug!(
                 stream_id = %self.stream_id,
@@ -231,6 +251,57 @@ mod enable_claim_guard_tests {
             .locally_owned_claim_ids()
             .expect("owned inventory")
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shadow_enrollment_tests {
+    use super::try_enqueue_shadow_stream_enrollment;
+    use crate::ingress_shadow::IngressShadowDisposition;
+
+    #[test]
+    fn resumable_enable_enqueues_shadow_enrollment_once() {
+        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("sm-enable-stream");
+        let mut attempts = Vec::new();
+
+        try_enqueue_shadow_stream_enrollment(true, &stream_id, |stream_id| {
+            attempts.push(stream_id);
+            IngressShadowDisposition::Enqueued
+        });
+
+        assert_eq!(attempts, vec![stream_id]);
+    }
+
+    #[test]
+    fn non_resumable_enable_skips_shadow_enrollment() {
+        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("non-resumable-stream");
+        let mut attempts = 0;
+
+        try_enqueue_shadow_stream_enrollment(false, &stream_id, |_stream_id| {
+            attempts += 1;
+            IngressShadowDisposition::Enqueued
+        });
+
+        assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn shadow_enrollment_result_never_changes_enable_commit() {
+        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("shadow-result-stream");
+
+        for disposition in [
+            IngressShadowDisposition::Disabled,
+            IngressShadowDisposition::QueueFull,
+            IngressShadowDisposition::Closed,
+            IngressShadowDisposition::Enqueued,
+        ] {
+            let mut attempts = Vec::new();
+            try_enqueue_shadow_stream_enrollment(true, &stream_id, |stream_id| {
+                attempts.push(stream_id);
+                disposition
+            });
+            assert_eq!(attempts, vec![stream_id.clone()]);
+        }
     }
 }
 

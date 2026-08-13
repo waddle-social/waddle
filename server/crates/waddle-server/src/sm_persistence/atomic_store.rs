@@ -62,7 +62,7 @@ async fn store_session_atomic_inner(
     tx.execute(
         r#"
         INSERT INTO sm_sessions (
-            stream_id, user_id, full_jid, inbound_count, outbound_count,
+            stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count,
             last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
             carbons_enabled, roster_interested, blocklist_interested, presence_available,
             presence_show, presence_status, presence_priority, replay_gap_through,
@@ -73,6 +73,7 @@ async fn store_session_atomic_inner(
             user_id = excluded.user_id,
             full_jid = excluded.full_jid,
             inbound_count = excluded.inbound_count,
+            shadow_ordinal = excluded.shadow_ordinal,
             outbound_count = excluded.outbound_count,
             last_acked = excluded.last_acked,
             max_resume_secs = excluded.max_resume_secs,
@@ -97,6 +98,7 @@ async fn store_session_atomic_inner(
             session.user_id.clone(),
             session.jid.to_string(),
             i64::from(session.inbound_count),
+            session.shadow_ordinal.to_storage().to_string(),
             i64::from(session.outbound_count),
             i64::from(session.last_acked),
             session.max_resume_time.map(i64::from),

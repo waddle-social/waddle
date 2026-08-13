@@ -35,6 +35,10 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         thread,
         dispatch_timestamp,
     } = input;
+    deps.capture_intent(IngressEffectIntent::InboxProject {
+        owner: owner.clone(),
+        increment_unread: is_recipient,
+    });
     let Some(inbox_storage) = deps.inbox_storage else {
         debug!(
             owner = %owner,
@@ -206,6 +210,10 @@ async fn enqueue_groupchat_notification_candidate(
     if !projection_committed {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
+    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+        owner: owner.clone(),
+        audience: Vec::new(),
+    });
     let Some(state) = deps.web_socket_state else {
         return GroupchatNotificationCandidateQueueOutcome::RetryLater;
     };

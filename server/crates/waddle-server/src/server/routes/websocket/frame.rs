@@ -18,6 +18,9 @@ use super::{
     },
 };
 use crate::server::routes::auth_telemetry::AuthFailure;
+use crate::server::routes::interpret::ParkedIngressShadowSubmission;
+use xmpp_parsers::message::Lang;
+use xmpp_parsers::minidom::Element;
 
 /// Handle an XMPP frame per RFC 7395
 #[cfg(test)]
@@ -58,6 +61,16 @@ async fn await_control_stage<T>(
         }
     }
     Ok(output)
+}
+
+fn message_stanza_lang_from_raw_frame(frame: &str) -> Option<Lang> {
+    let element = frame.trim().parse::<Element>().ok()?;
+    if element.name() != "message" {
+        return None;
+    }
+    element
+        .attr_ns(&xmpp_parsers::minidom::rxml::Namespace::XML, "lang")
+        .map(Lang::from)
 }
 
 async fn handle_xmpp_frame_impl(
@@ -305,6 +318,23 @@ async fn handle_xmpp_frame_impl(
             // an IQ get/set gets a conformant resource-constraint/wait error and
             // message/presence are dropped (logged + metered).
             let backstop = StanzaBackstop::capture(&stanza, phase.bound_jid());
+            let ingress_effect_capture = matches!(stanza.as_ref(), Stanza::Message(_)).then(|| {
+                crate::ingress_shadow::IngressEffectCapture::new(
+                    message_stanza_lang_from_raw_frame(frame),
+                )
+            });
+            if let (Some(inbound_sequence), Some(shadow_submission)) = (
+                reserved_inbound_for_sm,
+                parked_shadow_submission(
+                    state,
+                    sm_state,
+                    authenticated_session.as_ref(),
+                    stanza.as_ref(),
+                    ingress_effect_capture.clone(),
+                ),
+            ) {
+                sm_inbound_completion.park_shadow_submission(inbound_sequence, shadow_submission);
+            }
             let dispatch = async {
                 match *stanza {
                     Stanza::Iq(iq) => {
@@ -352,6 +382,7 @@ async fn handle_xmpp_frame_impl(
                             state_machine.as_mut(),
                             authenticated_session.as_ref(),
                             ordered_relay_origin.clone(),
+                            ingress_effect_capture.clone(),
                         )
                         .await
                     }
@@ -380,6 +411,7 @@ async fn handle_xmpp_frame_impl(
                 }
             };
             settle_inbound_dispatch(
+                state,
                 disposition,
                 ordered_relay_origin_was_deferred(&ordered_relay_origin),
                 reserved_inbound_for_sm,
@@ -392,6 +424,7 @@ async fn handle_xmpp_frame_impl(
 }
 
 pub(super) fn settle_inbound_dispatch(
+    state: &WebSocketState,
     disposition: InboundDisposition,
     ordered_relay_deferred: bool,
     inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
@@ -404,7 +437,9 @@ pub(super) fn settle_inbound_dispatch(
     match disposition {
         InboundDisposition::Handled => {
             if !ordered_relay_deferred {
-                completion.complete(inbound_sequence, sm_state);
+                completion.complete(inbound_sequence, sm_state, |submission| {
+                    let _ = state.deps.protocol.ingress_shadow.try_submit(submission);
+                });
             }
         }
         InboundDisposition::Unhandled => {
@@ -415,6 +450,42 @@ pub(super) fn settle_inbound_dispatch(
             completion.abandon(inbound_sequence);
         }
     }
+}
+
+fn parked_shadow_submission(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+    authenticated_session: Option<&crate::auth::Session>,
+    stanza: &Stanza,
+    capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+) -> Option<ParkedIngressShadowSubmission> {
+    let stream_id = sm_state.stream_id.as_deref()?;
+    let fence = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(stream_id)?;
+    let principal =
+        authenticated_session.and_then(|session| session.authenticated_principal_ref().ok())?;
+    let capture = capture?;
+    let Stanza::Message(message) = stanza else {
+        return None;
+    };
+    Some(ParkedIngressShadowSubmission {
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
+        owner: fence.owner().clone(),
+        claim_epoch: fence.epoch(),
+        principal,
+        target: match message.to.as_ref() {
+            None => waddle_xmpp::ingress::NormalizedTarget::Absent,
+            Some(jid) => match jid.try_as_full() {
+                Ok(full) => waddle_xmpp::ingress::NormalizedTarget::Full(full.clone()),
+                Err(bare) => waddle_xmpp::ingress::NormalizedTarget::Bare(bare.clone()),
+            },
+        },
+        message: message.clone(),
+        capture,
+    })
 }
 
 #[cfg(feature = "clustering")]
@@ -607,20 +678,18 @@ mod tests {
 mod inbound_dispatch_tests {
     use super::*;
 
-    fn enabled_sm() -> waddle_xmpp::stream_management::StreamManagementState {
+    #[tokio::test]
+    async fn handled_dispatch_advances_h_unless_ordered_relay_owns_completion() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
         state.enable("dispatch-test".to_string(), true, Some(300));
-        state
-    }
-
-    #[test]
-    fn handled_dispatch_advances_h_unless_ordered_relay_owns_completion() {
-        let mut state = enabled_sm();
         let mut completion =
             crate::server::routes::interpret::SmInboundCompletionTracker::default();
         let sequence = completion.reserve(&state);
 
         settle_inbound_dispatch(
+            websocket_state.as_ref(),
             InboundDisposition::Handled,
             false,
             Some(sequence),
@@ -632,6 +701,7 @@ mod inbound_dispatch_tests {
 
         let deferred = completion.reserve(&state);
         settle_inbound_dispatch(
+            websocket_state.as_ref(),
             InboundDisposition::Handled,
             true,
             Some(deferred),

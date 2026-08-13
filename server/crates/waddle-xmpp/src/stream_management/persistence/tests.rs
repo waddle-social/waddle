@@ -19,6 +19,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         user_id: "alice".to_string(),
         jid: full("alice@example.com/web"),
         inbound_count: 0,
+        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: Some(9),

@@ -1,10 +1,11 @@
 use waddle_xmpp::{
-    muc::room_registry_actor::GetRoom, parser::stanza_to_string,
+    ingress::IngressEffectIntent, muc::room_registry_actor::GetRoom, parser::stanza_to_string,
     protocol::handlers::errors::message_error_reply, Stanza,
 };
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
+use crate::ingress_shadow::IngressEffectCapture;
 use crate::server::routes::websocket::WebSocketState;
 use tracing::warn;
 
@@ -12,17 +13,21 @@ pub(super) async fn handle_muc_direct_message(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
-    if let Some(frames) = handle_muc_private_message(incoming, state, bound_jid).await {
+    if let Some(frames) =
+        handle_muc_private_message(incoming, state, bound_jid, ingress_effect_capture).await
+    {
         return Some(frames);
     }
-    handle_muc_mediated_decline(incoming, state, bound_jid).await
+    handle_muc_mediated_decline(incoming, state, bound_jid, ingress_effect_capture).await
 }
 
 async fn handle_muc_private_message(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     let target_occupant_jid = incoming.to.as_ref()?.clone().try_into_full().ok()?;
     let room_jid = target_occupant_jid.to_bare();
@@ -224,7 +229,9 @@ async fn handle_muc_private_message(
             exclude,
         });
     }
-    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    capture_muc_private_routes(ingress_effect_capture, &from_room_jid, &recipient_sessions);
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None)
+        .with_ingress_effect_capture(ingress_effect_capture.cloned());
     let nested = crate::server::routes::interpret::interpret(events, &deps).await;
     if !nested.archive_id_rewrites.is_empty() {
         crate::server::routes::interpret::rewrite_message_archive_ids(
@@ -360,6 +367,7 @@ async fn handle_muc_mediated_decline(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     if incoming.type_ != MessageType::Normal {
         return None;
@@ -464,8 +472,13 @@ async fn handle_muc_mediated_decline(
     mediated.from = Some(jid::Jid::from(room_jid.clone()));
     mediated.type_ = MessageType::Normal;
     mediated.payloads.push(x);
-    if let Err(error) =
-        super::muc_invite::deliver_muc_user_message(state, &invite.inviter, mediated).await
+    if let Err(error) = super::muc_invite::deliver_muc_user_message(
+        state,
+        &invite.inviter,
+        mediated,
+        ingress_effect_capture,
+    )
+    .await
     {
         // Neither a live socket nor the durable queue took the decline
         // — put the claimed row back so the decliner can retry, and
@@ -497,6 +510,25 @@ async fn handle_muc_mediated_decline(
     }
 
     Some(Vec::new())
+}
+
+fn capture_muc_private_routes(
+    ingress_effect_capture: Option<&IngressEffectCapture>,
+    sender: &jid::FullJid,
+    recipients: &[jid::FullJid],
+) {
+    let Some(capture) = ingress_effect_capture else {
+        return;
+    };
+    let mut recipients = recipients.to_vec();
+    recipients.sort_by_key(ToString::to_string);
+    recipients.dedup();
+    for recipient in recipients {
+        capture.record_intent(IngressEffectIntent::RouteOccupantPm {
+            recipient,
+            sender: sender.clone(),
+        });
+    }
 }
 
 fn mediated_decline(message: &Message) -> Option<&minidom::Element> {
@@ -579,6 +611,7 @@ fn message_error_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingress_shadow::IngressEffectCapture;
     use waddle_xmpp::xep::xep0421::{
         extract_occupant_id_from_message, generate_occupant_id, OccupantId, OccupantIdSecret,
         NS_OCCUPANT_ID, OCCUPANT_ID_SECRET_MIN_BYTES,
@@ -721,5 +754,45 @@ mod tests {
         );
         assert_eq!(muc_user[0].name(), "x");
         assert_eq!(muc_user[0].children().count(), 0);
+    }
+
+    #[test]
+    fn capture_muc_private_routes_records_each_recipient_once() {
+        let capture = IngressEffectCapture::new(None);
+        let sender: jid::FullJid = "room@muc.example.com/alice".parse().expect("sender");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let bob_laptop: jid::FullJid = "bob@example.com/laptop".parse().expect("bob laptop");
+
+        capture_muc_private_routes(
+            Some(&capture),
+            &sender,
+            &[bob_phone.clone(), bob_laptop.clone(), bob_phone.clone()],
+        );
+
+        let snapshot = capture.snapshot();
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::RouteOccupantPm {
+                recipient: bob_laptop,
+                sender: sender.clone(),
+            }));
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::RouteOccupantPm {
+                recipient: bob_phone.clone(),
+                sender,
+            }));
+        assert_eq!(
+            snapshot
+                .intents
+                .iter()
+                .filter(|intent| matches!(
+                    intent,
+                    IngressEffectIntent::RouteOccupantPm { recipient, .. }
+                        if recipient == &bob_phone
+                ))
+                .count(),
+            1
+        );
     }
 }

@@ -1,4 +1,7 @@
 use super::*;
+use crate::ingress_shadow::{
+    ShadowAuthorizationDeniedReason, ShadowDecisionMarker, ShadowSemanticRejectedReason,
+};
 
 /// Bind the subject mutation emitted from one frozen room snapshot to
 /// that actor incarnation's immutable ownership proof. This is mandatory
@@ -213,6 +216,9 @@ pub(super) async fn dispatch_to_room(
                 &sender_full,
                 item_not_found_error("Requested room not found."),
             );
+            deps.capture_marker(ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::MalformedPayload,
+            });
             return outcome;
         }
         // Transient lookup failure (#1263): surface an error to the
@@ -307,6 +313,9 @@ pub(super) async fn dispatch_to_room(
                         "This room is temporarily unavailable; please retry.",
                     ),
                 );
+                deps.capture_marker(ShadowDecisionMarker::AuthorizationDenied {
+                    reason: ShadowAuthorizationDeniedReason::Forbidden,
+                });
                 match Stanza::Message(reply).to_element_string() {
                     Ok(xml) => outcome.frames.push(xml),
                     Err(error) => {
@@ -392,6 +401,9 @@ pub(super) async fn dispatch_to_room(
         waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
             .handle(&mut gate_working, &gate_ctx);
     if let waddle_xmpp::protocol::room::RoomHandlerOutcome::Halt(gate_events) = gate_outcome {
+        deps.capture_marker(ShadowDecisionMarker::AuthorizationDenied {
+            reason: ShadowAuthorizationDeniedReason::Forbidden,
+        });
         // Fold the nested outcome's full state — frames, close
         // signal, and async-callback feedback — back into the outer
         // outcome (Copilot review on PR #279). Dropping `close` /
@@ -432,6 +444,9 @@ pub(super) async fn dispatch_to_room(
             &sender_full,
             bad_request_error("Client-authored Waddle extension envelopes are not allowed."),
         );
+        deps.capture_marker(ShadowDecisionMarker::SemanticRejected {
+            reason: ShadowSemanticRejectedReason::ClientAuthoredFrameworkEnvelope,
+        });
         match Stanza::Message(reply).to_element_string() {
             Ok(xml) => outcome.frames.push(xml),
             Err(error) => {
@@ -486,6 +501,17 @@ pub(super) async fn dispatch_to_room(
     )
     .await
     {
+        let marker = match stanza_error.defined_condition {
+            DefinedCondition::Forbidden | DefinedCondition::NotAcceptable => {
+                ShadowDecisionMarker::AuthorizationDenied {
+                    reason: ShadowAuthorizationDeniedReason::Forbidden,
+                }
+            }
+            _ => ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::MalformedPayload,
+            },
+        };
+        deps.capture_marker(marker);
         let reply = build_message_error_reply(&incoming, &room_jid, &sender_full, stanza_error);
         match Stanza::Message(reply).to_element_string() {
             Ok(xml) => outcome.frames.push(xml),

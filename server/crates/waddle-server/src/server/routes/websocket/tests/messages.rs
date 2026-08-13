@@ -116,7 +116,8 @@ async fn drive_dm_message(
     sm.transition_to_ready(full_jid, false);
     sm.set_blocklist(waddle_xmpp::protocol::session_state::Blocklist::empty());
     let _ =
-        handlers::message::handle_message(message, state, &phase, Some(&mut sm), None, None).await;
+        handlers::message::handle_message(message, state, &phase, Some(&mut sm), None, None, None)
+            .await;
 }
 
 async fn store_committed_dm_archive_for_notification(

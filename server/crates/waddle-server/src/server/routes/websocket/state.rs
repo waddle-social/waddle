@@ -1294,6 +1294,8 @@ pub struct ProtocolServices {
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    /// Non-blocking shadow executor for durable SM handled-frontier writes.
+    pub ingress_shadow: crate::ingress_shadow::IngressShadowHandle,
     /// Bounded admission for deferred link-preview resolver fetches
     /// (#1470). Serial frame dispatch used to throttle lookups to one in
     /// flight per connection as a side effect of blocking; once resolution

@@ -800,6 +800,7 @@ async fn create_test_websocket_state_with_extension_manager(
                             waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
                         )))
                     }),
+                    ingress_shadow: crate::ingress_shadow::IngressShadowHandle::disabled(),
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),
                     caps_resolver: Arc::new(
@@ -1084,7 +1085,8 @@ async fn handle_message_for_test(
     sm.transition_to_ready(sender_jid.clone(), false);
     sm.set_blocklist(Blocklist::empty());
     let phase = ConnectionPhase::ready(sender_jid.clone(), false);
-    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session, None).await
+    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session, None, None)
+        .await
 }
 
 fn authenticated_phase_for_session(session: &Session, domain: &str) -> ConnectionPhase {

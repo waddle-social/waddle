@@ -466,6 +466,7 @@ async fn detached_queued_session_initiate_counts_ok() {
         user_id: "bob".to_string(),
         jid: bob.clone(),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,

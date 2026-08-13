@@ -1112,6 +1112,7 @@ mod tests {
             user_id: jid.to_string(),
             jid: jid.parse().expect("valid jid"),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,

@@ -1,17 +1,25 @@
+use std::collections::BTreeMap;
+
 use tracing::{debug, warn};
 use waddle_xmpp::{
+    ingress::IngressEffectIntent,
     parser::stanza_to_string,
     protocol::handlers::errors::{bad_request_reply, message_error_reply},
     Stanza,
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 
+use crate::ingress_shadow::{
+    IngressEffectCapture, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
+    ShadowSemanticRejectedReason,
+};
 use crate::server::routes::websocket::WebSocketState;
 
 pub(super) async fn handle_dm_pin_message(
     incoming: &xmpp_parsers::message::Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     if incoming.type_ != xmpp_parsers::message::MessageType::Chat {
         return None;
@@ -24,6 +32,11 @@ pub(super) async fn handle_dm_pin_message(
                 .iter()
                 .any(|payload| payload.ns() == waddle_xmpp::xep::NS_WADDLE_PIN_V0)
             {
+                if let Some(capture) = ingress_effect_capture {
+                    capture.record_marker(ShadowDecisionMarker::SemanticRejected {
+                        reason: ShadowSemanticRejectedReason::MalformedPayload,
+                    });
+                }
                 let mut stamped = incoming.clone();
                 stamped.from = Some(jid::Jid::from(bound_jid.clone()));
                 let reply = bad_request_reply(&stamped, "Malformed DM pin marker.");
@@ -34,12 +47,22 @@ pub(super) async fn handle_dm_pin_message(
     };
     let target = intent.target().to_string();
     let Some(peer) = incoming.to.as_ref().map(|to| to.to_bare()) else {
+        if let Some(capture) = ingress_effect_capture {
+            capture.record_marker(ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::MalformedPayload,
+            });
+        }
         let mut stamped = incoming.clone();
         stamped.from = Some(jid::Jid::from(bound_jid.clone()));
         let reply = bad_request_reply(&stamped, "DM pin marker requires a local peer JID.");
         return stanza_to_string(reply).ok().map(|frame| vec![frame]);
     };
     if peer.domain() != bound_jid.domain() {
+        if let Some(capture) = ingress_effect_capture {
+            capture.record_marker(ShadowDecisionMarker::AuthorizationDenied {
+                reason: ShadowAuthorizationDeniedReason::Forbidden,
+            });
+        }
         let mut stamped = incoming.clone();
         stamped.from = Some(jid::Jid::from(bound_jid.clone()));
         let reply = message_error_reply(
@@ -78,7 +101,14 @@ pub(super) async fn handle_dm_pin_message(
             &sender,
             None,
         );
-        fanout_dm_pin_event(state, &sender, &[sender.clone(), peer], event).await;
+        fanout_dm_pin_event(
+            state,
+            &sender,
+            &[sender.clone(), peer],
+            event,
+            ingress_effect_capture,
+        )
+        .await;
         return Some(Vec::new());
     }
     let target = match lookup_dm_pin_target(state, [&peer, &sender], &sender, &peer, &target).await
@@ -127,7 +157,14 @@ pub(super) async fn handle_dm_pin_message(
         &entry.pinner_jid,
         Some(&entry.preview),
     );
-    fanout_dm_pin_event(state, &sender, &[sender.clone(), peer], event).await;
+    fanout_dm_pin_event(
+        state,
+        &sender,
+        &[sender.clone(), peer],
+        event,
+        ingress_effect_capture,
+    )
+    .await;
     Some(Vec::new())
 }
 
@@ -286,7 +323,9 @@ async fn fanout_dm_pin_event(
     sender: &jid::BareJid,
     recipients: &[jid::BareJid],
     event: xmpp_parsers::message::Message,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) {
+    let mut deliverable_resources = Vec::new();
     for resource in state
         .deps
         .protocol
@@ -308,6 +347,10 @@ async fn fanout_dm_pin_event(
             );
             continue;
         }
+        deliverable_resources.push(resource.clone());
+    }
+    capture_dm_pin_routes(ingress_effect_capture, &deliverable_resources);
+    for resource in deliverable_resources {
         let _ = state
             .deps
             .protocol
@@ -372,6 +415,7 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
     incoming: &xmpp_parsers::message::Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) {
     if incoming.type_ != xmpp_parsers::message::MessageType::Chat {
         return;
@@ -437,5 +481,94 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
             "retracted",
         );
     }
-    fanout_dm_pin_event(state, &sender, &[sender.clone(), peer], event).await;
+    fanout_dm_pin_event(
+        state,
+        &sender,
+        &[sender.clone(), peer],
+        event,
+        ingress_effect_capture,
+    )
+    .await;
+}
+
+fn capture_dm_pin_routes(
+    ingress_effect_capture: Option<&IngressEffectCapture>,
+    resources: &[jid::FullJid],
+) {
+    let Some(capture) = ingress_effect_capture else {
+        return;
+    };
+    let mut fanout_by_recipient: BTreeMap<jid::BareJid, Vec<jid::FullJid>> = BTreeMap::new();
+    for resource in resources {
+        fanout_by_recipient
+            .entry(resource.to_bare())
+            .or_default()
+            .push(resource.clone());
+    }
+    for (recipient, mut fanout) in fanout_by_recipient {
+        fanout.sort_by_key(ToString::to_string);
+        fanout.dedup();
+        capture.record_intent(IngressEffectIntent::RouteDirect { recipient, fanout });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
+
+    #[tokio::test]
+    async fn fanout_dm_pin_event_records_direct_routes_per_participant() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("alice phone");
+        let alice_laptop: jid::FullJid = "alice@example.com/laptop".parse().expect("alice laptop");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let (alice_phone_tx, _alice_phone_rx) = tokio::sync::mpsc::channel(4);
+        let (alice_laptop_tx, _alice_laptop_rx) = tokio::sync::mpsc::channel(4);
+        let (bob_phone_tx, _bob_phone_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &alice_phone, alice_phone_tx).await;
+        register_test_connection(state.as_ref(), &alice_laptop, alice_laptop_tx).await;
+        register_test_connection(state.as_ref(), &bob_phone, bob_phone_tx).await;
+
+        let event = build_dm_pin_event_message(
+            &"alice@example.com".parse().expect("sender"),
+            &"bob@example.com".parse().expect("peer"),
+            DmPinAction::Pinned,
+            &StanzaId::new(
+                "pin-1",
+                jid::Jid::from("alice@example.com".parse::<jid::BareJid>().expect("bare")),
+            ),
+            &"alice@example.com".parse().expect("by"),
+            None,
+        );
+
+        fanout_dm_pin_event(
+            state.as_ref(),
+            &"alice@example.com".parse().expect("sender"),
+            &[
+                "alice@example.com".parse().expect("alice"),
+                "bob@example.com".parse().expect("bob"),
+            ],
+            event,
+            Some(&capture),
+        )
+        .await;
+
+        let snapshot = capture.snapshot();
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::RouteDirect {
+                recipient: "alice@example.com".parse().expect("alice bare"),
+                fanout: vec![alice_laptop, alice_phone],
+            }));
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::RouteDirect {
+                recipient: "bob@example.com".parse().expect("bob bare"),
+                fanout: vec![bob_phone],
+            }));
+    }
 }

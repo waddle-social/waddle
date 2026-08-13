@@ -66,6 +66,10 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
     else {
         return;
     };
+    deps.capture_intent(IngressEffectIntent::Pin {
+        room: room.clone(),
+        stanza_id: target_stanza_id.clone(),
+    });
     let Some(room_actor) = lookup_room_actor(deps, &room, "ApplyPinChange::Pin").await else {
         return;
     };
@@ -170,6 +174,10 @@ async fn apply_unpin(
     else {
         return;
     };
+    deps.capture_intent(IngressEffectIntent::Pin {
+        room: room.clone(),
+        stanza_id: target_stanza_id.clone(),
+    });
     let Some(room_actor) = lookup_room_actor(deps, &room, "ApplyPinChange::Unpin").await else {
         return;
     };

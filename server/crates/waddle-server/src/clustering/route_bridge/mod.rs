@@ -82,6 +82,7 @@ pub(crate) use delivery::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 pub use reassert::LocalMediaGrantReassertion;
 #[cfg(test)]
 pub(crate) use registration::retry_remote_resource_register_test;
+pub(crate) use registration::RemoteCarbonFanout;
 use registration::*;
 use types::*;
 pub use types::{

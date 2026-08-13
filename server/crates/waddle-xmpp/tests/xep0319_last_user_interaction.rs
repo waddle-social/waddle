@@ -164,6 +164,7 @@ async fn xep0319_idle_payload_survives_sm_detach_snapshot() {
             user_id: "juliet@capulet.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,

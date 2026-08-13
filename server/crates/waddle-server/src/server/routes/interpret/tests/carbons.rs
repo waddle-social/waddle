@@ -153,6 +153,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         user_id: "alice".to_string(),
         jid: alice_phone.clone(),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -189,6 +190,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         pending_delivery_storage: None,
         ordered_relay_origin: None,
         sfu: None,
+        ingress_effect_capture: None,
     };
     let _outcome = interpret(
         vec![OutboundEvent::SendCarbons {

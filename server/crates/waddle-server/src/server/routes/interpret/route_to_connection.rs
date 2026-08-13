@@ -1,5 +1,6 @@
 use super::*;
 use std::{future::Future, pin::Pin};
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
 use xmpp_parsers::iq::Iq;
 
@@ -568,6 +569,19 @@ async fn route_to_bare_jid(
         // self-healing alone would otherwise lose the message: every
         // selected target turning out stale.
         let live_targets = select_bare_jid_live_targets(deps, &bare).await;
+        let mut route_fanout = live_targets.clone();
+        let detached_only = detached_targets
+            .iter()
+            .filter(|target| !route_fanout.contains(*target))
+            .cloned()
+            .collect::<Vec<_>>();
+        route_fanout.extend(detached_only);
+        if !route_fanout.is_empty() {
+            deps.capture_intent(IngressEffectIntent::RouteDirect {
+                recipient: bare.clone(),
+                fanout: route_fanout,
+            });
+        }
         if live_targets.is_empty() && detached_targets.is_empty() {
             if bare.domain().as_str() != deps.local_domain {
                 debug!(

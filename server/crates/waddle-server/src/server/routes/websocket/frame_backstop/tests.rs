@@ -129,6 +129,7 @@ fn responses_and_disposition(
 #[tokio::test]
 async fn already_revoked_admission_never_starts_dispatch_and_preserves_sm_hole() {
     let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let stanza = message_stanza();
     let lifecycle = crate::clustering::NodeLifecycle::new();
     let permit = lifecycle.admit().expect("serving permit");
@@ -161,6 +162,7 @@ async fn already_revoked_admission_never_starts_dispatch_and_preserves_sm_hole()
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        state.as_ref(),
         disposition,
         false,
         Some(sequence),
@@ -175,6 +177,7 @@ async fn already_revoked_admission_never_starts_dispatch_and_preserves_sm_hole()
 #[tokio::test]
 async fn revoked_after_committed_dispatch_suppresses_frames_but_settles_sm() {
     let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let stanza = message_stanza();
     let lifecycle = crate::clustering::NodeLifecycle::new();
     let permit = lifecycle.admit().expect("serving permit");
@@ -218,6 +221,7 @@ async fn revoked_after_committed_dispatch_suppresses_frames_but_settles_sm() {
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        state.as_ref(),
         disposition,
         false,
         Some(sequence),
@@ -232,6 +236,7 @@ async fn revoked_after_committed_dispatch_suppresses_frames_but_settles_sm() {
 #[tokio::test(start_paused = true)]
 async fn iq_get_timeout_yields_conformant_resource_constraint() {
     let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let stanza = iq_get_stanza("disco-1", "alice@example.com/web", "upload.example.com");
     let backstop = StanzaBackstop::capture(&stanza, None);
 
@@ -254,6 +259,7 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        state.as_ref(),
         disposition,
         false,
         Some(sequence),

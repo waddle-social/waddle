@@ -815,12 +815,15 @@ async fn store_resumable_test_session(
 
 #[test]
 fn timed_out_inbound_stanza_preserves_sender_responsibility() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let websocket_state = runtime.block_on(create_test_websocket_state());
     let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
     state.enable("timeout-regression".to_string(), true, Some(300));
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&state);
 
     settle_inbound_dispatch(
+        websocket_state.as_ref(),
         InboundDisposition::Unhandled,
         true,
         Some(sequence),
@@ -834,7 +837,7 @@ fn timed_out_inbound_stanza_preserves_sender_responsibility() {
 
     // A late ordered-relay completion cannot turn the cancelled dispatch into
     // an acknowledgement: the sender must retain and replay this stanza.
-    completion.complete(sequence, &mut state);
+    completion.complete(sequence, &mut state, |_submission| {});
     assert_eq!(state.get_inbound_count(), 0);
 }
 
@@ -858,6 +861,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
 
     let handled = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
+        state.as_ref(),
         InboundDisposition::Handled,
         false,
         Some(handled),
@@ -866,6 +870,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     );
     let timed_out = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
+        state.as_ref(),
         InboundDisposition::Unhandled,
         false,
         Some(timed_out),
@@ -3762,6 +3767,7 @@ async fn janitor_redrives_released_rows_before_promoting_remainder() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 0,
             replay_gap_through: None,
@@ -4828,6 +4834,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         user_id: format!("alice@{domain}"),
         jid: format!("alice@{domain}/web").parse().expect("jid"),
         inbound_count: 5,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -4906,6 +4913,7 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         user_id: format!("alice@{domain}"),
         jid: format!("alice@{domain}/web").parse().expect("jid"),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -4966,6 +4974,7 @@ async fn sm_resume_final_principal_recheck_rejects_without_committing_staged_sta
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
             inbound_count: 4,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 1,
             last_acked: 0,
             replay_gap_through: None,
@@ -5075,6 +5084,7 @@ async fn dropping_resume_after_claim_returns_the_snapshot_via_the_claim_guard() 
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -5141,6 +5151,7 @@ async fn sm_resume_legacy_snapshot_without_a_principal_is_not_authorized() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -5192,6 +5203,7 @@ async fn sm_resume_storage_error_is_reported_as_internal_server_error() {
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -5263,6 +5275,7 @@ async fn sm_resume_matching_authenticated_identity_restores_durable_principal_se
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
             inbound_count: 2,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 3,
             last_acked: 3,
             replay_gap_through: None,
@@ -5342,6 +5355,7 @@ async fn sm_resume_matching_authenticated_identity_restores_detached_principal_s
                 user_id: format!("bob@{domain}"),
                 jid: detached_jid.clone(),
                 inbound_count: 0,
+                shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
                 outbound_count: 0,
                 last_acked: 0,
                 replay_gap_through: None,
@@ -5947,6 +5961,7 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
         user_id: "alice@example.com".to_string(),
         jid: jid.clone(),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 2,
         last_acked: u32::MAX - 1,
         replay_gap_through: None,
@@ -6129,6 +6144,7 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 2,
             replay_gap_through: None,
@@ -6188,6 +6204,7 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 2,
             replay_gap_through: None,
@@ -6245,6 +6262,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         user_id: "alice@example.com".to_string(),
         jid: jid.clone(),
         inbound_count: 7,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 10,
         last_acked: 8,
         replay_gap_through: None,
@@ -6322,6 +6340,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 4,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 0,
             replay_gap_through: None,
@@ -6406,6 +6425,7 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6481,6 +6501,7 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6552,6 +6573,7 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6635,6 +6657,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             user_id: "alice@example.com".to_string(),
             jid: alice_laptop.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6700,6 +6723,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             user_id: "alice@example.com".to_string(),
             jid: alice_laptop,
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6889,6 +6913,7 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6953,6 +6978,7 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7049,6 +7075,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             user_id: "alice@example.com".to_string(),
             jid: alice_web_jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7139,6 +7166,7 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7240,6 +7268,7 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 user_id: "alice@example.com".to_string(),
                 jid,
                 inbound_count: 0,
+                shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
                 outbound_count: 0,
                 last_acked: 0,
                 replay_gap_through: None,
@@ -7314,6 +7343,7 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7471,6 +7501,7 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7530,6 +7561,7 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             user_id: "alice@example.com".to_string(),
             jid: alice_jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7607,6 +7639,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7687,6 +7720,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         user_id: "alice@example.com".to_string(),
         jid: jid.clone(),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 2,
         last_acked: 0,
         replay_gap_through: None,
@@ -8272,6 +8306,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -8388,6 +8423,7 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
             inbound_count: 1,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 0,
             replay_gap_through: None,
@@ -8882,6 +8918,7 @@ mod fix_a_post_cas_shutdown {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9030,6 +9067,7 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             // The server's send counter wrapped past 2^32: it now
             // reads 2, while the client last handled u32::MAX.
             outbound_count: 2,
@@ -9117,6 +9155,7 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9191,6 +9230,7 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9269,6 +9309,7 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9344,6 +9385,7 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9485,6 +9527,7 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 4,
             last_acked: 3,
             replay_gap_through: None,

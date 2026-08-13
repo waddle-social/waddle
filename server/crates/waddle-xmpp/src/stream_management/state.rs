@@ -4,7 +4,7 @@ use tracing::warn;
 
 use super::sequence::sequence_gt;
 use super::{
-    DetachedSession, UnackedPushResult, UnackedQueue, DEFAULT_ACK_REQUEST_THRESHOLD,
+    DetachedSession, ShadowOrdinal, UnackedPushResult, UnackedQueue, DEFAULT_ACK_REQUEST_THRESHOLD,
     DEFAULT_MAX_UNACKED_QUEUE_SIZE,
 };
 use crate::telemetry::attributes::SmEvictionPath;
@@ -49,6 +49,8 @@ pub struct StreamManagementState {
     pub resumable: bool,
     /// Count of stanzas received from the client (inbound)
     pub inbound_count: u32,
+    /// Durable non-wrapping shadow ordinal frontier for this stream.
+    pub shadow_ordinal: ShadowOrdinal,
     /// Count of stanzas sent to the client (outbound)
     pub outbound_count: u32,
     /// Last acknowledged outbound stanza count (from client's <a/>)
@@ -150,6 +152,7 @@ impl StreamManagementState {
             stream_id: None,
             resumable: false,
             inbound_count: 0,
+            shadow_ordinal: ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             last_request_outbound_count: 0,
@@ -173,6 +176,7 @@ impl StreamManagementState {
             stream_id: None,
             resumable: false,
             inbound_count: 0,
+            shadow_ordinal: ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             last_request_outbound_count: 0,
@@ -195,6 +199,7 @@ impl StreamManagementState {
         self.stream_id = Some(stream_id);
         self.resumable = resumable;
         self.max_resume_time = max_time;
+        self.shadow_ordinal = ShadowOrdinal::ZERO;
     }
 
     /// Increment the inbound stanza count (stanzas received from client).
@@ -468,6 +473,7 @@ impl StreamManagementState {
             user_id: snapshot.user_id,
             jid: snapshot.jid,
             inbound_count: self.inbound_count,
+            shadow_ordinal: self.shadow_ordinal,
             outbound_count: self.outbound_count,
             last_acked: self.last_acked,
             replay_gap_through: self.replay_gap_through,
@@ -494,6 +500,7 @@ impl StreamManagementState {
         self.stream_id = Some(session.stream_id.clone());
         self.resumable = true;
         self.inbound_count = session.inbound_count;
+        self.shadow_ordinal = session.shadow_ordinal;
         self.outbound_count = session.outbound_count;
         self.last_acked = session.last_acked;
         // Resume just replayed every still-unacked stanza on the new
@@ -528,6 +535,7 @@ mod tests {
         state.increment_inbound();
         state.increment_inbound();
         assert_eq!(state.inbound_count, 2);
+        assert_eq!(state.shadow_ordinal, ShadowOrdinal::ZERO);
 
         state.increment_outbound();
         state.increment_outbound();
@@ -860,6 +868,7 @@ mod tests {
             user_id: "u@h".to_string(),
             jid: "u@h/r".parse().unwrap(),
             inbound_count: 10,
+            shadow_ordinal: ShadowOrdinal::from_storage(41),
             outbound_count: 42,
             last_acked: 40,
             replay_gap_through: None,
@@ -878,6 +887,7 @@ mod tests {
         };
         let mut state = StreamManagementState::with_config(1000, 3);
         state.restore_from_session(&detached);
+        assert_eq!(state.shadow_ordinal, ShadowOrdinal::from_storage(41));
 
         // Push 1, 2 — below the post-resume threshold.
         assert!(

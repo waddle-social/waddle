@@ -194,6 +194,7 @@ fn make_detached_session(
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,

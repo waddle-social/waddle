@@ -40,6 +40,12 @@ pub(super) async fn queue_offline_delivery(
                 recipient = %recipient,
                 "pending_delivery row inserted"
             );
+            if notification_archive_stanza_id.is_some() {
+                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                    owner: recipient.clone(),
+                    audience: Vec::new(),
+                });
+            }
             let outcome = enqueue_xep0357_notification_candidate(
                 deps,
                 &recipient,

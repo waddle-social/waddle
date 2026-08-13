@@ -111,6 +111,7 @@ async fn bare_presence_direct_drops_blocked_sender_before_detached_replay() {
             user_id: target_bare().to_string(),
             jid: target_full(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,

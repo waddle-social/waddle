@@ -14,6 +14,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 mod archive;
+mod capture;
 mod carbons;
 mod enrichment;
 mod groupchat_retraction;
@@ -222,6 +223,7 @@ fn offline_pass_deps<'a>(
         pending_delivery_storage: None,
         ordered_relay_origin: None,
         sfu: None,
+        ingress_effect_capture: None,
     }
 }
 
@@ -328,6 +330,7 @@ fn detached_dm_session(
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,

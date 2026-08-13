@@ -221,6 +221,7 @@ pub(crate) async fn promote_terminal_overflow_entry(
         user_id: source.user_id.clone(),
         jid: source.jid.clone(),
         inbound_count: source.inbound_count,
+        shadow_ordinal: source.shadow_ordinal,
         outbound_count: source.outbound_count,
         last_acked: source.last_acked,
         replay_gap_through: source.replay_gap_through,

@@ -177,6 +177,34 @@ impl<'a> IngressUowTransaction<'a> {
         &mut self.transaction
     }
 
+    /// Install per-transaction PostgreSQL timeout bounds without exposing raw
+    /// SQL to ingress callers.
+    pub async fn set_local_timeouts(
+        &mut self,
+        lock_timeout_ms: u64,
+        statement_timeout_ms: u64,
+    ) -> Result<(), IngressUowError> {
+        let mut proof = self
+            .transaction
+            .query(
+                r#"
+                SELECT
+                    set_config('lock_timeout', ?, true),
+                    set_config('statement_timeout', ?, true)
+                "#,
+                crate::db_params![
+                    format!("{lock_timeout_ms}ms"),
+                    format!("{statement_timeout_ms}ms"),
+                ],
+            )
+            .await?;
+        proof
+            .next()
+            .await?
+            .ok_or(IngressUowError::EpochProofMissing)?;
+        Ok(())
+    }
+
     #[cfg(feature = "clustering")]
     fn identity(&self) -> Uuid {
         self.identity

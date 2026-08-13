@@ -1,5 +1,13 @@
 use super::super::*;
 
+/// Whether the remote owner supplied an authoritative XEP-0280 recipient
+/// snapshot. A timeout after send can be maybe-committed, but must never be
+/// represented as a known empty audience in ingress shadow capture.
+pub(crate) enum RemoteCarbonFanout {
+    Applied(Vec<jid::FullJid>),
+    MaybeCommitted,
+}
+
 impl OrderedRelayDeliveryBridge {
     pub(crate) async fn try_fanout_remote_user_carbons(
         &self,
@@ -8,8 +16,8 @@ impl OrderedRelayDeliveryBridge {
         message: &xmpp_parsers::message::Message,
         kind: CarbonKind,
         exclude: Vec<jid::FullJid>,
-    ) -> bool {
-        self.try_remote_user_side_effect(
+    ) -> Option<RemoteCarbonFanout> {
+        self.try_remote_user_carbons(
             source_jid,
             RemoteUserSideEffect::Carbons {
                 owner: owner.clone(),
@@ -19,6 +27,57 @@ impl OrderedRelayDeliveryBridge {
             },
         )
         .await
+    }
+
+    async fn try_remote_user_carbons(
+        &self,
+        source_jid: &jid::FullJid,
+        effect: RemoteUserSideEffect,
+    ) -> Option<RemoteCarbonFanout> {
+        let registration = self
+            .remote_socket_registration_if_current(source_jid)
+            .await?;
+        let mut handle = RelayHandle::new(registration.user_owner.clone(), self.stop_token.clone())
+            .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        match handle
+            .remote_user_side_effect(RelayRemoteUserSideEffect {
+                source_jid: source_jid.clone(),
+                registration_id: registration.registration_id,
+                socket_generation: registration.socket_generation,
+                effect,
+                trace: RelayTraceContext::default(),
+            })
+            .await
+        {
+            Ok(reply) if reply.status == RelayRemoteUserSideEffectStatus::Applied => {
+                Some(RemoteCarbonFanout::Applied(reply.carbon_recipients))
+            }
+            Ok(RelayRemoteUserSideEffectReply {
+                status: RelayRemoteUserSideEffectStatus::StaleRegistration,
+                ..
+            }) => {
+                self.remove_remote_socket_registration_if_current(source_jid, &registration)
+                    .await;
+                None
+            }
+            Ok(_) => None,
+            Err(RelayAskError::Send {
+                effect: RelaySendEffect::MaybeCommitted,
+                message,
+                ..
+            }) => {
+                tracing::warn!(
+                    jid = %source_jid,
+                    %message,
+                    "clustered remote-user carbon relay may have committed; suppressing local fallback"
+                );
+                Some(RemoteCarbonFanout::MaybeCommitted)
+            }
+            Err(error) => {
+                tracing::warn!(jid = %source_jid, %error, "clustered remote-user carbon relay ask failed");
+                None
+            }
+        }
     }
 
     pub(crate) async fn try_fanout_remote_user_roster_push(
@@ -81,9 +140,11 @@ impl OrderedRelayDeliveryBridge {
         {
             Ok(RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::Applied,
+                ..
             }) => true,
             Ok(RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::StaleRegistration,
+                ..
             }) => {
                 self.remove_remote_socket_registration_if_current(source_jid, &registration)
                     .await;
@@ -91,6 +152,7 @@ impl OrderedRelayDeliveryBridge {
             }
             Ok(RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::Unavailable,
+                ..
             }) => false,
             Err(RelayAskError::Send {
                 effect: RelaySendEffect::MaybeCommitted,
@@ -122,6 +184,7 @@ impl OrderedRelayDeliveryBridge {
         let Some(services) = self.services.get().cloned() else {
             return RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::Unavailable,
+                carbon_recipients: Vec::new(),
             };
         };
         let registration = self
@@ -137,6 +200,7 @@ impl OrderedRelayDeliveryBridge {
         let Some(registration) = registration else {
             return RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::StaleRegistration,
+                carbon_recipients: Vec::new(),
             };
         };
         let actor = match services
@@ -152,6 +216,7 @@ impl OrderedRelayDeliveryBridge {
             Ok(None) => {
                 return RelayRemoteUserSideEffectReply {
                     status: RelayRemoteUserSideEffectStatus::StaleRegistration,
+                    carbon_recipients: Vec::new(),
                 };
             }
             Err(error) => {
@@ -162,6 +227,7 @@ impl OrderedRelayDeliveryBridge {
                 );
                 return RelayRemoteUserSideEffectReply {
                     status: RelayRemoteUserSideEffectStatus::Unavailable,
+                    carbon_recipients: Vec::new(),
                 };
             }
         };
@@ -185,10 +251,11 @@ impl OrderedRelayDeliveryBridge {
                         RelayRemoteUserSideEffectStatus::Unavailable
                     }
                 },
+                carbon_recipients: Vec::new(),
             };
         }
 
-        let status = match msg.effect {
+        let (status, carbon_recipients) = match msg.effect {
             RemoteUserSideEffect::Carbons {
                 owner,
                 message,
@@ -197,19 +264,26 @@ impl OrderedRelayDeliveryBridge {
             } => match message.0 {
                 Stanza::Message(message) => {
                     let web_socket_state = services.web_socket_state.upgrade();
-                    crate::server::routes::interpret::carbons::send_carbons_to_registry(
-                        &services.connection_registry,
-                        Some(&services.sm_session_registry),
-                        web_socket_state.as_deref(),
-                        owner,
-                        Box::new(message),
-                        kind.into(),
-                        exclude,
-                    )
-                    .await;
-                    RelayRemoteUserSideEffectStatus::Applied
+                    let carbon_recipients =
+                        crate::server::routes::interpret::carbons::send_carbons_to_registry(
+                            &services.connection_registry,
+                            crate::server::routes::interpret::carbons::CarbonRegistryDeps {
+                                ingress_effect_capture: None,
+                                sm_session_registry: Some(&services.sm_session_registry),
+                                web_socket_state: web_socket_state.as_deref(),
+                            },
+                            owner,
+                            Box::new(message),
+                            kind.into(),
+                            exclude,
+                        )
+                        .await;
+                    (RelayRemoteUserSideEffectStatus::Applied, carbon_recipients)
                 }
-                _ => RelayRemoteUserSideEffectStatus::StaleRegistration,
+                _ => (
+                    RelayRemoteUserSideEffectStatus::StaleRegistration,
+                    Vec::new(),
+                ),
             },
             RemoteUserSideEffect::RosterPush {
                 user_jid,
@@ -220,6 +294,7 @@ impl OrderedRelayDeliveryBridge {
                 let Some(state) = services.web_socket_state.upgrade() else {
                     return RelayRemoteUserSideEffectReply {
                         status: RelayRemoteUserSideEffectStatus::Unavailable,
+                        carbon_recipients: Vec::new(),
                     };
                 };
                 crate::server::routes::websocket::handlers::iq::roster::push::send_roster_push_to_sibling_resources(
@@ -230,7 +305,7 @@ impl OrderedRelayDeliveryBridge {
                     &version,
                 )
                 .await;
-                RelayRemoteUserSideEffectStatus::Applied
+                (RelayRemoteUserSideEffectStatus::Applied, Vec::new())
             }
             RemoteUserSideEffect::BlocklistPush {
                 user_bare,
@@ -240,16 +315,20 @@ impl OrderedRelayDeliveryBridge {
                 let Some(state) = services.web_socket_state.upgrade() else {
                     return RelayRemoteUserSideEffectReply {
                         status: RelayRemoteUserSideEffectStatus::Unavailable,
+                        carbon_recipients: Vec::new(),
                     };
                 };
                 crate::server::routes::websocket::handlers::iq::blocking::send_blocking_pushes(
                     &state, &user_bare, blocked, &jids,
                 )
                 .await;
-                RelayRemoteUserSideEffectStatus::Applied
+                (RelayRemoteUserSideEffectStatus::Applied, Vec::new())
             }
         };
-        RelayRemoteUserSideEffectReply { status }
+        RelayRemoteUserSideEffectReply {
+            status,
+            carbon_recipients,
+        }
     }
 }
 

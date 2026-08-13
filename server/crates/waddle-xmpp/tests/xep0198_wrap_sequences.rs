@@ -21,6 +21,7 @@ fn detached_session(last_acked: u32, outbound_count: u32) -> DetachedSession {
         user_id: "user@example.com".to_string(),
         jid: "user@example.com/resource".parse().expect("valid full JID"),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count,
         last_acked,
         replay_gap_through: None,

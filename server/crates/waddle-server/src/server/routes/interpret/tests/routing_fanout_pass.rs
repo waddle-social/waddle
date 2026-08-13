@@ -67,6 +67,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         pending_delivery_storage: None,
         ordered_relay_origin: None,
         sfu: None,
+        ingress_effect_capture: None,
     };
 
     let msg = chat_msg(

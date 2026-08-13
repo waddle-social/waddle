@@ -11,6 +11,9 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
 use crate::db::ValueExt;
+use crate::ingress_shadow::{
+    IngressEffectCapture, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
+};
 use crate::server::routes::websocket::WebSocketState;
 
 pub(super) async fn handle_group_dm_mediated_invite(
@@ -18,6 +21,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
     authenticated_session: Option<&Session>,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     if incoming.type_ != xmpp_parsers::message::MessageType::Normal {
         return None;
@@ -96,6 +100,11 @@ pub(super) async fn handle_group_dm_mediated_invite(
         }
     };
     if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
+        if let Some(capture) = ingress_effect_capture {
+            capture.record_marker(ShadowDecisionMarker::AuthorizationDenied {
+                reason: ShadowAuthorizationDeniedReason::BlockedSender,
+            });
+        }
         return Some(vec![]);
     }
 
@@ -309,7 +318,10 @@ pub(super) async fn handle_group_dm_mediated_invite(
     // resource and falls back to the durable pending-delivery queue
     // when the invitee is offline OR every listed session refused the
     // write — a stale resource list must not lose the invitation.
-    if let Err(error) = super::muc_invite::deliver_muc_user_message(state, &invitee, invite).await {
+    if let Err(error) =
+        super::muc_invite::deliver_muc_user_message(state, &invitee, invite, ingress_effect_capture)
+            .await
+    {
         warn!(
             invitee = %invitee,
             error = %error,

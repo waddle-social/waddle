@@ -392,6 +392,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         pending_delivery_storage: None,
         ordered_relay_origin: None,
         sfu: None,
+        ingress_effect_capture: None,
     };
 
     let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
@@ -668,6 +669,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
         sfu: None,
+        ingress_effect_capture: None,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(sender));

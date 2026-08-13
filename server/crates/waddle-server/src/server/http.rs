@@ -915,6 +915,13 @@ async fn create_websocket_state(
     );
     let provider_dispatch_tasks =
         crate::server::routes::extension_webhooks::ProviderDispatchTracker::new();
+    let ingress_shadow = crate::ingress_shadow::IngressShadowHandle::new(
+        server_config.ingress_shadow.clone(),
+        state.db_pool.global().clone(),
+        state.lineage_config.clone(),
+        state.clustering_claims.node_identity.clone(),
+    )
+    .await;
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
             app_state: state.clone(),
@@ -952,6 +959,7 @@ async fn create_websocket_state(
                 dnd_reader,
                 notification_activity,
                 sm_session_registry,
+                ingress_shadow,
                 link_preview_resolves:
                     crate::server::routes::websocket::default_link_preview_resolve_permits(),
                 caps_resolver,
