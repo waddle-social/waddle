@@ -27,6 +27,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 #[cfg(feature = "clustering")]
 use std::pin::Pin;
+#[cfg(all(feature = "clustering", test))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(feature = "clustering")]
 use std::time::Duration;
@@ -34,6 +36,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 #[cfg(feature = "clustering")]
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+#[cfg(feature = "clustering")]
+use tokio_util::sync::CancellationToken;
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::{
@@ -92,7 +96,53 @@ enum IngressShadowInner {
         enrollment_capacity: Arc<Semaphore>,
         enrollment_retries: Arc<PendingEnrollmentRetries>,
         capacity: Arc<Semaphore>,
+        shutdown: Arc<IngressShadowShutdown>,
     },
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Debug, Default)]
+struct IngressShadowShutdown {
+    cancellation: CancellationToken,
+    #[cfg(test)]
+    complete: AtomicBool,
+    #[cfg(test)]
+    complete_notify: Notify,
+}
+
+#[cfg(feature = "clustering")]
+impl IngressShadowShutdown {
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn mark_complete(&self) {
+        #[cfg(test)]
+        {
+            self.complete.store(true, Ordering::Release);
+            self.complete_notify.notify_waiters();
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_for_completion(&self) {
+        loop {
+            let notified = self.complete_notify.notified();
+            if self.complete.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+impl Drop for IngressShadowInner {
+    fn drop(&mut self) {
+        if let Self::Worker { shutdown, .. } = self {
+            shutdown.cancel();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -137,9 +187,13 @@ impl PendingEnrollmentRetries {
         tx: mpsc::UnboundedSender<QueuedIngressShadowTask>,
         enrollment_capacity: Arc<Semaphore>,
         capacity: Arc<Semaphore>,
+        shutdown: CancellationToken,
     ) {
         loop {
-            self.notify.notified().await;
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = self.notify.notified() => {},
+            }
             loop {
                 let batch = {
                     let mut pending = self
@@ -151,8 +205,14 @@ impl PendingEnrollmentRetries {
                     }
                     pending.drain().collect::<Vec<_>>()
                 };
-                tokio::time::sleep(ENROLLMENT_RETRY_DELAY).await;
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(ENROLLMENT_RETRY_DELAY) => {},
+                }
                 for stream_id in batch {
+                    if shutdown.is_cancelled() {
+                        return;
+                    }
                     if matches!(
                         try_send_worker_task(
                             &tx,
@@ -295,6 +355,7 @@ impl IngressShadowHandle {
                 enrollment_capacity,
                 enrollment_retries: _,
                 capacity,
+                ..
             } => try_send_worker_task(tx, enrollment_capacity, capacity, task),
         };
         observe_disposition(kind, stream_id, disposition)
@@ -310,19 +371,38 @@ impl IngressShadowHandle {
         let capacity = Arc::new(Semaphore::new(queue_capacity));
         let enrollment_capacity = Arc::new(Semaphore::new(1));
         let enrollment_retries = Arc::new(PendingEnrollmentRetries::default());
-        tokio::spawn(IngressShadowScheduler::new(rx, max_concurrency, execute).run());
-        tokio::spawn(enrollment_retries.clone().run(
+        let shutdown = Arc::new(IngressShadowShutdown::default());
+        let scheduler =
+            tokio::spawn(IngressShadowScheduler::new(rx, max_concurrency, execute).run());
+        let retry = tokio::spawn(enrollment_retries.clone().run(
             tx.clone(),
             enrollment_capacity.clone(),
             capacity.clone(),
+            shutdown.cancellation.clone(),
         ));
+        let shutdown_completion = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_completion.cancellation.cancelled().await;
+            let _ = retry.await;
+            let _ = scheduler.await;
+            shutdown_completion.mark_complete();
+        });
         Self {
             inner: Arc::new(IngressShadowInner::Worker {
                 tx,
                 enrollment_capacity,
                 enrollment_retries,
                 capacity,
+                shutdown,
             }),
+        }
+    }
+
+    #[cfg(test)]
+    fn shutdown(&self) -> Option<Arc<IngressShadowShutdown>> {
+        match self.inner.as_ref() {
+            IngressShadowInner::Disabled => None,
+            IngressShadowInner::Worker { shutdown, .. } => Some(shutdown.clone()),
         }
     }
 }
@@ -1067,7 +1147,7 @@ mod tests {
     use jid::{BareJid, Jid};
     use sqlx::Connection;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Notify;
+    use tokio::sync::{oneshot, Notify};
     use tokio::time::Duration;
     use uuid::Uuid;
     use waddle_xmpp::auth::{AuthContextId, AuthContextVersion, PrincipalAuthEpoch};
@@ -1115,6 +1195,16 @@ mod tests {
         execute: impl Fn(IngressShadowTask) -> IngressShadowExecuteFuture + Send + Sync + 'static,
     ) -> IngressShadowHandle {
         IngressShadowHandle::spawn_worker(queue_capacity, max_concurrency, Arc::new(execute))
+    }
+
+    struct PoolCloseSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for PoolCloseSignal {
+        fn drop(&mut self) {
+            if let Some(closed) = self.0.take() {
+                let _ = closed.send(());
+            }
+        }
     }
 
     /// A real PostgreSQL fixture for the shadow transaction.  It intentionally
@@ -1761,6 +1851,40 @@ mod tests {
         assert_eq!(fixture.frontier().await, 0);
         fixture.assert_rows(0, 0, 0, 0).await;
         fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_last_handle_joins_background_tasks_and_closes_dedicated_pool() {
+        let (pool_closed_tx, pool_closed_rx) = oneshot::channel();
+        let pool = Arc::new(PoolCloseSignal(Some(pool_closed_tx)));
+        let handle = test_handle(1, 1, {
+            let pool = pool.clone();
+            move |_| {
+                let pool = pool.clone();
+                Box::pin(async move {
+                    drop(pool);
+                })
+            }
+        });
+        let shutdown = handle
+            .shutdown()
+            .expect("worker should expose shutdown state");
+        let handle_clone = handle.clone();
+        drop(pool);
+        drop(handle);
+        assert!(
+            !shutdown.complete.load(Ordering::Acquire),
+            "a remaining handle clone must keep the worker alive"
+        );
+
+        drop(handle_clone);
+        tokio::time::timeout(Duration::from_millis(250), shutdown.wait_for_completion())
+            .await
+            .expect("retry and scheduler tasks should join after the last handle drops");
+        tokio::time::timeout(Duration::from_millis(250), pool_closed_rx)
+            .await
+            .expect("scheduler completion should release the dedicated pool")
+            .expect("dedicated pool closure should be signalled");
     }
 
     #[tokio::test]
