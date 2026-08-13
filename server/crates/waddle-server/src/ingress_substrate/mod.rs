@@ -15,6 +15,7 @@ use waddle_xmpp::ingress::{
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
+use crate::ingress_uow::DbRetryClass;
 
 /// The time an origin-id alias remains available after its message becomes
 /// terminal.  The garbage collector receives `now` and binds the derived
@@ -38,11 +39,13 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 4] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 6] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
     "ingress_deliveries",
+    "ingress_sm_streams",
+    "ingress_effect_intents",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -55,7 +58,7 @@ pub enum IngressSubstrateError {
     #[error("ingress substrate requires PostgreSQL")]
     PostgresRequired,
     #[error("ingress substrate database operation failed")]
-    Database,
+    Database { retry_class: DbRetryClass },
     #[error("ingress substrate returned a malformed stored message key")]
     InvalidStoredMessageKey,
     #[error("ingress substrate returned a malformed semantic digest")]
@@ -197,7 +200,9 @@ pub(crate) async fn acquire_epoch_lock_first(
         .next()
         .await
         .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database)?
+        .ok_or(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })?
         .get(0)
         .map_err(discard_database_error)?;
     Ok(ProtocolEpoch::from_storage(
@@ -490,11 +495,11 @@ async fn gc_candidate_batch(
             )
             .await
             .map_err(discard_database_error)?;
-        proof
-            .next()
-            .await
-            .map_err(discard_database_error)?
-            .ok_or(IngressSubstrateError::Database)?;
+        proof.next().await.map_err(discard_database_error)?.ok_or(
+            IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            },
+        )?;
         drop(proof);
         if !lock_eligible_terminal_message(&mut tx, message_key, cutoff).await? {
             tx.commit().await.map_err(discard_database_error)?;
@@ -531,7 +536,9 @@ async fn gc_candidate_batch(
             .map_err(discard_database_error)?;
         tx.commit().await.map_err(discard_database_error)?;
         deleted_messages +=
-            usize::try_from(deleted).map_err(|_| IngressSubstrateError::Database)?;
+            usize::try_from(deleted).map_err(|_| IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            })?;
     }
 
     Ok(deleted_messages)
@@ -727,8 +734,10 @@ async fn lock_eligible_terminal_message(
     row.get(0).map_err(discard_database_error)
 }
 
-fn discard_database_error(_: DatabaseError) -> IngressSubstrateError {
-    IngressSubstrateError::Database
+fn discard_database_error(error: DatabaseError) -> IngressSubstrateError {
+    IngressSubstrateError::Database {
+        retry_class: DbRetryClass::from_database_error(&error),
+    }
 }
 
 #[cfg(test)]
@@ -1826,7 +1835,9 @@ mod tests {
                 .await?;
             tx.commit()
                 .await
-                .map_err(|_| IngressSubstrateError::Database)?;
+                .map_err(|_| IngressSubstrateError::Database {
+                    retry_class: DbRetryClass::NotRetryable,
+                })?;
             Ok::<_, IngressSubstrateError>(outcome)
         });
         wait_for_lock_waiter(&fixture.admin, "FOR SHARE").await;

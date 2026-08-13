@@ -458,6 +458,58 @@ ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_gua
 ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_truncate;
 "#;
 
+/// PostgreSQL-only shadow ingress durable surface. SQLite keeps its ledger in
+/// sync because these tables are only used by the clustered ingress UoW.
+pub const V1010_SHADOW_INGRESS_SURFACE: &str = r#"
+SELECT 1;
+"#;
+
+pub const V1010_SHADOW_INGRESS_SURFACE_POSTGRES: &str = r#"
+CREATE TABLE ingress_sm_streams (
+    sm_ingress_id UUID PRIMARY KEY,
+    stream_id TEXT NOT NULL UNIQUE CHECK (stream_id <> '' AND length(stream_id) <= 3071),
+    handled_ordinal NUMERIC(20,0) NOT NULL DEFAULT 0
+        CHECK (handled_ordinal >= 0 AND handled_ordinal <= 18446744073709551615),
+    row_revision NUMERIC(20,0) NOT NULL DEFAULT 0
+        CHECK (row_revision >= 0 AND row_revision <= 18446744073709551615),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE ingress_effect_intents (
+    message_key UUID NOT NULL REFERENCES ingress_messages (message_key) ON DELETE CASCADE,
+    effect_ordinal NUMERIC(20,0) NOT NULL
+        CHECK (effect_ordinal >= 0 AND effect_ordinal <= 18446744073709551615),
+    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 15),
+    payload_version INTEGER NOT NULL CHECK (payload_version = 1),
+    payload BYTEA NOT NULL CHECK (octet_length(payload) <= 65536),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (message_key, effect_ordinal)
+);
+
+CREATE TRIGGER ingress_sm_streams_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_sm_streams
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_sm_streams_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_sm_streams
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_sm_streams ENABLE ALWAYS TRIGGER ingress_sm_streams_epoch_guard_dml;
+ALTER TABLE ingress_sm_streams ENABLE ALWAYS TRIGGER ingress_sm_streams_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_effect_intents_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_effect_intents
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_effect_intents_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_effect_intents
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_effect_intents ENABLE ALWAYS TRIGGER ingress_effect_intents_epoch_guard_dml;
+ALTER TABLE ingress_effect_intents ENABLE ALWAYS TRIGGER ingress_effect_intents_epoch_guard_truncate;
+
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES
+    ('ingress_sm_streams'),
+    ('ingress_effect_intents');
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -517,6 +569,12 @@ pub fn all() -> Vec<Migration> {
             description: "Add inert PostgreSQL ingress epoch guards".to_string(),
             sql_sqlite: V1009_INERT_INGRESS_EPOCH_GUARDS,
             sql_postgres: V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES,
+        },
+        Migration {
+            version: 1010,
+            description: "Add shadow ingress streams and effect intents".to_string(),
+            sql_sqlite: V1010_SHADOW_INGRESS_SURFACE,
+            sql_postgres: V1010_SHADOW_INGRESS_SURFACE_POSTGRES,
         },
     ]
 }

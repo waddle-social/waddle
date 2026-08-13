@@ -2,6 +2,8 @@
 use chrono::{TimeZone, Utc};
 use sqlx::Connection;
 use uuid::Uuid;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::{
     auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
     ingress::{
@@ -31,8 +33,9 @@ use super::{
 };
 #[cfg(feature = "clustering")]
 use super::{
-    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, InboxRepository,
-    IngressUowTransaction, MamArchiveRepository,
+    ClaimRepository, EffectIntentRepository, EffectIntentWriteOutcome, HandledFrontierOutcome,
+    HandledFrontierRepository, InboxRepository, IngressUowTransaction, MamArchiveRepository,
+    PrincipalAssertion, PrincipalRepository, ShadowFrontierOutcome, SmIngressStreamRepository,
 };
 use crate::{
     config::LineageConfig,
@@ -140,9 +143,31 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
     fixture.advance_epoch_to_one().await;
     let uow = fixture.uow();
     let mut transaction = uow.begin().await.expect("begin epoch-one uow");
-    CanonicalMessageRepository::record(&mut transaction, MessageKey::new(), &digest(1))
+    let message_key = MessageKey::new();
+    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(1))
         .await
         .expect("UoW carries epoch proof");
+    #[cfg(feature = "clustering")]
+    SmIngressStreamRepository::mint(
+        &mut transaction,
+        &SmSessionId::new(format!("uow-guard-stream-{}", Uuid::new_v4().simple())),
+    )
+    .await
+    .expect("UoW can enroll a guarded SM stream");
+    #[cfg(feature = "clustering")]
+    assert_eq!(
+        EffectIntentRepository::record_all(
+            &mut transaction,
+            message_key,
+            &[IngressEffectIntent::InboxProject {
+                owner: "romeo@example.com".parse().expect("valid fixture JID"),
+                increment_unread: true,
+            }],
+        )
+        .await
+        .expect("UoW can record guarded effect intents"),
+        EffectIntentWriteOutcome::Recorded
+    );
     transaction.commit().await.expect("commit UoW write");
 
     let raw = fixture
@@ -152,6 +177,29 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
         )
         .await;
     assert!(raw.is_err(), "the V1009 trigger rejects unproven writes");
+    let raw_stream = fixture
+        .execute(
+            "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?)",
+            crate::db_params![
+                SmIngressId::new().to_storage().to_string(),
+                "raw-guard-stream".to_string()
+            ],
+        )
+        .await;
+    assert!(
+        raw_stream.is_err(),
+        "the V1010 stream guard rejects unproven writes"
+    );
+    let raw_intent = fixture
+        .execute(
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, payload_version, payload) VALUES (?::uuid, 0, 0, 1, ?)",
+            crate::db_params![message_key.to_storage().to_string(), vec![1_u8]],
+        )
+        .await;
+    assert!(
+        raw_intent.is_err(),
+        "the V1010 effect-intent guard rejects unproven writes"
+    );
     fixture.close().await;
 }
 
@@ -643,6 +691,371 @@ async fn handled_frontier_uses_wrapping_single_step_cas() {
 }
 
 #[cfg(feature = "clustering")]
+#[tokio::test]
+async fn shadow_stream_mint_is_idempotent_per_stream_and_unique_across_streams() {
+    let Some(fixture) = Fixture::open("shadow_stream_mint").await else {
+        return;
+    };
+    let first_stream = SmSessionId::new(format!("mint-a-{}", Uuid::new_v4().simple()));
+    let second_stream = SmSessionId::new(format!("mint-b-{}", Uuid::new_v4().simple()));
+
+    let mut first = fixture.begin().await;
+    let first_id = SmIngressStreamRepository::mint(&mut first, &first_stream)
+        .await
+        .expect("mint first stream");
+    first.commit().await.expect("commit first mint");
+
+    let mut retry = fixture.begin().await;
+    let repeated_id = SmIngressStreamRepository::mint(&mut retry, &first_stream)
+        .await
+        .expect("idempotent mint");
+    let second_id = SmIngressStreamRepository::mint(&mut retry, &second_stream)
+        .await
+        .expect("mint distinct stream");
+    retry.commit().await.expect("commit repeated mints");
+
+    assert_eq!(repeated_id, first_id, "same stream keeps its ingress ID");
+    assert_ne!(
+        second_id, first_id,
+        "distinct streams have distinct ingress IDs"
+    );
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn shadow_stream_lock_requires_the_current_transaction_fence() {
+    let Some(fixture) = Fixture::open("shadow_stream_lock").await else {
+        return;
+    };
+    let values = FixtureValues::new("shadow-stream-lock");
+    fixture.seed_claim(&values).await;
+
+    let mut transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_sm_claim(
+        &mut transaction,
+        &values.stream_id,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("mint exact claim fence");
+    assert_eq!(
+        SmIngressStreamRepository::lock(&mut transaction, &fence, &values.stream_id)
+            .await
+            .expect("missing enrollment is not an error"),
+        None
+    );
+    let enrolled = SmIngressStreamRepository::mint(&mut transaction, &values.stream_id)
+        .await
+        .expect("enroll stream");
+    assert_eq!(
+        SmIngressStreamRepository::lock(&mut transaction, &fence, &values.stream_id)
+            .await
+            .expect("lock enrolled stream"),
+        Some((enrolled, 0))
+    );
+
+    let mut other = fixture.begin().await;
+    assert!(matches!(
+        SmIngressStreamRepository::lock(&mut other, &fence, &values.stream_id).await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(other);
+    transaction
+        .commit()
+        .await
+        .expect("commit stream enrollment");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn shadow_frontier_advances_idempotently_and_detects_gaps() {
+    let Some(fixture) = Fixture::open("shadow_frontier").await else {
+        return;
+    };
+    let values = FixtureValues::new("shadow-frontier");
+    fixture.seed_claim(&values).await;
+    let mut transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_sm_claim(
+        &mut transaction,
+        &values.stream_id,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("mint exact claim fence");
+    let stream_id = SmIngressStreamRepository::mint(&mut transaction, &values.stream_id)
+        .await
+        .expect("enroll stream");
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::FIRST,
+        )
+        .await
+        .expect("advance 0 to 1"),
+        ShadowFrontierOutcome::Advanced
+    );
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::FIRST,
+        )
+        .await
+        .expect("replay is idempotent"),
+        ShadowFrontierOutcome::Idempotent
+    );
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::from_storage(3).expect("valid ordinal"),
+        )
+        .await
+        .expect("gap is observable"),
+        ShadowFrontierOutcome::Stale { stored: 1 }
+    );
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::from_storage(2).expect("valid ordinal"),
+        )
+        .await
+        .expect("advance 1 to 2"),
+        ShadowFrontierOutcome::Advanced
+    );
+    transaction.commit().await.expect("commit frontier updates");
+
+    let conn = fixture.db.guard().await.expect("read committed stream row");
+    let mut rows = conn
+        .query(
+            "SELECT handled_ordinal::text, row_revision::text FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid",
+            crate::db_params![stream_id.to_storage().to_string()],
+        )
+        .await
+        .expect("read shadow frontier");
+    let row = rows
+        .next()
+        .await
+        .expect("read stream row")
+        .expect("stream row exists");
+    assert_eq!(row.get::<String>(0).expect("decode frontier"), "2");
+    assert_eq!(row.get::<String>(1).expect("decode revision"), "2");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn effect_intents_are_ordered_idempotent_and_conflict_safely() {
+    let Some(fixture) = Fixture::open("effect_intents").await else {
+        return;
+    };
+    let message_key = MessageKey::new();
+    let intents = vec![
+        IngressEffectIntent::InboxProject {
+            owner: "romeo@example.com".parse().expect("valid owner"),
+            increment_unread: true,
+        },
+        IngressEffectIntent::RouteDirect {
+            recipient: "juliet@example.com".parse().expect("valid recipient"),
+            fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+        },
+    ];
+    let mut transaction = fixture.begin().await;
+    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(9))
+        .await
+        .expect("record effect parent message");
+    assert_eq!(
+        EffectIntentRepository::record_all(&mut transaction, message_key, &intents)
+            .await
+            .expect("record effect intents"),
+        EffectIntentWriteOutcome::Recorded
+    );
+    transaction.commit().await.expect("commit intents");
+
+    let conn = fixture.db.guard().await.expect("read effect rows");
+    let mut rows = conn
+        .query(
+            "SELECT effect_ordinal::text, kind::int FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("select ordered effects");
+    let mut stored = Vec::new();
+    while let Some(row) = rows.next().await.expect("read effect row") {
+        stored.push((
+            row.get::<String>(0).expect("ordinal"),
+            row.get::<i64>(1).expect("kind"),
+        ));
+    }
+    assert_eq!(stored, vec![("0".to_string(), 1), ("1".to_string(), 6)]);
+
+    let mut replay = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all(&mut replay, message_key, &intents)
+            .await
+            .expect("byte-identical replay"),
+        EffectIntentWriteOutcome::AlreadyRecorded
+    );
+    replay.commit().await.expect("commit replay");
+
+    let mut conflict = fixture.begin().await;
+    let differing = [IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("valid recipient"),
+        fanout: vec!["juliet@example.com/laptop".parse().expect("valid fanout")],
+    }];
+    assert!(matches!(
+        EffectIntentRepository::record_all(&mut conflict, message_key, &differing).await,
+        Err(IngressUowError::EffectIntentConflict)
+    ));
+    drop(conflict);
+
+    let mut missing = fixture.begin().await;
+    assert!(matches!(
+        EffectIntentRepository::record_all(&mut missing, MessageKey::new(), &intents,).await,
+        Err(IngressUowError::EffectIntentMessageMissing)
+    ));
+    drop(missing);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn principal_assertion_checks_each_persisted_identity_field_and_expiry() {
+    let Some(fixture) = Fixture::open("principal_assertion").await else {
+        return;
+    };
+    let values = FixtureValues::new("principal-assertion");
+    seed_principal_session(&fixture, &values.principal, None).await;
+
+    let mut happy = fixture.begin().await;
+    assert_eq!(
+        PrincipalRepository::assert_principal(&mut happy, &values.principal)
+            .await
+            .expect("assert matching principal"),
+        PrincipalAssertion::Asserted
+    );
+    happy.commit().await.expect("commit happy assertion");
+
+    for principal in [
+        AuthenticatedPrincipalRef::new(
+            "juliet@example.com"
+                .parse()
+                .expect("valid mismatched bare JID"),
+            values.principal.auth_context_id().clone(),
+            values.principal.auth_context_version(),
+            values.principal.auth_epoch(),
+        ),
+        AuthenticatedPrincipalRef::new(
+            values.principal.bare_jid().clone(),
+            AuthContextId::new(Uuid::new_v4()),
+            values.principal.auth_context_version(),
+            values.principal.auth_epoch(),
+        ),
+        AuthenticatedPrincipalRef::new(
+            values.principal.bare_jid().clone(),
+            values.principal.auth_context_id().clone(),
+            AuthContextVersion::new(values.principal.auth_context_version().get() + 1),
+            values.principal.auth_epoch(),
+        ),
+        AuthenticatedPrincipalRef::new(
+            values.principal.bare_jid().clone(),
+            values.principal.auth_context_id().clone(),
+            values.principal.auth_context_version(),
+            PrincipalAuthEpoch::new(values.principal.auth_epoch().get() + 1),
+        ),
+    ] {
+        let mut transaction = fixture.begin().await;
+        assert_eq!(
+            PrincipalRepository::assert_principal(&mut transaction, &principal)
+                .await
+                .expect("mismatched principal is an outcome"),
+            PrincipalAssertion::PrincipalAssertionFailed
+        );
+        transaction.commit().await.expect("commit failed assertion");
+    }
+
+    let expired = AuthenticatedPrincipalRef::new(
+        "mercutio@example.com".parse().expect("valid expired JID"),
+        AuthContextId::new(Uuid::new_v4()),
+        AuthContextVersion::new(1),
+        PrincipalAuthEpoch::new(1),
+    );
+    seed_principal_session(
+        &fixture,
+        &expired,
+        Some(Utc::now() - chrono::Duration::seconds(1)),
+    )
+    .await;
+    let mut transaction = fixture.begin().await;
+    assert_eq!(
+        PrincipalRepository::assert_principal(&mut transaction, &expired)
+            .await
+            .expect("expired principal is an outcome"),
+        PrincipalAssertion::PrincipalAssertionFailed
+    );
+    transaction
+        .commit()
+        .await
+        .expect("commit expired assertion");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn principal_assertion_observes_concurrent_session_revocation_after_lock_release() {
+    let Some(fixture) = Fixture::open("principal_revocation").await else {
+        return;
+    };
+    let values = FixtureValues::new("principal-revocation");
+    let session_id = seed_principal_session(&fixture, &values.principal, None).await;
+    let mut connection = sqlx::PgConnection::connect(&fixture.schema_url)
+        .await
+        .expect("open revocation connection");
+    let mut blocker = connection
+        .begin()
+        .await
+        .expect("begin revocation transaction");
+    sqlx::query("DELETE FROM sessions WHERE id = $1")
+        .bind(&session_id)
+        .execute(&mut *blocker)
+        .await
+        .expect("stage session revocation");
+
+    let uow = fixture.uow();
+    let principal = values.principal.clone();
+    let assertion = tokio::spawn(async move {
+        let mut transaction = uow.begin().await.expect("begin assertion transaction");
+        let outcome = PrincipalRepository::assert_principal(&mut transaction, &principal).await;
+        drop(transaction);
+        outcome
+    });
+    wait_for_lock_waiter(&fixture.admin, "SELECT expires_at FROM sessions").await;
+    assert!(
+        !assertion.is_finished(),
+        "share assertion waits for deletion lock"
+    );
+    blocker.commit().await.expect("commit revocation");
+    assert_eq!(
+        assertion
+            .await
+            .expect("join assertion task")
+            .expect("read revoked principal"),
+        PrincipalAssertion::PrincipalAssertionFailed
+    );
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
 async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
     store_mam_message(transaction, values).await;
     upsert_inbox_entry(transaction, values).await;
@@ -1126,6 +1539,48 @@ fn fixture_lineage_config() -> LineageConfig {
         ),
         action: None,
     }
+}
+
+#[cfg(feature = "clustering")]
+async fn seed_principal_session(
+    fixture: &Fixture,
+    principal: &AuthenticatedPrincipalRef,
+    expires_at: Option<chrono::DateTime<Utc>>,
+) -> String {
+    let user_jid = principal.bare_jid().to_string();
+    let suffix = Uuid::new_v4().simple().to_string();
+    fixture
+        .execute(
+            "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                user_jid.clone(),
+                format!("principal-{suffix}"),
+                format!("principal-{suffix}"),
+                Utc::now().to_rfc3339(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .await
+        .expect("seed principal user");
+    let session_id = format!("principal-session-{suffix}");
+    fixture
+        .execute(
+            "INSERT INTO sessions (id, user_jid, token_hash, auth_context_id, auth_context_version, principal_auth_epoch, expires_at, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            crate::db_params![
+                session_id.clone(),
+                user_jid,
+                format!("principal-token-{suffix}"),
+                principal.auth_context_id().as_uuid().to_string(),
+                i64::try_from(principal.auth_context_version().get()).expect("version fits i64"),
+                i64::try_from(principal.auth_epoch().get()).expect("epoch fits i64"),
+                expires_at.map(|value| value.to_rfc3339()),
+                Utc::now().to_rfc3339(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .await
+        .expect("seed principal session");
+    session_id
 }
 
 #[cfg(feature = "clustering")]

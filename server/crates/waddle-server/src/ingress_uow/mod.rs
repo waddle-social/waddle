@@ -7,17 +7,20 @@
 
 mod error;
 mod repositories;
+mod retry;
 
 pub use error::IngressUowError;
 pub use repositories::{
-    CanonicalMessageRepository, DeliveryEffectRepository, InboxRepository, MamArchiveRepository,
-    SmIngressRepository,
+    CanonicalMessageRepository, DeliveryEffectRepository, EffectIntentRepository,
+    EffectIntentWriteOutcome, InboxRepository, MamArchiveRepository, PrincipalAssertion,
+    PrincipalRepository, SmIngressRepository,
 };
 #[cfg(feature = "clustering")]
 pub use repositories::{
     ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, RoomClaimFence,
-    SmClaimFence,
+    ShadowFrontierOutcome, SmClaimFence, SmIngressStreamRepository,
 };
+pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
 use crate::{
     config::LineageConfig,
@@ -165,7 +168,7 @@ impl<'a> IngressUowTransaction<'a> {
         self.transaction
             .commit()
             .await
-            .map_err(IngressUowError::Database)
+            .map_err(IngressUowError::from)
     }
 
     /// Raw SQL remains confined to ingress repositories so callers cannot
