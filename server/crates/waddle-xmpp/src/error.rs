@@ -348,6 +348,35 @@ pub enum StanzaErrorCondition {
 }
 
 impl StanzaErrorCondition {
+    /// Convert a typed parser condition into Waddle's closed error vocabulary.
+    pub fn from_xmpp(condition: &xmpp_parsers::stanza_error::DefinedCondition) -> Self {
+        use xmpp_parsers::stanza_error::DefinedCondition as D;
+        match condition {
+            D::BadRequest => Self::BadRequest,
+            D::Conflict => Self::Conflict,
+            D::FeatureNotImplemented => Self::FeatureNotImplemented,
+            D::Forbidden => Self::Forbidden,
+            D::Gone { .. } => Self::Gone,
+            D::InternalServerError => Self::InternalServerError,
+            D::ItemNotFound => Self::ItemNotFound,
+            D::JidMalformed => Self::JidMalformed,
+            D::NotAcceptable => Self::NotAcceptable,
+            D::NotAllowed => Self::NotAllowed,
+            D::NotAuthorized => Self::NotAuthorized,
+            D::PolicyViolation => Self::PolicyViolation,
+            D::RecipientUnavailable => Self::RecipientUnavailable,
+            D::Redirect { .. } => Self::Redirect,
+            D::RegistrationRequired => Self::RegistrationRequired,
+            D::RemoteServerNotFound => Self::RemoteServerNotFound,
+            D::RemoteServerTimeout => Self::RemoteServerTimeout,
+            D::ResourceConstraint => Self::ResourceConstraint,
+            D::ServiceUnavailable => Self::ServiceUnavailable,
+            D::SubscriptionRequired => Self::SubscriptionRequired,
+            D::UndefinedCondition => Self::UndefinedCondition,
+            D::UnexpectedRequest => Self::UnexpectedRequest,
+        }
+    }
+
     /// Get the element name for this condition.
     pub fn as_str(&self) -> &'static str {
         match self {

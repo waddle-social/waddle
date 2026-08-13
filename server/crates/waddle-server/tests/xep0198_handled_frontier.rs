@@ -294,3 +294,35 @@ async fn handled_frontier_requires_exact_fence_and_live_session() {
     );
     fixture.close().await;
 }
+
+/// A non-contiguous handled offer is stale and must leave the stored frontier
+/// unchanged even if the transaction later commits.
+#[tokio::test]
+async fn handled_frontier_rejects_gaps_without_advancing() {
+    let Some(fixture) = Fixture::open("gap").await else {
+        return;
+    };
+    let stream_id = SmSessionId::new("x0198-gap-stream");
+    fixture.seed_claim_and_session(&stream_id, 7).await;
+
+    let mut transaction = fixture.uow.begin().await.expect("begin unit of work");
+    let fence = fixture.fence(&mut transaction, &stream_id).await;
+    assert!(matches!(
+        HandledFrontierRepository::advance(&mut transaction, &fence, &stream_id, 9).await,
+        Err(IngressUowError::FrontierStale {
+            stored: 7,
+            offered: 9
+        })
+    ));
+    transaction
+        .commit()
+        .await
+        .expect("commit stale frontier transaction");
+
+    assert_eq!(
+        fixture.stored_frontier(&stream_id).await,
+        7,
+        "stale handled offers must not advance the stored frontier"
+    );
+    fixture.close().await;
+}

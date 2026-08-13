@@ -34,7 +34,8 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
 use crate::ingress_shadow::{
-    IngressEffectCapture, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
+    IngressEffectCapture, IngressShadowRoomFence, ShadowAuthorizationDeniedReason,
+    ShadowDecisionMarker,
 };
 use crate::server::routes::websocket::muc_invites::{
     claim_invite, record_invite, OutstandingInvite, RecordOutcome,
@@ -100,7 +101,11 @@ pub(super) async fn handle_muc_mediated_invite(
             "Internal server error.",
         )]);
     };
-
+    if let (Some(capture), Some(claim_fence)) =
+        (ingress_effect_capture, snapshot.claim_fence.as_ref())
+    {
+        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
+    }
     // XEP-0045 §7.8: a mediated invitation is an occupant action ("a
     // room in which one is an occupant").
     if snapshot.room.find_nick_by_real_jid(bound_jid).is_none() {

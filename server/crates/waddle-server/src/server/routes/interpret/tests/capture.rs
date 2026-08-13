@@ -203,6 +203,69 @@ async fn archive_direct_boundary_records_notification_activity_preview_intent() 
 }
 
 #[tokio::test]
+async fn direct_archive_capture_uses_the_deduplicated_authoritative_id() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
+    use waddle_xmpp_core::xep0359::{build_origin_id_element, OriginId};
+
+    let registry = ConnectionRegistry::new();
+    let mam_concrete = Arc::new(InMemoryMamStorage::new());
+    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::test_with_storage(&registry, &mam, &inbox)
+        .with_ingress_effect_capture(Some(capture.clone()));
+    let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
+    let peer: jid::BareJid = "bob@example.com".parse().expect("peer");
+    let origin = OriginId::new("retry-origin");
+
+    mam_concrete
+        .store_message(
+            &owner,
+            &ArchivedMessage {
+                id: "authoritative-archive-id".to_string(),
+                body: Some("hello".to_string()),
+                origin_id: Some(origin.clone()),
+                message_type: xmpp_parsers::message::MessageType::Chat,
+                ..ArchivedMessage::for_test(
+                    "alice@example.com/old".parse().expect("sender"),
+                    peer.clone().into(),
+                )
+            },
+        )
+        .await
+        .expect("seed archive row");
+
+    let mut retry = chat_msg(
+        jid("alice@example.com/new"),
+        jid("bob@example.com"),
+        "hello",
+    );
+    retry.id = Some(xmpp_parsers::message::Id("fresh-retry-id".to_string()));
+    retry
+        .payloads
+        .push(build_origin_id_element(origin.as_str()));
+    let _ = interpret(
+        vec![OutboundEvent::ArchiveDirect {
+            archive_jid: owner.clone(),
+            from: jid("alice@example.com/new"),
+            to: jid("bob@example.com"),
+            message: Box::new(retry),
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(capture_snapshot(&capture).intents.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::ArchiveAuthoritative { archive, stanza_id, .. }
+                if archive == &owner && stanza_id.id == "authoritative-archive-id"
+        )
+    }));
+}
+
+#[tokio::test]
 async fn shared_recipient_pass_records_recipient_side_effects_once_across_multi_resource_fanout() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::storage::InMemoryMamStorage;

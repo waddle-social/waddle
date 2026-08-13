@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
 };
 
+#[cfg(any(feature = "clustering", test))]
 use tokio::sync::mpsc;
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::ingress::IngressOrdinal;

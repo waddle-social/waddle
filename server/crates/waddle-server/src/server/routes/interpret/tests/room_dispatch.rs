@@ -1,4 +1,6 @@
+use super::super::room_dispatch::push_sender_error_reply;
 use super::*;
+use crate::ingress_shadow::IngressEffectCapture;
 
 // XEP-0372 — RequestEnrichment callback round-trip
 // -----------------------------------------------------------------
@@ -98,6 +100,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
     )
     .await;
 
+    let capture = IngressEffectCapture::new(None);
     let deps = Deps {
         connection_registry: &state.deps.protocol.connection_registry,
         user_registry: Some(&state.deps.protocol.user_registry),
@@ -114,7 +117,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
         sfu: None,
-        ingress_effect_capture: None,
+        ingress_effect_capture: Some(capture.clone()),
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(alice));
@@ -211,6 +214,67 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
             .as_deref(),
         Some("ms")
     );
+    assert!(capture.snapshot().intents.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::RouteMucGroupchat { room, occupants, .. }
+                if room.to_string() == "trace@muc.example.com" && occupants.len() == 2
+        )
+    }));
+}
+
+#[test]
+fn successful_room_error_reply_records_error_intent() {
+    let registry = ConnectionRegistry::new();
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps {
+        connection_registry: &registry,
+        user_registry: None,
+        sm_session_registry: None,
+        mam_storage: None,
+        inbox_storage: None,
+        extension_manager: None,
+        room_registry: None,
+        web_socket_state: None,
+        authenticated_principal: None,
+        local_domain: "example.com",
+        blocking_storage: None,
+        message_dispatcher: None,
+        pending_delivery_storage: None,
+        ordered_relay_origin: None,
+        sfu: None,
+        ingress_effect_capture: Some(capture.clone()),
+    };
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+    let incoming = chat_msg(
+        jid::Jid::from(sender.clone()),
+        jid::Jid::from(room.clone()),
+        "bad",
+    );
+    let mut outcome = InterpretOutcome::default();
+    push_sender_error_reply(
+        &deps,
+        &mut outcome,
+        &incoming,
+        &room,
+        &sender,
+        xmpp_parsers::stanza_error::StanzaError::new(
+            xmpp_parsers::stanza_error::ErrorType::Cancel,
+            xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
+            "en",
+            "missing",
+        ),
+    );
+    assert_eq!(outcome.frames.len(), 1);
+    assert!(capture.snapshot().intents.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::ErrorReply { recipient, condition }
+                if *recipient == sender
+                    && *condition == waddle_xmpp::StanzaErrorCondition::ItemNotFound
+        )
+    }));
 }
 
 #[tokio::test]

@@ -1,4 +1,6 @@
 use super::*;
+use crate::ingress_shadow::IngressEffectCapture;
+use waddle_xmpp::stream_management::SmSessionRegistry;
 
 // -----------------------------------------------------------------
 // XEP-0280 — SendCarbons fan-out
@@ -215,6 +217,63 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         !session.unacked_stanzas.is_empty(),
         "detached SM session must have at least one queued carbon for resume"
     );
+}
+
+#[tokio::test]
+async fn detached_carbon_append_records_the_actual_sm_stream() {
+    let registry = ConnectionRegistry::new();
+    let alice_web: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+    let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
+    let (_web_tx, _web_rx) = tokio::sync::mpsc::channel(8);
+    registry.register_with_carbons(alice_web.clone(), _web_tx, true);
+    let sm = Arc::new(InMemorySmSessionRegistry::new());
+    let mut detached = detached_dm_session("captured-carbon-stream", &alice_phone);
+    detached.carbons_enabled = true;
+    sm.store_session(detached)
+        .await
+        .expect("store detached session");
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps {
+        connection_registry: &registry,
+        user_registry: None,
+        sm_session_registry: Some(&sm),
+        mam_storage: None,
+        inbox_storage: None,
+        extension_manager: None,
+        room_registry: None,
+        web_socket_state: None,
+        authenticated_principal: None,
+        local_domain: "example.com",
+        blocking_storage: None,
+        message_dispatcher: None,
+        pending_delivery_storage: None,
+        ordered_relay_origin: None,
+        sfu: None,
+        ingress_effect_capture: Some(capture.clone()),
+    };
+
+    let _ = interpret(
+        vec![OutboundEvent::SendCarbons {
+            owner: "alice@example.com".parse().expect("owner"),
+            message: Box::new(chat_msg(
+                jid("alice@example.com/web"),
+                jid("bob@example.com"),
+                "carbon",
+            )),
+            kind: CarbonKind::Sent,
+            exclude: vec![alice_web],
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(capture.snapshot().intents.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::RecipientSmAppend { stream }
+                if stream.as_str() == "captured-carbon-stream"
+        )
+    }));
 }
 
 // -----------------------------------------------------------------

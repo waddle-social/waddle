@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
+use jid::BareJid;
 use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey};
+use waddle_xmpp::muc::RoomClaimFenceContext;
+use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
 use xmpp_parsers::message::{Lang, Message};
 
 const MAX_CAPTURE_ENTRIES: usize = 128;
@@ -35,8 +38,26 @@ pub struct IngressEffectCaptureSnapshot {
     pub stanza_lang: Option<Lang>,
     /// Sanitized, pre-rewrite stanza captured by the message handler.
     pub sanitized_message: Option<Message>,
+    pub room_fence: Option<IngressShadowRoomFence>,
     pub intents: Vec<IngressEffectIntent>,
     pub markers: Vec<ShadowDecisionMarker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressShadowRoomFence {
+    pub room: BareJid,
+    pub owner: NodeIdentity,
+    pub claim_epoch: ClaimEpoch,
+}
+
+impl IngressShadowRoomFence {
+    pub fn from_context(room: &BareJid, context: &RoomClaimFenceContext) -> Self {
+        Self {
+            room: room.clone(),
+            owner: context.owner.clone(),
+            claim_epoch: context.epoch,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +69,7 @@ pub struct IngressEffectCapture {
 struct CaptureState {
     stanza_lang: Option<Lang>,
     sanitized_message: Option<Message>,
+    room_fence: Option<IngressShadowRoomFence>,
     intents: Vec<IngressEffectIntent>,
     intent_keys: BTreeSet<IngressEffectKey>,
     markers: Vec<ShadowDecisionMarker>,
@@ -60,6 +82,7 @@ impl IngressEffectCapture {
             inner: Arc::new(Mutex::new(CaptureState {
                 stanza_lang,
                 sanitized_message: None,
+                room_fence: None,
                 intents: Vec::new(),
                 intent_keys: BTreeSet::new(),
                 markers: Vec::new(),
@@ -95,16 +118,29 @@ impl IngressEffectCapture {
             Ok(state) => IngressEffectCaptureSnapshot {
                 stanza_lang: state.stanza_lang.clone(),
                 sanitized_message: state.sanitized_message.clone(),
+                room_fence: state.room_fence.clone(),
                 intents: state.intents.clone(),
                 markers: state.markers.clone(),
             },
             Err(_) => IngressEffectCaptureSnapshot {
                 stanza_lang: None,
                 sanitized_message: None,
+                room_fence: None,
                 intents: Vec::new(),
                 markers: vec![ShadowDecisionMarker::Overflow],
             },
         }
+    }
+
+    pub fn record_room_fence(&self, room_fence: IngressShadowRoomFence) {
+        self.with_state(|state| state.room_fence = Some(room_fence));
+    }
+
+    /// Discard a provisional room scope when the live MUC path never reached
+    /// its actor snapshot boundary. The shadow must not assert an unrelated
+    /// later room claim for a locally generated pre-dispatch error reply.
+    pub fn clear_room_fence(&self) {
+        self.with_state(|state| state.room_fence = None);
     }
 
     fn with_state(&self, action: impl FnOnce(&mut CaptureState)) {
@@ -153,6 +189,7 @@ mod tests {
 
         let snapshot = capture.snapshot();
         assert_eq!(snapshot.stanza_lang, Some(Lang::from("en")));
+        assert_eq!(snapshot.room_fence, None);
         assert_eq!(snapshot.intents.len(), 1);
         assert_eq!(snapshot.markers.len(), 1);
     }
@@ -177,5 +214,19 @@ mod tests {
         let snapshot = capture.snapshot();
         assert!(snapshot.intents.is_empty());
         assert_eq!(snapshot.markers, vec![ShadowDecisionMarker::Overflow]);
+    }
+
+    #[test]
+    fn clearing_a_provisional_room_fence_removes_room_authority() {
+        let capture = IngressEffectCapture::new(None);
+        capture.record_room_fence(IngressShadowRoomFence {
+            room: "room@muc.example.com".parse().expect("room jid"),
+            owner: NodeIdentity::new("room-node", "room-epoch"),
+            claim_epoch: ClaimEpoch(3),
+        });
+
+        capture.clear_room_fence();
+
+        assert_eq!(capture.snapshot().room_fence, None);
     }
 }

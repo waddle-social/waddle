@@ -425,6 +425,7 @@ async fn route_dm_to_full_jid(
                 if let Some(processed) = processed {
                     let not_queued = queue_processed_for_detached(
                         deps.sm_session_registry,
+                        deps.ingress_effect_capture.as_ref(),
                         vec![full.clone()],
                         &std::collections::HashSet::new(),
                         &processed,
@@ -703,6 +704,7 @@ async fn route_to_bare_jid(
                             // the legacy path).
                             let not_queued = queue_processed_for_detached(
                                 deps.sm_session_registry,
+                                deps.ingress_effect_capture.as_ref(),
                                 detached_targets,
                                 &live_set,
                                 &processed,
@@ -807,15 +809,16 @@ async fn route_to_bare_jid(
                     // PR #276).
                     let stanza_typed = (*stanza).clone();
                     match sm
-                        .record_stanza_for_detached_bound_resource(
+                        .record_stanza_for_detached_bound_resource_with_stream(
                             &full,
                             &stanza_typed,
                             chrono::Utc::now(),
                         )
                         .await
                     {
-                        Ok(true) => {
+                        Ok(Some(stream)) => {
                             any_landed = true;
+                            deps.capture_intent(IngressEffectIntent::RecipientSmAppend { stream });
                             debug!(
                                 jid = %full,
                                 message_id = stanza_message_id(stanza.as_ref()),
@@ -823,7 +826,7 @@ async fn route_to_bare_jid(
                                  for detached XEP-0198 replay"
                             );
                         }
-                        Ok(false) => {
+                        Ok(None) => {
                             debug!(
                                 jid = %full,
                                 message_id = stanza_message_id(stanza.as_ref()),
@@ -1215,6 +1218,7 @@ fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Act
 /// the retry is delivery-only and cannot duplicate rows).
 async fn queue_processed_for_detached(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
     detached_targets: Vec<jid::FullJid>,
     live_set: &std::collections::HashSet<jid::FullJid>,
     stanza: &Stanza,
@@ -1228,10 +1232,17 @@ async fn queue_processed_for_detached(
             continue;
         }
         match sm
-            .record_stanza_for_detached_bound_resource(&full, stanza, chrono::Utc::now())
+            .record_stanza_for_detached_bound_resource_with_stream(
+                &full,
+                stanza,
+                chrono::Utc::now(),
+            )
             .await
         {
-            Ok(true) => {
+            Ok(Some(stream)) => {
+                if let Some(capture) = ingress_effect_capture {
+                    capture.record_intent(IngressEffectIntent::RecipientSmAppend { stream });
+                }
                 debug!(
                     jid = %full,
                     message_id = stanza_message_id(stanza),
@@ -1239,7 +1250,7 @@ async fn queue_processed_for_detached(
                      XEP-0198 replay"
                 );
             }
-            Ok(false) => {
+            Ok(None) => {
                 debug!(
                     jid = %full,
                     message_id = stanza_message_id(stanza),

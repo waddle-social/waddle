@@ -5,12 +5,13 @@
 //! the archive identifier and clients must not rely on stanza-id for it.
 
 use chrono::{Duration, Utc};
+use jid::Jid;
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
     ingress_substrate::{PostgresIngressSubstrate, ALIAS_RETENTION},
 };
-use waddle_xmpp::ingress::{MessageKey, NormalizedTarget, SemanticDigest};
-use waddle_xmpp_core::xep0359::OriginId;
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NormalizedTarget, SemanticDigest};
+use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 
 #[tokio::test]
 async fn internal_message_association_and_digest_are_stable() {
@@ -108,6 +109,54 @@ async fn retention_is_non_cascading_and_child_foreign_keys_are_no_action() {
     .await
     .expect("read foreign-key delete actions");
     assert_eq!(fk_count, 3, "every ingress child FK is NO ACTION");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn archive_authoritative_effect_intents_bind_the_archive_stanza_id() {
+    let Some(fixture) = Fixture::open("archive_intent").await else {
+        return;
+    };
+    let key = fixture.record_message(digest(3)).await;
+    let archive = bare("romeo@example.com");
+    let intent = IngressEffectIntent::ArchiveAuthoritative {
+        archive: archive.clone(),
+        stanza_id: StanzaId::new("archive-sid", Jid::from(archive.clone())),
+        by: archive.clone(),
+    };
+    let encoded = intent.encode_v1().expect("encode archive effect intent");
+
+    let conn = fixture.db.guard().await.expect("database guard");
+    conn.execute(
+        "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, payload_version, payload) VALUES (?::uuid, 0::numeric, ?, 1, ?)",
+        waddle_server::db_params![
+            key.to_storage().to_string(),
+            i64::from(encoded.kind),
+            encoded.payload.clone(),
+        ],
+    )
+    .await
+    .expect("insert archive effect intent");
+    let mut rows = conn
+        .query(
+            "SELECT kind::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid AND effect_ordinal = 0::numeric",
+            waddle_server::db_params![key.to_storage().to_string()],
+        )
+        .await
+        .expect("read archive effect intent");
+    let row = rows
+        .next()
+        .await
+        .expect("read intent row")
+        .expect("intent row");
+    let kind: i64 = row.get(0).expect("decode intent kind");
+    let payload: Vec<u8> = row.get(1).expect("decode intent payload");
+    let decoded = IngressEffectIntent::decode_v1(
+        i32::try_from(kind).expect("intent kind fits in i32"),
+        &payload,
+    )
+    .expect("decode persisted archive effect intent");
+    assert_eq!(decoded, intent);
     fixture.close().await;
 }
 

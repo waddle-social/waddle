@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(super) enum ArchiveGroupchatEventOutcome {
     Stored(Option<ArchiveIdRewrite>),
@@ -78,6 +79,14 @@ pub(super) async fn archive_groupchat_event(
         archive_id = %archive_id.stored_id,
         "ArchiveGroupchat: persisted"
     );
+    deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
+        archive: room.clone(),
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+            archive_id.stored_id.clone(),
+            jid::Jid::from(room.clone()),
+        ),
+        by: room.clone(),
+    });
     update_groupchat_link_preview_refs(deps, &room, &archive_id.stored_id, &message).await;
     // Notification activity ingest (slice 2b): committing the sender's
     // groupchat message into the room archive is the strongest

@@ -320,6 +320,151 @@ impl MetricAttribute for PushRetryReason {
     }
 }
 
+/// `class` — the closed decision taxonomy for shadow-ingress submissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressDecisionClass {
+    Accepted,
+    ExistingSameDigest,
+    AliasConflict,
+    CaptureOverflow,
+    SemanticMalformed,
+    AuthorizationDenied,
+    PrincipalMissing,
+    ClaimFenceMissing,
+    FrontierStale,
+    Storage,
+    SerializationExhaustion,
+}
+
+impl IngressDecisionClass {
+    pub const ALL: [Self; 11] = [
+        Self::Accepted,
+        Self::ExistingSameDigest,
+        Self::AliasConflict,
+        Self::CaptureOverflow,
+        Self::SemanticMalformed,
+        Self::AuthorizationDenied,
+        Self::PrincipalMissing,
+        Self::ClaimFenceMissing,
+        Self::FrontierStale,
+        Self::Storage,
+        Self::SerializationExhaustion,
+    ];
+}
+
+impl sealed::Sealed for IngressDecisionClass {}
+impl MetricAttribute for IngressDecisionClass {
+    fn key(&self) -> &'static str {
+        "class"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::ExistingSameDigest => "existing_same_digest",
+            Self::AliasConflict => "alias_conflict",
+            Self::CaptureOverflow => "capture_overflow",
+            Self::SemanticMalformed => "semantic_malformed",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::PrincipalMissing => "principal_missing",
+            Self::ClaimFenceMissing => "claim_fence_missing",
+            Self::FrontierStale => "frontier_stale",
+            Self::Storage => "storage",
+            Self::SerializationExhaustion => "serialization_exhaustion",
+        }
+    }
+}
+
+/// `outcome` — the closed alias-resolution result set for shadow ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressAliasOutcome {
+    Inserted,
+    Existing,
+    Conflict,
+}
+
+impl IngressAliasOutcome {
+    pub const ALL: [Self; 3] = [Self::Inserted, Self::Existing, Self::Conflict];
+}
+
+impl sealed::Sealed for IngressAliasOutcome {}
+impl MetricAttribute for IngressAliasOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Inserted => "inserted",
+            Self::Existing => "existing",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// `outcome` — whether a whole ingress transaction retried and recovered or
+/// exhausted its retry budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressRetryOutcome {
+    Retried,
+    Exhausted,
+}
+
+impl IngressRetryOutcome {
+    pub const ALL: [Self; 2] = [Self::Retried, Self::Exhausted];
+}
+
+impl sealed::Sealed for IngressRetryOutcome {}
+impl MetricAttribute for IngressRetryOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Retried => "retried",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+/// `reason` — why shadow ingress intentionally skipped or dropped work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressSkipReason {
+    Disabled,
+    QueueFull,
+    ParkingFull,
+    Closed,
+    Unenrolled,
+}
+
+impl IngressSkipReason {
+    pub const ALL: [Self; 5] = [
+        Self::Disabled,
+        Self::QueueFull,
+        Self::ParkingFull,
+        Self::Closed,
+        Self::Unenrolled,
+    ];
+}
+
+impl sealed::Sealed for IngressSkipReason {}
+impl MetricAttribute for IngressSkipReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::QueueFull => "queue_full",
+            Self::ParkingFull => "parking_full",
+            Self::Closed => "closed",
+            Self::Unenrolled => "unenrolled",
+        }
+    }
+}
+
 /// `condition` — the RFC 6120 §8.3.3 defined stanza-error conditions,
 /// reusing the crate's existing typed enum (its `as_str()` already
 /// yields the hyphenated wire names). Re-exported here so metric call

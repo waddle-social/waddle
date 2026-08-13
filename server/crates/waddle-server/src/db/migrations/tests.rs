@@ -35,7 +35,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema)
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1009));
+    assert_eq!(version, Some(1010));
 }
 
 #[tokio::test]
@@ -150,7 +150,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
     );
 
     let conn = db.guard().await.unwrap();
@@ -170,7 +170,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1009));
+    assert_eq!(version, Some(1010));
 }
 
 #[tokio::test]
@@ -229,7 +229,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1009 (the waddle
+    // so the runner also reports applying 1001 through 1010 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -238,7 +238,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
     );
 
     // Column exists.
@@ -301,7 +301,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1009),
+        Some(1010),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -459,7 +459,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.unwrap(),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
     assert_eq!(
@@ -544,7 +544,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 20);
+    assert_eq!(runner.migrations.len(), 21);
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -554,7 +554,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 20);
+    assert_eq!(migration_ledger_row_count(&db).await, 21);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -604,6 +604,30 @@ async fn ledger_aware_old_binary_fails_closed_against_newer_ledger() {
     assert!(matches!(
         error,
         DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 11, .. })
+    ));
+}
+
+#[tokio::test]
+async fn pre_v1010_catalog_refuses_a_v1010_ledger_until_roll_forward() {
+    let db = Database::in_memory("pre-v1010-catalog-migration-ledger")
+        .await
+        .unwrap();
+    MigrationRunner::single().run(&db).await.unwrap();
+    let pre_v1010_catalog = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1010),
+            )
+            .collect(),
+    );
+
+    let error = pre_v1010_catalog.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 1010, .. })
     ));
 }
 
@@ -658,6 +682,63 @@ async fn checksum_mismatch_fails_closed_without_applying_migrations() {
     ));
     assert_eq!(migration_ledger_row_count(&db).await, before);
     assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+}
+
+#[tokio::test]
+async fn v1010_checksum_mismatch_fails_closed_without_applying_migrations() {
+    let db = Database::in_memory("checksum-mismatch-migration-ledger-v1010")
+        .await
+        .unwrap();
+    let runner = MigrationRunner::single();
+    runner.run(&db).await.unwrap();
+    let before = migration_ledger_row_count(&db).await;
+    let schema_before = sqlite_schema_object_count(&db).await;
+    let conn = db.guard().await.unwrap();
+    conn.execute(
+        "UPDATE _migrations SET checksum = ? WHERE version = ?",
+        crate::db_params!["wrong-checksum-v1010", 1010_i64],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let error = runner.run(&db).await.unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::MigrationLedger(MigrationLedgerError::ChecksumMismatch {
+            version: 1010,
+            ..
+        })
+    ));
+    assert_eq!(migration_ledger_row_count(&db).await, before);
+    assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
+}
+
+#[tokio::test]
+async fn v1010_rolls_forward_from_a_v1009_ledger() {
+    let db = Database::in_memory("roll-forward-v1010").await.unwrap();
+    let conn = db.guard().await.unwrap();
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().chain(
+            waddle::all()
+                .into_iter()
+                .filter(|migration| migration.version <= 1009),
+        ),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
+    drop(conn);
+
+    let applied = MigrationRunner::single().run(&db).await.unwrap();
+    assert_eq!(applied, vec![1010]);
+    assert_eq!(
+        migration_ledger_checksum(&db, 1010).await.as_deref(),
+        Some(migration_checksum(&migration_by_version(1010), DatabaseDriver::Sqlite).as_str())
+    );
 }
 
 #[tokio::test]
@@ -822,7 +903,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.expect("adopt and run migrations"),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
     assert_eq!(
@@ -937,7 +1018,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 20);
+    assert_eq!(runner.migrations.len(), 21);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -951,7 +1032,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 20);
+    assert_eq!(migration_ledger_row_count(&db).await, 21);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1089,8 +1170,8 @@ async fn postgres_incompatible_ingress_schema_drift_fails_without_recording_new_
     let conn = db.guard().await.expect("postgres guard");
     let mut rows = conn
         .query(
-            "SELECT COUNT(*) FROM _migrations WHERE version IN (?, ?)",
-            crate::db_params![1008_i64, 1009_i64],
+            "SELECT COUNT(*) FROM _migrations WHERE version IN (?, ?, ?)",
+            crate::db_params![1008_i64, 1009_i64, 1010_i64],
         )
         .await
         .expect("query ingress migration ledger rows");
@@ -1100,7 +1181,10 @@ async fn postgres_incompatible_ingress_schema_drift_fails_without_recording_new_
         .expect("read ingress migration ledger rows")
         .expect("ingress migration ledger row");
     let recorded: i64 = row.get(0).expect("decode ingress migration ledger rows");
-    assert_eq!(recorded, 0, "failed V1008 must not record V1008 or V1009");
+    assert_eq!(
+        recorded, 0,
+        "failed V1008 must not record V1008, V1009, or V1010"
+    );
     drop(conn);
 
     drop(db);
@@ -1420,7 +1504,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+        vec![6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
@@ -1494,7 +1578,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     let applied = MigrationRunner::global().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
     );
 
     let conn = db.guard().await.unwrap();
@@ -1884,7 +1968,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]
+        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
     );
 
     let conn = db.guard().await.expect("postgres guard");
@@ -2153,7 +2237,10 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         .run(&db)
         .await
         .expect("run waddle migration");
-    assert_eq!(applied, vec![1003, 1004, 1005, 1006, 1007, 1008, 1009]);
+    assert_eq!(
+        applied,
+        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
+    );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
 
     let oversized_int4 = i64::from(i32::MAX) + 1;

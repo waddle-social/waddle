@@ -140,6 +140,52 @@ async fn aliases_are_sender_and_target_scoped_without_silent_overwrite() {
     fixture.close().await;
 }
 
+#[tokio::test]
+async fn same_digest_reuses_the_existing_alias_binding() {
+    let Some(fixture) = Fixture::open("existing").await else {
+        return;
+    };
+    let sender = bare("romeo@example.com");
+    let target = NormalizedTarget::Bare(bare("juliet@example.com"));
+    let origin = OriginId::new("same-digest-origin");
+    let digest = digest(9);
+    let key = MessageKey::new();
+
+    let mut tx = fixture.store.begin().await.expect("begin alias insert");
+    assert!(matches!(
+        fixture
+            .store
+            .resolve_and_record_alias(&mut tx, &sender, &target, &origin, &digest, || key)
+            .await
+            .expect("insert origin alias"),
+        AliasResolution::Aliased(AliasOutcome::Inserted(inserted)) if inserted == key
+    ));
+    tx.commit().await.expect("commit alias insert");
+
+    let mut tx = fixture
+        .store
+        .begin()
+        .await
+        .expect("begin alias re-resolution");
+    let resolved = fixture
+        .store
+        .resolve_and_record_alias(&mut tx, &sender, &target, &origin, &digest, MessageKey::new)
+        .await
+        .expect("re-resolve alias");
+    tx.commit().await.expect("commit alias re-resolution");
+
+    assert!(matches!(
+        resolved,
+        AliasResolution::Aliased(AliasOutcome::Existing(existing)) if existing == key
+    ));
+    assert_eq!(
+        fixture.count("ingress_origin_aliases").await,
+        1,
+        "same-digest retries must preserve the first alias row"
+    );
+    fixture.close().await;
+}
+
 async fn insert(
     fixture: &Fixture,
     sender: jid::BareJid,

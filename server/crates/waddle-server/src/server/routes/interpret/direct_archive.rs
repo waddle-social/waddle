@@ -58,14 +58,6 @@ pub(super) async fn archive_direct(
         to.clone(),
         &message,
     );
-    deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
-        archive: archive_jid.clone(),
-        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
-            archived.id.clone(),
-            jid::Jid::from(archive_jid.clone()),
-        ),
-        by: archive_jid.clone(),
-    });
     let requested_archive_id = archived.id.clone();
     match mam_storage.store_message(&archive_jid, &archived).await {
         Ok(outcome) => {
@@ -85,6 +77,17 @@ pub(super) async fn archive_direct(
                 archive_id,
                 "ArchiveDirect: persisted"
             );
+            // Capture at the successful storage boundary. A retry-deduped
+            // write can resolve to an existing authoritative archive id,
+            // which is the only id that may be bound into the shadow intent.
+            deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
+                archive: archive_jid.clone(),
+                stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    archive_id.clone(),
+                    jid::Jid::from(archive_jid.clone()),
+                ),
+                by: archive_jid.clone(),
+            });
             // Notification activity ingest (slice 2b): the sender's
             // own archive commit is the strongest "currently active"
             // signal in a DM. `ArchiveDirect` runs twice per DM —

@@ -5,7 +5,7 @@ use waddle_xmpp::{
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress_shadow::{IngressEffectCapture, IngressShadowRoomFence};
 use crate::server::routes::websocket::WebSocketState;
 use tracing::warn;
 
@@ -79,6 +79,11 @@ async fn handle_muc_private_message(
             "Internal server error.",
         )]);
     };
+    if let (Some(capture), Some(claim_fence)) =
+        (ingress_effect_capture, snapshot.claim_fence.as_ref())
+    {
+        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
+    }
     let Some(sender_occupant) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {
         return Some(vec![message_error_frame(
             incoming,
@@ -377,6 +382,14 @@ async fn handle_muc_mediated_decline(
         return None;
     }
     let inbound_decline = mediated_decline(incoming)?;
+    // Declines are authorized exclusively against the durable outstanding
+    // invite ledger, not a live room actor. The frame-level MUC classifier
+    // has no actor-bound fence to contribute here, so retaining its
+    // provisional lookup would make the shadow assert authority that the
+    // live decision never used.
+    if let Some(capture) = ingress_effect_capture {
+        capture.clear_room_fence();
+    }
 
     let decliner = bound_jid.to_bare();
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();

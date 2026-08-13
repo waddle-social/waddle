@@ -2,8 +2,8 @@ mod capture;
 mod observe;
 
 pub use capture::{
-    IngressEffectCapture, IngressEffectCaptureSnapshot, ShadowAuthorizationDeniedReason,
-    ShadowDecisionMarker, ShadowSemanticRejectedReason,
+    IngressEffectCapture, IngressEffectCaptureSnapshot, IngressShadowRoomFence,
+    ShadowAuthorizationDeniedReason, ShadowDecisionMarker, ShadowSemanticRejectedReason,
 };
 pub use observe::{
     observe, IngressShadowAliasOutcome, IngressShadowCommitKind, IngressShadowDecisionClass,
@@ -30,6 +30,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(feature = "clustering")]
 use std::time::Duration;
+#[cfg(feature = "clustering")]
 use tokio::sync::mpsc;
 #[cfg(feature = "clustering")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -43,8 +44,6 @@ use waddle_xmpp::ingress::{ConnectionGeneration, IngressOrdinal, NormalizedTarge
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use xmpp_parsers::message::Message;
-#[cfg(feature = "clustering")]
-use xmpp_parsers::message::MessageType;
 
 #[cfg(feature = "clustering")]
 const DEFAULT_LOCK_TIMEOUT_MS: u64 = 250;
@@ -85,6 +84,10 @@ enum IngressShadowInner {
     #[cfg(feature = "clustering")]
     Worker {
         tx: mpsc::UnboundedSender<QueuedIngressShadowTask>,
+        /// One admission slot reserved for fresh SM-stream enrollment. A
+        /// saturated submission queue must not make an otherwise healthy
+        /// newly-enabled stream permanently unenrolled.
+        enrollment_capacity: Arc<Semaphore>,
         capacity: Arc<Semaphore>,
     },
 }
@@ -190,6 +193,17 @@ impl IngressShadowHandle {
         self.try_send(IngressShadowTask::Enroll { stream_id })
     }
 
+    pub fn is_enabled(&self) -> bool {
+        #[cfg(feature = "clustering")]
+        {
+            matches!(self.inner.as_ref(), IngressShadowInner::Worker { .. })
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            false
+        }
+    }
+
     pub fn try_submit(&self, submission: IngressShadowSubmission) -> IngressShadowDisposition {
         self.try_send(IngressShadowTask::Submit(Box::new(submission)))
     }
@@ -200,15 +214,39 @@ impl IngressShadowHandle {
         let disposition = match self.inner.as_ref() {
             IngressShadowInner::Disabled => IngressShadowDisposition::Disabled,
             #[cfg(feature = "clustering")]
-            IngressShadowInner::Worker { tx, capacity } => {
+            IngressShadowInner::Worker {
+                tx,
+                enrollment_capacity,
+                capacity,
+            } => {
                 let permit = match capacity.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(tokio::sync::TryAcquireError::NoPermits) => {
-                        return observe_disposition(
-                            kind,
-                            stream_id,
-                            IngressShadowDisposition::QueueFull,
-                        );
+                        if matches!(&task, IngressShadowTask::Enroll { .. }) {
+                            match enrollment_capacity.clone().try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                    return observe_disposition(
+                                        kind,
+                                        stream_id,
+                                        IngressShadowDisposition::QueueFull,
+                                    );
+                                }
+                                Err(tokio::sync::TryAcquireError::Closed) => {
+                                    return observe_disposition(
+                                        kind,
+                                        stream_id,
+                                        IngressShadowDisposition::Closed,
+                                    );
+                                }
+                            }
+                        } else {
+                            return observe_disposition(
+                                kind,
+                                stream_id,
+                                IngressShadowDisposition::QueueFull,
+                            );
+                        }
                     }
                     Err(tokio::sync::TryAcquireError::Closed) => {
                         return observe_disposition(
@@ -235,9 +273,14 @@ impl IngressShadowHandle {
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let capacity = Arc::new(Semaphore::new(queue_capacity));
+        let enrollment_capacity = Arc::new(Semaphore::new(1));
         tokio::spawn(IngressShadowScheduler::new(rx, max_concurrency, execute).run());
         Self {
-            inner: Arc::new(IngressShadowInner::Worker { tx, capacity }),
+            inner: Arc::new(IngressShadowInner::Worker {
+                tx,
+                enrollment_capacity,
+                capacity,
+            }),
         }
     }
 }
@@ -312,17 +355,26 @@ impl IngressShadowProcessor {
             IngressShadowTask::Enroll {
                 stream_id: enroll_stream,
             } => {
+                let mut attempts = 0_usize;
                 let result = run_with_retry(self.retry_attempts, || {
+                    attempts += 1;
                     self.execute_enrollment(&enroll_stream)
                 })
                 .await;
                 match result {
-                    Ok(kind) => observe(IngressShadowObservation::Committed {
-                        stream_id,
-                        claim_epoch,
-                        handled_ordinal,
-                        kind,
-                    }),
+                    Ok(kind) => {
+                        if attempts > 1 {
+                            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(
+                                waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Retried,
+                            );
+                        }
+                        observe(IngressShadowObservation::Committed {
+                            stream_id,
+                            claim_epoch,
+                            handled_ordinal,
+                            kind,
+                        });
+                    }
                     Err(_error) => observe(IngressShadowObservation::Failed {
                         kind,
                         stream_id,
@@ -332,13 +384,22 @@ impl IngressShadowProcessor {
                 }
             }
             IngressShadowTask::Submit(submission) => {
+                let mut attempts = 0_usize;
                 let timed = tokio::time::timeout(
                     DEFAULT_TX_DEADLINE,
-                    run_with_retry(self.retry_attempts, || self.execute_submission(&submission)),
+                    run_with_retry(self.retry_attempts, || {
+                        attempts += 1;
+                        self.execute_submission(&submission)
+                    }),
                 )
                 .await;
                 match timed {
                     Ok(Ok(outcome)) => {
+                        if attempts > 1 {
+                            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(
+                                waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Retried,
+                            );
+                        }
                         if let Some(kind) = outcome.commit_kind {
                             observe(IngressShadowObservation::Committed {
                                 stream_id: stream_id.clone(),
@@ -356,6 +417,17 @@ impl IngressShadowProcessor {
                         });
                     }
                     Ok(Err(exhausted)) => {
+                        if exhausted.attempts >= self.retry_attempts
+                            && matches!(
+                                exhausted.last_error.retry_class(),
+                                crate::ingress_uow::DbRetryClass::SerializationFailure
+                                    | crate::ingress_uow::DbRetryClass::Deadlock
+                            )
+                        {
+                            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(
+                                waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Exhausted,
+                            );
+                        }
                         let class = match exhausted.last_error.retry_class() {
                             crate::ingress_uow::DbRetryClass::SerializationFailure
                             | crate::ingress_uow::DbRetryClass::Deadlock => {
@@ -456,12 +528,12 @@ impl IngressShadowProcessor {
             ));
         };
 
-        if let Some(room) = submission.room_claim_target() {
+        if let Some(room_fence) = submission.room_claim_target() {
             match ClaimRepository::assert_room_claim(
                 &mut transaction,
-                room,
-                &submission.owner,
-                submission.claim_epoch,
+                &room_fence.room,
+                &room_fence.owner,
+                room_fence.claim_epoch,
             )
             .await
             {
@@ -476,6 +548,14 @@ impl IngressShadowProcessor {
         }
 
         let rowless_decision = submission.rowless_decision_marker();
+        if matches!(
+            rowless_decision,
+            Some(IngressShadowDecisionClass::CaptureOverflow)
+        ) {
+            return Ok(ShadowSubmissionOutcome::rolled_back(
+                IngressShadowDecisionClass::CaptureOverflow,
+            ));
+        }
         let digest_input = match digest_input_from_submission(submission)? {
             Ok(input) => input,
             Err(decision) => {
@@ -863,6 +943,14 @@ impl IngressShadowSubmission {
             .capture
             .markers
             .iter()
+            .any(|marker| matches!(marker, ShadowDecisionMarker::Overflow))
+        {
+            return Some(IngressShadowDecisionClass::CaptureOverflow);
+        }
+        if self
+            .capture
+            .markers
+            .iter()
             .any(|marker| matches!(marker, ShadowDecisionMarker::AuthorizationDenied { .. }))
         {
             return Some(IngressShadowDecisionClass::AuthorizationDenied);
@@ -878,18 +966,15 @@ impl IngressShadowSubmission {
         None
     }
 
-    fn room_claim_target(&self) -> Option<&BareJid> {
-        match (&self.message.type_, &self.target) {
-            (MessageType::Groupchat, NormalizedTarget::Bare(room)) => Some(room),
-            _ => None,
-        }
+    fn room_claim_target(&self) -> Option<&IngressShadowRoomFence> {
+        self.capture.room_fence.as_ref()
     }
 
     fn server_authorities(&self) -> Vec<BareJid> {
         let mut authorities = vec![self.principal.bare_jid().clone()];
-        if let Some(room) = self.room_claim_target() {
-            if !authorities.contains(room) {
-                authorities.push(room.clone());
+        if let Some(room_fence) = self.room_claim_target() {
+            if !authorities.contains(&room_fence.room) {
+                authorities.push(room_fence.room.clone());
             }
         }
         authorities
@@ -913,6 +998,7 @@ mod tests {
     use waddle_xmpp::ingress::{ConnectionGeneration, NormalizedTarget};
     use waddle_xmpp::ownership::ClaimStore;
     use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::message::MessageType;
 
     fn principal() -> AuthenticatedPrincipalRef {
         AuthenticatedPrincipalRef::new(
@@ -939,6 +1025,7 @@ mod tests {
             capture: IngressEffectCaptureSnapshot {
                 stanza_lang: Some(xmpp_parsers::message::Lang::from("en")),
                 sanitized_message: None,
+                room_fence: None,
                 intents: Vec::new(),
                 markers: Vec::new(),
             },
@@ -1116,6 +1203,7 @@ mod tests {
                 capture: IngressEffectCaptureSnapshot {
                     stanza_lang: None,
                     sanitized_message: None,
+                    room_fence: None,
                     intents: Vec::new(),
                     markers: Vec::new(),
                 },
@@ -1246,6 +1334,28 @@ mod tests {
     }
 
     #[test]
+    fn rowless_marker_promotes_capture_overflow_to_non_success() {
+        let mut message = Message::new(Some(Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        let mut submission = base_submission(message);
+        submission.capture.markers = vec![
+            ShadowDecisionMarker::AuthorizationDenied {
+                reason: ShadowAuthorizationDeniedReason::Forbidden,
+            },
+            ShadowDecisionMarker::Overflow,
+        ];
+
+        assert_eq!(
+            submission.rowless_decision_marker(),
+            Some(IngressShadowDecisionClass::CaptureOverflow)
+        );
+    }
+
+    #[test]
     fn groupchat_submission_includes_room_in_server_authorities() {
         let mut message = Message::new(Some(Jid::from(
             "room@conference.example.com"
@@ -1253,11 +1363,49 @@ mod tests {
                 .expect("room jid"),
         )));
         message.type_ = MessageType::Groupchat;
-        let submission = base_submission(message);
+        let mut submission = base_submission(message);
+        submission.capture.room_fence = Some(IngressShadowRoomFence {
+            room: "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+            owner: NodeIdentity::new("room-node", "room-epoch"),
+            claim_epoch: ClaimEpoch(11),
+        });
 
         let authorities = submission.server_authorities();
         assert!(authorities.contains(submission.principal.bare_jid()));
         assert!(authorities.contains(
+            &"room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid")
+        ));
+    }
+
+    #[test]
+    fn occupant_pm_submission_uses_room_fence_for_room_authorities() {
+        let mut message = Message::new(Some(Jid::from(
+            "room@conference.example.com/alice"
+                .parse::<jid::FullJid>()
+                .expect("occupant jid"),
+        )));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        let mut submission = base_submission(message);
+        submission.capture.room_fence = Some(IngressShadowRoomFence {
+            room: "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+            owner: NodeIdentity::new("room-node", "room-epoch"),
+            claim_epoch: ClaimEpoch(13),
+        });
+
+        assert_eq!(
+            submission
+                .room_claim_target()
+                .expect("room fence should define room scope")
+                .claim_epoch,
+            ClaimEpoch(13)
+        );
+        assert!(submission.server_authorities().contains(
             &"room@conference.example.com"
                 .parse::<BareJid>()
                 .expect("room jid")
@@ -1332,6 +1480,7 @@ mod tests {
         let snapshot = IngressEffectCaptureSnapshot {
             stanza_lang: Some(xmpp_parsers::message::Lang::from("en")),
             sanitized_message: None,
+            room_fence: None,
             intents: vec![
                 waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
                     archive: "romeo@example.com".parse().expect("bare jid"),
@@ -1464,6 +1613,22 @@ mod tests {
             fixture.processor.execute_submission(&bad_fence).await,
             Ok(ShadowSubmissionOutcome {
                 decision: IngressShadowDecisionClass::ClaimFenceMissing,
+                commit_kind: None,
+                ..
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 0);
+        fixture.assert_rows(0, 0, 0, 0).await;
+
+        let mut overflowed = fixture.submission(1, None);
+        overflowed
+            .capture
+            .markers
+            .push(ShadowDecisionMarker::Overflow);
+        assert!(matches!(
+            fixture.processor.execute_submission(&overflowed).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::CaptureOverflow,
                 commit_kind: None,
                 ..
             })
@@ -1744,6 +1909,12 @@ mod tests {
             handle.try_enroll_stream(stream_a.clone()),
             IngressShadowDisposition::Enqueued
         );
+        // The third enrollment consumes the single reserved enrollment
+        // admission slot; only the fourth sees a genuinely full queue.
+        assert_eq!(
+            handle.try_enroll_stream(stream_a.clone()),
+            IngressShadowDisposition::Enqueued
+        );
         assert_eq!(
             handle.try_enroll_stream(stream_a),
             IngressShadowDisposition::QueueFull
@@ -1767,6 +1938,39 @@ mod tests {
             .expect("second task should start after the first completes")
             .expect("second start order recorded");
         assert_eq!(second_started, 1);
+    }
+
+    #[tokio::test]
+    async fn reserved_enrollment_admission_survives_a_saturated_submission_queue() {
+        let hold_submission = Arc::new(Notify::new());
+        let handle = test_handle(1, 1, {
+            let hold_submission = hold_submission.clone();
+            move |task| {
+                let hold_submission = hold_submission.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Submit(_)) {
+                        hold_submission.notified().await;
+                    }
+                })
+            }
+        });
+        let message = Message::new(Some(jid::Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+
+        assert_eq!(
+            handle.try_submit(base_submission(message)),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            handle.try_enroll_stream(SmSessionId::new("fresh-sm-stream")),
+            IngressShadowDisposition::Enqueued,
+            "fresh SM enables retain one reserved admission slot when submit work fills the queue"
+        );
+
+        hold_submission.notify_waiters();
     }
 
     async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {

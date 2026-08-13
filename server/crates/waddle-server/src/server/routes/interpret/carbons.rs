@@ -242,17 +242,24 @@ pub(crate) async fn send_carbons_to_registry(
             };
             let stanza = Stanza::Message(envelope);
             match sm
-                .record_stanza_for_detached_bound_resource(&target, &stanza, chrono::Utc::now())
+                .record_stanza_for_detached_bound_resource_with_stream(
+                    &target,
+                    &stanza,
+                    chrono::Utc::now(),
+                )
                 .await
             {
-                Ok(true) => {
+                Ok(Some(stream)) => {
+                    if let Some(capture) = deps.ingress_effect_capture {
+                        capture.record_intent(IngressEffectIntent::RecipientSmAppend { stream });
+                    }
                     debug!(
                         target = %target,
                         kind = ?kind,
                         "SendCarbons: queued for detached XEP-0198 resume"
                     );
                 }
-                Ok(false) => {
+                Ok(None) => {
                     debug!(
                         target = %target,
                         kind = ?kind,

@@ -1,12 +1,20 @@
 use waddle_xmpp::ingress::IngressOrdinal;
 use waddle_xmpp::ownership::ClaimEpoch;
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::telemetry::{
+    attributes::{
+        IngressAliasOutcome as MetricAliasOutcome, IngressDecisionClass as MetricDecisionClass,
+        IngressSkipReason,
+    },
+    reliability,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressShadowDecisionClass {
     Accepted,
     ExistingSameDigest,
     AliasConflict,
+    CaptureOverflow,
     SemanticMalformed,
     AuthorizationDenied,
     PrincipalMissing,
@@ -96,6 +104,7 @@ pub fn observe(observation: IngressShadowObservation) {
                 stream_id = %stream_id,
                 "ingress shadow dropped"
             );
+            reliability::increment_ingress_shadow_skip(skip_reason(reason));
         }
         IngressShadowObservation::Committed {
             stream_id,
@@ -110,6 +119,9 @@ pub fn observe(observation: IngressShadowObservation) {
                 handled_ordinal = handled_ordinal.map(|ordinal| ordinal.to_storage()),
                 "ingress shadow committed"
             );
+            if matches!(kind, IngressShadowCommitKind::SkippedUnenrolled) {
+                reliability::increment_ingress_shadow_skip(IngressSkipReason::Unenrolled);
+            }
         }
         IngressShadowObservation::Failed {
             kind,
@@ -140,6 +152,57 @@ pub fn observe(observation: IngressShadowObservation) {
                 handled_ordinal = handled_ordinal.map(|ordinal| ordinal.to_storage()),
                 "ingress shadow decision"
             );
+            if let Some(metric_class) = decision_class(class) {
+                reliability::increment_ingress_shadow_decision(metric_class);
+            }
+            if let Some(metric_alias) = alias_outcome(alias) {
+                reliability::increment_ingress_shadow_alias_outcome(metric_alias);
+            }
         }
+    }
+}
+
+fn skip_reason(reason: IngressShadowDropReason) -> IngressSkipReason {
+    match reason {
+        IngressShadowDropReason::Disabled => IngressSkipReason::Disabled,
+        IngressShadowDropReason::QueueFull => IngressSkipReason::QueueFull,
+        IngressShadowDropReason::ParkingFull => IngressSkipReason::ParkingFull,
+        IngressShadowDropReason::Closed => IngressSkipReason::Closed,
+    }
+}
+
+fn decision_class(class: IngressShadowDecisionClass) -> Option<MetricDecisionClass> {
+    match class {
+        IngressShadowDecisionClass::Accepted => Some(MetricDecisionClass::Accepted),
+        IngressShadowDecisionClass::ExistingSameDigest => {
+            Some(MetricDecisionClass::ExistingSameDigest)
+        }
+        IngressShadowDecisionClass::AliasConflict => Some(MetricDecisionClass::AliasConflict),
+        IngressShadowDecisionClass::CaptureOverflow => Some(MetricDecisionClass::CaptureOverflow),
+        IngressShadowDecisionClass::SemanticMalformed => {
+            Some(MetricDecisionClass::SemanticMalformed)
+        }
+        IngressShadowDecisionClass::AuthorizationDenied => {
+            Some(MetricDecisionClass::AuthorizationDenied)
+        }
+        IngressShadowDecisionClass::PrincipalMissing => Some(MetricDecisionClass::PrincipalMissing),
+        IngressShadowDecisionClass::ClaimFenceMissing => {
+            Some(MetricDecisionClass::ClaimFenceMissing)
+        }
+        IngressShadowDecisionClass::FrontierStale => Some(MetricDecisionClass::FrontierStale),
+        IngressShadowDecisionClass::Storage => Some(MetricDecisionClass::Storage),
+        IngressShadowDecisionClass::SerializationExhaustion => {
+            Some(MetricDecisionClass::SerializationExhaustion)
+        }
+        IngressShadowDecisionClass::SkippedUnenrolled => None,
+    }
+}
+
+fn alias_outcome(alias: IngressShadowAliasOutcome) -> Option<MetricAliasOutcome> {
+    match alias {
+        IngressShadowAliasOutcome::None => None,
+        IngressShadowAliasOutcome::Inserted => Some(MetricAliasOutcome::Inserted),
+        IngressShadowAliasOutcome::Existing => Some(MetricAliasOutcome::Existing),
+        IngressShadowAliasOutcome::Conflict => Some(MetricAliasOutcome::Conflict),
     }
 }

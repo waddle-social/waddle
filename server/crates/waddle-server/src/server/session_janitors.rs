@@ -722,7 +722,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                 }
                 #[cfg(not(feature = "clustering"))]
                 {
-                    if routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid)
+                    if routes::websocket::cleanup_muc_presence_for_jid(state, &session.jid)
                         .await
                         == routes::websocket::MucCleanupOutcome::Failed
                     {
