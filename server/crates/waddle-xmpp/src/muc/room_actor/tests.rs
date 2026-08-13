@@ -3534,6 +3534,8 @@ struct FakeDurableStore {
     load_calls: std::sync::atomic::AtomicUsize,
     save_calls: std::sync::atomic::AtomicUsize,
     saved_affiliations: std::sync::Mutex<Vec<(BareJid, BareJid, Affiliation)>>,
+    lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
+    next_revision: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeDurableStore {
@@ -3596,9 +3598,85 @@ impl FakeDurableStore {
     fn set_fenced(&self, fenced: Option<bool>) {
         *self.fenced.lock().expect("lock") = fenced;
     }
+
+    fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
+        let lifecycle = *self
+            .lifecycle
+            .get_or_init(crate::muc::RoomLifecycleId::generate);
+        let revision = self
+            .next_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        crate::muc::RoomCommittedCoordinates {
+            lifecycle,
+            revision: crate::muc::RoomRevision::from_stored(revision as i64)
+                .expect("positive revision"),
+        }
+    }
 }
 
 impl crate::muc::durable::MucDurableStore for FakeDurableStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a crate::muc::RoomClaimFenceContext,
+        intent: crate::muc::RoomDurableMutation,
+    ) -> crate::muc::RoomCommitFuture<'a> {
+        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
+            return Box::pin(async move {
+                match error {
+                    crate::XmppError::OwnershipLost { .. } => {
+                        Err(crate::muc::RoomCommitError::NotOwner)
+                    }
+                    _ => Err(crate::muc::RoomCommitError::OwnershipUnavailable),
+                }
+            });
+        }
+        self.save_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let lose_ownership = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
+            && self.lose_config_persist_ownership;
+        let committed_affiliations = match intent {
+            crate::muc::RoomDurableMutation::Affiliation(entry)
+            | crate::muc::RoomDurableMutation::MediatedInviteGrant(entry)
+            | crate::muc::RoomDurableMutation::MediatedInviteRollback(entry) => vec![entry],
+            crate::muc::RoomDurableMutation::AffiliationBatch(entries)
+            | crate::muc::RoomDurableMutation::MembersOnlyEnforcement {
+                affiliations: entries,
+                ..
+            }
+            | crate::muc::RoomDurableMutation::Create {
+                initial_affiliations: entries,
+                ..
+            } => entries,
+            _ => Vec::new(),
+        };
+        let saved_affiliations = &self.saved_affiliations;
+        let committed_room = room_jid.clone();
+        let fail = self.fail_persist;
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            if lose_ownership {
+                Err(crate::muc::RoomCommitError::NotOwner)
+            } else if fail {
+                Err(crate::muc::RoomCommitError::Database(
+                    crate::muc::durable::RoomCommitDatabaseError::sanitized(),
+                ))
+            } else {
+                saved_affiliations.lock().expect("lock").extend(
+                    committed_affiliations.into_iter().map(|entry| {
+                        (
+                            committed_room.clone(),
+                            entry.jid,
+                            entry.affiliation.unwrap_or(crate::Affiliation::None),
+                        )
+                    }),
+                );
+                Ok(coordinates)
+            }
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3618,95 +3696,6 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                 Ok(None)
             }
         })
-    }
-
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        self.save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fail = self.fail_persist;
-        let lose_ownership = self.lose_config_persist_ownership;
-        let entity = test_claim_fence(room_jid).entity;
-        Box::pin(async move {
-            if lose_ownership {
-                Err(crate::XmppError::OwnershipLost { entity })
-            } else if fail {
-                Err(crate::XmppError::internal(
-                    "simulated transient persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        self.save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fail = self.fail_persist;
-        Box::pin(async move {
-            if fail {
-                Err(crate::XmppError::internal(
-                    "simulated transient persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        entry: &'a crate::muc::affiliation::AffiliationEntry,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        self.save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.saved_affiliations.lock().expect("lock").push((
-            room_jid.clone(),
-            entry.jid.clone(),
-            entry.affiliation,
-        ));
-        let fail = self.fail_persist;
-        Box::pin(async move {
-            if fail {
-                Err(crate::XmppError::internal(
-                    "simulated transient persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
     }
 
     fn check_exact_claim_fence<'a>(
@@ -3733,6 +3722,8 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
 struct FailNthAffiliationSaveStore {
     fail_on_call: usize,
     save_calls: std::sync::atomic::AtomicUsize,
+    lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
+    next_revision: std::sync::atomic::AtomicUsize,
 }
 
 impl FailNthAffiliationSaveStore {
@@ -3740,15 +3731,78 @@ impl FailNthAffiliationSaveStore {
         std::sync::Arc::new(Self {
             fail_on_call,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
+            lifecycle: std::sync::OnceLock::new(),
+            next_revision: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     fn save_call_count(&self) -> usize {
         self.save_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
+        let lifecycle = *self
+            .lifecycle
+            .get_or_init(crate::muc::RoomLifecycleId::generate);
+        let revision = self
+            .next_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        crate::muc::RoomCommittedCoordinates {
+            lifecycle,
+            revision: crate::muc::RoomRevision::from_stored(revision as i64)
+                .expect("positive revision"),
+        }
+    }
 }
 
 impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a crate::muc::RoomClaimFenceContext,
+        intent: crate::muc::RoomDurableMutation,
+    ) -> crate::muc::RoomCommitFuture<'a> {
+        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
+            return Box::pin(async move {
+                match error {
+                    crate::XmppError::OwnershipLost { .. } => {
+                        Err(crate::muc::RoomCommitError::NotOwner)
+                    }
+                    _ => Err(crate::muc::RoomCommitError::OwnershipUnavailable),
+                }
+            });
+        }
+        let counts_as_affiliation_commit = matches!(
+            intent,
+            crate::muc::RoomDurableMutation::Affiliation(_)
+                | crate::muc::RoomDurableMutation::AffiliationBatch(_)
+                | crate::muc::RoomDurableMutation::MembersOnlyEnforcement { .. }
+                | crate::muc::RoomDurableMutation::MediatedInviteGrant(_)
+                | crate::muc::RoomDurableMutation::MediatedInviteRollback(_)
+                | crate::muc::RoomDurableMutation::Create { .. }
+        );
+        let fail = if counts_as_affiliation_commit {
+            let call = self
+                .save_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            call == self.fail_on_call
+        } else {
+            false
+        };
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            if fail {
+                Err(crate::muc::RoomCommitError::Database(
+                    crate::muc::durable::RoomCommitDatabaseError::sanitized(),
+                ))
+            } else {
+                Ok(coordinates)
+            }
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3760,62 +3814,6 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
             validation?;
             Ok(None)
         })
-    }
-
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _entry: &'a crate::muc::affiliation::AffiliationEntry,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        let call = self
-            .save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let fail = call == self.fail_on_call;
-        Box::pin(async move {
-            if fail {
-                Err(crate::XmppError::internal(
-                    "simulated affiliation persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
     }
 
     fn check_exact_claim_fence<'a>(
@@ -3886,6 +3884,8 @@ struct FlakyThenRecoveringStore {
     fail_count: usize,
     calls: std::sync::atomic::AtomicUsize,
     banned: BareJid,
+    lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
+    next_revision: std::sync::atomic::AtomicUsize,
 }
 
 impl FlakyThenRecoveringStore {
@@ -3894,15 +3894,49 @@ impl FlakyThenRecoveringStore {
             fail_count,
             calls: std::sync::atomic::AtomicUsize::new(0),
             banned,
+            lifecycle: std::sync::OnceLock::new(),
+            next_revision: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     fn call_count(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
+        let lifecycle = *self
+            .lifecycle
+            .get_or_init(crate::muc::RoomLifecycleId::generate);
+        let revision = self
+            .next_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        crate::muc::RoomCommittedCoordinates {
+            lifecycle,
+            revision: crate::muc::RoomRevision::from_stored(revision as i64)
+                .expect("positive revision"),
+        }
+    }
 }
 
 impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a crate::muc::RoomClaimFenceContext,
+        _intent: crate::muc::RoomDurableMutation,
+    ) -> crate::muc::RoomCommitFuture<'a> {
+        let validation = validate_test_claim_fence(room_jid, fence);
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            validation.map_err(|error| match error {
+                crate::XmppError::OwnershipLost { .. } => crate::muc::RoomCommitError::NotOwner,
+                _ => crate::muc::RoomCommitError::OwnershipUnavailable,
+            })?;
+            Ok(coordinates)
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3935,47 +3969,6 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
                 }))
             }
         })
-    }
-
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _entry: &'a crate::muc::affiliation::AffiliationEntry,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
     }
 
     fn check_exact_claim_fence<'a>(
@@ -4226,7 +4219,7 @@ async fn ownership_lost_seal_blocks_a_later_mutation() {
 }
 
 #[tokio::test]
-async fn update_config_surfaces_a_typed_persist_failure_after_mutating() {
+async fn update_config_surfaces_a_typed_persist_failure_without_mutating_memory() {
     let store = FakeDurableStore::owned_but_persist_fails();
     let actor = spawn_room_actor_with_store(store.clone()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
@@ -4243,11 +4236,11 @@ async fn update_config_surfaces_a_typed_persist_failure_after_mutating() {
     );
     assert_eq!(store.save_call_count(), 1);
 
-    // FIX 2: the in-memory mutation still committed (undoing it risks a
-    // worse inconsistency than leaving it applied-but-not-yet-durable) —
-    // only the caller's visibility into durable convergence changed.
     let after = actor.ask(GetConfig).await.expect("ask").members_only;
-    assert_ne!(after, original, "the in-memory mutation still applies");
+    assert_eq!(
+        after, original,
+        "a failed durable commit must leave the in-memory config unchanged"
+    );
 }
 
 #[tokio::test]
@@ -4266,17 +4259,18 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
     assert!(
         matches!(
             result,
-            Err(SendError::HandlerError(
-                RoomMutationError::OwnershipLostAfterApply
-            ))
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
         ),
-        "expected OwnershipLostAfterApply, got: {result:?}"
+        "expected NotOwner, got: {result:?}"
     );
     assert_eq!(store.save_call_count(), 1, "the fenced write was attempted");
     assert_eq!(
-        actor.ask(GetConfig).await.expect("mutated config"),
-        changed,
-        "the local config mutation remains applied after the durable ownership loss"
+        actor
+            .ask(GetConfig)
+            .await
+            .expect("config after failed commit"),
+        original,
+        "a lost durable claim must leave config memory unchanged"
     );
     assert_eq!(
         actor.ask(GetRoomSealState).await.expect("typed seal state"),
@@ -5321,5 +5315,46 @@ async fn banned_join_denial_reason_is_banned_even_in_members_only_room() {
             }))
         ),
         "plain non-member keeps the MembersOnly reason, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn destroy_unseal_only_reopens_the_matching_attempt() {
+    let actor = spawn_room_actor().await;
+    let first = crate::muc::DestroyAttemptId::generate();
+    let second = crate::muc::DestroyAttemptId::generate();
+
+    assert_eq!(
+        actor
+            .ask(SealForDestroy { attempt: first })
+            .await
+            .expect("pre-seal first destroy"),
+        RoomSealState::Destroying { attempt: first }
+    );
+    assert_eq!(
+        actor
+            .ask(SealForDestroy { attempt: second })
+            .await
+            .expect("do not replace active destroy attempt"),
+        RoomSealState::Destroying { attempt: first }
+    );
+    assert!(actor
+        .ask(UnsealDestroy { attempt: first })
+        .await
+        .expect("matching unseal reply"));
+    assert_eq!(
+        actor
+            .ask(SealForDestroy { attempt: second })
+            .await
+            .expect("pre-seal newer destroy"),
+        RoomSealState::Destroying { attempt: second }
+    );
+    assert!(!actor
+        .ask(UnsealDestroy { attempt: first })
+        .await
+        .expect("stale unseal reply"));
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal state"),
+        RoomSealState::Destroying { attempt: second }
     );
 }

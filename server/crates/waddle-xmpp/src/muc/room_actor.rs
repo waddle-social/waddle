@@ -12,6 +12,10 @@ use std::{collections::HashMap, convert::Infallible};
 use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
+use super::durable::{
+    authorize_ephemeral_projection, mint_room_mutation_commit, RoomCommitError,
+    RoomDurableMutation, RoomMutationCommit,
+};
 use super::pin::{PinStateChange, PinnedEntry};
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role, Voice};
@@ -183,24 +187,11 @@ pub enum AdminApplyError {
     /// `<resource-constraint/>` bounce).
     #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    /// The pre-mutation gate passed, but this actor became non-serving before the
-    /// following durable write committed. The mutation exists only in this
-    /// now-stale actor incarnation; callers must demote it and retry against
-    /// the current owner.
-    #[error("this actor became non-serving after the in-memory mutation was applied")]
-    OwnershipLostAfterApply,
     /// The exact ownership check could not establish either ownership or
     /// loss. The requested mutation was never applied and may be retried.
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
-    /// FIX 2: the fenced gate passed (or was skipped, single-node), the
-    /// in-memory mutation was applied, but the awaited durable persist
-    /// afterwards failed for a reason OTHER than ownership loss
-    /// (a transient backend outage). Previously silently logged and
-    /// swallowed; FIX 2 revises that contract for affiliation-mutating
-    /// operations — the caller is told the durable side did not
-    /// converge rather than reporting bare success.
-    #[error("durable persist failed after the in-memory mutation committed")]
+    #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
 }
 
@@ -208,7 +199,6 @@ impl From<RoomMutationError> for AdminApplyError {
     fn from(error: RoomMutationError) -> Self {
         match error {
             RoomMutationError::NotOwner => AdminApplyError::NotOwner,
-            RoomMutationError::OwnershipLostAfterApply => AdminApplyError::OwnershipLostAfterApply,
             RoomMutationError::OwnershipUnavailable => AdminApplyError::OwnershipUnavailable,
             RoomMutationError::PersistFailed => AdminApplyError::PersistFailed,
         }
@@ -219,49 +209,21 @@ impl From<DurablePersistError> for AdminApplyError {
     fn from(error: DurablePersistError) -> Self {
         match error {
             DurablePersistError::NotOwner => AdminApplyError::NotOwner,
-            DurablePersistError::OwnershipLostAfterApply => {
-                AdminApplyError::OwnershipLostAfterApply
-            }
             DurablePersistError::OwnershipUnavailable => AdminApplyError::OwnershipUnavailable,
             DurablePersistError::PersistFailed => AdminApplyError::PersistFailed,
         }
     }
 }
 
-/// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): typed outcome of
-/// the two-stage durability gate every durable-relevant `RoomActor`
-/// mutation handler (`UpdateConfig`, `RollbackConfigIfRevision`,
-/// `UpdateGroupDmConfigByMember`, `SetSubject`, `ChangeAffiliation`,
-/// `ApplyAdminItems`, `ApplyAffiliationChange`,
-/// `EnforceMembersOnlyAffiliations`, `ReconcileChannelBackedRoom`) now
-/// runs:
-///
-/// 1. **Before mutating**: [`RoomActor::gate_mutation`] runs the SAME
-///    fenced `check_exact_claim_fence` pre-check using this actor
-///    incarnation's retained fence.
-///    `NotOwner` here means the in-memory mutation NEVER RAN — the
-///    caller must not report success, must trigger
-///    `RoomLocalClaims::demote`, and must surface a conformant,
-///    recoverable error to whatever requested the mutation.
-/// 2. **After mutating**: an awaited `persist_*` write can still
-///    fail for a reason OTHER than ownership loss (a transient DB
-///    outage). This was previously silently logged and swallowed
-///    (`muc/durable.rs`'s old fail-open doc contract, corrected by this
-///    fix). `PersistFailed` surfaces that failure typed instead — the
-///    in-memory mutation has already committed by this point (undoing
-///    it risks a worse inconsistency than leaving it applied-but-
-///    not-yet-durable), but the caller now knows the durable side did
-///    not converge and can retry or surface a typed error rather than
-///    reporting bare success.
+/// Typed failures from a durable-first room mutation. Every variant leaves
+/// the actor's in-memory state and emitted effects unchanged.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RoomMutationError {
     #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    #[error("this actor became non-serving after the in-memory mutation was applied")]
-    OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
-    #[error("durable persist failed after the in-memory mutation committed")]
+    #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
 }
 
@@ -290,11 +252,9 @@ impl From<PreMutationOwnershipError> for RoomMutationError {
 pub enum AffiliationMutationError {
     #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    #[error("this actor became non-serving after the in-memory mutation was applied")]
-    OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
-    #[error("durable persist failed after the in-memory mutation committed")]
+    #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
     #[error("invitee affiliation is fenced pending invite rollback acknowledgement")]
     InviteRollbackPending,
@@ -304,7 +264,6 @@ impl From<RoomMutationError> for AffiliationMutationError {
     fn from(error: RoomMutationError) -> Self {
         match error {
             RoomMutationError::NotOwner => Self::NotOwner,
-            RoomMutationError::OwnershipLostAfterApply => Self::OwnershipLostAfterApply,
             RoomMutationError::OwnershipUnavailable => Self::OwnershipUnavailable,
             RoomMutationError::PersistFailed => Self::PersistFailed,
         }
@@ -315,28 +274,18 @@ impl From<DurablePersistError> for AffiliationMutationError {
     fn from(error: DurablePersistError) -> Self {
         match error {
             DurablePersistError::NotOwner => Self::NotOwner,
-            DurablePersistError::OwnershipLostAfterApply => Self::OwnershipLostAfterApply,
             DurablePersistError::OwnershipUnavailable => Self::OwnershipUnavailable,
             DurablePersistError::PersistFailed => Self::PersistFailed,
         }
     }
 }
 
-/// FIX 2: typed outcome of an awaited durable `save_*` call inside
-/// [`RoomActor::persist_config`] and [`RoomActor::persist_affiliation`]. The
-/// ownership variants distinguish a failure before an in-memory mutation from
-/// ownership loss after one. Subject persistence has its own pre-apply-only
-/// [`SetSubjectError`] contract. Definitive ownership variants preserve
-/// whether the mutation was applied; `PersistFailed` is phase-neutral so
-/// each operation's public error can state its own apply boundary. Backend
-/// diagnostics stay in structured logs rather than becoming a stringly-typed
-/// protocol payload.
+/// Typed outcome of a durable room-mutation commit before its corresponding
+/// in-memory mutation.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DurablePersistError {
     #[error("this actor became non-serving before the in-memory mutation was applied")]
     NotOwner,
-    #[error("this actor became non-serving after the in-memory mutation was applied")]
-    OwnershipLostAfterApply,
     #[error("this room's exact ownership fence is unavailable")]
     OwnershipUnavailable,
     #[error("durable persist failed")]
@@ -347,9 +296,6 @@ impl From<DurablePersistError> for RoomMutationError {
     fn from(error: DurablePersistError) -> Self {
         match error {
             DurablePersistError::NotOwner => RoomMutationError::NotOwner,
-            DurablePersistError::OwnershipLostAfterApply => {
-                RoomMutationError::OwnershipLostAfterApply
-            }
             DurablePersistError::OwnershipUnavailable => RoomMutationError::OwnershipUnavailable,
             DurablePersistError::PersistFailed => RoomMutationError::PersistFailed,
         }
@@ -487,6 +433,11 @@ pub enum RoomSealState {
     Open,
     /// The registry sealed an inactive actor before a terminal local removal.
     Inactive,
+    /// The registry is committing a terminal destroy under this typed
+    /// attempt. New mutations must retry through the registry.
+    Destroying {
+        attempt: crate::muc::durable::DestroyAttemptId,
+    },
     /// The durable ownership gate proved this incarnation is non-serving.
     OwnershipLost,
 }
@@ -854,179 +805,71 @@ impl RoomActor {
                 let _ = self.gate_join_ownership().await;
                 Err(RoomActorError::RoomSealed)
             }
+            RoomSealState::Destroying { .. } => Err(RoomActorError::OwnershipUnavailable),
         }
     }
 
-    /// Await the durable persist of the current config (ADR-0017 Phase 3
-    /// Slice 7, FIX 2 revision): a persistence error is logged AND
-    /// returned typed — the in-memory mutation the caller already applied
-    /// remains authoritative for this actor incarnation regardless, but
-    /// the caller now learns the durable side did not converge (see
-    /// [`DurablePersistError`]'s doc comment for why this is no longer
-    /// silently swallowed).
-    fn classify_durable_persist_error(
-        &mut self,
-        write_error: crate::XmppError,
-        operation: &'static str,
-        mutation_applied: bool,
-    ) -> DurablePersistError {
-        match write_error {
-            crate::XmppError::OwnershipLost { entity } => {
+    fn classify_durable_persist_error(&mut self, error: RoomCommitError) -> DurablePersistError {
+        match error {
+            RoomCommitError::NotOwner => {
                 self.seal_state = RoomSealState::OwnershipLost;
                 tracing::warn!(
                     room = %self.room.room_jid,
-                    %operation,
-                    %entity,
-                    "durable write failed because this actor lost exact ownership"
+                    "durable mutation commit lost exact ownership"
                 );
-                if mutation_applied {
-                    DurablePersistError::OwnershipLostAfterApply
-                } else {
-                    DurablePersistError::NotOwner
-                }
+                DurablePersistError::NotOwner
             }
-            crate::XmppError::OwnershipUnavailable { entity } => {
+            RoomCommitError::OwnershipUnavailable | RoomCommitError::RetryExhausted => {
                 tracing::warn!(
                     room = %self.room.room_jid,
-                    %operation,
-                    %entity,
-                    "durable write could not prove exact ownership"
+                    "durable mutation commit could not prove ownership"
                 );
-                if mutation_applied {
-                    DurablePersistError::PersistFailed
-                } else {
-                    DurablePersistError::OwnershipUnavailable
-                }
+                DurablePersistError::OwnershipUnavailable
             }
             error => {
                 tracing::warn!(
                     room = %self.room.room_jid,
-                    %operation,
                     %error,
-                    "durable write failed for a non-ownership reason"
+                    "durable mutation commit failed before applying memory"
                 );
                 DurablePersistError::PersistFailed
             }
         }
     }
 
-    async fn persist_config(&mut self) -> Result<(), DurablePersistError> {
+    /// Commits authoritative room state before the caller projects it into
+    /// actor memory. Store-less deployments retain their in-memory behavior.
+    async fn commit_durable(
+        &mut self,
+        intent: RoomDurableMutation,
+    ) -> Result<Option<RoomMutationCommit>, DurablePersistError> {
+        match self.seal_state {
+            RoomSealState::Open => {}
+            RoomSealState::OwnershipLost => return Err(DurablePersistError::NotOwner),
+            RoomSealState::Inactive => return Err(DurablePersistError::OwnershipUnavailable),
+            RoomSealState::Destroying { .. } => {
+                return Err(DurablePersistError::OwnershipUnavailable);
+            }
+        }
         let Some(store) = self.durable_store.clone() else {
-            return Ok(());
+            return Ok(None);
         };
         let fence = self
             .durable_claim_fence
             .clone()
             .ok_or(DurablePersistError::OwnershipUnavailable)?;
-        let result = store
-            .save_config_fenced(
-                &self.room.room_jid,
-                &self.room.waddle_id,
-                &self.room.channel_id,
-                &self.room.config,
-                &fence,
-            )
-            .await;
-        match result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(self.classify_durable_persist_error(error, "config", true)),
-        }
+        let coordinates = store
+            .commit_room_mutation(&self.room.room_jid, &fence, intent)
+            .await
+            .map_err(|error| self.classify_durable_persist_error(error))?;
+        let commit = mint_room_mutation_commit(fence, coordinates);
+        let _ = authorize_ephemeral_projection(commit.clone());
+        Ok(Some(commit))
     }
 
     /// Replace config only after restoring cross-field privacy invariants.
     fn replace_config(&mut self, config: RoomConfig) {
         self.room.config = config.normalized();
-    }
-
-    /// Persist a constructed subject before installing it in memory. See
-    /// [`Self::persist_config`]'s FIX 2 rationale.
-    async fn persist_subject_before_apply(
-        &mut self,
-        subject: Option<&SubjectState>,
-    ) -> Result<(), SetSubjectError> {
-        let Some(store) = self.durable_store.clone() else {
-            return Ok(());
-        };
-        let fence = self
-            .durable_claim_fence
-            .clone()
-            .ok_or(SetSubjectError::OwnershipUnavailable)?;
-        let result = store
-            .save_subject_fenced(&self.room.room_jid, subject, &fence)
-            .await;
-        match result {
-            Ok(()) => Ok(()),
-            Err(crate::XmppError::OwnershipLost { entity }) => {
-                self.seal_state = RoomSealState::OwnershipLost;
-                tracing::warn!(
-                    room = %self.room.room_jid,
-                    %entity,
-                    "durable subject write failed because this actor lost exact ownership"
-                );
-                Err(SetSubjectError::NotOwner)
-            }
-            Err(crate::XmppError::OwnershipUnavailable { entity }) => {
-                tracing::warn!(
-                    room = %self.room.room_jid,
-                    %entity,
-                    "durable subject write could not prove exact ownership"
-                );
-                Err(SetSubjectError::OwnershipUnavailable)
-            }
-            Err(error) => {
-                tracing::warn!(
-                    room = %self.room.room_jid,
-                    %error,
-                    "durable subject write failed before applying the in-memory mutation"
-                );
-                Err(SetSubjectError::PersistFailedBeforeApply)
-            }
-        }
-    }
-
-    /// Await the durable persist of one affiliation-list entry. See
-    /// [`Self::persist_config`]'s FIX 2 rationale.
-    async fn persist_affiliation(
-        &mut self,
-        jid: &BareJid,
-        affiliation: Affiliation,
-    ) -> Result<(), DurablePersistError> {
-        self.persist_affiliation_with_phase(jid, affiliation, true)
-            .await
-    }
-
-    async fn persist_affiliation_before_apply(
-        &mut self,
-        jid: &BareJid,
-        affiliation: Affiliation,
-    ) -> Result<(), DurablePersistError> {
-        self.persist_affiliation_with_phase(jid, affiliation, false)
-            .await
-    }
-
-    async fn persist_affiliation_with_phase(
-        &mut self,
-        jid: &BareJid,
-        affiliation: Affiliation,
-        mutation_applied: bool,
-    ) -> Result<(), DurablePersistError> {
-        let Some(store) = self.durable_store.clone() else {
-            return Ok(());
-        };
-        let fence = self
-            .durable_claim_fence
-            .clone()
-            .ok_or(DurablePersistError::OwnershipUnavailable)?;
-        let entry = super::affiliation::AffiliationEntry::new(jid.clone(), affiliation);
-        let result = store
-            .save_affiliation_fenced(&self.room.room_jid, &entry, &fence)
-            .await;
-        match result {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                Err(self.classify_durable_persist_error(error, "affiliation", mutation_applied))
-            }
-        }
     }
 
     /// Drop a JID from the spawn-time hydrated durable-recipient
@@ -1529,10 +1372,16 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.gate_mutation().await?;
-        self.replace_config(msg.config);
+        let config = msg.config.normalized();
+        self.commit_durable(RoomDurableMutation::Config {
+            config: config.clone(),
+            waddle_id: self.room.waddle_id.clone(),
+            channel_id: self.room.channel_id.clone(),
+        })
+        .await?;
+        self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
-        self.persist_config().await?;
         Ok(self.config_revision)
     }
 }
@@ -1557,10 +1406,16 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
             return Ok(false);
         }
         self.gate_mutation().await?;
-        self.replace_config(msg.config);
+        let config = msg.config.normalized();
+        self.commit_durable(RoomDurableMutation::Config {
+            config: config.clone(),
+            waddle_id: self.room.waddle_id.clone(),
+            channel_id: self.room.channel_id.clone(),
+        })
+        .await?;
+        self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
-        self.persist_config().await?;
         Ok(true)
     }
 }
@@ -1584,12 +1439,9 @@ pub enum UpdateGroupDmConfigByMemberError {
     /// doc comment — identical contract, one message type over.
     #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    #[error("this actor became non-serving after the in-memory mutation was applied")]
-    OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
-    /// FIX 2: see [`AdminApplyError::PersistFailed`]'s doc comment.
-    #[error("durable persist failed after the in-memory mutation committed")]
+    #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
 }
 
@@ -1597,9 +1449,6 @@ impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
     fn from(error: RoomMutationError) -> Self {
         match error {
             RoomMutationError::NotOwner => UpdateGroupDmConfigByMemberError::NotOwner,
-            RoomMutationError::OwnershipLostAfterApply => {
-                UpdateGroupDmConfigByMemberError::OwnershipLostAfterApply
-            }
             RoomMutationError::OwnershipUnavailable => {
                 UpdateGroupDmConfigByMemberError::OwnershipUnavailable
             }
@@ -1612,9 +1461,6 @@ impl From<DurablePersistError> for UpdateGroupDmConfigByMemberError {
     fn from(error: DurablePersistError) -> Self {
         match error {
             DurablePersistError::NotOwner => UpdateGroupDmConfigByMemberError::NotOwner,
-            DurablePersistError::OwnershipLostAfterApply => {
-                UpdateGroupDmConfigByMemberError::OwnershipLostAfterApply
-            }
             DurablePersistError::OwnershipUnavailable => {
                 UpdateGroupDmConfigByMemberError::OwnershipUnavailable
             }
@@ -1652,10 +1498,16 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         self.gate_mutation().await?;
         let mut config = msg.config;
         config.group_dm = true;
+        let config = config.normalized();
+        self.commit_durable(RoomDurableMutation::Config {
+            config: config.clone(),
+            waddle_id: self.room.waddle_id.clone(),
+            channel_id: self.room.channel_id.clone(),
+        })
+        .await?;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
-        self.persist_config().await?;
         Ok(RoomSnapshot {
             room: self.room.clone(),
             config_revision: self.config_revision,
@@ -1696,6 +1548,16 @@ impl From<PreMutationOwnershipError> for SetSubjectError {
     }
 }
 
+impl From<DurablePersistError> for SetSubjectError {
+    fn from(error: DurablePersistError) -> Self {
+        match error {
+            DurablePersistError::NotOwner => Self::NotOwner,
+            DurablePersistError::OwnershipUnavailable => Self::OwnershipUnavailable,
+            DurablePersistError::PersistFailed => Self::PersistFailedBeforeApply,
+        }
+    }
+}
+
 impl kameo::message::Message<SetSubject> for RoomActor {
     type Reply = Result<(), SetSubjectError>;
 
@@ -1711,7 +1573,8 @@ impl kameo::message::Message<SetSubject> for RoomActor {
             setter_nick: msg.setter_nick,
             set_at: msg.set_at,
         };
-        self.persist_subject_before_apply(Some(&subject)).await?;
+        self.commit_durable(RoomDurableMutation::Subject(Some(subject.clone())))
+            .await?;
         self.room.subject = Some(subject);
         Ok(())
     }
@@ -1781,6 +1644,16 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         if self.invite_rollback_pending(&msg.jid) {
             return Err(AffiliationMutationError::InviteRollbackPending);
         }
+        let changed = self.room.get_affiliation(&msg.jid) != msg.affiliation;
+        if changed {
+            self.commit_durable(RoomDurableMutation::Affiliation(
+                super::durable::AffiliationEntry::new(
+                    msg.jid.clone(),
+                    (msg.affiliation != Affiliation::None).then_some(msg.affiliation),
+                ),
+            ))
+            .await?;
+        }
         self.invalidate_invite_grant(&msg.jid);
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if self
@@ -1789,7 +1662,6 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
             .is_some()
         {
             self.advance_member_admission_revision(&msg.jid);
-            self.persist_affiliation(&msg.jid, msg.affiliation).await?;
         }
         if needs_rehydration {
             self.refresh_durable_recipients_from_source().await;
@@ -2006,6 +1878,82 @@ pub struct SealIfInactive {
     pub guard: SealGuard,
 }
 
+/// Pre-seal an actor before the registry commits a terminal `Destroy`.
+/// Repeating the same attempt is deliberately idempotent so the registry can
+/// reconcile a lost ask reply without reopening the actor.
+pub struct SealForDestroy {
+    pub attempt: crate::muc::durable::DestroyAttemptId,
+}
+
+impl kameo::message::Message<SealForDestroy> for RoomActor {
+    type Reply = RoomSealState;
+
+    async fn handle(
+        &mut self,
+        msg: SealForDestroy,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match self.seal_state {
+            RoomSealState::Open => {
+                self.seal_state = RoomSealState::Destroying {
+                    attempt: msg.attempt,
+                };
+                self.seal_state
+            }
+            RoomSealState::Destroying { attempt } if attempt == msg.attempt => self.seal_state,
+            state => state,
+        }
+    }
+}
+
+/// Undo a failed destroy only when this is still the matching attempt. A
+/// delayed recovery must never reopen a later destroy attempt.
+pub struct UnsealDestroy {
+    pub attempt: crate::muc::durable::DestroyAttemptId,
+}
+
+/// Reopen an inactivity seal when the registry could not durably record the
+/// dormancy transition. This is intentionally narrower than destroy unseal.
+pub struct UnsealInactive;
+
+impl kameo::message::Message<UnsealInactive> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        _msg: UnsealInactive,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.seal_state == RoomSealState::Inactive {
+            self.seal_state = RoomSealState::Open;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl kameo::message::Message<UnsealDestroy> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: UnsealDestroy,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.seal_state
+            == (RoomSealState::Destroying {
+                attempt: msg.attempt,
+            })
+        {
+            self.seal_state = RoomSealState::Open;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Typed result of an inactivity-seal attempt.
 ///
 /// The registry must retain the distinction between ordinary inactivity and
@@ -2031,6 +1979,7 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
         match self.seal_state {
             RoomSealState::OwnershipLost => return SealIfInactiveOutcome::OwnershipLost,
             RoomSealState::Inactive => return SealIfInactiveOutcome::Inactive,
+            RoomSealState::Destroying { .. } => return SealIfInactiveOutcome::Refused,
             RoomSealState::Open => {}
         }
         if self.occupancy_revision != msg.expected_occupancy_revision {

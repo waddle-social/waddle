@@ -12,7 +12,8 @@ use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use waddle_xmpp::muc::affiliation::AffiliationEntry;
 use waddle_xmpp::muc::durable::{
-    DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomCommitError,
+    RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation, RoomLifecycleId, RoomRevision,
 };
 use waddle_xmpp::muc::room_actor::{
     DurableRestoreReadiness, GetAffiliation, GetConfig, GetDurableRestoreReadiness,
@@ -24,7 +25,7 @@ use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, GetOrCreateRoom, RoomCreation, RoomRegistryActor, RoomRegistryError,
     WireClusteringClaims,
 };
-use waddle_xmpp::muc::{MucRoom, RoomConfig, SubjectState};
+use waddle_xmpp::muc::{MucRoom, RoomConfig};
 use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
     SharedNodeIdentity,
@@ -42,6 +43,8 @@ struct OwnershipStore {
     expected_owner: NodeIdentity,
     expected_epoch: ClaimEpoch,
     observed_loads: AtomicUsize,
+    lifecycle: std::sync::OnceLock<RoomLifecycleId>,
+    next_revision: AtomicUsize,
 }
 
 impl OwnershipStore {
@@ -64,6 +67,8 @@ impl OwnershipStore {
             expected_owner,
             expected_epoch,
             observed_loads: AtomicUsize::new(0),
+            lifecycle: std::sync::OnceLock::new(),
+            next_revision: AtomicUsize::new(0),
         }
     }
 
@@ -91,9 +96,38 @@ impl OwnershipStore {
         }
         Ok(())
     }
+
+    fn next_commit_coordinates(&self) -> RoomCommittedCoordinates {
+        let lifecycle = *self.lifecycle.get_or_init(RoomLifecycleId::generate);
+        let revision = self.next_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        RoomCommittedCoordinates {
+            lifecycle,
+            revision: RoomRevision::from_stored(revision as i64).expect("positive revision"),
+        }
+    }
 }
 
 impl MucDurableStore for OwnershipStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        _intent: RoomDurableMutation,
+    ) -> RoomCommitFuture<'a> {
+        let validation = self.validate_fence(room_jid, fence);
+        let state = self.state.load(Ordering::SeqCst);
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            validation.map_err(|_| RoomCommitError::NotOwner)?;
+            match state {
+                OWNED => Ok(coordinates),
+                DEPOSED => Err(RoomCommitError::NotOwner),
+                UNCERTAIN => Err(RoomCommitError::OwnershipUnavailable),
+                _ => unreachable!("test ownership state"),
+            }
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -113,47 +147,6 @@ impl MucDurableStore for OwnershipStore {
                 _ => unreachable!("test ownership state"),
             }
         })
-    }
-
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _entry: &'a AffiliationEntry,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
     }
 
     fn check_exact_claim_fence<'a>(

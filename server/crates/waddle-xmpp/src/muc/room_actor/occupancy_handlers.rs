@@ -7,7 +7,7 @@ use super::{
     affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
     LeaveOutcome, PresenceUpdateOutcome, RoomActor, RoomActorError,
 };
-use crate::muc::RoomConfig;
+use crate::muc::{durable::RoomDurableMutation, RoomConfig};
 use crate::types::Affiliation;
 
 /// The affiliation a join request carries into the room, typed by
@@ -68,6 +68,8 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         match msg.affiliation_grant {
             JoinAffiliationGrant::Unaffiliated => {}
             JoinAffiliationGrant::Resolver(affiliation) => {
+                // Resolver-derived affiliations are reconstructible from the
+                // channel/space graph, so they intentionally remain memory-only.
                 // Applied unconditionally, including `Affiliation::None`:
                 // a resolver revocation must clear any stale
                 // resolver-derived Member/Admin entry so the revoked
@@ -101,6 +103,20 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 // creatorship, the actor's serialized mailbox makes
                 // exactly one of them the owner.
                 if !self.room.has_owner() {
+                    self.commit_durable(RoomDurableMutation::Affiliation(
+                        crate::muc::durable::AffiliationEntry::new(
+                            msg.sender_jid.to_bare(),
+                            Some(Affiliation::Owner),
+                        ),
+                    ))
+                    .await
+                    .map_err(|error| match error {
+                        super::DurablePersistError::NotOwner => RoomActorError::RoomSealed,
+                        super::DurablePersistError::OwnershipUnavailable
+                        | super::DurablePersistError::PersistFailed => {
+                            RoomActorError::OwnershipUnavailable
+                        }
+                    })?;
                     self.room
                         .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
                     self.invalidate_invite_grant(&msg.sender_jid.to_bare());
@@ -641,12 +657,18 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         {
             desired_config.name = self.room.config.name.clone();
         }
+        let desired_config = desired_config.normalized();
+        self.commit_durable(RoomDurableMutation::Config {
+            config: desired_config.clone(),
+            waddle_id: msg.waddle_id.clone(),
+            channel_id: msg.channel_id.clone(),
+        })
+        .await?;
         self.room.waddle_id = msg.waddle_id;
         self.room.channel_id = msg.channel_id;
         self.replace_config(desired_config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
-        self.persist_config().await?;
         Ok(())
     }
 }

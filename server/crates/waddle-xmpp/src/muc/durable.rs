@@ -185,7 +185,7 @@ pub struct DurableRoomState {
 ///
 /// Every load, write, and delete is epoch-fenced against the exact claim
 /// retained by that `RoomActor` incarnation — "epoch-fenced like all
-/// claimed-entity writes" per element 7. The cache populated by
+/// claimed-entity writes" per element 7. The room-JID cache populated by
 /// [`Self::record_claim_fence`] is not an authority for actor-owned writes.
 ///
 /// **Fail-closed ownership contract (ADR-0017 Phase 3 Slice 7 FIX 2).**
@@ -243,64 +243,17 @@ pub trait MucDurableStore: Send + Sync {
         room_jid: &'a BareJid,
         fence: &'a RoomClaimFenceContext,
         intent: RoomDurableMutation,
-    ) -> RoomCommitFuture<'a> {
-        let _ = (room_jid, fence, intent);
-        // The actor commit path replaces this compatibility default in Lane B.
-        // Keep its sole proof-minting helpers reachable in this interim slice
-        // without exposing their constructors outside this crate.
-        let _ = (mint_room_mutation_commit, authorize_ephemeral_projection);
-        Box::pin(async {
-            Err(RoomCommitError::Database(
-                RoomCommitDatabaseError::sanitized(),
-            ))
-        })
+    ) -> RoomCommitFuture<'a>;
+
+    /// Establish the exact claim fence for forthcoming actor-owned durable
+    /// work before the room is published. This is separate from
+    /// [`Self::record_claim_fence`]: preparation-time fenced loads/commits
+    /// may need store-local fence bookkeeping, but legacy room-JID fan-out
+    /// visibility must still wait until the ready actor is inserted into the
+    /// registry. Default no-op for deployments without a durable store.
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+        let _ = (room_jid, fence);
     }
-
-    /// Durably upsert the room's configuration (plus the `waddle_id`/
-    /// `channel_id` it travels with).
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        waddle_id: &'a str,
-        channel_id: &'a str,
-        config: &'a RoomConfig,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
-
-    /// Update (or, when `subject` is `None`, clear) an existing room's current
-    /// subject. This must not create a parent row: #1352 owns atomically
-    /// creating the complete room plus initial Owner. Until then, a missing
-    /// parent returns [`crate::XmppError::DurableRoomStateMissing`] so callers
-    /// fail before acknowledging or applying a non-durable subject.
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        subject: Option<&'a SubjectState>,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
-
-    /// Durably upsert one affiliation-list entry. `Affiliation::None`
-    /// removes the row, mirroring `AffiliationList::set`'s in-memory
-    /// contract.
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        entry: &'a StoredAffiliationEntry,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
-
-    /// XEP-0045 §10.9 (#1261): destroy removes the room "even if it was
-    /// defined as persistent". Delete every durable row for `room_jid`
-    /// — config, subject, and the full affiliation list — so a
-    /// destroyed room can never resurrect from storage (with its old
-    /// config, subject, or ban list) on the next join. Called by the
-    /// room registry's explicit-destroy path only; dormancy eviction
-    /// keeps the rows because an evicted-but-live room MUST restore.
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
 
     /// Publish the claim fence alongside the matching ready room-registry
     /// entry — never immediately after acquire/steal while restore is still

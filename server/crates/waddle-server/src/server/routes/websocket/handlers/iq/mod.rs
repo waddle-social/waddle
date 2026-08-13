@@ -24,8 +24,8 @@ use waddle_xmpp::{
         },
         owner::build_config_form,
         room_actor::{
-            ApplyAdminItems, ChangeAffiliation, EnforceMembersOnly, EnforceMembersOnlyAffiliations,
-            GetAdminContext, GetOccupantByJid, GetSnapshot, PingSelfCheck, UpdateConfig,
+            ApplyAdminItems, EnforceMembersOnly, EnforceMembersOnlyAffiliations, GetAdminContext,
+            GetOccupantByJid, GetSnapshot, PingSelfCheck, UpdateConfig,
         },
         DATA_FORMS_NS,
     },

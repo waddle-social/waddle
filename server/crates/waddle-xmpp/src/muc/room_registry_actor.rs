@@ -20,10 +20,10 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{
     DurableRestoreReadiness, DurableRoomOrigin, GetDurableRestoreReadiness, GetRoomSealState,
-    HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState, SealGuard,
-    SealIfInactive, SealIfInactiveOutcome,
+    HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState, SealForDestroy,
+    SealGuard, SealIfInactive, SealIfInactiveOutcome, UnsealDestroy, UnsealInactive,
 };
-use super::{MucRoom, RoomConfig};
+use super::{MucRoom, RoomConfig, RoomDurableMutation};
 use crate::metrics;
 use crate::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
@@ -104,6 +104,7 @@ struct RoomCreationSpec {
     waddle_id: String,
     channel_id: String,
     config: RoomConfig,
+    initial_affiliations: Vec<super::durable::AffiliationEntry>,
 }
 
 #[derive(Clone)]
@@ -241,6 +242,10 @@ pub struct RoomRegistryActor {
     /// and lets terminal operations cancel the exact generation before a late
     /// completion can publish it.
     pending_room_preparations: HashMap<BareJid, PendingRoomPreparation>,
+    /// Attempt identities whose pre-seal reply was lost or whose durable
+    /// destroy commit still needs reconciliation. A retry must reuse the
+    /// same token; a new token cannot reopen the actor-local seal.
+    destroy_attempts: HashMap<BareJid, super::DestroyAttemptId>,
     ready_room_publications: VecDeque<ReadyRoomPublication>,
     ready_room_publication_scheduled: bool,
     next_room_preparation_generation: u64,
@@ -335,6 +340,7 @@ impl RoomRegistryActor {
             pending_room_releases: HashMap::new(),
             pending_room_acquisitions: HashMap::new(),
             pending_room_preparations: HashMap::new(),
+            destroy_attempts: HashMap::new(),
             ready_room_publications: VecDeque::new(),
             ready_room_publication_scheduled: false,
             next_room_preparation_generation: 0,
@@ -1318,11 +1324,13 @@ impl RoomRegistryActor {
         config: RoomConfig,
         claim_fence: &super::RoomClaimFenceContext,
     ) -> Result<(RoomPreparationGuard, bool), RoomPreparationError> {
-        // Restore receives this preparation's exact fence directly. Do not
-        // publish it through the room-keyed fan-out cache yet: until the new
-        // actor reaches the final registry insertion boundary, an in-flight
-        // predecessor must continue checking its own old fence and fail
-        // closed rather than borrowing this successor's authority.
+        // Establish the exact fence before any preparation-time durable I/O.
+        // This deliberately does not publish the room-JID fan-out cache: that
+        // still waits for the ready actor's registry insertion so an
+        // in-flight predecessor cannot borrow successor authority.
+        if let Some(store) = &self.durable_store {
+            store.establish_claim_fence(&room_jid, claim_fence.clone());
+        }
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
         let actor_guard = RoomPreparationGuard::new(RoomActor::spawn(RoomActor::new(
             room,
@@ -1520,6 +1528,10 @@ impl RoomRegistryActor {
         let actor_ref = guard.actor_ref().clone();
         let claim_store = Arc::clone(&self.claim_store);
         let durable_store = self.durable_store.clone();
+        let creation_spec = match &origin {
+            RoomPreparationOrigin::Demand { prepared_spec } => Some(Arc::clone(prepared_spec)),
+            RoomPreparationOrigin::Reclaimed { .. } => None,
+        };
         let publication_fence = claim_fence.clone();
         let waiters = waiter.into_iter().collect();
         let replaced = self.pending_room_preparations.insert(
@@ -1540,7 +1552,7 @@ impl RoomRegistryActor {
                 .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                 .await;
             let readiness = match first_readiness {
-                Ok(DurableRestoreReadiness::Pending) => match durable_store {
+                Ok(DurableRestoreReadiness::Pending) => match durable_store.clone() {
                     Some(store) => {
                         if actor_ref
                             .tell(RestoreDurableRoomState {
@@ -1565,6 +1577,83 @@ impl RoomRegistryActor {
                     None => None,
                 },
                 other => Some(other),
+            };
+            // A fresh actor is not published until its complete initial
+            // snapshot is durably committed and then restored into memory.
+            // Reclaimed rooms already have an authoritative snapshot and
+            // therefore only take the restore path above.
+            let readiness = match (readiness, creation_spec, durable_store.clone()) {
+                (
+                    Some(Ok(DurableRestoreReadiness::Ready(DurableRoomOrigin::New))),
+                    Some(spec),
+                    Some(store),
+                ) => match store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &publication_fence,
+                        RoomDurableMutation::Create {
+                            waddle_id: spec.waddle_id.clone(),
+                            channel_id: spec.channel_id.clone(),
+                            config: spec.config.clone(),
+                            initial_affiliations: spec.initial_affiliations.clone(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        if actor_ref
+                            .tell(RestoreDurableRoomState {
+                                store,
+                                claim_fence: publication_fence.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            None
+                        } else {
+                            match actor_ref
+                                .ask(GetDurableRestoreReadiness)
+                                .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                                .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                                .await
+                            {
+                                Ok(DurableRestoreReadiness::Ready(_)) => {
+                                    Some(Ok(DurableRestoreReadiness::Ready(DurableRoomOrigin::New)))
+                                }
+                                other => Some(other),
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(room = %room_jid, %error, "failed to commit initial durable room state before publication");
+                        None
+                    }
+                },
+                (readiness, _, _) => readiness,
+            };
+            // A dormant lifecycle becomes active before the restored actor
+            // can be published; an already-active lifecycle activates
+            // idempotently. `StateMissing` means no live lifecycle exists —
+            // publishing would strand a room no mutation can ever commit to.
+            let readiness = match (readiness, durable_store.clone()) {
+                (
+                    ready @ Some(Ok(DurableRestoreReadiness::Ready(DurableRoomOrigin::Restored))),
+                    Some(store),
+                ) => match store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &publication_fence,
+                        RoomDurableMutation::Activate,
+                    )
+                    .await
+                {
+                    Ok(_) => ready,
+                    Err(error) => {
+                        warn!(room = %room_jid, %error, "failed to activate durable room before publication");
+                        None
+                    }
+                },
+                (readiness, _) => readiness,
             };
             let readiness = match readiness {
                 Some(Ok(DurableRestoreReadiness::Ready(durable_origin))) => {
@@ -1781,6 +1870,22 @@ impl RoomRegistryActor {
         &mut self,
         room_jid: &BareJid,
     ) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
+        if self.destroy_attempts.contains_key(room_jid) {
+            if self
+                .rooms
+                .get(room_jid)
+                .is_some_and(|entry| !entry.actor_ref.is_alive())
+            {
+                // The recovery target died. Let the ordinary dead-actor
+                // path below retire its exact fence instead of permanently
+                // deferring the room behind an orphaned attempt marker.
+                self.destroy_attempts.remove(room_jid);
+            } else {
+                return Err(RoomRegistryError::OwnershipReconciliationPending(
+                    room_jid.clone(),
+                ));
+            }
+        }
         if self.poisoned_rooms.contains(room_jid) {
             return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
         }
@@ -1823,6 +1928,48 @@ impl RoomRegistryActor {
             return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
         }
         Ok(None)
+    }
+
+    /// Reconcile a failed terminal destroy before making the retained room
+    /// serviceable again. Re-asking is deliberate: the first pre-seal reply
+    /// could have been lost, and the matching token prevents a delayed
+    /// recovery from reopening a newer destroy attempt.
+    async fn recover_failed_destroy(
+        &mut self,
+        room_jid: &BareJid,
+        entry: &RoomEntry,
+        attempt: super::DestroyAttemptId,
+    ) {
+        let seal = entry
+            .actor_ref
+            .ask(SealForDestroy { attempt })
+            .mailbox_timeout(SEAL_ASK_TIMEOUT)
+            .reply_timeout(SEAL_ASK_TIMEOUT)
+            .await;
+        let matching_attempt = matches!(
+            seal,
+            Ok(RoomSealState::Destroying { attempt: current }) if current == attempt
+        );
+        if !matching_attempt {
+            warn!(room = %room_jid, "failed destroy could not confirm its matching pre-seal attempt");
+            return;
+        }
+
+        match entry
+            .actor_ref
+            .ask(UnsealDestroy { attempt })
+            .mailbox_timeout(SEAL_ASK_TIMEOUT)
+            .reply_timeout(SEAL_ASK_TIMEOUT)
+            .await
+        {
+            Ok(true) => {
+                self.destroy_attempts.remove(room_jid);
+                info!(room = %room_jid, "reopened room after durable destroy commit failure");
+            }
+            Ok(false) | Err(_) => {
+                warn!(room = %room_jid, "failed destroy could not unseal its matching attempt");
+            }
+        }
     }
 
     /// Best-effort release of `room_jid`'s Postgres claim (dormancy
@@ -3332,6 +3479,7 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
             waddle_id: msg.waddle_id,
             channel_id: msg.channel_id,
             config: msg.config,
+            initial_affiliations: Vec::new(),
         });
         match self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
@@ -3344,6 +3492,59 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
                     creation: RoomCreation::Existing,
                 }))
             }
+            Ok(DemandRoomTransition::Created(actor_ref)) => ctx.reply(Ok(RoomAcquisition {
+                actor_ref,
+                creation: RoomCreation::Created,
+            })),
+            Ok(DemandRoomTransition::Pending(creation_spec)) => {
+                let (delegated, reply) = ctx.reply_sender();
+                self.attach_preparation_waiter(
+                    &room_jid,
+                    reply.map(|reply| RoomPreparationWaiter::Acquisition {
+                        reply,
+                        creation_spec,
+                    }),
+                );
+                delegated
+            }
+            Err(error) => ctx.reply(Err(error)),
+        }
+    }
+}
+
+/// Get or create a room with the complete affiliation snapshot required by
+/// its first observable incarnation.
+pub struct GetOrCreateRoomWithInitialAffiliations {
+    pub room_jid: BareJid,
+    pub waddle_id: String,
+    pub channel_id: String,
+    pub config: RoomConfig,
+    pub initial_affiliations: Vec<super::durable::AffiliationEntry>,
+}
+
+impl kameo::message::Message<GetOrCreateRoomWithInitialAffiliations> for RoomRegistryActor {
+    type Reply = DelegatedReply<Result<RoomAcquisition, RoomRegistryError>>;
+
+    async fn handle(
+        &mut self,
+        msg: GetOrCreateRoomWithInitialAffiliations,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let room_jid = msg.room_jid;
+        let creation_spec = Arc::new(RoomCreationSpec {
+            waddle_id: msg.waddle_id,
+            channel_id: msg.channel_id,
+            config: msg.config,
+            initial_affiliations: msg.initial_affiliations,
+        });
+        match self
+            .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
+            .await
+        {
+            Ok(DemandRoomTransition::Existing(actor_ref)) => ctx.reply(Ok(RoomAcquisition {
+                actor_ref,
+                creation: RoomCreation::Existing,
+            })),
             Ok(DemandRoomTransition::Created(actor_ref)) => ctx.reply(Ok(RoomAcquisition {
                 actor_ref,
                 creation: RoomCreation::Created,
@@ -3394,6 +3595,7 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
             waddle_id,
             channel_id,
             config,
+            initial_affiliations: Vec::new(),
         });
 
         let room_jid = msg.room_jid;
@@ -3446,6 +3648,56 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
             waddle_id: msg.waddle_id,
             channel_id: msg.channel_id,
             config: msg.config,
+            initial_affiliations: Vec::new(),
+        });
+        match self
+            .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
+            .await
+        {
+            Ok(DemandRoomTransition::Existing(_)) => {
+                ctx.reply(Err(RoomRegistryError::RoomAlreadyExists(room_jid)))
+            }
+            Ok(DemandRoomTransition::Created(actor_ref)) => ctx.reply(Ok(actor_ref)),
+            Ok(DemandRoomTransition::Pending(creation_spec)) => {
+                let (delegated, reply) = ctx.reply_sender();
+                self.attach_preparation_waiter(
+                    &room_jid,
+                    reply.map(|reply| RoomPreparationWaiter::ExclusiveCreate {
+                        reply,
+                        creation_spec,
+                    }),
+                );
+                delegated
+            }
+            Err(error) => ctx.reply(Err(error)),
+        }
+    }
+}
+
+/// Create an administrator-provisioned room with the affiliations that must
+/// be visible in its first published durable snapshot.
+pub struct CreateRoomWithInitialAffiliations {
+    pub room_jid: BareJid,
+    pub waddle_id: String,
+    pub channel_id: String,
+    pub config: RoomConfig,
+    pub initial_affiliations: Vec<super::durable::AffiliationEntry>,
+}
+
+impl kameo::message::Message<CreateRoomWithInitialAffiliations> for RoomRegistryActor {
+    type Reply = DelegatedReply<Result<ActorRef<RoomActor>, RoomRegistryError>>;
+
+    async fn handle(
+        &mut self,
+        msg: CreateRoomWithInitialAffiliations,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let room_jid = msg.room_jid;
+        let creation_spec = Arc::new(RoomCreationSpec {
+            waddle_id: msg.waddle_id,
+            channel_id: msg.channel_id,
+            config: msg.config,
+            initial_affiliations: msg.initial_affiliations,
         });
         match self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
@@ -3533,70 +3785,84 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                 return DestroyRoomOutcome::ReleaseBacklogFull;
             }
         }
-        let removed_entry = self.rooms.remove(&msg.room_jid);
-        let removed_room = removed_entry.is_some();
-        let removed_preparation = self.pending_room_preparations.remove(&msg.room_jid);
-        let removed_pending_room = removed_preparation.is_some();
-        let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
-        // XEP-0045 §10.9 (#1261): destroy removes the room "even if it
-        // was defined as persistent" — wipe the durable rows (config,
-        // subject, affiliations incl. bans) so the room cannot
-        // resurrect from storage on the next join. Runs BEFORE the
-        // claim release below: the delete is epoch-fenced against this
-        // node's still-held claim (a fencing loss means another node
-        // owns the room now and this node must not wipe the new
-        // owner's rows). A failed delete FAILS the destroy: the entry
-        // is restored and `false` returned, so a caller never
-        // acknowledges a destruction whose durable state survived.
-        // `DeposedEviction` never wipes — the
-        // room lives on under its new owner.
-        if (removed_room || removed_pending_room || removed_poison)
-            && msg.reason == DestroyRoomReason::Destroy
-        {
-            if let Some(store) = &self.durable_store {
-                let Some(fence) = removed_entry
-                    .as_ref()
-                    .map(|entry| &entry.claim_fence)
-                    .or_else(|| {
-                        removed_preparation
-                            .as_ref()
-                            .map(|preparation| &preparation.claim_fence)
-                    })
-                else {
-                    warn!(
-                        room = %msg.room_jid,
-                        "Refusing durable room deletion without the registry entry's exact fence"
+        // Seal the serving actor first, then commit the terminal lifecycle
+        // transition under its exact claim. Keeping the map entry intact
+        // until that commit succeeds eliminates the former remove/reinsert
+        // compensation window.
+        if msg.reason == DestroyRoomReason::Destroy {
+            let pending_fence = self
+                .pending_room_preparations
+                .get(&msg.room_jid)
+                .map(|pending| pending.claim_fence.clone());
+            if let Some(entry) = self.rooms.get(&msg.room_jid).cloned() {
+                let attempt = *self
+                    .destroy_attempts
+                    .entry(msg.room_jid.clone())
+                    .or_insert_with(super::DestroyAttemptId::generate);
+                let seal = entry
+                    .actor_ref
+                    .ask(SealForDestroy { attempt })
+                    .mailbox_timeout(SEAL_ASK_TIMEOUT)
+                    .reply_timeout(SEAL_ASK_TIMEOUT)
+                    .await;
+                let sealed = matches!(seal, Ok(RoomSealState::Destroying { attempt: current }) if current == attempt)
+                    || matches!(
+                        entry
+                            .actor_ref
+                            .ask(SealForDestroy { attempt })
+                            .mailbox_timeout(SEAL_ASK_TIMEOUT)
+                            .reply_timeout(SEAL_ASK_TIMEOUT)
+                            .await,
+                        Ok(RoomSealState::Destroying { attempt: current }) if current == attempt
                     );
-                    if let Some(pending) = removed_preparation {
-                        self.pending_room_preparations
-                            .insert(msg.room_jid.clone(), pending);
-                    }
-                    if removed_poison {
-                        self.poisoned_rooms.insert(msg.room_jid.clone());
-                    }
+                if !sealed {
+                    warn!(room = %msg.room_jid, "room destroy pre-seal was not acknowledged");
                     return DestroyRoomOutcome::DurableWipeFailed;
-                };
-                if let Err(error) = store.delete_room_state_fenced(&msg.room_jid, fence).await {
-                    warn!(
-                        room = %msg.room_jid,
-                        %error,
-                        "Failed to delete durable room state under the registry entry's exact \
-                         fence; refusing the destroy so it can be retried"
+                }
+                if let Some(store) = &self.durable_store {
+                    if let Err(error) = store
+                        .commit_room_mutation(
+                            &msg.room_jid,
+                            &entry.claim_fence,
+                            RoomDurableMutation::Destroy,
+                        )
+                        .await
+                    {
+                        warn!(room = %msg.room_jid, %error, "durable room destroy commit failed; reconciling the sealed attempt");
+                        self.recover_failed_destroy(&msg.room_jid, &entry, attempt)
+                            .await;
+                        return DestroyRoomOutcome::DurableWipeFailed;
+                    }
+                }
+            } else if let (Some(store), Some(claim_fence)) = (&self.durable_store, pending_fence) {
+                // A restore may still be preparing when destroy arrives. Its
+                // pending preparation owns the exact claim, so wipe under
+                // that fence before removing or releasing it. Its waiters
+                // are still cancelled before the wipe, as they were under
+                // the former remove-before-wipe protocol.
+                if let Some(pending) = self.pending_room_preparations.get_mut(&msg.room_jid) {
+                    let waiters = std::mem::take(&mut pending.waiters);
+                    Self::reply_preparation_failure(
+                        &msg.room_jid,
+                        waiters,
+                        ReclaimedRoomOutcome::PendingRetry,
                     );
-                    if let Some(entry) = removed_entry {
-                        self.rooms.insert(msg.room_jid.clone(), entry);
-                    }
-                    if let Some(pending) = removed_preparation {
-                        self.pending_room_preparations
-                            .insert(msg.room_jid.clone(), pending);
-                    }
-                    if removed_poison {
-                        self.poisoned_rooms.insert(msg.room_jid.clone());
-                    }
+                }
+                if let Err(error) = store
+                    .commit_room_mutation(&msg.room_jid, &claim_fence, RoomDurableMutation::Destroy)
+                    .await
+                {
+                    warn!(room = %msg.room_jid, %error, "durable pending-room destroy commit failed; keeping the preparation intact");
                     return DestroyRoomOutcome::DurableWipeFailed;
                 }
             }
         }
+        let removed_entry = self.rooms.remove(&msg.room_jid);
+        self.destroy_attempts.remove(&msg.room_jid);
+        let removed_room = removed_entry.is_some();
+        let removed_preparation = self.pending_room_preparations.remove(&msg.room_jid);
+        let removed_pending_room = removed_preparation.is_some();
+        let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
         if let Some(pending) = removed_preparation {
             let claim_fence = pending.claim_fence.clone();
             Self::reply_preparation_failure(
@@ -3705,7 +3971,11 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     info!(room = %msg.room_jid, "Evicted non-serving room during inactive-room cleanup");
                     true
                 }
-                Ok(RoomSealState::Open | RoomSealState::Inactive) => {
+                Ok(
+                    RoomSealState::Open
+                    | RoomSealState::Inactive
+                    | RoomSealState::Destroying { .. },
+                ) => {
                     warn!(room = %msg.room_jid, "Skipping inactive-room seal because exact-release retry backlog is full");
                     false
                 }
@@ -3731,6 +4001,20 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                 true
             }
             Ok(SealIfInactiveOutcome::Inactive) => {
+                if let Some(store) = &self.durable_store {
+                    if let Err(error) = store
+                        .commit_room_mutation(
+                            &msg.room_jid,
+                            &entry.claim_fence,
+                            RoomDurableMutation::Dormancy,
+                        )
+                        .await
+                    {
+                        let _ = entry.actor_ref.tell(UnsealInactive).await;
+                        warn!(room = %msg.room_jid, %error, "durable dormancy commit failed; keeping room active");
+                        return false;
+                    }
+                }
                 self.rooms.remove(&msg.room_jid);
                 self.poisoned_rooms.remove(&msg.room_jid);
                 // ADR-0017 Phase 3 Slice 7: this is a terminal removal from
@@ -3801,6 +4085,10 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                 return false;
             }
             self.rooms.remove(&msg.room_jid);
+            // A dead actor cannot complete a retained destroy reconciliation.
+            // Its exact claim is being released below, so no later recovery
+            // can safely apply this attempt to a successor incarnation.
+            self.destroy_attempts.remove(&msg.room_jid);
             self.poisoned_rooms.remove(&msg.room_jid);
             // ADR-0017 Phase 3 Slice 7: same terminal-removal claim release
             // as the `live_room` dead-actor path and `DestroyRoom`.
@@ -3834,6 +4122,20 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                 if !self.has_pending_release_capacity(&msg.room_jid, &entry.claim_fence) {
                     return false;
                 }
+                if let Some(store) = &self.durable_store {
+                    if let Err(error) = store
+                        .commit_room_mutation(
+                            &msg.room_jid,
+                            &entry.claim_fence,
+                            RoomDurableMutation::Dormancy,
+                        )
+                        .await
+                    {
+                        let _ = entry.actor_ref.tell(UnsealInactive).await;
+                        warn!(room = %msg.room_jid, %error, "durable dormancy recovery commit failed; keeping room active");
+                        return false;
+                    }
+                }
                 self.rooms.remove(&msg.room_jid);
                 self.poisoned_rooms.remove(&msg.room_jid);
                 // ADR-0017 Phase 3 Slice 7: same terminal-removal claim
@@ -3846,7 +4148,7 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                 );
                 true
             }
-            Ok(RoomSealState::Open) => false,
+            Ok(RoomSealState::Open | RoomSealState::Destroying { .. }) => false,
             Err(error) => {
                 warn!(
                     room = %msg.room_jid,

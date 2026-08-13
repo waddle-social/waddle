@@ -31,8 +31,8 @@ use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{
-    CreateRoom, DestroyRoom, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom, GetRoom,
-    ListRooms, RetryPendingRoomReleases,
+    CreateRoom, CreateRoomWithInitialAffiliations, DestroyRoom, DestroyRoomOutcome,
+    DestroyRoomReason, GetOrCreateRoom, GetRoom, ListRooms, RetryPendingRoomReleases,
 };
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
@@ -2044,26 +2044,35 @@ async fn run_group_dm_create(
         ..RoomConfig::default()
     };
 
-    let actor = state
+    let mut members = args.member_jids.clone();
+    members.push(creator_jid.clone());
+    members.sort();
+    members.dedup();
+    let initial_affiliations = members
+        .iter()
+        .cloned()
+        .map(|jid| waddle_xmpp::muc::DurableAffiliationEntry::new(jid, Some(Affiliation::Member)))
+        .collect();
+
+    state
         .room_registry
-        .ask(CreateRoom {
+        .ask(CreateRoomWithInitialAffiliations {
             room_jid: room_jid.clone(),
             waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
             channel_id: localpart.clone(),
             config: config.clone(),
+            initial_affiliations,
         })
         .await
-        .map_err(send_err("room_registry ask CreateRoom"))?;
+        .map_err(send_err(
+            "room_registry ask CreateRoomWithInitialAffiliations",
+        ))?;
 
     if let Err(error) = upsert_group_dm_catalog(state, &localpart, &config).await {
         destroy_room_for_rollback(state, &room_jid, "group-DM catalog creation failed").await?;
         return Err(error);
     }
 
-    let mut members = args.member_jids.clone();
-    members.push(creator_jid.clone());
-    members.sort();
-    members.dedup();
     let mut persisted_members: Vec<BareJid> = Vec::with_capacity(members.len());
     for member_jid in members {
         if let Err(error) = persist_group_dm_member_tuple(state, &localpart, &member_jid).await {
@@ -2071,16 +2080,6 @@ async fn run_group_dm_create(
             return Err(Box::new(CommandResult::Error(error)));
         }
         persisted_members.push(member_jid.clone());
-        if let Err(error) = actor
-            .ask(ChangeAffiliation {
-                jid: member_jid.clone(),
-                affiliation: Affiliation::Member,
-            })
-            .await
-        {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await?;
-            return Err(send_err("room actor ChangeAffiliation")(error));
-        }
         if let Err(error) =
             publish_group_dm_bookmark(state, &member_jid, &room_jid, Some(&args.name)).await
         {
@@ -2707,14 +2706,9 @@ async fn group_dm_rename_update_error(
                     "Only joined group-DM occupants can rename the room".to_string(),
                 ))))
             }
-            // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
-            // `NotOwner` means the pre-mutation gate rejected the rename.
-            // `OwnershipLostAfterApply` means the rename may already exist in
-            // this stale actor, but its awaited durable write lost ownership.
-            // Either outcome exact-demotes this actor and returns a
-            // recoverable retry response.
-            UpdateGroupDmConfigByMemberError::NotOwner
-            | UpdateGroupDmConfigByMemberError::OwnershipLostAfterApply => {
+            // A definitive ownership loss rejects the rename before any
+            // actor-memory projection, so exact-demote and let the caller retry.
+            UpdateGroupDmConfigByMemberError::NotOwner => {
                 let _ = state
                     .room_registry
                     .ask(
@@ -2730,7 +2724,7 @@ async fn group_dm_rename_update_error(
                 unavailable("This room's ownership cannot be verified right now; please retry.")
             }
             UpdateGroupDmConfigByMemberError::PersistFailed => {
-                internal_err("group-DM rename applied but durable persist failed")
+                internal_err("group-DM rename durable commit failed")
             }
         },
         error => internal_err(format!("room actor UpdateGroupDmConfigByMember: {error}")),

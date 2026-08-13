@@ -38,14 +38,14 @@ use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
     DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
-    DrainRoomOwnershipForShutdown, GetOrCreateRoom, GetPendingReclaimedRoomBacklog,
-    GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
-    IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
-    ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
-    PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome,
-    ReconcileReclaimedRoom, RememberPendingReclaimedRoom, ReservePendingReclaimedRoom,
-    RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome,
-    RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
+    DrainRoomOwnershipForShutdown, GetOrCreateRoom, GetOrCreateRoomWithInitialAffiliations,
+    GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom,
+    IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease, IsMucJid,
+    IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
+    ListRoomsOwnedBy, PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog,
+    ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
+    ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
+    RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -359,6 +359,26 @@ impl RoomRegistry {
         ) -> RoomAcquisition,
         "get_or_create_room",
         GetOrCreateRoom { room_jid, waddle_id, channel_id, config }
+    );
+
+    registry_method!(
+        /// Get or create a room whose initial affiliations must be committed
+        /// before the actor is exposed to any waiter.
+        get_or_create_room_with_initial_affiliations(
+            room_jid: BareJid,
+            waddle_id: String,
+            channel_id: String,
+            config: RoomConfig,
+            initial_affiliations: Vec<super::durable::AffiliationEntry>
+        ) -> RoomAcquisition,
+        "get_or_create_room_with_initial_affiliations",
+        GetOrCreateRoomWithInitialAffiliations {
+            room_jid,
+            waddle_id,
+            channel_id,
+            config,
+            initial_affiliations
+        }
     );
 
     registry_method!(

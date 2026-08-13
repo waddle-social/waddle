@@ -96,16 +96,21 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
             Err(RoomMutationError::OwnershipUnavailable) => {
                 return Err(MediatedInviteRollbackError::OwnershipUnavailable);
             }
-            Err(RoomMutationError::OwnershipLostAfterApply) => {
-                return Err(MediatedInviteRollbackError::NotOwner);
-            }
             Err(RoomMutationError::PersistFailed) => {
                 return Err(MediatedInviteRollbackError::OwnershipUnavailable);
             }
         }
-        self.persist_affiliation_before_apply(&msg.grant.invitee, msg.grant.previous_affiliation)
-            .await
-            .map_err(MediatedInviteRollbackError::PersistFailedBeforeApply)?;
+        self.commit_durable(
+            crate::muc::durable::RoomDurableMutation::MediatedInviteRollback(
+                crate::muc::durable::AffiliationEntry::new(
+                    msg.grant.invitee.clone(),
+                    (msg.grant.previous_affiliation != Affiliation::None)
+                        .then_some(msg.grant.previous_affiliation),
+                ),
+            ),
+        )
+        .await
+        .map_err(MediatedInviteRollbackError::PersistFailedBeforeApply)?;
 
         // Token construction proves `previous_affiliation < Member`, so
         // the existing last-owner guard cannot reject this transition.

@@ -1,5 +1,6 @@
 use super::*;
 use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
+use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
 
 /// Upper bound on the mutating room-actor asks below. The room actor
 /// awaits the durable-membership source inside its affiliation
@@ -108,14 +109,13 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
     }
 }
 
-/// Roll back optimistically-persisted affiliation changes after the room
-/// actor rejected an admin set.
+/// Roll back optimistically-persisted channel tuples after the room actor
+/// rejected an admin set. The actor batch itself is durable-first and
+/// all-or-nothing now, so there is no room-memory compensation here.
 async fn rollback_admin_affiliations(
     state: &WebSocketState,
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     managed_channel_id: Option<&str>,
     durable_previous_affiliations: &[(BareJid, Affiliation)],
-    actor_previous_affiliations: &[(BareJid, Affiliation)],
 ) {
     let Some(channel_id) = managed_channel_id else {
         return;
@@ -128,15 +128,6 @@ async fn rollback_admin_affiliations(
             *previous_affiliation,
         )
         .await;
-    }
-    for (previous_jid, previous_affiliation) in actor_previous_affiliations {
-        let _ = room_actor
-            .ask(ChangeAffiliation {
-                jid: previous_jid.clone(),
-                affiliation: *previous_affiliation,
-            })
-            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-            .await;
     }
 }
 
@@ -330,9 +321,7 @@ pub(super) async fn handle_muc_admin_iq(
             .filter_map(|item| item.jid.clone().zip(item.affiliation))
             .collect()
     };
-    let actor_previous_affiliations = if affiliation_updates.is_empty() {
-        Vec::new()
-    } else {
+    if !affiliation_updates.is_empty() {
         match room_actor
             .ask(GetSnapshot)
             .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
@@ -411,11 +400,6 @@ pub(super) async fn handle_muc_admin_iq(
                         conflict_iq_error("Cannot remove the last owner from a room."),
                     )];
                 }
-                let mut previous_affiliations = Vec::with_capacity(affiliation_updates.len());
-                for (jid, _) in &affiliation_updates {
-                    previous_affiliations.push((jid.clone(), snapshot.room.get_affiliation(jid)));
-                }
-                previous_affiliations
             }
             Err(_) => {
                 return vec![build_iq_error_xml_typed(
@@ -426,7 +410,7 @@ pub(super) async fn handle_muc_admin_iq(
                 )];
             }
         }
-    };
+    }
     let managed_channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid);
     let durable_previous_affiliations = if affiliation_updates.is_empty() {
         Vec::new()
@@ -502,10 +486,8 @@ pub(super) async fn handle_muc_admin_iq(
             warn!(room = %room_jid, "MUC admin set rejected because it would remove the last owner");
             rollback_admin_affiliations(
                 state,
-                &room_actor,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
-                &actor_previous_affiliations,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -521,10 +503,8 @@ pub(super) async fn handle_muc_admin_iq(
             warn!(room = %room_jid, "MUC admin set rejected because an admin tried to change an owner affiliation");
             rollback_admin_affiliations(
                 state,
-                &room_actor,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
-                &actor_previous_affiliations,
             )
             .await;
             // XEP-0045 §9.2: the denial returns <not-allowed/> "along
@@ -543,10 +523,8 @@ pub(super) async fn handle_muc_admin_iq(
             warn!(room = %room_jid, "MUC admin set rejected because a non-owner tried to change an owner/admin role");
             rollback_admin_affiliations(
                 state,
-                &room_actor,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
-                &actor_previous_affiliations,
             )
             .await;
             // XEP-0045 §8.4/§9.7: the denial returns <not-allowed/>
@@ -567,10 +545,8 @@ pub(super) async fn handle_muc_admin_iq(
             warn!(room = %room_jid, nick = %nick, "MUC admin set targeted an absent occupant");
             rollback_admin_affiliations(
                 state,
-                &room_actor,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
-                &actor_previous_affiliations,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -580,14 +556,76 @@ pub(super) async fn handle_muc_admin_iq(
                 item_not_found_iq_error("No such occupant in this room."),
             )];
         }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::NotOwner,
+        )) => {
+            warn!(room = %room_jid, "MUC admin set hit a deposed room actor");
+            rollback_admin_affiliations(
+                state,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+            )
+            .await;
+            let _ = state
+                .deps
+                .protocol
+                .room_registry
+                .ask(
+                    waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                        room_jid: room_jid.clone(),
+                        actor_ref: room_actor.clone(),
+                    },
+                )
+                .await;
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error("This room is temporarily unavailable; please retry."),
+            )];
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUnavailable,
+        )) => {
+            warn!(room = %room_jid, "MUC admin ownership verification is temporarily unavailable");
+            rollback_admin_affiliations(
+                state,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+            )
+            .await;
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error(
+                    "This room's ownership cannot be verified right now; please retry.",
+                ),
+            )];
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed,
+        )) => {
+            warn!(room = %room_jid, "MUC admin durable commit failed before apply");
+            rollback_admin_affiliations(
+                state,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+            )
+            .await;
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        }
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
             rollback_admin_affiliations(
                 state,
-                &room_actor,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
-                &actor_previous_affiliations,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -601,10 +639,8 @@ pub(super) async fn handle_muc_admin_iq(
             warn!(room = %room_jid, error = ?error, "Failed to apply MUC admin IQ");
             rollback_admin_affiliations(
                 state,
-                &room_actor,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
-                &actor_previous_affiliations,
             )
             .await;
             return vec![build_iq_error_xml_typed(

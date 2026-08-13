@@ -44,6 +44,23 @@ struct PendingPreparationCountForTest;
 
 struct PendingRoomOwnershipResponsibilityCountForTest;
 
+struct RememberDestroyAttemptForTest {
+    room_jid: BareJid,
+}
+
+impl kameo::message::Message<RememberDestroyAttemptForTest> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RememberDestroyAttemptForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.destroy_attempts
+            .insert(msg.room_jid, crate::muc::DestroyAttemptId::generate());
+    }
+}
+
 impl kameo::message::Message<PendingRoomOwnershipResponsibilityCountForTest> for RoomRegistryActor {
     type Reply = usize;
 
@@ -1136,7 +1153,6 @@ mod ownership_claims_tests {
         GetAffiliation, GetConfig, IsSealed, JoinAffiliationGrant, JoinWithAffiliation,
         ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpdateConfig,
     };
-    use crate::muc::subject::SubjectState;
     use crate::ownership::{
         ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore,
         NodeIdentity, ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
@@ -1273,7 +1289,7 @@ mod ownership_claims_tests {
         .await;
 
         let jid = test_room_jid("durable-destroy-fails");
-        registry
+        let room = registry
             .ask(GetOrCreateRoom {
                 room_jid: jid.clone(),
                 waddle_id: "w-1".to_string(),
@@ -1300,11 +1316,72 @@ mod ownership_claims_tests {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("get room");
+            .expect("get room")
+            .expect("the room stays registered so the destroy can be retried");
         assert!(
-            still_there.is_some(),
+            !still_there.ask(IsSealed).await.expect("sealed probe"),
+            "a failed durable destroy must reopen the matching actor attempt"
+        );
+        assert_eq!(
+            still_there
+                .ask(UpdateConfig {
+                    config: RoomConfig {
+                        name: "still-serviceable".to_string(),
+                        ..RoomConfig::default()
+                    },
+                })
+                .await
+                .expect("mutation after failed destroy"),
+            1,
+            "a failed durable destroy must leave the room serviceable"
+        );
+        assert_eq!(
+            room.actor_ref.id(),
+            still_there.id(),
             "the room stays registered so the destroy can be retried"
         );
+    }
+
+    #[tokio::test]
+    async fn dead_actor_cleanup_clears_an_orphaned_destroy_attempt() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("orphaned-destroy-attempt");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("remember destroy attempt");
+
+        actor.kill();
+        actor.wait_for_shutdown().await;
+        assert!(matches!(
+            registry.ask(GetRoom {
+                room_jid: jid.clone(),
+            }).await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if *room == jid
+        ));
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("clear dead room"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        registry
+            .ask(get_or_create(jid))
+            .await
+            .expect("recreate after dead actor cleanup");
     }
 
     /// The deposed-node eviction path (fenced fan-out check observed a
@@ -2137,7 +2214,14 @@ mod ownership_claims_tests {
         fail_deletes: bool,
         local_identity: Option<SharedNodeIdentity>,
         authoritative_claim_store: Mutex<Option<Arc<dyn ClaimStore>>>,
-        claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
+        exact_claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
+        published_claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
+        /// The static-load fake lets a fresh `Create` perform its required
+        /// post-commit hydration without consuming the test's initial-restore
+        /// blocker a second time.
+        post_create_reload_credits: Mutex<HashMap<BareJid, ()>>,
+        lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
+        next_revision: AtomicUsize,
     }
 
     impl RecordingDurableStore {
@@ -2196,9 +2280,97 @@ mod ownership_claims_tests {
                 })
             }
         }
+
+        fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
+            let lifecycle = *self
+                .lifecycle
+                .get_or_init(crate::muc::RoomLifecycleId::generate);
+            let revision = self.next_revision.fetch_add(1, Ordering::SeqCst) + 1;
+            crate::muc::RoomCommittedCoordinates {
+                lifecycle,
+                revision: crate::muc::RoomRevision::from_stored(revision as i64)
+                    .expect("positive revision"),
+            }
+        }
     }
 
     impl MucDurableStore for RecordingDurableStore {
+        fn commit_room_mutation<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+            intent: crate::muc::RoomDurableMutation,
+        ) -> crate::muc::RoomCommitFuture<'a> {
+            let store = self;
+            let block = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
+                && self.block_next_config_save.swap(false, Ordering::SeqCst);
+            if matches!(intent, crate::muc::RoomDurableMutation::Config { .. }) {
+                self.config_save_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            let config_save_started = self.config_save_started.clone();
+            let allow_config_save = self.allow_config_save.clone();
+            let starting_fence = fence.clone();
+            let fail_deletes = self.fail_deletes;
+            let deleted_rooms = &self.deleted_rooms;
+            let created = matches!(intent, crate::muc::RoomDurableMutation::Create { .. });
+            let coordinates = self.next_commit_coordinates();
+            Box::pin(async move {
+                if store.exact_claim_fences.lock().expect("lock").get(room_jid) != Some(fence) {
+                    return Err(crate::muc::RoomCommitError::OwnershipUnavailable);
+                }
+                store
+                    .validate_claim_fence(room_jid, fence)
+                    .await
+                    .map_err(|error| match error {
+                        crate::XmppError::OwnershipLost { .. } => {
+                            crate::muc::RoomCommitError::NotOwner
+                        }
+                        crate::XmppError::OwnershipUnavailable { .. } => {
+                            crate::muc::RoomCommitError::OwnershipUnavailable
+                        }
+                        _ => crate::muc::RoomCommitError::OwnershipUnavailable,
+                    })?;
+                if block {
+                    let claim_fences = Arc::clone(&store.exact_claim_fences);
+                    let stale_rejected = Arc::clone(&store.stale_config_save_rejected);
+                    let room_jid = room_jid.clone();
+                    tokio::spawn(async move {
+                        if let Some(started) = config_save_started {
+                            started.notify_one();
+                        }
+                        if let Some(allow) = allow_config_save {
+                            allow.notified().await;
+                        }
+                        let current_fence =
+                            claim_fences.lock().expect("lock").get(&room_jid).cloned();
+                        if current_fence.as_ref() != Some(&starting_fence) {
+                            stale_rejected.store(true, Ordering::SeqCst);
+                        }
+                    });
+                    std::future::pending().await
+                }
+                if matches!(intent, crate::muc::RoomDurableMutation::Destroy) {
+                    if fail_deletes {
+                        return Err(crate::muc::RoomCommitError::Database(
+                            crate::muc::durable::RoomCommitDatabaseError::sanitized(),
+                        ));
+                    }
+                    deleted_rooms
+                        .lock()
+                        .expect("lock")
+                        .push(room_jid.to_string());
+                }
+                if created {
+                    store
+                        .post_create_reload_credits
+                        .lock()
+                        .expect("lock")
+                        .insert(room_jid.clone(), ());
+                }
+                Ok(coordinates)
+            })
+        }
+
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,
@@ -2212,8 +2384,14 @@ mod ownership_claims_tests {
             Box::pin(async move {
                 store.validate_claim_fence(room_jid, fence).await?;
                 let load_call = store.load_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let post_create_reload = store
+                    .post_create_reload_credits
+                    .lock()
+                    .expect("lock")
+                    .remove(room_jid)
+                    .is_some();
                 let should_block = store.block_all_loads
-                    || store.block_load_for.as_ref() == Some(room_jid)
+                    || (!post_create_reload && store.block_load_for.as_ref() == Some(room_jid))
                     || store
                         .block_load_from_call
                         .is_some_and(|first_blocked_call| load_call >= first_blocked_call);
@@ -2271,45 +2449,6 @@ mod ownership_claims_tests {
             })
         }
 
-        fn save_config_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a RoomConfig,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            self.config_save_calls.fetch_add(1, Ordering::SeqCst);
-            let store = self;
-            let block = self.block_next_config_save.swap(false, Ordering::SeqCst);
-            let config_save_started = self.config_save_started.clone();
-            let allow_config_save = self.allow_config_save.clone();
-            let starting_fence = fence.clone();
-            Box::pin(async move {
-                store.validate_claim_fence(room_jid, fence).await?;
-                if block {
-                    let claim_fences = Arc::clone(&self.claim_fences);
-                    let stale_rejected = Arc::clone(&self.stale_config_save_rejected);
-                    let room_jid = room_jid.clone();
-                    tokio::spawn(async move {
-                        if let Some(started) = config_save_started {
-                            started.notify_one();
-                        }
-                        if let Some(allow) = allow_config_save {
-                            allow.notified().await;
-                        }
-                        let current_fence =
-                            claim_fences.lock().expect("lock").get(&room_jid).cloned();
-                        if current_fence.as_ref() != Some(&starting_fence) {
-                            stale_rejected.store(true, Ordering::SeqCst);
-                        }
-                    });
-                    std::future::pending().await
-                }
-                Ok(())
-            })
-        }
-
         fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
             let owned = !self.fence_lost.load(Ordering::SeqCst);
             Box::pin(async move { Ok(owned) })
@@ -2340,60 +2479,37 @@ mod ownership_claims_tests {
             })
         }
 
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _subject: Option<&'a SubjectState>,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async move { self.validate_claim_fence(room_jid, fence).await })
-        }
-
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _entry: &'a AffiliationEntry,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async move { self.validate_claim_fence(room_jid, fence).await })
-        }
-
-        fn delete_room_state_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let fail_deletes = self.fail_deletes;
-            let deleted_rooms = &self.deleted_rooms;
-            Box::pin(async move {
-                self.validate_claim_fence(room_jid, fence).await?;
-                if fail_deletes {
-                    return Err(crate::XmppError::internal("delete refused by test store"));
-                }
-                deleted_rooms
-                    .lock()
-                    .expect("lock")
-                    .push(room_jid.to_string());
-                Ok(())
-            })
+        fn establish_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+            self.exact_claim_fences
+                .lock()
+                .expect("lock")
+                .insert(room_jid.clone(), fence);
         }
 
         fn record_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
-            self.claim_fences
+            self.exact_claim_fences
+                .lock()
+                .expect("lock")
+                .insert(room_jid.clone(), fence.clone());
+            self.published_claim_fences
                 .lock()
                 .expect("lock")
                 .insert(room_jid.clone(), fence);
         }
 
         fn forget_claim_fence(&self, room_jid: &BareJid, expected: &RoomClaimFenceContext) {
-            let mut fences = self.claim_fences.lock().expect("lock");
-            if fences.get(room_jid) == Some(expected) {
-                fences.remove(room_jid);
+            let mut exact_fences = self.exact_claim_fences.lock().expect("lock");
+            if exact_fences.get(room_jid) == Some(expected) {
+                exact_fences.remove(room_jid);
+            }
+            let mut published_fences = self.published_claim_fences.lock().expect("lock");
+            if published_fences.get(room_jid) == Some(expected) {
+                published_fences.remove(room_jid);
             }
         }
 
         fn current_claim_fence(&self, room_jid: &BareJid) -> Option<RoomClaimFenceContext> {
-            self.claim_fences
+            self.published_claim_fences
                 .lock()
                 .expect("lock")
                 .get(room_jid)
@@ -2721,7 +2837,11 @@ mod ownership_claims_tests {
             .expect("lookup task")
             .expect("lookup reply")
             .is_some());
-        assert_eq!(store.load_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store.load_calls.load(Ordering::SeqCst),
+            4,
+            "each fresh room performs its initial restore and its post-Create hydration"
+        );
     }
 
     #[tokio::test]

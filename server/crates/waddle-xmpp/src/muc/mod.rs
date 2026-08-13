@@ -34,9 +34,9 @@ pub use admin::{
 pub use durable::{
     AffiliationEntry as DurableAffiliationEntry, DestroyAttemptId, DurableRoomState,
     EphemeralProjectionAuthorization, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
-    RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
-    RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit,
-    RoomRevision,
+    RoomCommitDatabaseError, RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates,
+    RoomDurableMutation, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState,
+    RoomMutationCommit, RoomRevision,
 };
 pub use messages::{
     build_config_change_message, config_change_status_codes, create_broadcast_message,

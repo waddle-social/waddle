@@ -273,45 +273,24 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             })
         }
 
-        fn save_config_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a waddle_xmpp::muc::RoomConfig,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn delete_room_state_fenced<'a>(
+        fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
+            _intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            if let Err(error) = validate_local_room_fence(room_jid, fence) {
+                return Box::pin(async move {
+                    let _ = error;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                });
+            }
+            Box::pin(async move {
+                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                })
+            })
         }
 
         fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
@@ -7996,65 +7975,31 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
                 Ok(None)
             })
         }
-        fn save_config_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a waddle_xmpp::muc::RoomConfig,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let expected =
-                expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
-            let validation = (fence == &expected)
-                .then_some(())
-                .ok_or_else(|| waddle_xmpp::XmppError::internal("unexpected exact room fence"));
-            Box::pin(async move { validation })
-        }
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let expected =
-                expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
-            let validation = (fence == &expected)
-                .then_some(())
-                .ok_or_else(|| waddle_xmpp::XmppError::internal("unexpected exact room fence"));
-            Box::pin(async move { validation })
-        }
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let expected =
-                expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
-            let validation = (fence == &expected)
-                .then_some(())
-                .ok_or_else(|| waddle_xmpp::XmppError::internal("unexpected exact room fence"));
-            Box::pin(async move { validation })
-        }
-        fn delete_room_state_fenced<'a>(
+        fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             let expected =
                 expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
             if fence != &expected {
-                let error = waddle_xmpp::XmppError::internal("unexpected exact room fence");
-                return Box::pin(async move { Err(error) });
+                return Box::pin(async { Err(waddle_xmpp::muc::RoomCommitError::NotOwner) });
             }
-            Box::pin(async {
-                Err(waddle_xmpp::XmppError::internal(
-                    "destroy-time wipe refused by test store",
-                ))
+            if matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Destroy) {
+                return Box::pin(async {
+                    Err(waddle_xmpp::muc::RoomCommitError::Database(
+                        waddle_xmpp::muc::RoomCommitDatabaseError::sanitized(),
+                    ))
+                });
+            }
+            Box::pin(async move {
+                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                })
             })
         }
-
         fn check_exact_claim_fence<'a>(
             &'a self,
             room_jid: &'a BareJid,
