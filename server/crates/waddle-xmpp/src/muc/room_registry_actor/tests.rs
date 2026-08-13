@@ -1596,9 +1596,10 @@ mod ownership_claims_tests {
 
     #[tokio::test]
     async fn terminal_destroy_commit_errors_evict_instead_of_reopening_the_actor() {
-        for (name, durable_store) in [
+        for (name, expected, durable_store) in [
             (
                 "not-owner",
+                DestroyRoomOutcome::DurableWipeFailed,
                 Arc::new(RecordingDurableStore {
                     destroy_not_owner: true,
                     ..RecordingDurableStore::default()
@@ -1606,6 +1607,7 @@ mod ownership_claims_tests {
             ),
             (
                 "state-missing",
+                DestroyRoomOutcome::Destroyed,
                 Arc::new(RecordingDurableStore {
                     destroy_state_missing: true,
                     ..RecordingDurableStore::default()
@@ -1641,7 +1643,7 @@ mod ownership_claims_tests {
                     })
                     .await
                     .expect("destroy"),
-                DestroyRoomOutcome::Destroyed
+                expected
             );
             actor.wait_for_shutdown().await;
             assert!(
@@ -1653,6 +1655,108 @@ mod ownership_claims_tests {
                 "{name} must not leave the pre-sealed actor discoverable"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dormant_state_missing_evicts_and_releases_inactive_rooms() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            dormancy_state_missing: true,
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store),
+            SharedNodeIdentity::new(this_identity()),
+            durable_store,
+        )
+        .await;
+        let room_jid = test_room_jid("dormancy-state-missing-guarded");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let actor = registry
+            .ask(get_or_create(room_jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let probe = actor
+            .ask(crate::muc::room_actor::IsDormant)
+            .await
+            .expect("dormancy probe");
+
+        assert!(registry
+            .ask(DestroyRoomIfInactive {
+                room_jid: room_jid.clone(),
+                expected_occupancy_revision: probe.occupancy_revision,
+                guard: crate::muc::room_actor::SealGuard::Dormant,
+            })
+            .await
+            .expect("guarded eviction"));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn dormant_state_missing_reaper_evicts_without_unsealing() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            dormancy_state_missing: true,
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store),
+            SharedNodeIdentity::new(this_identity()),
+            durable_store,
+        )
+        .await;
+        let room_jid = test_room_jid("dormancy-state-missing-reaper");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let actor = registry
+            .ask(get_or_create(room_jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        assert_eq!(
+            actor
+                .ask(crate::muc::room_actor::SealIfInactive {
+                    expected_occupancy_revision: 0,
+                    guard: crate::muc::room_actor::SealGuard::Dormant,
+                })
+                .await
+                .expect("seal inactive room"),
+            crate::muc::room_actor::SealIfInactiveOutcome::Inactive,
+        );
+
+        assert!(registry
+            .ask(ReapSealedRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("reap sealed room"));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .is_none());
     }
 
     #[tokio::test]
@@ -2526,6 +2630,9 @@ mod ownership_claims_tests {
         block_next_config_save: AtomicBool,
         config_save_started: Option<Arc<tokio::sync::Notify>>,
         allow_config_save: Option<Arc<tokio::sync::Notify>>,
+        block_create_for: Option<BareJid>,
+        create_started: Option<Arc<tokio::sync::Notify>>,
+        allow_create: Option<Arc<tokio::sync::Notify>>,
         stale_config_save_rejected: Arc<AtomicBool>,
         fence_lost: AtomicBool,
         demote_notifications: Mutex<Vec<(String, String)>>,
@@ -2533,6 +2640,7 @@ mod ownership_claims_tests {
         fail_deletes: bool,
         destroy_not_owner: bool,
         destroy_state_missing: bool,
+        dormancy_state_missing: bool,
         local_identity: Option<SharedNodeIdentity>,
         authoritative_claim_store: Mutex<Option<Arc<dyn ClaimStore>>>,
         exact_claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
@@ -2630,10 +2738,15 @@ mod ownership_claims_tests {
             }
             let config_save_started = self.config_save_started.clone();
             let allow_config_save = self.allow_config_save.clone();
+            let block_create = matches!(intent, crate::muc::RoomDurableMutation::Create { .. })
+                && self.block_create_for.as_ref() == Some(room_jid);
+            let create_started = self.create_started.clone();
+            let allow_create = self.allow_create.clone();
             let starting_fence = fence.clone();
             let fail_deletes = self.fail_deletes;
             let destroy_not_owner = self.destroy_not_owner;
             let destroy_state_missing = self.destroy_state_missing;
+            let dormancy_state_missing = self.dormancy_state_missing;
             let deleted_rooms = &self.deleted_rooms;
             let created_state = match &intent {
                 crate::muc::RoomDurableMutation::Create {
@@ -2660,9 +2773,25 @@ mod ownership_claims_tests {
                 }),
                 _ => None,
             };
-            let destroys = matches!(intent, crate::muc::RoomDurableMutation::Destroy);
+            let destroys = matches!(
+                intent,
+                crate::muc::RoomDurableMutation::Destroy
+                    | crate::muc::RoomDurableMutation::DestroyAndReleaseClaim
+            );
+            let releases_claim = matches!(
+                intent,
+                crate::muc::RoomDurableMutation::DestroyAndReleaseClaim
+            );
             let coordinates = self.next_commit_coordinates();
             Box::pin(async move {
+                if block_create {
+                    if let Some(started) = create_started {
+                        started.notify_one();
+                    }
+                    if let Some(allow) = allow_create {
+                        allow.notified().await;
+                    }
+                }
                 if store.exact_claim_fences.lock().expect("lock").get(room_jid) != Some(fence) {
                     return Err(crate::muc::RoomCommitError::OwnershipUnavailable);
                 }
@@ -2718,6 +2847,28 @@ mod ownership_claims_tests {
                         .lock()
                         .expect("lock")
                         .remove(room_jid);
+                }
+                if releases_claim {
+                    let claim_store = store
+                        .authoritative_claim_store
+                        .lock()
+                        .expect("claim store")
+                        .clone()
+                        .expect("claim store is configured");
+                    claim_store
+                        .release_exact(&fence.entity, &fence.owner(), fence.epoch)
+                        .await
+                        .expect("release exact claim inside fake pending destroy");
+                    store
+                        .exact_claim_fences
+                        .lock()
+                        .expect("exact fences")
+                        .remove(room_jid);
+                }
+                if matches!(intent, crate::muc::RoomDurableMutation::Dormancy)
+                    && dormancy_state_missing
+                {
+                    return Err(crate::muc::RoomCommitError::StateMissing);
                 }
                 if let Some(created_state) = created_state {
                     store
@@ -4282,6 +4433,66 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn pending_destroy_fences_a_late_create_before_it_can_resurrect_the_room() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("destroy-before-late-create");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let allow = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(RecordingDurableStore {
+            block_create_for: Some(room_jid.clone()),
+            create_started: Some(Arc::clone(&started)),
+            allow_create: Some(Arc::clone(&allow)),
+            ..RecordingDurableStore::default()
+        });
+        let claim_store = wire_recording_store(&registry, Arc::clone(&store)).await;
+
+        let create_registry = registry.clone();
+        let create_jid = room_jid.clone();
+        let create =
+            tokio::spawn(async move { create_registry.ask(get_or_create(create_jid)).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("Create reached the durable fence");
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: room_jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy pending room"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup after destroy")
+            .is_none());
+
+        allow.notify_one();
+        assert!(matches!(
+            create.await.expect("create task"),
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
+                if *room == room_jid
+        ));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert!(store
+            .persisted_room_states
+            .lock()
+            .expect("persisted room states")
+            .get(&room_jid)
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn pending_not_owner_destroy_releases_an_old_identity_claim() {
         let registry = spawn_registry().await;
         let old_owner = this_identity();
@@ -4323,7 +4534,7 @@ mod ownership_claims_tests {
                 })
                 .await
                 .expect("destroy pending room"),
-            DestroyRoomOutcome::Destroyed,
+            DestroyRoomOutcome::DurableWipeFailed,
         );
         assert!(matches!(
             create.await.expect("create task"),

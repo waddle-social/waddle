@@ -406,9 +406,10 @@ impl RoomRegistry {
         /// Destroy a room, returning the typed outcome. The handler
         /// removes the registry entry and wipes the room's clustering
         /// durable rows (config/subject/affiliations incl. bans) under
-        /// one claim fence, restoring the entry and reporting
-        /// [`DestroyRoomOutcome::DurableWipeFailed`] if the durable delete
-        /// fails — the destroy is therefore all-or-nothing (#1261, #1276).
+        /// one claim fence, reporting [`DestroyRoomOutcome::DurableWipeFailed`]
+        /// if the durable delete does not commit. A deposed local actor is
+        /// evicted without acknowledging the destroy, so callers never run
+        /// application-level cleanup for a room that remains live elsewhere.
         destroy_room(room_jid: BareJid) -> DestroyRoomOutcome,
         "destroy_room",
         DestroyRoom {

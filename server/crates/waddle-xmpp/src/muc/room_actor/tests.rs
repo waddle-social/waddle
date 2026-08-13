@@ -3510,23 +3510,22 @@ async fn health_check_replies_when_the_room_actor_is_idle() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the pre-mutation
-// fencing gate every durable-relevant mutation handler now runs.
+// ADR-0017 Phase 3 Slice 7: the durable commit is the ownership authority for
+// mutations that carry a durable delta. Zero-delta paths retain a direct probe.
 // ---------------------------------------------------------------------------
 
 /// A [`crate::muc::durable::MucDurableStore`] test double whose
-/// `check_exact_claim_fence` result is controlled by the test, so
-/// `RoomActor::gate_mutation` can be exercised without a real Postgres
-/// backend. `save_*` calls always succeed (or, when `fail_persist` is
-/// set, always fail, or when `lose_config_persist_ownership` is set,
-/// return exact ownership loss) — only the two-stage gate is under test
-/// here; the concrete Postgres fencing SQL itself is covered by
+/// `check_exact_claim_fence` and durable-commit result are controlled by the
+/// test, so ownership handling can be exercised without a real Postgres
+/// backend. `save_*` calls always succeed (or, when `fail_persist` is set,
+/// always fail, or when `lose_config_persist_ownership` is set, return exact
+/// ownership loss). The concrete Postgres fencing SQL itself is covered by
 /// `waddle-server::muc_durable`'s own Postgres-gated test suite.
 #[derive(Default)]
 struct FakeDurableStore {
-    /// `check_exact_claim_fence`'s result: `Some(true)` = owned, `Some(false)`
-    /// = deposed, `None` = simulate a transient backend error (fails
-    /// closed, per `gate_mutation`'s own contract).
+    /// Ownership result for both direct zero-delta probes and durable commits:
+    /// `Some(true)` = owned, `Some(false)` = deposed, `None` = transient
+    /// backend error (fails closed).
     fenced: std::sync::Mutex<Option<bool>>,
     fail_persist: bool,
     lose_config_persist_ownership: bool,
@@ -3648,6 +3647,7 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let established =
             self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
+        let fenced = *self.fenced.lock().expect("lock");
         let lose_ownership = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
             && self.lose_config_persist_ownership;
         let committed_affiliations = match intent {
@@ -3671,6 +3671,10 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         let coordinates = self.next_commit_coordinates();
         Box::pin(async move {
             if !established {
+                Err(crate::muc::RoomCommitError::OwnershipUnavailable)
+            } else if fenced == Some(false) {
+                Err(crate::muc::RoomCommitError::NotOwner)
+            } else if fenced.is_none() {
                 Err(crate::muc::RoomCommitError::OwnershipUnavailable)
             } else if lose_ownership {
                 Err(crate::muc::RoomCommitError::NotOwner)
@@ -4124,7 +4128,7 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
 }
 
 #[tokio::test]
-async fn update_config_gate_blocks_the_mutation_when_deposed() {
+async fn update_config_durable_commit_blocks_the_mutation_when_deposed() {
     let store = FakeDurableStore::deposed();
     let actor = spawn_room_actor_with_store(store.clone()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
@@ -4143,7 +4147,7 @@ async fn update_config_gate_blocks_the_mutation_when_deposed() {
     let after = actor.ask(GetConfig).await.expect("ask").members_only;
     assert_eq!(
         after, original,
-        "a gated-out mutation must never have applied in-memory"
+        "a rejected durable commit must never apply the mutation in memory"
     );
 
     store.set_fenced(None);
@@ -4164,7 +4168,7 @@ async fn update_config_gate_blocks_the_mutation_when_deposed() {
 }
 
 #[tokio::test]
-async fn update_config_gate_allows_the_mutation_when_owned() {
+async fn update_config_durable_commit_allows_the_mutation_when_owned() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store.clone()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
@@ -4181,7 +4185,7 @@ async fn update_config_gate_allows_the_mutation_when_owned() {
 }
 
 #[tokio::test]
-async fn update_config_gate_fails_closed_on_a_transient_fencing_error() {
+async fn update_config_durable_commit_fails_closed_on_transient_ownership_error() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::transient_failure()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
 
@@ -4353,7 +4357,7 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
 }
 
 #[tokio::test]
-async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
+async fn change_affiliation_durable_commit_blocks_the_mutation_when_deposed() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
     let jid: BareJid = "carol@example.com".parse().expect("valid jid");
 
@@ -4375,8 +4379,25 @@ async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
     assert_eq!(
         affiliation,
         Affiliation::None,
-        "a gated-out affiliation change must never have applied"
+        "a rejected durable affiliation commit must never apply in memory"
     );
+}
+
+#[tokio::test]
+async fn no_op_affiliation_change_still_checks_ownership_when_deposed() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+    let jid: BareJid = "carol@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(ChangeAffiliation {
+            jid,
+            affiliation: Affiliation::None,
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(AffiliationMutationError::NotOwner))
+    ));
 }
 
 #[tokio::test]

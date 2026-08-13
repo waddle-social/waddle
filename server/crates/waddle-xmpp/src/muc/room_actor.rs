@@ -1371,7 +1371,6 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         msg: UpdateConfig,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.gate_mutation().await?;
         let config = msg.config.normalized();
         self.commit_durable(RoomDurableMutation::Config {
             config: config.clone(),
@@ -1405,7 +1404,6 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
         if self.config_revision != msg.expected_revision {
             return Ok(false);
         }
-        self.gate_mutation().await?;
         let config = msg.config.normalized();
         self.commit_durable(RoomDurableMutation::Config {
             config: config.clone(),
@@ -1495,7 +1493,6 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         if !sender_is_occupant {
             return Err(UpdateGroupDmConfigByMemberError::NotOccupant);
         }
-        self.gate_mutation().await?;
         let mut config = msg.config;
         config.group_dm = true;
         let config = config.normalized();
@@ -1640,7 +1637,6 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         msg: ChangeAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.gate_mutation().await?;
         if self.invite_rollback_pending(&msg.jid) {
             return Err(AffiliationMutationError::InviteRollbackPending);
         }
@@ -1653,6 +1649,10 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
                 ),
             ))
             .await?;
+        } else {
+            self.gate_pre_mutation_ownership()
+                .await
+                .map_err(RoomMutationError::from)?;
         }
         self.invalidate_invite_grant(&msg.jid);
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);

@@ -7986,7 +7986,11 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
             if fence != &expected {
                 return Box::pin(async { Err(waddle_xmpp::muc::RoomCommitError::NotOwner) });
             }
-            if matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Destroy) {
+            if matches!(
+                intent,
+                waddle_xmpp::muc::RoomDurableMutation::Destroy
+                    | waddle_xmpp::muc::RoomDurableMutation::DestroyAndReleaseClaim
+            ) {
                 return Box::pin(async {
                     Err(waddle_xmpp::muc::RoomCommitError::Database(
                         waddle_xmpp::muc::RoomCommitDatabaseError::sanitized(),

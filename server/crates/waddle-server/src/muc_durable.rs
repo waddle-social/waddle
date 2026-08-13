@@ -545,6 +545,33 @@ impl PostgresMucRoomStore {
         Ok(())
     }
 
+    async fn release_claim_in_tx(
+        &self,
+        tx: &mut Transaction<'_>,
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), RoomCommitError> {
+        let released = tx
+            .execute(
+                "DELETE FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?",
+                crate::db_params![
+                    room_entity_key(room_jid),
+                    fence.owner.node_id.clone(),
+                    fence.owner.node_epoch.clone(),
+                    fence.epoch.0,
+                ],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        if released == 1 {
+            Ok(())
+        } else {
+            remove_room_claim_fence_if(&self.exact_claim_fences, room_jid, fence);
+            remove_room_claim_fence_if(&self.published_claim_fences, room_jid, fence);
+            Err(RoomCommitError::NotOwner)
+        }
+    }
+
     fn commit_error(error: DatabaseError) -> RoomCommitError {
         if is_retryable_tx_error(&error) {
             RoomCommitError::RetryExhausted
@@ -613,6 +640,7 @@ impl PostgresMucRoomStore {
         let exclusive_claim = matches!(
             intent,
             RoomDurableMutation::Destroy
+                | RoomDurableMutation::DestroyAndReleaseClaim
                 | RoomDurableMutation::Dormancy
                 | RoomDurableMutation::Activate
         );
@@ -696,6 +724,38 @@ impl PostgresMucRoomStore {
             .await
             .map_err(Self::commit_error)?;
             (lifecycle, revision, RoomLifecycleState::Active)
+        } else if matches!(intent, RoomDurableMutation::DestroyAndReleaseClaim) {
+            let mut room_rows = tx
+                .query(
+                    "SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ?",
+                    crate::db_params![room_jid.to_string()],
+                )
+                .await
+                .map_err(Self::commit_error)?;
+            if room_rows
+                .next()
+                .await
+                .map_err(Self::commit_error)?
+                .is_none()
+            {
+                drop(room_rows);
+                self.release_claim_in_tx(&mut tx, room_jid, fence).await?;
+                tx.commit().await.map_err(Self::commit_error)?;
+                return Ok(RoomCommittedCoordinates {
+                    lifecycle: RoomLifecycleId::generate(),
+                    revision: RoomRevision::initial(),
+                });
+            }
+            drop(room_rows);
+            let lifecycle = RoomLifecycleId::generate();
+            let revision = RoomRevision::initial();
+            tx.execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params![lifecycle.to_string(), room_jid.to_string(), revision.as_i64(), RoomLifecycleState::Active.as_db_str()],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+            (lifecycle, revision, RoomLifecycleState::Active)
         } else if matches!(intent, RoomDurableMutation::Destroy) {
             // A pre-lifecycle room row is a valid legacy state.  Destroy is
             // terminal, so it must claim that legacy incarnation and wipe it
@@ -765,7 +825,10 @@ impl PostgresMucRoomStore {
         if state == RoomLifecycleState::Dormant
             && !matches!(
                 intent,
-                RoomDurableMutation::Activate | RoomDurableMutation::Destroy
+                RoomDurableMutation::Activate
+                    | RoomDurableMutation::Destroy
+                    | RoomDurableMutation::DestroyAndReleaseClaim
+                    | RoomDurableMutation::Dormancy
             )
         {
             return Err(RoomCommitError::StateMissing);
@@ -775,6 +838,16 @@ impl PostgresMucRoomStore {
             // transition, so it keeps its coordinates and bumps nothing. A
             // missing lifecycle stays a hard `StateMissing` above — callers
             // must not conflate the two.
+            tx.commit().await.map_err(Self::commit_error)?;
+            return Ok(RoomCommittedCoordinates {
+                lifecycle,
+                revision,
+            });
+        }
+        if matches!(intent, RoomDurableMutation::Dormancy) && state == RoomLifecycleState::Dormant {
+            // An acknowledgement can be lost after the dormancy transaction
+            // commits. Repeating the same terminal transition must converge
+            // without bumping the durable coordinates.
             tx.commit().await.map_err(Self::commit_error)?;
             return Ok(RoomCommittedCoordinates {
                 lifecycle,
@@ -853,13 +926,16 @@ impl PostgresMucRoomStore {
                     Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
                 }
             }
-            RoomDurableMutation::Destroy => {
+            RoomDurableMutation::Destroy | RoomDurableMutation::DestroyAndReleaseClaim => {
                 tx.execute(
                     "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ?",
                     crate::db_params![room_jid.to_string()],
                 )
                 .await
                 .map_err(Self::commit_error)?;
+                if matches!(intent, RoomDurableMutation::DestroyAndReleaseClaim) {
+                    self.release_claim_in_tx(&mut tx, room_jid, fence).await?;
+                }
                 tx.execute(
                     "DELETE FROM clustering_muc_rooms WHERE room_jid = ?",
                     crate::db_params![room_jid.to_string()],
@@ -885,7 +961,9 @@ impl PostgresMucRoomStore {
             }
         }
         let final_state = match intent {
-            RoomDurableMutation::Destroy => RoomLifecycleState::Tombstoned,
+            RoomDurableMutation::Destroy | RoomDurableMutation::DestroyAndReleaseClaim => {
+                RoomLifecycleState::Tombstoned
+            }
             RoomDurableMutation::Dormancy => RoomLifecycleState::Dormant,
             RoomDurableMutation::Activate => RoomLifecycleState::Active,
             _ => state,
@@ -1818,6 +1896,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_destroy_releases_its_claim_before_a_late_create_can_commit() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-c7-pending-destroy");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::DestroyAndReleaseClaim,
+            )
+            .await
+            .expect("pending destroy atomically consumes its claim");
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .is_none());
+        assert!(matches!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::Create {
+                        waddle_id: "waddle-late-create".to_string(),
+                        channel_id: "channel-late-create".to_string(),
+                        config: RoomConfig::default(),
+                        initial_affiliations: vec![],
+                    },
+                )
+                .await,
+            Err(RoomCommitError::NotOwner)
+        ));
+        let mut rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT count(*) FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query room rows");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("room count")
+            .expect("room count row")
+            .get(0)
+            .expect("decode room count");
+        assert_eq!(count, 0, "late Create cannot resurrect durable room state");
+    }
+
+    #[tokio::test]
     async fn activate_transitions_dormant_to_active_adopts_pre_lifecycle_rooms_and_rejects_missing_state(
     ) {
         let _guard = clustering_control_plane_table_lock().lock().await;
@@ -1852,6 +1993,15 @@ mod tests {
             .await
             .expect("dormancy transition");
         assert_eq!(dormant.revision.as_i64(), 2);
+
+        let redormant = store
+            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .await
+            .expect("repeating dormancy converges after an ambiguous acknowledgement");
+        assert_eq!(
+            redormant, dormant,
+            "idempotent dormancy must not bump revision"
+        );
 
         let active = store
             .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Activate)

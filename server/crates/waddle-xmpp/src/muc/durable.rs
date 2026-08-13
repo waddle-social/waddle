@@ -106,6 +106,10 @@ pub enum RoomDurableMutation {
     MediatedInviteGrant(AffiliationEntry),
     MediatedInviteRollback(AffiliationEntry),
     Destroy,
+    /// Terminally destroy an unpublished room and release its exact claim in
+    /// the same durable transaction. This prevents a preparation that was
+    /// already in flight from committing `Create` after the destroy returns.
+    DestroyAndReleaseClaim,
     Dormancy,
     Activate,
 }
@@ -198,12 +202,12 @@ pub struct DurableRoomState {
 /// `ChangeAffiliation`, `ApplyAdminItems`, `ApplyAffiliationChange`,
 /// `EnforceMembersOnlyAffiliations`, `ReconcileChannelBackedRoom`):
 ///
-/// 1. **Before mutating**: the handler runs
-///    [`super::room_actor::RoomActor::gate_mutation`] — a `SELECT ... FOR
-///    SHARE`-fenced [`Self::check_exact_claim_fence`] pre-check using the
-///    actor incarnation's retained fence. It refuses to mutate both when
-///    ownership was lost and when ownership cannot be proven.
-/// 2. **After mutating**: config and ordinary affiliation writes classify a
+/// 1. **Before mutating**: zero-delta handlers run a `SELECT ... FOR SHARE`
+///    [`Self::check_exact_claim_fence`] pre-check using the actor
+///    incarnation's retained fence. Durable-delta handlers use their
+///    in-transaction commit fence as the authority. Both refuse to mutate
+///    when ownership was lost or cannot be proven.
+/// 2. **At commit**: config and ordinary affiliation writes classify a
 ///    `save_*` failure that is NOT ownership loss (a transient backend
 ///    outage) as a typed error rather than silently logging and swallowing
 ///    it. Subject persistence intentionally occurs before applying the
@@ -216,9 +220,8 @@ pub struct DurableRoomState {
 ///    convergence.
 ///
 /// Single-node/non-clustering deployments are unaffected: no
-/// `MucDurableStore` is configured there at all, so `gate_mutation`'s
-/// `None`-store branch always returns `Ok(())` and `save_*` is never
-/// called — today's purely in-memory behavior, byte-identical.
+/// `MucDurableStore` is configured there at all, so no durable fence or
+/// save is attempted — today's purely in-memory behavior, byte-identical.
 pub trait MucDurableStore: Send + Sync {
     /// Load `room_jid`'s durable state, if a row exists. `None` for a room
     /// that has never been durably written (e.g. a brand-new persistent

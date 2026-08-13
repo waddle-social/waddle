@@ -439,8 +439,8 @@ impl LocallyClaimedEntities for RoomLocalClaims {
     /// and every mutation handler this actor exposes
     /// (`UpdateConfig`/`RollbackConfigIfRevision`/
     /// `UpdateGroupDmConfigByMember`/`SetSubject`/`ChangeAffiliation`, and
-    /// the affiliation-bulk-apply path) synchronously `.await`s its own
-    /// `gate_mutation()` check and durable persist call
+    /// the affiliation-bulk-apply path) synchronously `.await`s its
+    /// ownership check and durable persist call
     /// (`persist_config`/`persist_subject`/`persist_affiliation`) before
     /// returning a reply — so a mutation enqueued ahead of this ask has
     /// already run its handler to completion, including its durable write's

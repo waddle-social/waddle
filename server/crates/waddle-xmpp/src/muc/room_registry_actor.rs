@@ -3829,10 +3829,10 @@ pub enum DestroyRoomReason {
 
 /// Outcome of a [`DestroyRoom`] ask. Split four ways because callers
 /// must distinguish "the room simply was not registered" (fine for
-/// admin deletion of a dormant room) from "the fenced durable wipe
-/// failed and the room was deliberately kept alive for a retry"
-/// (which MUST fail the caller's operation — acknowledging it would
-/// leave rows that resurrect the room).
+/// admin deletion of a dormant room) from "the fenced durable wipe did
+/// not commit" (which MUST fail the caller's operation — a local actor
+/// may have been evicted after ownership moved, but the durable room can
+/// still be live elsewhere).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
 pub enum DestroyRoomOutcome {
     /// The room existed and was removed (durable rows wiped when the
@@ -3840,8 +3840,9 @@ pub enum DestroyRoomOutcome {
     Destroyed,
     /// No live or poisoned entry for this JID existed.
     NotRegistered,
-    /// The epoch-fenced durable delete failed; the registry entry was
-    /// restored and nothing was destroyed.
+    /// The epoch-fenced durable delete did not commit. The registry either
+    /// retained the room for retry or evicted a now-deposed local actor, but
+    /// callers must not perform application-level destroy cleanup.
     DurableWipeFailed,
     /// The bounded exact-release retry set is full, so the registry kept the
     /// actor and claim intact rather than losing responsibility for the fence.
@@ -3862,6 +3863,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         msg: DestroyRoom,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let mut terminal_outcome = None;
         if msg.reason != DestroyRoomReason::DeposedEviction {
             let claim_fence = self
                 .rooms
@@ -3924,7 +3926,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                                 // any old-identity release responsibility.
                                 self.destroy_attempts.remove(&msg.room_jid);
                                 self.evict_ownership_lost_room(&msg.room_jid, entry).await;
-                                return DestroyRoomOutcome::Destroyed;
+                                return DestroyRoomOutcome::DurableWipeFailed;
                             }
                             RoomCommitError::StateMissing => {
                                 // The durable mutation fenced this exact claim
@@ -3958,18 +3960,24 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                     );
                 }
                 if let Err(error) = store
-                    .commit_room_mutation(&msg.room_jid, &claim_fence, RoomDurableMutation::Destroy)
+                    .commit_room_mutation(
+                        &msg.room_jid,
+                        &claim_fence,
+                        RoomDurableMutation::DestroyAndReleaseClaim,
+                    )
                     .await
                 {
-                    if matches!(
-                        error,
-                        RoomCommitError::NotOwner | RoomCommitError::StateMissing
-                    ) {
-                        // Both terminal outcomes must fall through to the
-                        // retained exact-release path below. In particular,
-                        // NotOwner may describe an old local identity whose
-                        // exact claim still needs conditional release.
+                    if matches!(error, RoomCommitError::StateMissing) {
+                        // No durable room state existed. The pending destroy
+                        // consumed the exact claim in the same transaction,
+                        // so a late Create cannot revive the room.
                         self.destroy_attempts.remove(&msg.room_jid);
+                    } else if matches!(error, RoomCommitError::NotOwner) {
+                        // The durable room belongs to another node. Retire
+                        // this pending incarnation, but never acknowledge a
+                        // destroy that did not wipe that live room.
+                        self.destroy_attempts.remove(&msg.room_jid);
+                        terminal_outcome = Some(DestroyRoomOutcome::DurableWipeFailed);
                     } else {
                         warn!(room = %msg.room_jid, %error, "durable pending-room destroy commit failed; keeping the preparation intact");
                         return DestroyRoomOutcome::DurableWipeFailed;
@@ -4022,7 +4030,9 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                     .await;
             }
         }
-        if removed_room || removed_pending_room || removed_poison {
+        if let Some(outcome) = terminal_outcome {
+            outcome
+        } else if removed_room || removed_pending_room || removed_poison {
             info!(room = %msg.room_jid, "Destroyed room");
             DestroyRoomOutcome::Destroyed
         } else {
@@ -4135,9 +4145,13 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                             info!(room = %msg.room_jid, "evicted room after ownership loss during dormancy commit");
                             return true;
                         }
-                        let _ = entry.actor_ref.tell(UnsealInactive).await;
-                        warn!(room = %msg.room_jid, %error, "durable dormancy commit failed; keeping room active");
-                        return false;
+                        if matches!(error, RoomCommitError::StateMissing) {
+                            info!(room = %msg.room_jid, "evicting room after terminal dormancy state miss");
+                        } else {
+                            let _ = entry.actor_ref.tell(UnsealInactive).await;
+                            warn!(room = %msg.room_jid, %error, "durable dormancy commit failed; keeping room active");
+                            return false;
+                        }
                     }
                 }
                 self.rooms.remove(&msg.room_jid);
@@ -4270,9 +4284,13 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                             info!(room = %msg.room_jid, "evicted room after ownership loss during dormancy recovery");
                             return true;
                         }
-                        let _ = entry.actor_ref.tell(UnsealInactive).await;
-                        warn!(room = %msg.room_jid, %error, "durable dormancy recovery commit failed; keeping room active");
-                        return false;
+                        if matches!(error, RoomCommitError::StateMissing) {
+                            info!(room = %msg.room_jid, "reaping room after terminal dormancy state miss");
+                        } else {
+                            let _ = entry.actor_ref.tell(UnsealInactive).await;
+                            warn!(room = %msg.room_jid, %error, "durable dormancy recovery commit failed; keeping room active");
+                            return false;
+                        }
                     }
                 }
                 self.rooms.remove(&msg.room_jid);
