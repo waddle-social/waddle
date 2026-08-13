@@ -51,9 +51,13 @@ use dashmap::DashMap;
 use jid::BareJid;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::muc::affiliation::AffiliationEntry;
+use waddle_xmpp::muc::durable::{
+    AffiliationEntry as DurableAffiliationEntry, RoomCommitDatabaseError, RoomCommitError,
+    RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
+};
 use waddle_xmpp::muc::{
     DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomConfig,
-    SubjectState,
+    RoomLifecycleId, RoomLifecycleState, RoomRevision, SubjectState,
 };
 use waddle_xmpp::ownership::{
     ClaimEpoch, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
@@ -71,6 +75,22 @@ use crate::db::{Database, DatabaseError, Transaction};
 /// (`6_841_445_497_037_937_993`) because each protects a separate bootstrap
 /// invariant and should not serialize unrelated startup work.
 const MUC_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_994;
+const ROOM_COMMIT_RETRY_ATTEMPTS: usize = 5;
+
+fn is_retryable_tx_error(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::Internal(sqlx::Error::Database(inner))
+            if matches!(inner.code().as_deref(), Some("40001" | "40P01"))
+                || (inner.code().as_deref() == Some("23505")
+                    && inner.constraint()
+                        == Some("clustering_muc_room_lifecycles_live_room_idx"))
+    )
+}
+
+fn commit_database_error() -> RoomCommitError {
+    RoomCommitError::Database(RoomCommitDatabaseError::sanitized())
+}
 
 fn db_err(error: DatabaseError) -> XmppError {
     // Durable MUC operations translate database failures into typed XMPP
@@ -455,6 +475,336 @@ impl PostgresMucRoomStore {
         Ok(())
     }
 
+    async fn assert_fenced_for_update(
+        &self,
+        tx: &mut Transaction<'_>,
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), RoomCommitError> {
+        self.assert_commit_fenced(tx, room_jid, fence, "FOR UPDATE")
+            .await
+    }
+
+    async fn assert_commit_fenced(
+        &self,
+        tx: &mut Transaction<'_>,
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+        lock_mode: &'static str,
+    ) -> Result<(), RoomCommitError> {
+        let expected_entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        if fence.entity != expected_entity || self.node_identity.current() != fence.owner {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
+            return Err(RoomCommitError::NotOwner);
+        }
+        let query = match lock_mode {
+            "FOR UPDATE" => "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR UPDATE",
+            _ => "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+        };
+        let mut rows = tx
+            .query(
+                query,
+                crate::db_params![
+                    room_entity_key(room_jid),
+                    fence.owner.node_id.clone(),
+                    fence.owner.node_epoch.clone(),
+                    fence.epoch.0,
+                ],
+            )
+            .await
+            .map_err(Self::commit_fence_error)?;
+        let held = rows
+            .next()
+            .await
+            .map_err(Self::commit_fence_error)?
+            .is_some();
+        if !held {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
+            return Err(RoomCommitError::NotOwner);
+        }
+        Ok(())
+    }
+
+    fn commit_error(error: DatabaseError) -> RoomCommitError {
+        if is_retryable_tx_error(&error) {
+            RoomCommitError::RetryExhausted
+        } else {
+            commit_database_error()
+        }
+    }
+
+    fn commit_fence_error(error: DatabaseError) -> RoomCommitError {
+        if is_retryable_tx_error(&error) {
+            RoomCommitError::RetryExhausted
+        } else {
+            RoomCommitError::OwnershipUnavailable
+        }
+    }
+
+    async fn write_commit_affiliation(
+        tx: &mut Transaction<'_>,
+        room_jid: &BareJid,
+        entry: &DurableAffiliationEntry,
+    ) -> Result<(), RoomCommitError> {
+        if let Some(affiliation) = entry.affiliation {
+            tx.execute(
+                r#"
+                INSERT INTO clustering_muc_room_affiliations (room_jid, member_jid, affiliation, reason)
+                VALUES (?, ?, ?, NULL)
+                ON CONFLICT (room_jid, member_jid) DO UPDATE SET
+                    affiliation = excluded.affiliation,
+                    reason = NULL
+                "#,
+                crate::db_params![
+                    room_jid.to_string(),
+                    entry.jid.to_string(),
+                    affiliation_to_db_str(affiliation).to_string(),
+                ],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        } else {
+            tx.execute(
+                "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ? AND member_jid = ?",
+                crate::db_params![room_jid.to_string(), entry.jid.to_string()],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        }
+        Ok(())
+    }
+
+    async fn commit_room_mutation_once(
+        &self,
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+        intent: &RoomDurableMutation,
+    ) -> Result<RoomCommittedCoordinates, RoomCommitError> {
+        if self.node_identity.current() != fence.owner {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
+            return Err(RoomCommitError::NotOwner);
+        }
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|_| RoomCommitError::OwnershipUnavailable)?;
+        let exclusive_claim = matches!(
+            intent,
+            RoomDurableMutation::Destroy
+                | RoomDurableMutation::Dormancy
+                | RoomDurableMutation::Activate
+        );
+        if exclusive_claim {
+            self.assert_fenced_for_update(&mut tx, room_jid, fence)
+                .await?;
+        } else {
+            self.assert_commit_fenced(&mut tx, room_jid, fence, "FOR SHARE")
+                .await?;
+        }
+
+        let mut rows = tx
+            .query(
+                "SELECT lifecycle_id, revision, state FROM clustering_muc_room_lifecycles WHERE room_jid = ? AND state IN ('active', 'dormant') FOR UPDATE",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        let existing = rows.next().await.map_err(Self::commit_error)?;
+        drop(rows);
+        let lifecycle_row_exists = existing.is_some();
+
+        let (lifecycle, revision, state) = if let Some(row) = existing {
+            let lifecycle: String = row.get(0).map_err(Self::commit_error)?;
+            let revision: i64 = row.get(1).map_err(Self::commit_error)?;
+            let state: String = row.get(2).map_err(Self::commit_error)?;
+            let lifecycle = uuid::Uuid::parse_str(&lifecycle)
+                .map(RoomLifecycleId::from_uuid)
+                .map_err(|_| commit_database_error())?;
+            let revision = RoomRevision::from_stored(revision).ok_or_else(commit_database_error)?;
+            let state =
+                RoomLifecycleState::from_db_str(&state).ok_or_else(commit_database_error)?;
+            (lifecycle, revision, state)
+        } else if matches!(intent, RoomDurableMutation::Create { .. }) {
+            let lifecycle = RoomLifecycleId::generate();
+            let revision = RoomRevision::initial();
+            match tx
+                .execute(
+                    "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                    crate::db_params![lifecycle.to_string(), room_jid.to_string(), revision.as_i64(), RoomLifecycleState::Active.as_db_str()],
+                )
+                .await
+            {
+                Ok(_) => (lifecycle, revision, RoomLifecycleState::Active),
+                Err(error) => return Err(Self::commit_error(error)),
+            }
+        } else {
+            return Err(RoomCommitError::StateMissing);
+        };
+
+        if matches!(intent, RoomDurableMutation::Create { .. }) && lifecycle_row_exists {
+            let RoomDurableMutation::Create {
+                waddle_id,
+                channel_id,
+                ..
+            } = intent
+            else {
+                unreachable!()
+            };
+            let mut room_rows = tx
+                .query(
+                    "SELECT waddle_id, channel_id FROM clustering_muc_rooms WHERE room_jid = ?",
+                    crate::db_params![room_jid.to_string()],
+                )
+                .await
+                .map_err(Self::commit_error)?;
+            let Some(room_row) = room_rows.next().await.map_err(Self::commit_error)? else {
+                return Err(RoomCommitError::StateMissing);
+            };
+            let stored_waddle: String = room_row.get(0).map_err(Self::commit_error)?;
+            let stored_channel: String = room_row.get(1).map_err(Self::commit_error)?;
+            drop(room_rows);
+            return if &stored_waddle == waddle_id && &stored_channel == channel_id {
+                tx.commit().await.map_err(Self::commit_error)?;
+                Ok(RoomCommittedCoordinates {
+                    lifecycle,
+                    revision,
+                })
+            } else {
+                Err(RoomCommitError::CreateConflict)
+            };
+        }
+        if state == RoomLifecycleState::Dormant
+            && !matches!(
+                intent,
+                RoomDurableMutation::Activate | RoomDurableMutation::Destroy
+            )
+        {
+            return Err(RoomCommitError::StateMissing);
+        }
+        if matches!(intent, RoomDurableMutation::Activate) && state != RoomLifecycleState::Dormant {
+            return Err(RoomCommitError::StateMissing);
+        }
+
+        let next_revision = if matches!(intent, RoomDurableMutation::Create { .. }) {
+            revision
+        } else {
+            revision.next().ok_or(RoomCommitError::RevisionOverflow)?
+        };
+        match intent {
+            RoomDurableMutation::Create {
+                waddle_id,
+                channel_id,
+                config,
+                initial_affiliations,
+            } => {
+                let config_json =
+                    serde_json::to_string(config).map_err(|_| commit_database_error())?;
+                tx.execute(
+                    "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, ?, ?, ?, ?, ?)",
+                    crate::db_params![room_jid.to_string(), waddle_id.clone(), channel_id.clone(), config_json, lifecycle.to_string(), next_revision.as_i64()],
+                ).await.map_err(Self::commit_error)?;
+                for entry in initial_affiliations {
+                    Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
+                }
+            }
+            RoomDurableMutation::Config {
+                config,
+                waddle_id,
+                channel_id,
+            } => {
+                let config_json =
+                    serde_json::to_string(config).map_err(|_| commit_database_error())?;
+                let affected = tx.execute(
+                    "UPDATE clustering_muc_rooms SET waddle_id = ?, channel_id = ?, config_json = ?, lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?",
+                    crate::db_params![waddle_id.clone(), channel_id.clone(), config_json, lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()],
+                ).await.map_err(Self::commit_error)?;
+                if affected == 0 {
+                    return Err(RoomCommitError::StateMissing);
+                }
+            }
+            RoomDurableMutation::Subject(subject) => {
+                let subject_json = subject
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|_| commit_database_error())?;
+                let affected = tx.execute("UPDATE clustering_muc_rooms SET subject_json = ?, lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?", crate::db_params![subject_json, lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()]).await.map_err(Self::commit_error)?;
+                if affected == 0 {
+                    return Err(RoomCommitError::StateMissing);
+                }
+            }
+            RoomDurableMutation::Affiliation(entry)
+            | RoomDurableMutation::MediatedInviteGrant(entry)
+            | RoomDurableMutation::MediatedInviteRollback(entry) => {
+                Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
+                tx.execute("UPDATE clustering_muc_rooms SET lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?", crate::db_params![lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()]).await.map_err(Self::commit_error)?;
+            }
+            RoomDurableMutation::AffiliationBatch(entries) => {
+                for entry in entries {
+                    Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
+                }
+                tx.execute("UPDATE clustering_muc_rooms SET lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?", crate::db_params![lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()]).await.map_err(Self::commit_error)?;
+            }
+            RoomDurableMutation::MembersOnlyEnforcement {
+                config,
+                affiliations,
+            } => {
+                let config_json =
+                    serde_json::to_string(config).map_err(|_| commit_database_error())?;
+                tx.execute("UPDATE clustering_muc_rooms SET config_json = ?, lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?", crate::db_params![config_json, lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()]).await.map_err(Self::commit_error)?;
+                for entry in affiliations {
+                    Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
+                }
+            }
+            RoomDurableMutation::Destroy => {
+                tx.execute(
+                    "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ?",
+                    crate::db_params![room_jid.to_string()],
+                )
+                .await
+                .map_err(Self::commit_error)?;
+                tx.execute(
+                    "DELETE FROM clustering_muc_rooms WHERE room_jid = ?",
+                    crate::db_params![room_jid.to_string()],
+                )
+                .await
+                .map_err(Self::commit_error)?;
+            }
+            RoomDurableMutation::Dormancy | RoomDurableMutation::Activate => {
+                let affected = tx
+                    .execute(
+                        "UPDATE clustering_muc_rooms SET lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?",
+                        crate::db_params![
+                            lifecycle.to_string(),
+                            next_revision.as_i64(),
+                            room_jid.to_string()
+                        ],
+                    )
+                    .await
+                    .map_err(Self::commit_error)?;
+                if affected == 0 {
+                    return Err(RoomCommitError::StateMissing);
+                }
+            }
+        }
+        let final_state = match intent {
+            RoomDurableMutation::Destroy => RoomLifecycleState::Tombstoned,
+            RoomDurableMutation::Dormancy => RoomLifecycleState::Dormant,
+            RoomDurableMutation::Activate => RoomLifecycleState::Active,
+            _ => state,
+        };
+        tx.execute(
+            "UPDATE clustering_muc_room_lifecycles SET revision = ?, state = ?, updated_at = now() WHERE lifecycle_id = ?",
+            crate::db_params![next_revision.as_i64(), final_state.as_db_str(), lifecycle.to_string()],
+        ).await.map_err(Self::commit_error)?;
+        tx.commit().await.map_err(Self::commit_error)?;
+        Ok(RoomCommittedCoordinates {
+            lifecycle,
+            revision: next_revision,
+        })
+    }
+
     async fn exact_claim_is_held(
         &self,
         room_jid: &BareJid,
@@ -586,6 +936,34 @@ impl PostgresMucRoomStore {
 }
 
 impl MucDurableStore for PostgresMucRoomStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        intent: RoomDurableMutation,
+    ) -> RoomCommitFuture<'a> {
+        Box::pin(async move {
+            for attempt in 0..ROOM_COMMIT_RETRY_ATTEMPTS {
+                match self
+                    .commit_room_mutation_once(room_jid, fence, &intent)
+                    .await
+                {
+                    Ok(coordinates) => return Ok(coordinates),
+                    Err(RoomCommitError::RetryExhausted)
+                        if attempt + 1 < ROOM_COMMIT_RETRY_ATTEMPTS =>
+                    {
+                        let jitter = (uuid::Uuid::now_v7().as_u128() % 4) as u64;
+                        let delay =
+                            std::time::Duration::from_millis(2 + attempt as u64 * 3 + jitter);
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(RoomCommitError::RetryExhausted)
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -894,6 +1272,43 @@ mod tests {
             .expect("valid test room JID")
     }
 
+    fn unique_room_jid(prefix: &str) -> BareJid {
+        format!("{prefix}-{}@muc.example.com", uuid::Uuid::new_v4())
+            .parse()
+            .expect("valid test room JID")
+    }
+
+    async fn wait_for_lock_waiter(db: &Database, query_fragment: &str) {
+        let waiter = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let conn = db.guard().await.expect("monitor guard");
+                let mut rows = conn
+                    .query(
+                        "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE ?",
+                        crate::db_params![format!("%{query_fragment}%")],
+                    )
+                    .await
+                    .expect("poll lock waiters");
+                let count = rows
+                    .next()
+                    .await
+                    .expect("read lock-waiter count")
+                    .expect("lock-waiter count row")
+                    .get::<i64>(0)
+                    .expect("decode lock-waiter count");
+                if count > 0 {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            waiter.is_ok(),
+            "no blocked backend appeared for query fragment: {query_fragment:?}"
+        );
+    }
+
     #[test]
     fn fence_database_failures_preserve_the_exact_fence_entity() {
         let jid = room_jid("fence-db-unavailable");
@@ -913,6 +1328,81 @@ mod tests {
                 "database uncertainty must remain typed for the exact fence entity"
             );
         }
+    }
+
+    #[derive(Debug)]
+    struct RetryablePgError {
+        code: &'static str,
+        constraint: Option<&'static str>,
+    }
+
+    impl std::fmt::Display for RetryablePgError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "test postgres error")
+        }
+    }
+
+    impl std::error::Error for RetryablePgError {}
+
+    impl sqlx::error::DatabaseError for RetryablePgError {
+        fn message(&self) -> &str {
+            "test postgres error"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.code))
+        }
+
+        fn constraint(&self) -> Option<&str> {
+            self.constraint
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn retryable_database_error(
+        code: &'static str,
+        constraint: Option<&'static str>,
+    ) -> DatabaseError {
+        DatabaseError::Internal(sqlx::Error::Database(Box::new(RetryablePgError {
+            code,
+            constraint,
+        })))
+    }
+
+    #[test]
+    fn retry_classifier_accepts_transaction_retries_and_the_lifecycle_arbiter_only() {
+        assert!(is_retryable_tx_error(&retryable_database_error(
+            "40001", None
+        )));
+        assert!(is_retryable_tx_error(&retryable_database_error(
+            "40P01", None
+        )));
+        assert!(is_retryable_tx_error(&retryable_database_error(
+            "23505",
+            Some("clustering_muc_room_lifecycles_live_room_idx"),
+        )));
+        assert!(!is_retryable_tx_error(&retryable_database_error(
+            "23505",
+            Some("other_unique")
+        )));
+        assert!(!is_retryable_tx_error(&retryable_database_error(
+            "23503", None
+        )));
     }
 
     #[tokio::test]
@@ -1156,6 +1646,988 @@ mod tests {
             waiter.is_ok(),
             "MUC schema bootstrap must show an ungranted advisory waiter in pg_locks"
         );
+    }
+
+    #[tokio::test]
+    async fn first_writer_create_mints_revision_one_and_back_links() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-a2-first-write");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        let config = RoomConfig {
+            name: "first-writer".to_string(),
+            ..RoomConfig::default()
+        };
+        let owner: BareJid = "owner@example.com".parse().expect("valid jid");
+        let coords = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: "waddle-first".to_string(),
+                    channel_id: "channel-first".to_string(),
+                    config: config.clone(),
+                    initial_affiliations: vec![waddle_xmpp::muc::durable::AffiliationEntry::new(
+                        owner.clone(),
+                        Some(Affiliation::Owner),
+                    )],
+                },
+            )
+            .await
+            .expect("first write must commit");
+
+        assert_eq!(coords.revision, RoomRevision::initial());
+
+        let conn = store.db.guard().await.expect("guard");
+        let mut lifecycle_rows = conn
+            .query(
+                "SELECT lifecycle_id, revision, state FROM clustering_muc_room_lifecycles WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query lifecycle row");
+        let lifecycle_row = lifecycle_rows
+            .next()
+            .await
+            .expect("lifecycle row exists")
+            .expect("lifecycle row");
+        let lifecycle_id: String = lifecycle_row.get(0).expect("lifecycle id");
+        let revision: i64 = lifecycle_row.get(1).expect("lifecycle revision");
+        let state: String = lifecycle_row.get(2).expect("lifecycle state");
+        assert_eq!(coords.lifecycle.to_string(), lifecycle_id);
+        assert_eq!(revision, RoomRevision::initial().as_i64());
+        assert_eq!(state, "active");
+
+        let mut room_rows = conn
+            .query(
+                "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query room row");
+        let room_row = room_rows
+            .next()
+            .await
+            .expect("room row exists")
+            .expect("room row");
+        let room_lifecycle_id: String = room_row.get(0).expect("room lifecycle id");
+        let room_revision: i64 = room_row.get(1).expect("room revision");
+        assert_eq!(room_lifecycle_id, coords.lifecycle.to_string());
+        let room_revision =
+            RoomRevision::from_stored(room_revision).expect("room revision must be decodable");
+        assert_eq!(room_revision, coords.revision);
+
+        let mut affiliation_rows = conn
+            .query(
+                "SELECT count(*) FROM clustering_muc_room_affiliations WHERE room_jid = ? AND member_jid = ? AND affiliation = ?",
+                crate::db_params![room_jid.to_string(), owner.to_string(), "owner"],
+            )
+            .await
+            .expect("query affiliation rows");
+        let affiliation_count: i64 = affiliation_rows
+            .next()
+            .await
+            .expect("affiliation row count")
+            .expect("affiliation row count row")
+            .get(0)
+            .expect("decode affiliation row count");
+        assert_eq!(affiliation_count, 1);
+    }
+
+    #[tokio::test]
+    async fn non_create_mutations_require_matching_lifecycle_and_dormant_state_is_not_mutable() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-a2-state-missing");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        for intent in [
+            RoomDurableMutation::Config {
+                config: RoomConfig::default(),
+                waddle_id: "waddle".to_string(),
+                channel_id: "channel".to_string(),
+            },
+            RoomDurableMutation::Subject(Some(SubjectState {
+                texts: RoomSubjectTexts::from_iter([(String::new(), "subject".to_string())]),
+                setter: "alice@example.com".parse().expect("valid jid"),
+                setter_nick: "alice".to_string(),
+                set_at: chrono::Utc::now(),
+            })),
+            RoomDurableMutation::Affiliation(waddle_xmpp::muc::durable::AffiliationEntry::new(
+                "bob@example.com".parse().expect("valid jid"),
+                Some(Affiliation::Member),
+            )),
+            RoomDurableMutation::AffiliationBatch(vec![
+                waddle_xmpp::muc::durable::AffiliationEntry::new(
+                    "carol@example.com".parse().expect("valid jid"),
+                    Some(Affiliation::Member),
+                ),
+            ]),
+            RoomDurableMutation::MembersOnlyEnforcement {
+                config: RoomConfig::default(),
+                affiliations: vec![waddle_xmpp::muc::durable::AffiliationEntry::new(
+                    "dave@example.com".parse().expect("valid jid"),
+                    Some(Affiliation::Member),
+                )],
+            },
+            RoomDurableMutation::MediatedInviteGrant(
+                waddle_xmpp::muc::durable::AffiliationEntry::new(
+                    "erin@example.com".parse().expect("valid jid"),
+                    Some(Affiliation::Member),
+                ),
+            ),
+            RoomDurableMutation::MediatedInviteRollback(
+                waddle_xmpp::muc::durable::AffiliationEntry::new(
+                    "frank@example.com".parse().expect("valid jid"),
+                    Some(Affiliation::Outcast),
+                ),
+            ),
+            RoomDurableMutation::Dormancy,
+            RoomDurableMutation::Activate,
+            RoomDurableMutation::Destroy,
+        ] {
+            assert!(
+                matches!(
+                    store.commit_room_mutation(&room_jid, &fence, intent).await,
+                    Err(RoomCommitError::StateMissing)
+                ),
+                "non-create mutation on a missing lifecycle must return StateMissing"
+            );
+        }
+
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: "waddle".to_string(),
+                    channel_id: "channel".to_string(),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("create seeds lifecycle");
+        store
+            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .await
+            .expect("dormancy transition");
+
+        assert!(
+            matches!(
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Config {
+                            config: RoomConfig::default(),
+                            waddle_id: "waddle".to_string(),
+                            channel_id: "channel".to_string(),
+                        },
+                    )
+                    .await,
+                Err(RoomCommitError::StateMissing)
+            ),
+            "ordinary mutation must not mutate a dormant room"
+        );
+    }
+
+    #[tokio::test]
+    async fn activate_transitions_dormant_to_active_and_state_missing_on_missing_lifecycle() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-a2-activate");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me.clone(), epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: "waddle-activate".to_string(),
+                    channel_id: "channel-activate".to_string(),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("seed room");
+        let dormant = store
+            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .await
+            .expect("dormancy transition");
+        assert_eq!(dormant.revision.as_i64(), 2);
+
+        let active = store
+            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Activate)
+            .await
+            .expect("activate transition");
+        assert_eq!(active.revision.as_i64(), 3);
+
+        let mut rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT revision, state FROM clustering_muc_room_lifecycles WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query lifecycle row");
+        let row = rows
+            .next()
+            .await
+            .expect("lifecycle row")
+            .expect("lifecycle row");
+        let revision: i64 = row.get(0).expect("revision");
+        let state: String = row.get(1).expect("state");
+        assert_eq!(revision, 3);
+        assert_eq!(state, "active");
+
+        let mut room_rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query activated room back-link");
+        let room_row = room_rows
+            .next()
+            .await
+            .expect("activated room row exists")
+            .expect("activated room row");
+        assert_eq!(
+            room_row.get::<String>(0).expect("room lifecycle id"),
+            active.lifecycle.to_string()
+        );
+        assert_eq!(room_row.get::<i64>(1).expect("room revision"), 3);
+
+        let missing = unique_room_jid("lane-a2-activate-missing");
+        let missing_entity = Entity::new(EntityType::RoomActor, missing.to_string());
+        let missing_epoch = claim_store
+            .ensure_claimed(&missing_entity, &me)
+            .await
+            .expect("missing room claim");
+        let missing_fence = RoomClaimFenceContext::new(missing_entity, me, missing_epoch);
+        store.record_claim_fence(&missing, missing_fence.clone());
+        assert!(
+            matches!(
+                store
+                    .commit_room_mutation(&missing, &missing_fence, RoomDurableMutation::Activate)
+                    .await,
+                Err(RoomCommitError::StateMissing)
+            ),
+            "activating a missing lifecycle must remain StateMissing"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_is_idempotent_for_matching_life_identity_and_conflicts_on_different_ids(
+    ) {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-a2-concurrent-create");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me.clone(), epoch);
+        let store = Arc::new(store);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let intent = RoomDurableMutation::Create {
+            waddle_id: "waddle-concurrent".to_string(),
+            channel_id: "channel-concurrent".to_string(),
+            config: RoomConfig::default(),
+            initial_affiliations: vec![],
+        };
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "DROP TRIGGER IF EXISTS lane_a2_delay_lifecycle_insert ON clustering_muc_room_lifecycles",
+            (),
+        )
+        .await
+        .expect("remove stale concurrent-create delay trigger");
+        conn.execute(
+            "DROP FUNCTION IF EXISTS lane_a2_delay_lifecycle_insert()",
+            (),
+        )
+        .await
+        .expect("remove stale concurrent-create delay function");
+        conn.execute(
+            r#"
+            CREATE OR REPLACE FUNCTION lane_a2_delay_lifecycle_insert()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(0.2);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+            (),
+        )
+        .await
+        .expect("create concurrent-create delay function");
+        conn.execute(
+            "CREATE TRIGGER lane_a2_delay_lifecycle_insert BEFORE INSERT ON clustering_muc_room_lifecycles FOR EACH ROW EXECUTE FUNCTION lane_a2_delay_lifecycle_insert()",
+            (),
+        )
+        .await
+        .expect("create concurrent-create delay trigger");
+        let store_a = Arc::clone(&store);
+        let store_b = Arc::clone(&store);
+        let jid_a = room_jid.clone();
+        let jid_b = room_jid.clone();
+        let fence_a = fence.clone();
+        let fence_b = fence.clone();
+        let intent_a = intent.clone();
+        let intent_b = intent.clone();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let barrier_a = Arc::clone(&barrier);
+        let barrier_b = Arc::clone(&barrier);
+
+        let first = tokio::spawn(async move {
+            barrier_a.wait().await;
+            store_a
+                .commit_room_mutation(&jid_a, &fence_a, intent_a)
+                .await
+                .expect("first create")
+        });
+        let second = tokio::spawn(async move {
+            barrier_b.wait().await;
+            store_b
+                .commit_room_mutation(&jid_b, &fence_b, intent_b)
+                .await
+                .expect("second create")
+        });
+
+        let first_result = first.await;
+        let second_result = second.await;
+        conn.execute(
+            "DROP TRIGGER lane_a2_delay_lifecycle_insert ON clustering_muc_room_lifecycles",
+            (),
+        )
+        .await
+        .expect("drop concurrent-create delay trigger");
+        conn.execute("DROP FUNCTION lane_a2_delay_lifecycle_insert()", ())
+            .await
+            .expect("drop concurrent-create delay function");
+        let first_coords = first_result.expect("first create task");
+        let second_coords = second_result.expect("second create task");
+        assert_eq!(
+            first_coords, second_coords,
+            "concurrent creates with same ids must return idempotent winner coordinates"
+        );
+
+        assert!(matches!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::Create {
+                        waddle_id: "waddle-mismatch".to_string(),
+                        channel_id: "channel-mismatch".to_string(),
+                        config: RoomConfig::default(),
+                        initial_affiliations: vec![],
+                    },
+                )
+                .await,
+            Err(RoomCommitError::CreateConflict)
+        ));
+
+        store
+            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .await
+            .expect("make the lifecycle dormant");
+        let dormant_coordinates = store
+            .commit_room_mutation(&room_jid, &fence, intent)
+            .await
+            .expect("matching create is idempotent for a dormant live lifecycle");
+        assert_eq!(dormant_coordinates.revision.as_i64(), 2);
+        assert!(matches!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::Create {
+                        waddle_id: "waddle-mismatch".to_string(),
+                        channel_id: "channel-mismatch".to_string(),
+                        config: RoomConfig::default(),
+                        initial_affiliations: vec![],
+                    },
+                )
+                .await,
+            Err(RoomCommitError::CreateConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn revision_overflow_does_not_apply_any_commit_data() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-a2-revision-overflow");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me.clone(), epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let lifecycle_id = uuid::Uuid::new_v4().to_string();
+        let overflow = i64::MAX;
+        let original_config =
+            serde_json::to_string(&RoomConfig::default()).expect("encode default config");
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+            crate::db_params![lifecycle_id.clone(), room_jid.to_string(), overflow, "active"],
+        )
+        .await
+        .expect("seed max revision lifecycle");
+        conn.execute(
+            "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, ?, ?, ?, ?, ?)",
+            crate::db_params![
+                room_jid.to_string(),
+                "waddle-overflow",
+                "channel-overflow",
+                original_config.clone(),
+                lifecycle_id.clone(),
+                overflow
+            ],
+        )
+        .await
+        .expect("seed room row");
+
+        assert!(
+            matches!(
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Config {
+                            config: RoomConfig {
+                                name: "updated".to_string(),
+                                ..RoomConfig::default()
+                            },
+                            waddle_id: "waddle-overflow".to_string(),
+                            channel_id: "channel-overflow".to_string(),
+                        },
+                    )
+                    .await,
+                Err(RoomCommitError::RevisionOverflow)
+            ),
+            "max revision must overflow before any state write"
+        );
+
+        let mut room_rows = conn
+            .query(
+                "SELECT revision, lifecycle_id, config_json FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query room row after overflow");
+        let room_row = room_rows
+            .next()
+            .await
+            .expect("room row exists")
+            .expect("room row");
+        let room_revision: i64 = room_row.get(0).expect("room revision");
+        let room_lifecycle_id: String = room_row.get(1).expect("room lifecycle id");
+        let room_config: String = room_row.get(2).expect("room config");
+        assert_eq!(room_revision, overflow);
+        assert_eq!(room_lifecycle_id, lifecycle_id);
+        assert_eq!(room_config, original_config);
+
+        let mut lifecycle_rows = conn
+            .query(
+                "SELECT revision, state FROM clustering_muc_room_lifecycles WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query lifecycle row after overflow");
+        let lifecycle_row = lifecycle_rows
+            .next()
+            .await
+            .expect("lifecycle row exists")
+            .expect("lifecycle row");
+        assert_eq!(
+            lifecycle_row.get::<i64>(0).expect("lifecycle revision"),
+            overflow
+        );
+        assert_eq!(
+            lifecycle_row.get::<String>(1).expect("lifecycle state"),
+            "active"
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_ordering_uses_claim_then_lifecycle_locking_and_serializes_concurrent_mutations() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let store = Arc::new(store);
+        let room_jid = unique_room_jid("lane-a2-lock-order");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me.clone(), epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: "waddle-lock".to_string(),
+                    channel_id: "channel-lock".to_string(),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("seed room");
+
+        // normal mutation blocks behind a FOR UPDATE claim holder while it takes FOR SHARE
+        let mut blocker = db.begin().await.expect("begin blocker transaction");
+        let mut lock_rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? FOR UPDATE",
+                crate::db_params![room_entity_key(&room_jid)],
+            )
+            .await
+            .expect("acquire claim lock");
+        assert!(lock_rows.next().await.expect("claim lock row").is_some());
+        drop(lock_rows);
+        let mut lifecycle_blocker = db
+            .begin()
+            .await
+            .expect("begin lifecycle blocker transaction");
+        let mut lifecycle_lock_rows = lifecycle_blocker
+            .query(
+                "SELECT 1 FROM clustering_muc_room_lifecycles WHERE room_jid = ? FOR UPDATE",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("acquire lifecycle lock");
+        assert!(lifecycle_lock_rows
+            .next()
+            .await
+            .expect("lifecycle lock row")
+            .is_some());
+        drop(lifecycle_lock_rows);
+
+        let share_blocker = tokio::spawn({
+            let room_jid = room_jid.clone();
+            let fence = fence.clone();
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Config {
+                            config: RoomConfig {
+                                name: "blocked".to_string(),
+                                ..RoomConfig::default()
+                            },
+                            waddle_id: "waddle-lock".to_string(),
+                            channel_id: "channel-lock".to_string(),
+                        },
+                    )
+                    .await
+                    .expect("blocked mutation completes after release")
+            }
+        });
+        wait_for_lock_waiter(&db, "FOR SHARE").await;
+        assert!(
+            !share_blocker.is_finished(),
+            "normal mutation must wait on the claim before it can lock the lifecycle"
+        );
+        blocker
+            .commit()
+            .await
+            .expect("release claim FOR UPDATE holder");
+        wait_for_lock_waiter(
+            &db,
+            "SELECT lifecycle_id, revision, state FROM clustering_muc_room_lifecycles",
+        )
+        .await;
+        assert!(
+            !share_blocker.is_finished(),
+            "normal mutation must reach the lifecycle lock only after the claim is released"
+        );
+        lifecycle_blocker
+            .commit()
+            .await
+            .expect("release lifecycle blocker");
+        share_blocker.await.expect("blocked commit task");
+
+        // destroy/dormancy path blocks behind FOR SHARE claim holders (FOR UPDATE assert)
+        let mut blocker = db.begin().await.expect("begin blocker transaction");
+        let mut share_lock_rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? FOR SHARE",
+                crate::db_params![room_entity_key(&room_jid)],
+            )
+            .await
+            .expect("acquire claim SHARE lock");
+        assert!(share_lock_rows
+            .next()
+            .await
+            .expect("claim share lock row")
+            .is_some());
+        drop(share_lock_rows);
+        let update = tokio::spawn({
+            let room_jid = room_jid.clone();
+            let fence = fence.clone();
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+                    .await
+                    .expect("dormancy follows lock order")
+            }
+        });
+        wait_for_lock_waiter(&db, "FOR UPDATE").await;
+        blocker.commit().await.expect("release share lock holder");
+        update.await.expect("dormancy task finishes");
+
+        let mut blocker = db.begin().await.expect("begin destroy blocker transaction");
+        let mut share_lock_rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? FOR SHARE",
+                crate::db_params![room_entity_key(&room_jid)],
+            )
+            .await
+            .expect("acquire destroy claim SHARE lock");
+        assert!(share_lock_rows
+            .next()
+            .await
+            .expect("destroy claim share lock row")
+            .is_some());
+        drop(share_lock_rows);
+        let destroy = tokio::spawn({
+            let room_jid = room_jid.clone();
+            let fence = fence.clone();
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Destroy)
+                    .await
+                    .expect("destroy follows lock order")
+            }
+        });
+        wait_for_lock_waiter(&db, "FOR UPDATE").await;
+        assert!(
+            !destroy.is_finished(),
+            "destroy must wait behind the shared claim holder"
+        );
+        blocker
+            .commit()
+            .await
+            .expect("release destroy share lock holder");
+        destroy.await.expect("destroy task finishes");
+
+        let serialized_jid = unique_room_jid("lane-a2-lifecycle-serialization");
+        let serialized_entity = Entity::new(EntityType::RoomActor, serialized_jid.to_string());
+        let serialized_epoch = claim_store
+            .ensure_claimed(&serialized_entity, &me)
+            .await
+            .expect("serialized room claim");
+        let serialized_fence =
+            RoomClaimFenceContext::new(serialized_entity, me.clone(), serialized_epoch);
+        store.record_claim_fence(&serialized_jid, serialized_fence.clone());
+        store
+            .commit_room_mutation(
+                &serialized_jid,
+                &serialized_fence,
+                RoomDurableMutation::Create {
+                    waddle_id: "waddle-serialized".to_string(),
+                    channel_id: "channel-serialized".to_string(),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("seed serialized room");
+
+        let (start_a, start_b) = {
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let store_a = Arc::clone(&store);
+            let store_b = Arc::clone(&store);
+            let barrier_a = Arc::clone(&barrier);
+            let barrier_b = Arc::clone(&barrier);
+            let room_a = serialized_jid.clone();
+            let room_b = serialized_jid.clone();
+            let fence_a = serialized_fence.clone();
+            let fence_b = serialized_fence.clone();
+            (
+                tokio::spawn(async move {
+                    barrier_a.wait().await;
+                    store_a
+                        .commit_room_mutation(
+                            &room_a,
+                            &fence_a,
+                            RoomDurableMutation::Config {
+                                config: RoomConfig {
+                                    name: "first".to_string(),
+                                    ..RoomConfig::default()
+                                },
+                                waddle_id: "waddle-serialized".to_string(),
+                                channel_id: "channel-serialized".to_string(),
+                            },
+                        )
+                        .await
+                        .expect("first concurrent mutation")
+                        .revision
+                        .as_i64()
+                }),
+                tokio::spawn(async move {
+                    barrier_b.wait().await;
+                    store_b
+                        .commit_room_mutation(
+                            &room_b,
+                            &fence_b,
+                            RoomDurableMutation::Config {
+                                config: RoomConfig {
+                                    name: "second".to_string(),
+                                    ..RoomConfig::default()
+                                },
+                                waddle_id: "waddle-serialized".to_string(),
+                                channel_id: "channel-serialized".to_string(),
+                            },
+                        )
+                        .await
+                        .expect("second concurrent mutation")
+                        .revision
+                        .as_i64()
+                }),
+            )
+        };
+        let first_revision = start_a.await.expect("first concurrent mutation join");
+        let second_revision = start_b.await.expect("second concurrent mutation join");
+        let mut revisions = [first_revision, second_revision];
+        revisions.sort_unstable();
+        assert_eq!(
+            revisions,
+            [
+                RoomRevision::from_stored(2).expect("revision 2").as_i64(),
+                3
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_lost_mid_mutation_is_not_owner_and_leaves_no_new_state() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-a2-claim-lost");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "DELETE FROM clustering_claims WHERE entity = ?",
+                crate::db_params![room_entity_key(&room_jid)],
+            )
+            .await
+            .expect("delete claim row");
+
+        assert!(
+            matches!(
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Create {
+                            waddle_id: "waddle-lost".to_string(),
+                            channel_id: "channel-lost".to_string(),
+                            config: RoomConfig::default(),
+                            initial_affiliations: vec![],
+                        },
+                    )
+                    .await,
+                Err(RoomCommitError::NotOwner)
+            ),
+            "a deleted claim row must be treated as not owner"
+        );
+
+        let mut room_rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT count(*) FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query room rows");
+        let room_count: i64 = room_rows
+            .next()
+            .await
+            .expect("room row count")
+            .expect("room row count row")
+            .get(0)
+            .expect("decode room row count");
+        assert_eq!(room_count, 0);
+        let mut lifecycle_rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT count(*) FROM clustering_muc_room_lifecycles WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query lifecycle rows");
+        let lifecycle_count: i64 = lifecycle_rows
+            .next()
+            .await
+            .expect("lifecycle row count")
+            .expect("lifecycle row count row")
+            .get(0)
+            .expect("decode lifecycle row count");
+        assert_eq!(lifecycle_count, 0);
+    }
+
+    #[tokio::test]
+    async fn revision_monotonicity_across_intents_tracks_coordinates_and_back_links() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-a2-revision-mono");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: "waddle-mono".to_string(),
+                    channel_id: "channel-mono".to_string(),
+                    config: RoomConfig {
+                        name: "first".to_string(),
+                        ..RoomConfig::default()
+                    },
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("seed room");
+
+        let config = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Config {
+                    config: RoomConfig {
+                        name: "second".to_string(),
+                        ..RoomConfig::default()
+                    },
+                    waddle_id: "waddle-mono".to_string(),
+                    channel_id: "channel-mono".to_string(),
+                },
+            )
+            .await
+            .expect("config revision bump");
+        assert_eq!(config.revision.as_i64(), 2);
+
+        let subject = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Subject(Some(SubjectState {
+                    texts: RoomSubjectTexts::from_iter([(String::new(), "hello".to_string())]),
+                    setter: "alice@example.com".parse().expect("valid jid"),
+                    setter_nick: "alice".to_string(),
+                    set_at: chrono::Utc::now(),
+                })),
+            )
+            .await
+            .expect("subject revision bump");
+        assert_eq!(subject.revision.as_i64(), 3);
+
+        let affiliation = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Affiliation(waddle_xmpp::muc::durable::AffiliationEntry::new(
+                    "alice@example.com".parse().expect("valid jid"),
+                    Some(Affiliation::Owner),
+                )),
+            )
+            .await
+            .expect("affiliation revision bump");
+        assert_eq!(affiliation.revision.as_i64(), 4);
+
+        let coords = room_jid;
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![coords.to_string()],
+            )
+            .await
+            .expect("query back-link");
+        let row = rows
+            .next()
+            .await
+            .expect("room row exists")
+            .expect("room row");
+        let row_revision: i64 = row.get(1).expect("room revision");
+        assert_eq!(row_revision, 4);
+        let lifecycle_id: String = row.get(0).expect("room lifecycle id");
+        assert_eq!(lifecycle_id, affiliation.lifecycle.to_string());
     }
 
     #[tokio::test]
@@ -1406,6 +2878,42 @@ mod tests {
         )
         .await
         .expect("a pre-lifecycle room row with both back-link columns NULL is valid");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_state_db_mapping_matches_the_schema_check() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((_store, _claim_store, db, _me)) = clean_store().await else {
+            return;
+        };
+        let conn = db.guard().await.expect("guard");
+        for (index, state) in [
+            RoomLifecycleState::Active,
+            RoomLifecycleState::Dormant,
+            RoomLifecycleState::Tombstoned,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params![
+                    format!("lifecycle-state-{index}"),
+                    format!("state-{index}@muc.example.com"),
+                    1_i64,
+                    state.as_db_str(),
+                ],
+            )
+            .await
+            .expect("every Rust lifecycle state must satisfy the database CHECK");
+        }
+        assert!(conn
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params!["lifecycle-state-invalid", "invalid@muc.example.com", 1_i64, "invalid"],
+            )
+            .await
+            .is_err());
     }
 
     #[tokio::test]

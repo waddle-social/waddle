@@ -34,22 +34,113 @@ use std::pin::Pin;
 
 use jid::BareJid;
 
-use super::affiliation::AffiliationEntry;
+use super::affiliation::AffiliationEntry as StoredAffiliationEntry;
 use super::{RoomConfig, SubjectState};
 use crate::ownership::{ClaimEpoch, Entity, NodeIdentity};
+use crate::types::Affiliation;
 use crate::XmppError;
 
 pub mod lifecycle;
 
 pub use lifecycle::{
-    EphemeralProjectionAuthorization, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId,
-    RoomLifecycleState, RoomMutationCommit, RoomRevision,
+    DestroyAttemptId, EphemeralProjectionAuthorization, RoomCommittedCoordinates, RoomEffectIntent,
+    RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit, RoomRevision,
 };
+
+pub(crate) fn mint_room_mutation_commit(
+    fence: RoomClaimFenceContext,
+    coordinates: RoomCommittedCoordinates,
+) -> RoomMutationCommit {
+    lifecycle::mint_room_mutation_commit(fence, coordinates)
+}
+
+pub(crate) fn authorize_ephemeral_projection(
+    commit: RoomMutationCommit,
+) -> EphemeralProjectionAuthorization {
+    lifecycle::authorize_ephemeral_projection(commit)
+}
 
 /// Boxed future returned by every [`MucDurableStore`] method, mirroring
 /// [`super::affiliation::DurableMembershipFuture`]'s exact shape and
 /// rationale.
 pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppError>> + Send + 'a>>;
+
+/// Boxed future returned by [`MucDurableStore::commit_room_mutation`].
+pub type RoomCommitFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<RoomCommittedCoordinates, RoomCommitError>> + Send + 'a>>;
+
+/// One durable affiliation delta carried by [`RoomDurableMutation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffiliationEntry {
+    pub jid: BareJid,
+    pub affiliation: Option<Affiliation>,
+}
+
+impl AffiliationEntry {
+    pub fn new(jid: BareJid, affiliation: Option<Affiliation>) -> Self {
+        Self { jid, affiliation }
+    }
+}
+
+/// Closed durable mutation vocabulary for authoritative room-state commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomDurableMutation {
+    Create {
+        waddle_id: String,
+        channel_id: String,
+        config: RoomConfig,
+        initial_affiliations: Vec<AffiliationEntry>,
+    },
+    Config {
+        config: RoomConfig,
+        waddle_id: String,
+        channel_id: String,
+    },
+    Subject(Option<SubjectState>),
+    Affiliation(AffiliationEntry),
+    AffiliationBatch(Vec<AffiliationEntry>),
+    MembersOnlyEnforcement {
+        config: RoomConfig,
+        affiliations: Vec<AffiliationEntry>,
+    },
+    MediatedInviteGrant(AffiliationEntry),
+    MediatedInviteRollback(AffiliationEntry),
+    Destroy,
+    Dormancy,
+    Activate,
+}
+
+/// Sanitized database failure marker for room commits.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+#[error("database commit failed")]
+pub struct RoomCommitDatabaseError;
+
+impl RoomCommitDatabaseError {
+    pub const fn sanitized() -> Self {
+        Self
+    }
+}
+
+/// Errors surfaced by [`MucDurableStore::commit_room_mutation`].
+#[derive(Debug, thiserror::Error)]
+pub enum RoomCommitError {
+    #[error("room mutation commit rejected: exact ownership fence no longer authorizes the room")]
+    NotOwner,
+    #[error(
+        "room mutation commit temporarily unavailable: exact ownership fence could not be verified"
+    )]
+    OwnershipUnavailable,
+    #[error("room mutation commit retried until the budget was exhausted")]
+    RetryExhausted,
+    #[error("room lifecycle revision overflowed")]
+    RevisionOverflow,
+    #[error("room lifecycle state is missing for this mutation")]
+    StateMissing,
+    #[error("room create lost the race to a different durable room identity")]
+    CreateConflict,
+    #[error("room mutation commit failed")]
+    Database(#[source] RoomCommitDatabaseError),
+}
 
 /// Typed fencing context for a room's currently-recorded Postgres claim
 /// (ADR-0017 Phase 3 Slice 7): the immutable `(Entity, ClaimEpoch,
@@ -87,7 +178,7 @@ pub struct DurableRoomState {
     pub channel_id: String,
     pub config: RoomConfig,
     pub subject: Option<SubjectState>,
-    pub affiliations: Vec<AffiliationEntry>,
+    pub affiliations: Vec<StoredAffiliationEntry>,
 }
 
 /// Durable backing store for MUC room ownership (ADR-0017 Phase 3 Slice 7).
@@ -145,6 +236,26 @@ pub trait MucDurableStore: Send + Sync {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, Option<DurableRoomState>>;
 
+    /// Atomically commit one authoritative durable mutation and return the
+    /// committed lifecycle/revision coordinate.
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        intent: RoomDurableMutation,
+    ) -> RoomCommitFuture<'a> {
+        let _ = (room_jid, fence, intent);
+        // The actor commit path replaces this compatibility default in Lane B.
+        // Keep its sole proof-minting helpers reachable in this interim slice
+        // without exposing their constructors outside this crate.
+        let _ = (mint_room_mutation_commit, authorize_ephemeral_projection);
+        Box::pin(async {
+            Err(RoomCommitError::Database(
+                RoomCommitDatabaseError::sanitized(),
+            ))
+        })
+    }
+
     /// Durably upsert the room's configuration (plus the `waddle_id`/
     /// `channel_id` it travels with).
     fn save_config_fenced<'a>(
@@ -174,7 +285,7 @@ pub trait MucDurableStore: Send + Sync {
     fn save_affiliation_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
-        entry: &'a AffiliationEntry,
+        entry: &'a StoredAffiliationEntry,
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 

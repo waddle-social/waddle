@@ -32,9 +32,11 @@ pub use admin::{
     KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
 };
 pub use durable::{
-    DurableRoomState, EphemeralProjectionAuthorization, MucDurableFuture, MucDurableStore,
-    RoomClaimFenceContext, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId,
-    RoomLifecycleState, RoomMutationCommit, RoomRevision,
+    AffiliationEntry as DurableAffiliationEntry, DestroyAttemptId, DurableRoomState,
+    EphemeralProjectionAuthorization, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
+    RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit,
+    RoomRevision,
 };
 pub use messages::{
     build_config_change_message, config_change_status_codes, create_broadcast_message,
