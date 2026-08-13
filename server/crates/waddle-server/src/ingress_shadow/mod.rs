@@ -91,7 +91,8 @@ enum IngressShadowInner {
     Worker {
         tx: mpsc::UnboundedSender<QueuedIngressShadowTask>,
         enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
-        capacity: Arc<Semaphore>,
+        submission_capacity: Arc<Semaphore>,
+        enrollment_capacity: Arc<Semaphore>,
         shutdown: Arc<IngressShadowShutdown>,
     },
 }
@@ -248,6 +249,20 @@ impl IngressShadowHandle {
         self.try_enroll_stream(stream_id)
     }
 
+    /// Forget a terminal SM stream so a future session with the same ID can
+    /// enroll again without retaining this process-lifetime gate entry.
+    pub fn forget_stream(&self, stream_id: &SmSessionId) {
+        #[cfg(not(feature = "clustering"))]
+        let _ = stream_id;
+        #[cfg(feature = "clustering")]
+        if let IngressShadowInner::Worker {
+            enqueued_streams, ..
+        } = self.inner.as_ref()
+        {
+            forget_enqueued_stream(enqueued_streams, stream_id);
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         #[cfg(feature = "clustering")]
         {
@@ -272,9 +287,16 @@ impl IngressShadowHandle {
             IngressShadowInner::Worker {
                 tx,
                 enqueued_streams,
-                capacity,
+                submission_capacity,
+                enrollment_capacity,
                 ..
-            } => try_send_worker_task(tx, enqueued_streams, capacity, task),
+            } => try_send_worker_task(
+                tx,
+                enqueued_streams,
+                submission_capacity,
+                enrollment_capacity,
+                task,
+            ),
         };
         observe_disposition(kind, stream_id, disposition)
     }
@@ -301,7 +323,8 @@ impl IngressShadowHandle {
         execute: IngressShadowExecutor,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let capacity = Arc::new(Semaphore::new(queue_capacity));
+        let submission_capacity = Arc::new(Semaphore::new(queue_capacity));
+        let enrollment_capacity = Arc::new(Semaphore::new(queue_capacity));
         let shutdown = Arc::new(IngressShadowShutdown::default());
         let scheduler =
             tokio::spawn(IngressShadowScheduler::new(rx, max_concurrency, execute).run());
@@ -315,7 +338,8 @@ impl IngressShadowHandle {
             inner: Arc::new(IngressShadowInner::Worker {
                 tx,
                 enqueued_streams,
-                capacity,
+                submission_capacity,
+                enrollment_capacity,
                 shutdown,
             }),
         }
@@ -334,26 +358,28 @@ impl IngressShadowHandle {
 fn try_send_worker_task(
     tx: &mpsc::UnboundedSender<QueuedIngressShadowTask>,
     enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
-    capacity: &Arc<Semaphore>,
+    submission_capacity: &Arc<Semaphore>,
+    enrollment_capacity: &Arc<Semaphore>,
     task: IngressShadowTask,
 ) -> IngressShadowDisposition {
     match task {
         IngressShadowTask::Enroll { stream_id } => {
-            send_enrollment_task(tx, enqueued_streams, stream_id)
+            send_enrollment_task(tx, enqueued_streams, enrollment_capacity, stream_id)
         }
         submit @ IngressShadowTask::Submit(_) => {
             let stream_id = submit.stream_id().clone();
-            if !ensure_stream_enrollment_task(tx, enqueued_streams, &stream_id) {
-                return IngressShadowDisposition::Closed;
+            match ensure_stream_enrollment_task(
+                tx,
+                enqueued_streams,
+                enrollment_capacity,
+                &stream_id,
+            ) {
+                IngressShadowDisposition::Enqueued => {}
+                disposition => return disposition,
             }
-            let permit = match capacity.clone().try_acquire_owned() {
+            let permit = match try_acquire_task_permit(submission_capacity) {
                 Ok(permit) => permit,
-                Err(tokio::sync::TryAcquireError::NoPermits) => {
-                    return IngressShadowDisposition::QueueFull;
-                }
-                Err(tokio::sync::TryAcquireError::Closed) => {
-                    return IngressShadowDisposition::Closed;
-                }
+                Err(disposition) => return disposition,
             };
             match tx.send(QueuedIngressShadowTask {
                 task: submit,
@@ -370,23 +396,29 @@ fn try_send_worker_task(
 fn send_enrollment_task(
     tx: &mpsc::UnboundedSender<QueuedIngressShadowTask>,
     enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    enrollment_capacity: &Arc<Semaphore>,
     stream_id: SmSessionId,
 ) -> IngressShadowDisposition {
     let mut enqueued = enqueued_streams
         .lock()
         .expect("enqueued stream mutex must not be poisoned");
-    let inserted = enqueued.insert(stream_id.clone());
+    if enqueued.contains(&stream_id) {
+        return IngressShadowDisposition::Enqueued;
+    }
+    let permit = match try_acquire_task_permit(enrollment_capacity) {
+        Ok(permit) => permit,
+        Err(disposition) => return disposition,
+    };
+    enqueued.insert(stream_id.clone());
     match tx.send(QueuedIngressShadowTask {
         task: IngressShadowTask::Enroll {
             stream_id: stream_id.clone(),
         },
-        permit: None,
+        permit: Some(permit),
     }) {
         Ok(()) => IngressShadowDisposition::Enqueued,
         Err(_closed) => {
-            if inserted {
-                enqueued.remove(&stream_id);
-            }
+            enqueued.remove(&stream_id);
             IngressShadowDisposition::Closed
         }
     }
@@ -396,27 +428,45 @@ fn send_enrollment_task(
 fn ensure_stream_enrollment_task(
     tx: &mpsc::UnboundedSender<QueuedIngressShadowTask>,
     enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    enrollment_capacity: &Arc<Semaphore>,
     stream_id: &SmSessionId,
-) -> bool {
+) -> IngressShadowDisposition {
     let mut enqueued = enqueued_streams
         .lock()
         .expect("enqueued stream mutex must not be poisoned");
     if enqueued.contains(stream_id) {
-        return true;
+        return IngressShadowDisposition::Enqueued;
     }
+    let permit = match try_acquire_task_permit(enrollment_capacity) {
+        Ok(permit) => permit,
+        Err(disposition) => return disposition,
+    };
     enqueued.insert(stream_id.clone());
     match tx.send(QueuedIngressShadowTask {
         task: IngressShadowTask::Enroll {
             stream_id: stream_id.clone(),
         },
-        permit: None,
+        permit: Some(permit),
     }) {
-        Ok(()) => true,
+        Ok(()) => IngressShadowDisposition::Enqueued,
         Err(_closed) => {
             enqueued.remove(stream_id);
-            false
+            IngressShadowDisposition::Closed
         }
     }
+}
+
+#[cfg(feature = "clustering")]
+fn try_acquire_task_permit(
+    capacity: &Arc<Semaphore>,
+) -> Result<OwnedSemaphorePermit, IngressShadowDisposition> {
+    capacity
+        .clone()
+        .try_acquire_owned()
+        .map_err(|error| match error {
+            tokio::sync::TryAcquireError::NoPermits => IngressShadowDisposition::QueueFull,
+            tokio::sync::TryAcquireError::Closed => IngressShadowDisposition::Closed,
+        })
 }
 
 fn observe_disposition(
@@ -475,6 +525,14 @@ struct IngressShadowProcessor {
 
 #[cfg(feature = "clustering")]
 fn clear_failed_enrollment(
+    enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    stream_id: &SmSessionId,
+) {
+    forget_enqueued_stream(enqueued_streams, stream_id);
+}
+
+#[cfg(feature = "clustering")]
+fn forget_enqueued_stream(
     enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
     stream_id: &SmSessionId,
 ) {
@@ -2305,13 +2363,19 @@ mod tests {
     #[tokio::test]
     async fn saturated_submission_queue_still_accepts_sm_enrollment() {
         let hold_submission = Arc::new(Notify::new());
+        let (enrolled_tx, mut enrolled_rx) = mpsc::unbounded_channel();
         let handle = test_handle(1, 1, {
             let hold_submission = hold_submission.clone();
+            let enrolled_tx = enrolled_tx.clone();
             move |task| {
                 let hold_submission = hold_submission.clone();
+                let enrolled_tx = enrolled_tx.clone();
                 Box::pin(async move {
-                    if matches!(task, IngressShadowTask::Submit(_)) {
-                        hold_submission.notified().await;
+                    match task {
+                        IngressShadowTask::Submit(_) => hold_submission.notified().await,
+                        IngressShadowTask::Enroll { .. } => {
+                            let _ = enrolled_tx.send(());
+                        }
                     }
                 })
             }
@@ -2326,6 +2390,14 @@ mod tests {
             handle.try_submit(base_submission(message)),
             IngressShadowDisposition::Enqueued
         );
+        // The submission auto-enqueued its own stream's enrollment; wait for
+        // that enroll task to execute (releasing its admission permit) so this
+        // test isolates SUBMIT capacity exhaustion, which is its actual
+        // subject — the submission itself stays parked on `hold_submission`.
+        tokio::time::timeout(Duration::from_millis(250), enrolled_rx.recv())
+            .await
+            .expect("auto-enqueued enrollment should execute")
+            .expect("enrollment execution recorded");
         assert_eq!(
             handle.try_enroll_stream(SmSessionId::new("fresh-sm-stream")),
             IngressShadowDisposition::Enqueued,
@@ -2339,6 +2411,7 @@ mod tests {
     async fn failed_enrollment_allows_a_later_submit_to_enqueue_enrollment_again() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let enqueued_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let enrollment_capacity = Arc::new(Semaphore::new(1));
         let stream_id = SmSessionId::new("retry-enrollment-stream");
         enqueued_streams
             .lock()
@@ -2347,11 +2420,10 @@ mod tests {
 
         clear_failed_enrollment(&enqueued_streams, &stream_id);
 
-        assert!(ensure_stream_enrollment_task(
-            &tx,
-            &enqueued_streams,
-            &stream_id,
-        ));
+        assert_eq!(
+            ensure_stream_enrollment_task(&tx, &enqueued_streams, &enrollment_capacity, &stream_id),
+            IngressShadowDisposition::Enqueued
+        );
         assert!(matches!(
             rx.recv().await,
             Some(QueuedIngressShadowTask {
@@ -2481,6 +2553,99 @@ mod tests {
             .expect("fresh enrollment should run after the blocker")
             .expect("fresh enrollment start recorded");
         assert_eq!(started_enroll, "enroll:fresh-stream");
+    }
+
+    #[tokio::test]
+    async fn enrollment_admission_is_bounded_without_blocking_submissions() {
+        let release_enrollment = Arc::new(Notify::new());
+        let enrollment_released = Arc::new(AtomicBool::new(false));
+        let handle = test_handle(2, 1, {
+            let release_enrollment = release_enrollment.clone();
+            let enrollment_released = enrollment_released.clone();
+            move |task| {
+                let release_enrollment = release_enrollment.clone();
+                let enrollment_released = enrollment_released.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Enroll { .. }) {
+                        while !enrollment_released.load(Ordering::Acquire) {
+                            release_enrollment.notified().await;
+                        }
+                    }
+                })
+            }
+        });
+        let stream_a = SmSessionId::new("bounded-enrollment-a");
+        let stream_b = SmSessionId::new("bounded-enrollment-b");
+        let stream_c = SmSessionId::new("bounded-enrollment-c");
+
+        assert_eq!(
+            handle.try_enroll_stream(stream_a.clone()),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            handle.try_enroll_stream(stream_b.clone()),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            handle.try_enroll_stream(stream_c),
+            IngressShadowDisposition::QueueFull,
+            "unique SM enrollments must stop at their dedicated queue capacity"
+        );
+
+        let message = Message::new(Some(jid::Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+        let mut submission = base_submission(message);
+        submission.stream_id = stream_a;
+        assert_eq!(
+            handle.try_submit(submission),
+            IngressShadowDisposition::Enqueued,
+            "an already-enrolled stream must retain independent submission admission"
+        );
+
+        enrollment_released.store(true, Ordering::Release);
+        release_enrollment.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_terminal_stream_allows_fresh_enrollment() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let handle = test_handle(2, 1, move |task| {
+            let started_tx = started_tx.clone();
+            Box::pin(async move {
+                if let IngressShadowTask::Enroll { stream_id } = task {
+                    started_tx.send(stream_id).expect("record enrollment");
+                }
+            })
+        });
+        let stream_id = SmSessionId::new("terminal-stream");
+
+        assert_eq!(
+            handle.try_enroll_stream(stream_id.clone()),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
+                .await
+                .expect("initial enrollment should run"),
+            Some(stream_id.clone())
+        );
+
+        handle.forget_stream(&stream_id);
+
+        assert_eq!(
+            handle.try_enroll_stream(stream_id.clone()),
+            IngressShadowDisposition::Enqueued,
+            "a terminated stream must not retain the enrollment gate"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
+                .await
+                .expect("fresh enrollment should run"),
+            Some(stream_id)
+        );
     }
 
     async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {

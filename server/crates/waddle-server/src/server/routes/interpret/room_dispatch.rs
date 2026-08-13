@@ -3,7 +3,9 @@ use crate::ingress_shadow::{
     IngressShadowRoomFence, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
     ShadowSemanticRejectedReason,
 };
-use waddle_xmpp::ingress::{EntityGeneration, IngressEffectIntent, RelayTargetIdentity};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::RelayTargetIdentity;
+use waddle_xmpp::ingress::{EntityGeneration, IngressEffectIntent};
 
 /// Bind the subject mutation emitted from one frozen room snapshot to
 /// that actor incarnation's immutable ownership proof. This is mandatory
@@ -693,6 +695,7 @@ fn clear_provisional_shadow_room_fence(deps: &Deps<'_>) {
     }
 }
 
+#[cfg(feature = "clustering")]
 pub(super) fn capture_delivered_remote_room_route(
     capture: &crate::ingress_shadow::IngressEffectCapture,
     room: &jid::BareJid,
@@ -704,6 +707,7 @@ pub(super) fn capture_delivered_remote_room_route(
     });
 }
 
+#[cfg(feature = "clustering")]
 pub(super) fn capture_ambiguous_remote_room_route(
     capture: &crate::ingress_shadow::IngressEffectCapture,
     room: &jid::BareJid,

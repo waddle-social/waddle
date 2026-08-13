@@ -484,7 +484,7 @@ async fn handle_xmpp_frame_impl(
                 }
             };
             settle_inbound_dispatch(
-                state,
+                &state.deps.protocol.ingress_shadow,
                 disposition,
                 ordered_relay_origin_was_deferred(&ordered_relay_origin),
                 reserved_inbound_for_sm,
@@ -497,7 +497,7 @@ async fn handle_xmpp_frame_impl(
 }
 
 pub(super) fn settle_inbound_dispatch(
-    state: &WebSocketState,
+    ingress_shadow: &crate::ingress_shadow::IngressShadowHandle,
     disposition: InboundDisposition,
     ordered_relay_deferred: bool,
     inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
@@ -511,7 +511,7 @@ pub(super) fn settle_inbound_dispatch(
         InboundDisposition::Handled => {
             if !ordered_relay_deferred {
                 completion.complete(inbound_sequence, sm_state, |submission| {
-                    let _ = state.deps.protocol.ingress_shadow.try_submit(submission);
+                    let _ = ingress_shadow.try_submit(submission);
                 });
             }
         }
@@ -767,7 +767,7 @@ mod inbound_dispatch_tests {
         let sequence = completion.reserve(&state);
 
         settle_inbound_dispatch(
-            websocket_state.as_ref(),
+            &websocket_state.deps.protocol.ingress_shadow,
             InboundDisposition::Handled,
             false,
             Some(sequence),
@@ -779,7 +779,7 @@ mod inbound_dispatch_tests {
 
         let deferred = completion.reserve(&state);
         settle_inbound_dispatch(
-            websocket_state.as_ref(),
+            &websocket_state.deps.protocol.ingress_shadow,
             InboundDisposition::Handled,
             true,
             Some(deferred),
@@ -819,7 +819,7 @@ mod inbound_dispatch_tests {
             )
             .is_none());
             settle_inbound_dispatch(
-                websocket_state.as_ref(),
+                &websocket_state.deps.protocol.ingress_shadow,
                 InboundDisposition::Handled,
                 false,
                 Some(sequence),

@@ -390,6 +390,7 @@ async fn cleanup_connection_shutdown_inner(
     // promotes this task's already accepted delivery and leaves those shared
     // resources alone.
     if superseded && !conn.sm_recovery_required {
+        forget_terminal_shadow_stream(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
@@ -423,6 +424,7 @@ async fn cleanup_connection_shutdown_inner(
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
+            forget_terminal_shadow_stream(state, &conn.sm_state);
             return ConnectionShutdownOutcome::NotPersisted;
         };
         let presence_state = state
@@ -441,6 +443,7 @@ async fn cleanup_connection_shutdown_inner(
             }
             super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
+            forget_terminal_shadow_stream(state, &conn.sm_state);
             return ConnectionShutdownOutcome::NotPersisted;
         };
 
@@ -783,6 +786,7 @@ async fn cleanup_connection_shutdown_inner(
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
+                    forget_terminal_shadow_stream(state, &conn.sm_state);
                     let detach_fail_removed = state
                         .deps
                         .protocol
@@ -863,7 +867,22 @@ async fn cleanup_connection_shutdown_inner(
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
+    forget_terminal_shadow_stream(state, &conn.sm_state);
     ConnectionShutdownOutcome::NotPersisted
+}
+
+fn forget_terminal_shadow_stream(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+) {
+    let Some(stream_id) = sm_state.stream_id.as_deref() else {
+        return;
+    };
+    state
+        .deps
+        .protocol
+        .ingress_shadow
+        .forget_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id));
 }
 
 /// Promote terminal recovery without creating a resumable snapshot. This is
@@ -1507,6 +1526,7 @@ async fn refuse_detach_without_principal(
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
+    forget_terminal_shadow_stream(state, &conn.sm_state);
     // A terminal session must disappear from the exact-FullJID routing table
     // before promotion. Otherwise `send_to` can successfully target this
     // closed channel and drop a <no-store/> stanza instead of taking the

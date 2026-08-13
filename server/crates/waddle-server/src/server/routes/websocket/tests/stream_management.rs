@@ -823,7 +823,7 @@ fn timed_out_inbound_stanza_preserves_sender_responsibility() {
     let sequence = completion.reserve(&state);
 
     settle_inbound_dispatch(
-        websocket_state.as_ref(),
+        &websocket_state.deps.protocol.ingress_shadow,
         InboundDisposition::Unhandled,
         true,
         Some(sequence),
@@ -861,7 +861,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
 
     let handled = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
-        state.as_ref(),
+        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         InboundDisposition::Handled,
         false,
         Some(handled),
@@ -870,7 +870,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     );
     let timed_out = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
-        state.as_ref(),
+        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         InboundDisposition::Unhandled,
         false,
         Some(timed_out),

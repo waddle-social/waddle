@@ -1,6 +1,7 @@
+use super::super::room_dispatch::push_sender_error_reply;
+#[cfg(feature = "clustering")]
 use super::super::room_dispatch::{
     capture_ambiguous_remote_room_route, capture_delivered_remote_room_route,
-    push_sender_error_reply,
 };
 use super::*;
 use crate::ingress_shadow::IngressEffectCapture;
@@ -17,6 +18,7 @@ fn extension_waddle_scope_matches_managed_room_context() {
     assert_eq!(waddle_id_for_room_jid(&unmanaged_room).as_str(), "default");
 }
 
+#[cfg(feature = "clustering")]
 #[test]
 fn delivered_remote_room_dispatch_captures_frozen_route_intent() {
     let capture = IngressEffectCapture::new(None);
@@ -31,6 +33,7 @@ fn delivered_remote_room_dispatch_captures_frozen_route_intent() {
         .contains(&IngressEffectIntent::DispatchToRoomRemote { room, relay_target }));
 }
 
+#[cfg(feature = "clustering")]
 #[test]
 fn maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
     let capture = IngressEffectCapture::new(None);
@@ -47,6 +50,7 @@ fn maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
     ));
 }
 
+#[cfg(feature = "clustering")]
 #[test]
 fn join_maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
     let capture = IngressEffectCapture::new(None);

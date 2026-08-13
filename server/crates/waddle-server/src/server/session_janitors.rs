@@ -219,6 +219,11 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                 count = drained.len(),
                 "SM janitor: cleaning up expired detached sessions"
             );
+            for session in &drained {
+                state.deps.protocol.ingress_shadow.forget_stream(
+                    &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone()),
+                );
+            }
         }
         let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
             &state.deps.protocol.sm_session_registry,
