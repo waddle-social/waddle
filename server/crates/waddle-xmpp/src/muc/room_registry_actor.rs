@@ -2031,8 +2031,20 @@ impl RoomRegistryActor {
             }
             Err(RoomCommitError::StateMissing) => {
                 // This exact fence passed the durable gate before the state
-                // miss, so it may still own a claim. Retire the actor and
-                // release that exact fence through the normal path.
+                // miss, so it may still own a claim. Reserve release-retry
+                // capacity BEFORE teardown: with a saturated backlog a
+                // transient release failure after removal would leave a
+                // still-owned fence with no local record. On saturation the
+                // entry and attempt are retained so the next registry touch
+                // re-enters this reconciliation.
+                if !self.remember_pending_room_release(room_jid.clone(), entry.claim_fence.clone())
+                {
+                    warn!(
+                        room = %room_jid,
+                        "release backlog saturated; retaining room entry and destroy attempt for a later reconciliation"
+                    );
+                    return;
+                }
                 self.rooms.remove(room_jid);
                 self.publish_room_count();
                 self.poisoned_rooms.remove(room_jid);

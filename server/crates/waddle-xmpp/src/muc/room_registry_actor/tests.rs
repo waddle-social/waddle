@@ -61,6 +61,48 @@ impl kameo::message::Message<RememberDestroyAttemptForTest> for RoomRegistryActo
     }
 }
 
+/// Saturate the exact-release retry backlog with synthetic entries so a
+/// test can prove teardown paths reserve capacity before removing their
+/// fence-bearing records. `count = 0` clears the synthetic entries.
+struct FillPendingRoomReleasesForTest {
+    count: usize,
+}
+
+impl kameo::message::Message<FillPendingRoomReleasesForTest> for RoomRegistryActor {
+    type Reply = usize;
+
+    async fn handle(
+        &mut self,
+        msg: FillPendingRoomReleasesForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.pending_room_releases
+            .retain(|(jid, _), _| !jid.to_string().starts_with("synthetic-backlog-"));
+        for index in 0..msg.count {
+            let jid: BareJid = format!("synthetic-backlog-{index}@muc.example.com")
+                .parse()
+                .expect("synthetic jid");
+            let fence = crate::muc::RoomClaimFenceContext::new(
+                crate::ownership::Entity::new(
+                    crate::ownership::EntityType::RoomActor,
+                    jid.to_string(),
+                ),
+                crate::ownership::NodeIdentity::new("synthetic-node", "synthetic-epoch"),
+                crate::ownership::ClaimEpoch(0),
+            );
+            self.pending_retry_order = self.pending_retry_order.wrapping_add(1);
+            self.pending_room_releases.insert(
+                (jid, fence),
+                PendingRoomReleaseState {
+                    retry_order: self.pending_retry_order,
+                    first_pending_at: std::time::Instant::now(),
+                },
+            );
+        }
+        self.pending_room_releases.len()
+    }
+}
+
 impl kameo::message::Message<PendingRoomOwnershipResponsibilityCountForTest> for RoomRegistryActor {
     type Reply = usize;
 
@@ -1426,6 +1468,92 @@ mod ownership_claims_tests {
             .await
             .expect("authoritative claim lookup")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn saturated_release_backlog_retains_state_missing_destroy_reconciliation() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            destroy_state_missing: true,
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store),
+            SharedNodeIdentity::new(this_identity()),
+            durable_store,
+        )
+        .await;
+
+        let jid = test_room_jid("reconcile-saturated-backlog");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        actor
+            .ask(crate::muc::room_actor::SealForDestroy { attempt })
+            .await
+            .expect("seal before reconciliation");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("record retained attempt");
+
+        // Saturate the exact-release retry backlog so reconciliation's
+        // capacity reservation must fail.
+        registry
+            .ask(FillPendingRoomReleasesForTest {
+                count: crate::muc::room_registry_actor::MAX_PENDING_ROOM_RELEASES,
+            })
+            .await
+            .expect("fill backlog");
+
+        // The touch runs reconciliation; with no release capacity the
+        // registry must RETAIN the fence-bearing entry and attempt rather
+        // than tear down and risk losing the still-owned claim.
+        let touched = registry.ask(GetRoom {
+            room_jid: jid.clone(),
+        });
+        let _ = touched.await; // outcome shape is secondary; ownership is the invariant
+        assert!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("authoritative claim lookup")
+                .is_some(),
+            "the still-owned claim must survive a saturated-backlog reconciliation"
+        );
+
+        // Drain the synthetic backlog; the next touch completes the same
+        // attempt's reconciliation and releases the claim.
+        registry
+            .ask(FillPendingRoomReleasesForTest { count: 0 })
+            .await
+            .expect("drain backlog");
+        assert_eq!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("reconcile on lookup after drain"),
+            None,
+        );
+        assert!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("authoritative claim lookup")
+                .is_none(),
+            "reconciliation after drain must release the exact claim"
+        );
     }
 
     #[tokio::test]
