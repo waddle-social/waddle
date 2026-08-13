@@ -81,7 +81,39 @@ impl ShadowWsFixture {
         let schema_url = postgres_url_with_search_path(&database_url, &schema);
         let swarm_port = reserve_swarm_port();
         let listen_addr = format!("/ip4/127.0.0.1/tcp/{swarm_port}");
-        let pool_env = generate_keypair_pool();
+        let (pool_env, pool_peer_id) = generate_keypair_pool();
+
+        // A clustered server refuses to boot unless its keypair-pool peer is
+        // enrolled in the allowlist (the e2e harness does the same through
+        // `reset_and_enroll`). Provision the control-plane tables through the
+        // production ensure_schema paths inside this fixture's schema, then
+        // enroll the pool peer, all before the server process starts.
+        {
+            use waddle_server::clustering::allowlist::AllowlistStore as _;
+            use waddle_server::clustering::lease::KeypairSlotLease as _;
+            use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+            let control_db = Database::from_config(
+                "xep0280-shadow-fixture",
+                &DatabaseConfig::new(DatabaseDriver::Postgres, schema_url.clone()),
+            )
+            .await
+            .expect("open fixture control db");
+            waddle_server::clustering::allowlist::PostgresAllowlistStore::new(control_db.clone())
+                .ensure_schema()
+                .await
+                .expect("allowlist schema");
+            waddle_server::clustering::lease::PostgresKeypairSlotLease::new(control_db.clone())
+                .ensure_schema()
+                .await
+                .expect("lease schema");
+            let conn = control_db.guard().await.expect("guard");
+            conn.execute(
+                "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
+                waddle_server::db_params![pool_peer_id],
+            )
+            .await
+            .expect("enroll fixture pool peer");
+        }
         let shadow_enabled_env = if shadow_enabled { "true" } else { "false" };
         let envs: Vec<(String, String)> = vec![
             ("WADDLE_DB_DRIVER".to_string(), "postgres".to_string()),
@@ -162,9 +194,16 @@ fn reserve_swarm_port() -> u16 {
 }
 
 #[cfg(feature = "clustering")]
-fn generate_keypair_pool() -> String {
+fn generate_keypair_pool() -> (String, String) {
     let keypair = libp2p::identity::ed25519::Keypair::generate();
-    base64::engine::general_purpose::STANDARD.encode(keypair.secret().as_ref())
+    let peer_id = libp2p::identity::Keypair::from(keypair.clone())
+        .public()
+        .to_peer_id()
+        .to_string();
+    (
+        base64::engine::general_purpose::STANDARD.encode(keypair.secret().as_ref()),
+        peer_id,
+    )
 }
 
 #[cfg(feature = "clustering")]
@@ -185,6 +224,20 @@ fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
 #[cfg(feature = "clustering")]
 fn normalize_sm_enabled_frame(frame: &str) -> String {
     normalize_attr_value(frame, "id", "$stream-id")
+}
+
+/// Replaces only the `<stanza-id/>` element's `id` attribute — the message's
+/// own client-chosen `id` must stay byte-compared.
+fn normalize_stanza_id_frame(frame: &str) -> String {
+    let Some(start) = frame.find("<stanza-id ") else {
+        return frame.to_string();
+    };
+    let Some(end_rel) = frame[start..].find("/>") else {
+        return frame.to_string();
+    };
+    let end = start + end_rel + 2;
+    let normalized_element = normalize_attr_value(&frame[start..end], "id", "$stanza-id");
+    format!("{}{}{}", &frame[..start], normalized_element, &frame[end..])
 }
 
 #[cfg(feature = "clustering")]
@@ -284,6 +337,10 @@ async fn run_shadow_parity_exchange(server: &TestServer) -> Vec<String> {
         .await
         .expect("desktop receives sent carbon")
     {
+        // The delay stamp and the server-minted archive stanza-id are
+        // run-unique by construction; parity is about everything else.
+        let frame = normalize_attr_value(&frame, "stamp", "$stamp");
+        let frame = normalize_stanza_id_frame(&frame);
         transcript.push(format!("desktop:{frame}"));
     }
 
