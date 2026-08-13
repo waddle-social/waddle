@@ -1377,6 +1377,58 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn reconcile_state_missing_destroy_attempt_releases_exact_claim() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            destroy_state_missing: true,
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store),
+            SharedNodeIdentity::new(this_identity()),
+            durable_store,
+        )
+        .await;
+
+        let jid = test_room_jid("reconcile-state-missing");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        actor
+            .ask(crate::muc::room_actor::SealForDestroy { attempt })
+            .await
+            .expect("seal before reconciliation");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("record retained attempt");
+
+        assert_eq!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("reconcile on lookup"),
+            None,
+        );
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("authoritative claim lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn sealed_room_reaper_reconciles_a_retained_destroy_attempt() {
         let registry = spawn_registry().await;
         let jid = test_room_jid("reaped-lost-destroy-seal-replies");
@@ -4041,6 +4093,132 @@ mod ownership_claims_tests {
             *store.deleted_rooms.lock().expect("deleted rooms"),
             vec![room_jid.to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn state_missing_destroy_before_create_commit_releases_exact_claim() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("state-missing-before-create");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let allow = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(RecordingDurableStore {
+            destroy_state_missing: true,
+            block_load_for: Some(room_jid.clone()),
+            load_started: Some(Arc::clone(&started)),
+            allow_load: Some(Arc::clone(&allow)),
+            ..RecordingDurableStore::default()
+        });
+        let claim_store = wire_recording_store(&registry, store).await;
+
+        let create_registry = registry.clone();
+        let create_jid = room_jid.clone();
+        let create =
+            tokio::spawn(async move { create_registry.ask(get_or_create(create_jid)).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("initial load started before Create commits");
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: room_jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy pending room"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        assert!(matches!(
+            create.await.expect("create task"),
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
+                if *room == room_jid
+        ));
+        allow.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if claim_store
+                    .current_claim(&entity)
+                    .await
+                    .expect("authoritative claim lookup")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("state-missing destroy releases the authoritative claim");
+    }
+
+    #[tokio::test]
+    async fn pending_not_owner_destroy_releases_an_old_identity_claim() {
+        let registry = spawn_registry().await;
+        let old_owner = this_identity();
+        let identity = SharedNodeIdentity::new(old_owner);
+        let room_jid = test_room_jid("pending-not-owner-old-identity");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let allow = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(RecordingDurableStore {
+            destroy_not_owner: true,
+            block_load_for: Some(room_jid.clone()),
+            load_started: Some(Arc::clone(&started)),
+            allow_load: Some(Arc::clone(&allow)),
+            ..RecordingDurableStore::default()
+        });
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            identity.clone(),
+            store,
+        )
+        .await;
+
+        let create_registry = registry.clone();
+        let create_jid = room_jid.clone();
+        let create =
+            tokio::spawn(async move { create_registry.ask(get_or_create(create_jid)).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("initial load started before Create commits");
+        identity.rotate(foreign_identity()).await;
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: room_jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy pending room"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        assert!(matches!(
+            create.await.expect("create task"),
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
+                if *room == room_jid
+        ));
+        allow.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if claim_store
+                    .current_claim(&entity)
+                    .await
+                    .expect("authoritative claim lookup")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending NotOwner destroy releases the old exact claim");
     }
 
     #[tokio::test]

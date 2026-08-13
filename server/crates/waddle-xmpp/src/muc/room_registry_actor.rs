@@ -2022,12 +2022,24 @@ impl RoomRegistryActor {
                 self.release_room_claim(room_jid, &entry.claim_fence).await;
                 info!(room = %room_jid, "completed a previously ambiguous room destroy");
             }
-            Err(RoomCommitError::NotOwner | RoomCommitError::StateMissing) => {
-                // A deposed actor must never be reopened.  StateMissing on a
-                // destroy means the durable room has already been removed.
+            Err(RoomCommitError::NotOwner) => {
+                // A deposed actor must never be reopened. Preserve any
+                // old-identity release responsibility while retiring it.
                 self.destroy_attempts.remove(room_jid);
                 self.evict_ownership_lost_room(room_jid, entry).await;
                 info!(room = %room_jid, "evicted room after terminal destroy reconciliation result");
+            }
+            Err(RoomCommitError::StateMissing) => {
+                // This exact fence passed the durable gate before the state
+                // miss, so it may still own a claim. Retire the actor and
+                // release that exact fence through the normal path.
+                self.rooms.remove(room_jid);
+                self.publish_room_count();
+                self.poisoned_rooms.remove(room_jid);
+                self.destroy_attempts.remove(room_jid);
+                entry.actor_ref.kill();
+                self.release_room_claim(room_jid, &entry.claim_fence).await;
+                info!(room = %room_jid, "released exact claim after terminal destroy reconciliation state miss");
             }
             Err(error) => {
                 warn!(room = %room_jid, %error, "transient destroy reconciliation failure; reopening matching actor attempt");
@@ -3893,13 +3905,22 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                         .await
                     {
                         match error {
-                            RoomCommitError::NotOwner | RoomCommitError::StateMissing => {
-                                // Ownership loss and an already-removed durable
-                                // room are terminal for this exact actor. Never
-                                // unseal and accidentally return it to service.
+                            RoomCommitError::NotOwner => {
+                                // A lost fence is terminal for this actor.
+                                // Never unseal and accidentally return it to
+                                // service. `evict_ownership_lost_room` keeps
+                                // any old-identity release responsibility.
                                 self.destroy_attempts.remove(&msg.room_jid);
                                 self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                                 return DestroyRoomOutcome::Destroyed;
+                            }
+                            RoomCommitError::StateMissing => {
+                                // The durable mutation fenced this exact claim
+                                // before observing the missing state, so it may
+                                // still be ours. Kill the sealed actor, then
+                                // fall through to the normal exact-release path.
+                                self.destroy_attempts.remove(&msg.room_jid);
+                                entry.actor_ref.kill();
                             }
                             error => {
                                 warn!(room = %msg.room_jid, %error, "durable room destroy commit failed; reconciling the sealed attempt");
@@ -3932,12 +3953,15 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                         error,
                         RoomCommitError::NotOwner | RoomCommitError::StateMissing
                     ) {
-                        self.pending_room_preparations.remove(&msg.room_jid);
+                        // Both terminal outcomes must fall through to the
+                        // retained exact-release path below. In particular,
+                        // NotOwner may describe an old local identity whose
+                        // exact claim still needs conditional release.
                         self.destroy_attempts.remove(&msg.room_jid);
-                        return DestroyRoomOutcome::Destroyed;
+                    } else {
+                        warn!(room = %msg.room_jid, %error, "durable pending-room destroy commit failed; keeping the preparation intact");
+                        return DestroyRoomOutcome::DurableWipeFailed;
                     }
-                    warn!(room = %msg.room_jid, %error, "durable pending-room destroy commit failed; keeping the preparation intact");
-                    return DestroyRoomOutcome::DurableWipeFailed;
                 }
             }
         }
