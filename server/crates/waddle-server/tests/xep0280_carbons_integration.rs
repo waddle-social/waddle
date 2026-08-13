@@ -228,6 +228,7 @@ fn normalize_sm_enabled_frame(frame: &str) -> String {
 
 /// Replaces only the `<stanza-id/>` element's `id` attribute — the message's
 /// own client-chosen `id` must stay byte-compared.
+#[cfg(feature = "clustering")]
 fn normalize_stanza_id_frame(frame: &str) -> String {
     let Some(start) = frame.find("<stanza-id ") else {
         return frame.to_string();
