@@ -1,12 +1,14 @@
 use chrono::{DateTime, Utc};
 use jid::BareJid;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
 use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::ingress::{
-    AliasResolution, DeliveryKey, IngressEffectIntent, IngressOrdinal, MessageKey,
-    NormalizedTarget, SemanticDigest, SmIngressId,
+    AliasResolution, DeliveryKey, IngressEffectIntent, IngressEffectKey, IngressOrdinal,
+    MessageKey, NormalizedTarget, SemanticDigest, SmIngressId,
 };
 use waddle_xmpp::mam::{ArchivedMessage, MamTxStoreOutcome};
 #[cfg(feature = "clustering")]
@@ -328,6 +330,7 @@ impl SmIngressStreamRepository {
 pub enum EffectIntentWriteOutcome {
     Recorded,
     AlreadyRecorded,
+    IntentDivergence,
 }
 
 /// Repository for inert, deterministic effect-intent rows.
@@ -339,6 +342,23 @@ impl EffectIntentRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
         intents: &[IngressEffectIntent],
+    ) -> Result<EffectIntentWriteOutcome, IngressUowError> {
+        Self::record_all_inner(transaction, message_key, intents, false).await
+    }
+
+    pub async fn record_all_existing_alias(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        intents: &[IngressEffectIntent],
+    ) -> Result<EffectIntentWriteOutcome, IngressUowError> {
+        Self::record_all_inner(transaction, message_key, intents, true).await
+    }
+
+    async fn record_all_inner(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        intents: &[IngressEffectIntent],
+        allow_existing_alias_divergence: bool,
     ) -> Result<EffectIntentWriteOutcome, IngressUowError> {
         let mut message = transaction
             .transaction_mut()
@@ -356,66 +376,159 @@ impl EffectIntentRepository {
             .iter()
             .map(|intent| {
                 let encoded = intent.encode_v1()?;
-                Ok((intent.semantic_key(), encoded))
+                Ok((
+                    intent.semantic_key(),
+                    CanonicalEffectIntentRow {
+                        kind: encoded.kind,
+                        semantic_identity_hash: semantic_identity_hash(intent),
+                        effect_ordinal: 0,
+                        payload: encoded.payload,
+                    },
+                ))
             })
             .collect::<Result<Vec<_>, IngressUowError>>()?;
         ordered.sort_by(|left, right| left.0.cmp(&right.0));
         let mut canonical = Vec::with_capacity(ordered.len());
-        for (key, encoded) in ordered {
-            if let Some((previous_key, previous_encoded)) = canonical.last() {
+        for (key, row) in ordered {
+            if let Some((previous_key, previous_row)) = canonical.last() {
                 if *previous_key == key {
-                    if previous_encoded != &encoded {
+                    if previous_row != &row {
                         return Err(IngressUowError::EffectIntentConflict);
                     }
                     continue;
                 }
             }
-            canonical.push((key, encoded));
+            canonical.push((key, row));
         }
-        let mut all_existing = true;
-        for (ordinal, (_, encoded)) in canonical.iter().enumerate() {
-            let ordinal =
+        for (ordinal, (_, row)) in canonical.iter_mut().enumerate() {
+            row.effect_ordinal =
                 u64::try_from(ordinal).map_err(|_| IngressUowError::EffectIntentOrdinalOverflow)?;
-            let inserted = transaction
+        }
+
+        let mut existing_rows = transaction
+            .transaction_mut()
+            .query(
+                "SELECT kind::int, semantic_identity_hash, effect_ordinal::text, payload_version::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal FOR SHARE",
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await?;
+        let mut existing = BTreeMap::new();
+        while let Some(row) = existing_rows.next().await? {
+            let kind: i64 = row.get(0)?;
+            let semantic_identity_hash: Vec<u8> = row.get(1)?;
+            let effect_ordinal: String = row.get(2)?;
+            let payload_version: i64 = row.get(3)?;
+            let payload: Vec<u8> = row.get(4)?;
+            existing.insert(
+                (
+                    i32::try_from(kind).map_err(|_| IngressUowError::EffectIntentConflict)?,
+                    storage_hash(&semantic_identity_hash)?,
+                ),
+                StoredEffectIntentRow {
+                    effect_ordinal: effect_ordinal
+                        .parse::<u64>()
+                        .map_err(|_| IngressUowError::EffectIntentConflict)?,
+                    payload_version,
+                    payload,
+                },
+            );
+        }
+
+        if existing.is_empty() && allow_existing_alias_divergence {
+            return Ok(if canonical.is_empty() {
+                EffectIntentWriteOutcome::AlreadyRecorded
+            } else {
+                EffectIntentWriteOutcome::IntentDivergence
+            });
+        }
+
+        if !existing.is_empty() {
+            let mut matches_existing = true;
+            for (_, row) in &canonical {
+                let key = (row.kind, row.semantic_identity_hash);
+                let Some(stored) = existing.remove(&key) else {
+                    matches_existing = false;
+                    break;
+                };
+                if stored.effect_ordinal != row.effect_ordinal
+                    || stored.payload_version != 1
+                    || stored.payload != row.payload
+                {
+                    matches_existing = false;
+                    break;
+                }
+            }
+            if matches_existing && existing.is_empty() {
+                return Ok(EffectIntentWriteOutcome::AlreadyRecorded);
+            }
+            return if allow_existing_alias_divergence {
+                Ok(EffectIntentWriteOutcome::IntentDivergence)
+            } else {
+                Err(IngressUowError::EffectIntentConflict)
+            };
+        }
+
+        for (_, row) in canonical {
+            transaction
                 .transaction_mut()
                 .execute(
-                    "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, 1, ?) ON CONFLICT (message_key, effect_ordinal) DO NOTHING",
+                    "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, ?, 1, ?)",
                     crate::db_params![
                         message_key.to_storage().to_string(),
-                        ordinal.to_string(),
-                        i64::from(encoded.kind),
-                        encoded.payload.clone(),
+                        row.effect_ordinal.to_string(),
+                        i64::from(row.kind),
+                        row.semantic_identity_hash.to_vec(),
+                        row.payload,
                     ],
                 )
                 .await?;
-            if inserted == 1 {
-                all_existing = false;
-                continue;
-            }
-            let mut existing = transaction
-                .transaction_mut()
-                .query(
-                    "SELECT kind::int, payload_version::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid AND effect_ordinal = ?::numeric FOR SHARE",
-                    crate::db_params![message_key.to_storage().to_string(), ordinal.to_string()],
-                )
-                .await?;
-            let row = existing
-                .next()
-                .await?
-                .ok_or(IngressUowError::EffectIntentConflict)?;
-            let kind: i64 = row.get(0)?;
-            let version: i64 = row.get(1)?;
-            let payload: Vec<u8> = row.get(2)?;
-            if kind != i64::from(encoded.kind) || version != 1 || payload != encoded.payload {
-                return Err(IngressUowError::EffectIntentConflict);
-            }
         }
-        Ok(if all_existing {
-            EffectIntentWriteOutcome::AlreadyRecorded
-        } else {
-            EffectIntentWriteOutcome::Recorded
-        })
+
+        Ok(EffectIntentWriteOutcome::Recorded)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalEffectIntentRow {
+    kind: i32,
+    semantic_identity_hash: [u8; 32],
+    effect_ordinal: u64,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredEffectIntentRow {
+    effect_ordinal: u64,
+    payload_version: i64,
+    payload: Vec<u8>,
+}
+
+fn semantic_identity_hash(intent: &IngressEffectIntent) -> [u8; 32] {
+    let identity = match intent.semantic_key() {
+        IngressEffectKey::ArchiveAuthoritative(archive) => archive.to_string(),
+        IngressEffectKey::RouteDirect(recipient) => recipient.to_string(),
+        IngressEffectKey::RouteMucGroupchat(room) => room.to_string(),
+        IngressEffectKey::RouteOccupantPm(recipient) => recipient.to_string(),
+        IngressEffectKey::DispatchToRoomRemote(room, relay_target) => format!(
+            "{}|{}|{}",
+            room,
+            relay_target.node_id,
+            relay_target.node_epoch.as_deref().unwrap_or("")
+        ),
+        IngressEffectKey::RecipientSmAppend(stream) => stream.as_str().to_string(),
+        IngressEffectKey::Carbons(excluded_source) => excluded_source.to_string(),
+        IngressEffectKey::InboxProject(owner) => owner.to_string(),
+        IngressEffectKey::NotificationActivityPreview(owner) => owner.to_string(),
+        IngressEffectKey::CallSignal(recipient) => recipient.to_string(),
+        IngressEffectKey::Pin(room) => room.to_string(),
+        IngressEffectKey::Extension(recipient) => recipient.to_string(),
+        IngressEffectKey::ErrorReply(recipient) => recipient.to_string(),
+    };
+    Sha256::digest(identity.as_bytes()).into()
+}
+
+fn storage_hash(value: &[u8]) -> Result<[u8; 32], IngressUowError> {
+    <[u8; 32]>::try_from(value).map_err(|_| IngressUowError::EffectIntentConflict)
 }
 
 /// Result of checking a persisted authenticated principal under a share lock.

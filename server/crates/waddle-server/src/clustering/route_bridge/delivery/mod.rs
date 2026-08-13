@@ -15,6 +15,8 @@ pub(super) use local::*;
 pub(super) use muc::reserved::{
     deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome, muc_proxy_result_to_outcome,
 };
+#[cfg(test)]
+pub(crate) use muc::MucProxyRouteAttempt;
 pub(crate) use muc::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 use receiver::*;
 pub(super) use remote_route_helpers::*;

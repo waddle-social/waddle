@@ -9,11 +9,14 @@ mod ingress_shadow_support;
 
 use chrono::{Duration, Utc};
 use jid::Jid;
+use sha2::{Digest, Sha256};
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
     ingress_substrate::{PostgresIngressSubstrate, ALIAS_RETENTION},
 };
-use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NormalizedTarget, SemanticDigest};
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, IngressEffectKey, MessageKey, NormalizedTarget, SemanticDigest,
+};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 
 #[cfg(feature = "clustering")]
@@ -134,10 +137,11 @@ async fn archive_authoritative_effect_intents_bind_the_archive_stanza_id() {
 
     let conn = fixture.db.guard().await.expect("database guard");
     conn.execute(
-        "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, payload_version, payload) VALUES (?::uuid, 0::numeric, ?, 1, ?)",
+        "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, 0::numeric, ?, ?, 1, ?)",
         waddle_server::db_params![
             key.to_storage().to_string(),
             i64::from(encoded.kind),
+            semantic_identity_hash(&intent),
             encoded.payload.clone(),
         ],
     )
@@ -242,6 +246,30 @@ fn digest(byte: u8) -> SemanticDigest {
 
 fn bare(value: &str) -> jid::BareJid {
     value.parse().expect("valid fixture bare JID")
+}
+
+fn semantic_identity_hash(intent: &IngressEffectIntent) -> Vec<u8> {
+    let identity = match intent.semantic_key() {
+        IngressEffectKey::ArchiveAuthoritative(archive) => archive.to_string(),
+        IngressEffectKey::RouteDirect(recipient) => recipient.to_string(),
+        IngressEffectKey::RouteMucGroupchat(room) => room.to_string(),
+        IngressEffectKey::RouteOccupantPm(recipient) => recipient.to_string(),
+        IngressEffectKey::DispatchToRoomRemote(room, relay_target) => format!(
+            "{}|{}|{}",
+            room,
+            relay_target.node_id,
+            relay_target.node_epoch.as_deref().unwrap_or("")
+        ),
+        IngressEffectKey::RecipientSmAppend(stream) => stream.as_str().to_string(),
+        IngressEffectKey::Carbons(excluded_source) => excluded_source.to_string(),
+        IngressEffectKey::InboxProject(owner) => owner.to_string(),
+        IngressEffectKey::NotificationActivityPreview(owner) => owner.to_string(),
+        IngressEffectKey::CallSignal(recipient) => recipient.to_string(),
+        IngressEffectKey::Pin(room) => room.to_string(),
+        IngressEffectKey::Extension(recipient) => recipient.to_string(),
+        IngressEffectKey::ErrorReply(recipient) => recipient.to_string(),
+    };
+    Sha256::digest(identity.as_bytes()).to_vec()
 }
 
 struct Fixture {

@@ -212,7 +212,6 @@ async fn enqueue_groupchat_notification_candidate(
     }
     deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
         owner: owner.clone(),
-        audience: Vec::new(),
     });
     let Some(state) = deps.web_socket_state else {
         return GroupchatNotificationCandidateQueueOutcome::RetryLater;

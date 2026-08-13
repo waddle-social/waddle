@@ -43,7 +43,6 @@ pub(super) async fn queue_offline_delivery(
             if notification_archive_stanza_id.is_some() {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: recipient.clone(),
-                    audience: Vec::new(),
                 });
             }
             let outcome = enqueue_xep0357_notification_candidate(

@@ -481,10 +481,11 @@ CREATE TABLE ingress_effect_intents (
     effect_ordinal NUMERIC(20,0) NOT NULL
         CHECK (effect_ordinal >= 0 AND effect_ordinal <= 18446744073709551615),
     kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 15),
+    semantic_identity_hash BYTEA NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
     payload_version INTEGER NOT NULL CHECK (payload_version = 1),
     payload BYTEA NOT NULL CHECK (octet_length(payload) <= 65536),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (message_key, effect_ordinal)
+    PRIMARY KEY (message_key, kind, semantic_identity_hash)
 );
 
 CREATE TRIGGER ingress_sm_streams_epoch_guard_dml

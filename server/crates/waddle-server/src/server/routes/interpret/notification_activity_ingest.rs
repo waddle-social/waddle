@@ -99,7 +99,6 @@ pub(super) async fn record_chat_state_activity(
     }
     deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
         owner: sender.clone(),
-        audience: Vec::new(),
     });
     let Some(store) = activity_store(deps) else {
         return;
@@ -151,7 +150,6 @@ pub(super) async fn record_read_marker_activity(
 ) {
     deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
         owner: owner.clone(),
-        audience: Vec::new(),
     });
     let Some(store) = activity_store(deps) else {
         return;
@@ -201,7 +199,6 @@ pub(super) async fn record_outbound_message_activity(
     }
     deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
         owner: sender.clone(),
-        audience: Vec::new(),
     });
     let Some(store) = activity_store(deps) else {
         return;

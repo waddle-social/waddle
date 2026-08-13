@@ -400,7 +400,7 @@ mod tests {
         incoming.from = Some(jid::Jid::from(bound));
         incoming
             .payloads
-            .push(Element::builder("envelope", "urn:waddle:test").build());
+            .push(Element::builder("extensions", waddle_extensions::FRAMEWORK_NAMESPACE).build());
 
         let frames = handle_message(
             incoming,

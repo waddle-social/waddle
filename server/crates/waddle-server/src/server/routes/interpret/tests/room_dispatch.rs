@@ -1,4 +1,7 @@
-use super::super::room_dispatch::push_sender_error_reply;
+use super::super::room_dispatch::{
+    capture_ambiguous_remote_room_route, capture_delivered_remote_room_route,
+    push_sender_error_reply,
+};
 use super::*;
 use crate::ingress_shadow::IngressEffectCapture;
 
@@ -12,6 +15,52 @@ fn extension_waddle_scope_matches_managed_room_context() {
 
     let unmanaged_room: BareJid = "conference.example.com".parse().expect("room jid");
     assert_eq!(waddle_id_for_room_jid(&unmanaged_room).as_str(), "default");
+}
+
+#[test]
+fn delivered_remote_room_dispatch_captures_frozen_route_intent() {
+    let capture = IngressEffectCapture::new(None);
+    let room: BareJid = "remote@muc.example.com".parse().expect("room");
+    let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
+
+    capture_delivered_remote_room_route(&capture, &room, relay_target.clone());
+
+    assert!(capture
+        .snapshot()
+        .intents
+        .contains(&IngressEffectIntent::DispatchToRoomRemote { room, relay_target }));
+}
+
+#[test]
+fn maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
+    let capture = IngressEffectCapture::new(None);
+    let room: BareJid = "remote@muc.example.com".parse().expect("room");
+    let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
+
+    capture_ambiguous_remote_room_route(&capture, &room, relay_target.clone());
+
+    assert!(capture.snapshot().markers.contains(
+        &crate::ingress_shadow::ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
+            room,
+            relay_target,
+        }
+    ));
+}
+
+#[test]
+fn join_maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
+    let capture = IngressEffectCapture::new(None);
+    let room: BareJid = "remote@muc.example.com".parse().expect("room");
+    let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
+
+    capture_ambiguous_remote_room_route(&capture, &room, relay_target.clone());
+
+    assert!(capture.snapshot().markers.contains(
+        &crate::ingress_shadow::ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
+            room,
+            relay_target,
+        }
+    ));
 }
 
 // #229 PR18 — DispatchToRoom interpreter arm runs the room handler

@@ -2011,17 +2011,19 @@ fn remote_muc_cleanup_disposition(
 ) -> RemoteMucCleanupDisposition {
     use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
     match decision {
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
-            RemoteMucCleanupDisposition::Converged
+        MucProxyRouteDecision::Attempted(attempt) => match &attempt.outcome {
+            OrderedRelayMucProxyOutcome::Delivered(_) => RemoteMucCleanupDisposition::Converged,
+            OrderedRelayMucProxyOutcome::MaybeCommitted
+            | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                RemoteMucCleanupDisposition::UncertainCommit
+            }
+            OrderedRelayMucProxyOutcome::Unavailable | OrderedRelayMucProxyOutcome::Dropped => {
+                RemoteMucCleanupDisposition::RetryableFailure
+            }
+        },
+        MucProxyRouteDecision::RoomClaimUnavailable | MucProxyRouteDecision::OriginUnavailable => {
+            RemoteMucCleanupDisposition::RetryableFailure
         }
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
-        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
-            RemoteMucCleanupDisposition::UncertainCommit
-        }
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
-        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
-        | MucProxyRouteDecision::RoomClaimUnavailable
-        | MucProxyRouteDecision::OriginUnavailable => RemoteMucCleanupDisposition::RetryableFailure,
         MucProxyRouteDecision::LocalRoom | MucProxyRouteDecision::RoomUnclaimed => {
             RemoteMucCleanupDisposition::NoRemoteOccupancy
         }
@@ -2415,8 +2417,9 @@ mod eviction_tests {
     #[test]
     fn remote_muc_cleanup_success_leaves_fresh_join_untouched() {
         use crate::clustering::route_bridge::{
-            MucProxyRouteDecision, OrderedRelayMucProxyOutcome::Delivered,
+            MucProxyRouteAttempt, MucProxyRouteDecision, OrderedRelayMucProxyOutcome::Delivered,
         };
+        use waddle_xmpp::ingress::RelayTargetIdentity;
 
         let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
         let occupant = full_jid("alice@example.com/web");
@@ -2431,7 +2434,10 @@ mod eviction_tests {
         memberships.record_join(&occupant, &room, "fresh-nick");
         assert_eq!(
             remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
-                Delivered(Vec::new())
+                MucProxyRouteAttempt {
+                    relay_target: RelayTargetIdentity::relay_node("relay-node"),
+                    outcome: Delivered(Vec::new()),
+                }
             )),
             RemoteMucCleanupDisposition::Converged
         );
@@ -2644,7 +2650,17 @@ mod eviction_tests {
 #[cfg(all(test, feature = "clustering"))]
 mod remote_muc_cleanup_disposition_tests {
     use super::{remote_muc_cleanup_disposition, RemoteMucCleanupDisposition};
-    use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+    use crate::clustering::route_bridge::{
+        MucProxyRouteAttempt, MucProxyRouteDecision, OrderedRelayMucProxyOutcome,
+    };
+    use waddle_xmpp::ingress::RelayTargetIdentity;
+
+    fn attempted(outcome: OrderedRelayMucProxyOutcome) -> MucProxyRouteDecision {
+        MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
+            relay_target: RelayTargetIdentity::relay_node("relay-node"),
+            outcome,
+        })
+    }
 
     /// #1249: the benign "room claim locally owned" and definitive
     /// "room unclaimed anywhere" cases converge by FORGETTING the
@@ -2670,8 +2686,8 @@ mod remote_muc_cleanup_disposition_tests {
         for decision in [
             MucProxyRouteDecision::OriginUnavailable,
             MucProxyRouteDecision::RoomClaimUnavailable,
-            MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable),
-            MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped),
+            attempted(OrderedRelayMucProxyOutcome::Unavailable),
+            attempted(OrderedRelayMucProxyOutcome::Dropped),
         ] {
             assert_eq!(
                 remote_muc_cleanup_disposition(&decision),
@@ -2684,9 +2700,9 @@ mod remote_muc_cleanup_disposition_tests {
     #[test]
     fn delivered_converges_and_uncertain_commit_retries_quietly() {
         assert_eq!(
-            remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
-                OrderedRelayMucProxyOutcome::Delivered(Vec::new()),
-            )),
+            remote_muc_cleanup_disposition(&attempted(OrderedRelayMucProxyOutcome::Delivered(
+                Vec::new(),
+            ))),
             RemoteMucCleanupDisposition::Converged
         );
         for outcome in [
@@ -2694,7 +2710,7 @@ mod remote_muc_cleanup_disposition_tests {
             OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
         ] {
             assert_eq!(
-                remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(outcome)),
+                remote_muc_cleanup_disposition(&attempted(outcome)),
                 RemoteMucCleanupDisposition::UncertainCommit
             );
         }

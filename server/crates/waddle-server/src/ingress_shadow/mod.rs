@@ -16,8 +16,8 @@ use crate::db::{Database, DatabaseDriver};
 #[cfg(feature = "clustering")]
 use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, ClaimRepository, EffectIntentRepository,
-    IngressUowError, PostgresIngressUnitOfWork, PrincipalAssertion, PrincipalRepository,
-    ShadowFrontierOutcome, SmIngressRepository, SmIngressStreamRepository,
+    EffectIntentWriteOutcome, IngressUowError, PostgresIngressUnitOfWork, PrincipalAssertion,
+    PrincipalRepository, ShadowFrontierOutcome, SmIngressRepository, SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]
 use jid::BareJid;
@@ -34,8 +34,10 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "clustering")]
 use tokio::sync::mpsc;
+#[cfg(all(feature = "clustering", test))]
+use tokio::sync::Notify;
 #[cfg(feature = "clustering")]
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[cfg(feature = "clustering")]
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
@@ -55,8 +57,6 @@ const DEFAULT_LOCK_TIMEOUT_MS: u64 = 250;
 const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 1_500;
 #[cfg(feature = "clustering")]
 const DEFAULT_TX_DEADLINE: Duration = Duration::from_millis(2_500);
-#[cfg(feature = "clustering")]
-const ENROLLMENT_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngressShadowSubmission {
@@ -90,11 +90,7 @@ enum IngressShadowInner {
     #[cfg(feature = "clustering")]
     Worker {
         tx: mpsc::UnboundedSender<QueuedIngressShadowTask>,
-        /// One admission slot reserved for fresh SM-stream enrollment. A
-        /// saturated submission queue must not make an otherwise healthy
-        /// newly-enabled stream permanently unenrolled.
-        enrollment_capacity: Arc<Semaphore>,
-        enrollment_retries: Arc<PendingEnrollmentRetries>,
+        enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
         capacity: Arc<Semaphore>,
         shutdown: Arc<IngressShadowShutdown>,
     },
@@ -154,7 +150,7 @@ enum IngressShadowTask {
 #[cfg(feature = "clustering")]
 struct QueuedIngressShadowTask {
     task: IngressShadowTask,
-    permit: OwnedSemaphorePermit,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 #[cfg(feature = "clustering")]
@@ -162,75 +158,6 @@ type IngressShadowExecuteFuture = Pin<Box<dyn Future<Output = ()> + Send + 'stat
 #[cfg(feature = "clustering")]
 type IngressShadowExecutor =
     Arc<dyn Fn(IngressShadowTask) -> IngressShadowExecuteFuture + Send + Sync>;
-
-#[cfg(feature = "clustering")]
-#[derive(Debug, Default)]
-struct PendingEnrollmentRetries {
-    pending: std::sync::Mutex<HashSet<SmSessionId>>,
-    notify: Notify,
-}
-
-#[cfg(feature = "clustering")]
-impl PendingEnrollmentRetries {
-    fn schedule(&self, stream_id: SmSessionId) {
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("pending enrollment retry mutex must not be poisoned");
-        if pending.insert(stream_id) {
-            self.notify.notify_one();
-        }
-    }
-
-    async fn run(
-        self: Arc<Self>,
-        tx: mpsc::UnboundedSender<QueuedIngressShadowTask>,
-        enrollment_capacity: Arc<Semaphore>,
-        capacity: Arc<Semaphore>,
-        shutdown: CancellationToken,
-    ) {
-        loop {
-            tokio::select! {
-                () = shutdown.cancelled() => return,
-                () = self.notify.notified() => {},
-            }
-            loop {
-                let batch = {
-                    let mut pending = self
-                        .pending
-                        .lock()
-                        .expect("pending enrollment retry mutex must not be poisoned");
-                    if pending.is_empty() {
-                        break;
-                    }
-                    pending.drain().collect::<Vec<_>>()
-                };
-                tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    () = tokio::time::sleep(ENROLLMENT_RETRY_DELAY) => {},
-                }
-                for stream_id in batch {
-                    if shutdown.is_cancelled() {
-                        return;
-                    }
-                    if matches!(
-                        try_send_worker_task(
-                            &tx,
-                            &enrollment_capacity,
-                            &capacity,
-                            IngressShadowTask::Enroll {
-                                stream_id: stream_id.clone(),
-                            },
-                        ),
-                        IngressShadowDisposition::QueueFull
-                    ) {
-                        self.schedule(stream_id);
-                    }
-                }
-            }
-        }
-    }
-}
 
 impl IngressShadowTask {
     fn kind(&self) -> IngressShadowRequestKind {
@@ -293,14 +220,16 @@ impl IngressShadowHandle {
                 lineage,
                 node_identity,
                 retry_attempts: config.retry_attempts,
+                enqueued_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 #[cfg(test)]
                 forced_alias_serialization_failures: Arc::new(std::sync::atomic::AtomicUsize::new(
                     0,
                 )),
             };
-            Self::spawn_worker(
+            Self::spawn_worker_with_enqueued_streams(
                 config.queue_capacity,
                 ingress_shadow_max_concurrency(config.queue_capacity, config.pool_size),
+                worker.enqueued_streams.clone(),
                 Arc::new(move |task| {
                     let worker = worker.clone();
                     Box::pin(async move {
@@ -316,17 +245,7 @@ impl IngressShadowHandle {
     }
 
     pub fn ensure_stream_enrollment(&self, stream_id: SmSessionId) -> IngressShadowDisposition {
-        let disposition = self.try_enroll_stream(stream_id.clone());
-        if matches!(disposition, IngressShadowDisposition::QueueFull) {
-            #[cfg(feature = "clustering")]
-            if let IngressShadowInner::Worker {
-                enrollment_retries, ..
-            } = self.inner.as_ref()
-            {
-                enrollment_retries.schedule(stream_id);
-            }
-        }
-        disposition
+        self.try_enroll_stream(stream_id)
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -352,53 +271,57 @@ impl IngressShadowHandle {
             #[cfg(feature = "clustering")]
             IngressShadowInner::Worker {
                 tx,
-                enrollment_capacity,
-                enrollment_retries: _,
+                enqueued_streams,
                 capacity,
                 ..
-            } => try_send_worker_task(tx, enrollment_capacity, capacity, task),
+            } => try_send_worker_task(tx, enqueued_streams, capacity, task),
         };
         observe_disposition(kind, stream_id, disposition)
     }
 
-    #[cfg(feature = "clustering")]
+    #[cfg(all(test, feature = "clustering"))]
     fn spawn_worker(
         queue_capacity: usize,
         max_concurrency: usize,
         execute: IngressShadowExecutor,
     ) -> Self {
+        Self::spawn_worker_with_enqueued_streams(
+            queue_capacity,
+            max_concurrency,
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            execute,
+        )
+    }
+
+    #[cfg(feature = "clustering")]
+    fn spawn_worker_with_enqueued_streams(
+        queue_capacity: usize,
+        max_concurrency: usize,
+        enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+        execute: IngressShadowExecutor,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let capacity = Arc::new(Semaphore::new(queue_capacity));
-        let enrollment_capacity = Arc::new(Semaphore::new(1));
-        let enrollment_retries = Arc::new(PendingEnrollmentRetries::default());
         let shutdown = Arc::new(IngressShadowShutdown::default());
         let scheduler =
             tokio::spawn(IngressShadowScheduler::new(rx, max_concurrency, execute).run());
-        let retry = tokio::spawn(enrollment_retries.clone().run(
-            tx.clone(),
-            enrollment_capacity.clone(),
-            capacity.clone(),
-            shutdown.cancellation.clone(),
-        ));
         let shutdown_completion = shutdown.clone();
         tokio::spawn(async move {
             shutdown_completion.cancellation.cancelled().await;
-            let _ = retry.await;
             let _ = scheduler.await;
             shutdown_completion.mark_complete();
         });
         Self {
             inner: Arc::new(IngressShadowInner::Worker {
                 tx,
-                enrollment_capacity,
-                enrollment_retries,
+                enqueued_streams,
                 capacity,
                 shutdown,
             }),
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "clustering"))]
     fn shutdown(&self) -> Option<Arc<IngressShadowShutdown>> {
         match self.inner.as_ref() {
             IngressShadowInner::Disabled => None,
@@ -410,34 +333,89 @@ impl IngressShadowHandle {
 #[cfg(feature = "clustering")]
 fn try_send_worker_task(
     tx: &mpsc::UnboundedSender<QueuedIngressShadowTask>,
-    enrollment_capacity: &Arc<Semaphore>,
+    enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
     capacity: &Arc<Semaphore>,
     task: IngressShadowTask,
 ) -> IngressShadowDisposition {
-    let permit = match capacity.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(tokio::sync::TryAcquireError::NoPermits) => {
-            if matches!(&task, IngressShadowTask::Enroll { .. }) {
-                match enrollment_capacity.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(tokio::sync::TryAcquireError::NoPermits) => {
-                        return IngressShadowDisposition::QueueFull;
-                    }
-                    Err(tokio::sync::TryAcquireError::Closed) => {
-                        return IngressShadowDisposition::Closed;
-                    }
+    match task {
+        IngressShadowTask::Enroll { stream_id } => {
+            send_enrollment_task(tx, enqueued_streams, stream_id)
+        }
+        submit @ IngressShadowTask::Submit(_) => {
+            let stream_id = submit.stream_id().clone();
+            if !ensure_stream_enrollment_task(tx, enqueued_streams, &stream_id) {
+                return IngressShadowDisposition::Closed;
+            }
+            let permit = match capacity.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    return IngressShadowDisposition::QueueFull;
                 }
-            } else {
-                return IngressShadowDisposition::QueueFull;
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    return IngressShadowDisposition::Closed;
+                }
+            };
+            match tx.send(QueuedIngressShadowTask {
+                task: submit,
+                permit: Some(permit),
+            }) {
+                Ok(()) => IngressShadowDisposition::Enqueued,
+                Err(_closed) => IngressShadowDisposition::Closed,
             }
         }
-        Err(tokio::sync::TryAcquireError::Closed) => {
-            return IngressShadowDisposition::Closed;
-        }
-    };
-    match tx.send(QueuedIngressShadowTask { task, permit }) {
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn send_enrollment_task(
+    tx: &mpsc::UnboundedSender<QueuedIngressShadowTask>,
+    enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    stream_id: SmSessionId,
+) -> IngressShadowDisposition {
+    let mut enqueued = enqueued_streams
+        .lock()
+        .expect("enqueued stream mutex must not be poisoned");
+    let inserted = enqueued.insert(stream_id.clone());
+    match tx.send(QueuedIngressShadowTask {
+        task: IngressShadowTask::Enroll {
+            stream_id: stream_id.clone(),
+        },
+        permit: None,
+    }) {
         Ok(()) => IngressShadowDisposition::Enqueued,
-        Err(_closed) => IngressShadowDisposition::Closed,
+        Err(_closed) => {
+            if inserted {
+                enqueued.remove(&stream_id);
+            }
+            IngressShadowDisposition::Closed
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn ensure_stream_enrollment_task(
+    tx: &mpsc::UnboundedSender<QueuedIngressShadowTask>,
+    enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    stream_id: &SmSessionId,
+) -> bool {
+    let mut enqueued = enqueued_streams
+        .lock()
+        .expect("enqueued stream mutex must not be poisoned");
+    if enqueued.contains(stream_id) {
+        return true;
+    }
+    enqueued.insert(stream_id.clone());
+    match tx.send(QueuedIngressShadowTask {
+        task: IngressShadowTask::Enroll {
+            stream_id: stream_id.clone(),
+        },
+        permit: None,
+    }) {
+        Ok(()) => true,
+        Err(_closed) => {
+            enqueued.remove(stream_id);
+            false
+        }
     }
 }
 
@@ -486,12 +464,24 @@ struct IngressShadowProcessor {
     lineage: LineageConfig,
     node_identity: SharedNodeIdentity,
     retry_attempts: usize,
+    enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
     /// Test-only deterministic fault point inside the transaction, after
     /// fences and digest evaluation but before alias persistence.  PostgreSQL
     /// serialization failures are otherwise difficult to force reliably at
     /// the processor's READ COMMITTED boundary.
     #[cfg(test)]
     forced_alias_serialization_failures: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(feature = "clustering")]
+fn clear_failed_enrollment(
+    enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    stream_id: &SmSessionId,
+) {
+    enqueued_streams
+        .lock()
+        .expect("enqueued stream mutex must not be poisoned")
+        .remove(stream_id);
 }
 
 #[cfg(feature = "clustering")]
@@ -512,13 +502,16 @@ impl IngressShadowProcessor {
                 stream_id: enroll_stream,
             } => {
                 let mut attempts = 0_usize;
-                let result = run_with_retry(self.retry_attempts, || {
-                    attempts += 1;
-                    self.execute_enrollment(&enroll_stream)
-                })
+                let timed = tokio::time::timeout(
+                    DEFAULT_TX_DEADLINE,
+                    run_with_retry(self.retry_attempts, || {
+                        attempts += 1;
+                        self.execute_enrollment(&enroll_stream)
+                    }),
+                )
                 .await;
-                match result {
-                    Ok(kind) => {
+                match timed {
+                    Ok(Ok(kind)) => {
                         if attempts > 1 {
                             waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(
                                 waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Retried,
@@ -531,12 +524,15 @@ impl IngressShadowProcessor {
                             kind,
                         });
                     }
-                    Err(_error) => observe(IngressShadowObservation::Failed {
-                        kind,
-                        stream_id,
-                        claim_epoch,
-                        handled_ordinal,
-                    }),
+                    Ok(Err(_)) | Err(_) => {
+                        clear_failed_enrollment(&self.enqueued_streams, &enroll_stream);
+                        observe(IngressShadowObservation::Failed {
+                            kind,
+                            stream_id,
+                            claim_epoch,
+                            handled_ordinal,
+                        });
+                    }
                 }
             }
             IngressShadowTask::Submit(submission) => {
@@ -704,14 +700,6 @@ impl IngressShadowProcessor {
         }
 
         let rowless_decision = submission.rowless_decision_marker();
-        if matches!(
-            rowless_decision,
-            Some(IngressShadowDecisionClass::CaptureOverflow)
-        ) {
-            return Ok(ShadowSubmissionOutcome::rolled_back(
-                IngressShadowDecisionClass::CaptureOverflow,
-            ));
-        }
         let digest_input = match digest_input_from_submission(submission)? {
             Ok(input) => input,
             Err(decision) => {
@@ -795,12 +783,26 @@ impl IngressShadowProcessor {
             ));
         }
 
-        let _ = EffectIntentRepository::record_all(
-            &mut transaction,
-            message_key,
-            &submission.capture.intents,
-        )
-        .await?;
+        let effect_outcome = if matches!(alias, IngressShadowAliasOutcome::Existing) {
+            EffectIntentRepository::record_all_existing_alias(
+                &mut transaction,
+                message_key,
+                &submission.capture.intents,
+            )
+            .await?
+        } else {
+            EffectIntentRepository::record_all(
+                &mut transaction,
+                message_key,
+                &submission.capture.intents,
+            )
+            .await?
+        };
+        let decision = if matches!(effect_outcome, EffectIntentWriteOutcome::IntentDivergence) {
+            IngressShadowDecisionClass::IntentDivergence
+        } else {
+            decision
+        };
         let commit_kind = advance_shadow_frontier(
             &mut transaction,
             &fence,
@@ -1103,6 +1105,14 @@ impl IngressShadowSubmission {
         {
             return Some(IngressShadowDecisionClass::CaptureOverflow);
         }
+        if self.capture.markers.iter().any(|marker| {
+            matches!(
+                marker,
+                ShadowDecisionMarker::AmbiguousDispatchToRoomRemote { .. }
+            )
+        }) {
+            return Some(IngressShadowDecisionClass::RemoteRouteAmbiguous);
+        }
         if self
             .capture
             .markers
@@ -1287,6 +1297,7 @@ mod tests {
                 lineage,
                 node_identity,
                 retry_attempts: 5,
+                enqueued_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
             };
             let fixture = Self {
@@ -1522,6 +1533,28 @@ mod tests {
     }
 
     #[test]
+    fn rowless_marker_promotes_ambiguous_remote_route() {
+        let mut message = Message::new(Some(Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+        message.type_ = MessageType::Groupchat;
+        let mut submission = base_submission(message);
+        submission.capture.markers = vec![ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
+            room: "room@conference.example.com".parse().expect("room jid"),
+            relay_target: waddle_xmpp::ingress::RelayTargetIdentity::owner_node(
+                "node-b", "epoch-b",
+            ),
+        }];
+
+        assert_eq!(
+            submission.rowless_decision_marker(),
+            Some(IngressShadowDecisionClass::RemoteRouteAmbiguous)
+        );
+    }
+
+    #[test]
     fn groupchat_submission_includes_room_in_server_authorities() {
         let mut message = Message::new(Some(Jid::from(
             "room@conference.example.com"
@@ -1749,6 +1782,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_existing_alias_intent_divergence_advances_without_new_rows() {
+        let Some(fixture) = ShadowFixture::open("intent_divergence").await else {
+            return;
+        };
+
+        let accepted = fixture.submission_with_inbox_intent(1, Some("intent-origin"));
+        assert!(matches!(
+            fixture.processor.execute_submission(&accepted).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::Accepted,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::Inserted,
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 1);
+        fixture.assert_rows(1, 1, 1, 1).await;
+
+        let subset = fixture.submission(2, Some("intent-origin"));
+        assert!(matches!(
+            fixture.processor.execute_submission(&subset).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::IntentDivergence,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::Existing,
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 2);
+        fixture.assert_rows(1, 1, 2, 1).await;
+
+        let mut payload_churn = fixture.submission_with_inbox_intent(3, Some("intent-origin"));
+        payload_churn.capture.intents[0] =
+            waddle_xmpp::ingress::IngressEffectIntent::InboxProject {
+                owner: fixture.principal.bare_jid().clone(),
+                increment_unread: false,
+            };
+        assert!(matches!(
+            fixture.processor.execute_submission(&payload_churn).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::IntentDivergence,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::Existing,
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 3);
+        fixture.assert_rows(1, 1, 3, 1).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
     async fn postgres_fence_principal_and_storage_failures_leave_shadow_unchanged() {
         let Some(fixture) = ShadowFixture::open("rollbacks").await else {
             return;
@@ -1786,22 +1868,6 @@ mod tests {
         assert_eq!(fixture.frontier().await, 0);
         fixture.assert_rows(0, 0, 0, 0).await;
 
-        let mut overflowed = fixture.submission(1, None);
-        overflowed
-            .capture
-            .markers
-            .push(ShadowDecisionMarker::Overflow);
-        assert!(matches!(
-            fixture.processor.execute_submission(&overflowed).await,
-            Ok(ShadowSubmissionOutcome {
-                decision: IngressShadowDecisionClass::CaptureOverflow,
-                commit_kind: None,
-                ..
-            })
-        ));
-        assert_eq!(fixture.frontier().await, 0);
-        fixture.assert_rows(0, 0, 0, 0).await;
-
         // A per-run schema lets this test poison only the shadow dependency;
         // the processor must roll the transaction back without advancing h.
         fixture
@@ -1819,6 +1885,59 @@ mod tests {
         // The poisoned ingress_effect_intents table no longer exists, so the
         // surviving tables plus the unmoved frontier carry the rollback proof.
         assert_eq!(fixture.count("ingress_sm_refs").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_capture_overflow_advances_frontier_without_rows() {
+        let Some(fixture) = ShadowFixture::open("capture_overflow").await else {
+            return;
+        };
+
+        let mut overflowed = fixture.submission(1, None);
+        overflowed
+            .capture
+            .markers
+            .push(ShadowDecisionMarker::Overflow);
+        assert!(matches!(
+            fixture.processor.execute_submission(&overflowed).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::CaptureOverflow,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::None,
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 1);
+        fixture.assert_rows(0, 0, 0, 0).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_ambiguous_remote_route_advances_frontier_without_rows() {
+        let Some(fixture) = ShadowFixture::open("ambiguous_remote_route").await else {
+            return;
+        };
+
+        let mut ambiguous = fixture.submission(1, None);
+        ambiguous
+            .capture
+            .markers
+            .push(ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
+                room: "room@conference.example.com".parse().expect("room jid"),
+                relay_target: waddle_xmpp::ingress::RelayTargetIdentity::owner_node(
+                    "node-b", "epoch-b",
+                ),
+            });
+        assert!(matches!(
+            fixture.processor.execute_submission(&ambiguous).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::RemoteRouteAmbiguous,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::None,
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 1);
+        fixture.assert_rows(0, 0, 0, 0).await;
         fixture.close().await;
     }
 
@@ -1892,6 +2011,39 @@ mod tests {
         let Some(fixture) = ShadowFixture::open("claim_lock_timeout").await else {
             return;
         };
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel::<&'static str>();
+        let (finished_tx, mut finished_rx) = mpsc::unbounded_channel::<&'static str>();
+        let processor = fixture.processor.clone();
+        let handle = test_handle(4, 1, move |task| {
+            let processor = processor.clone();
+            let started_tx = started_tx.clone();
+            let finished_tx = finished_tx.clone();
+            Box::pin(async move {
+                let label = match &task {
+                    IngressShadowTask::Enroll { .. } => "enroll",
+                    IngressShadowTask::Submit(_) => "submit",
+                };
+                started_tx.send(label).expect("record worker start");
+                processor.execute(task).await;
+                finished_tx.send(label).expect("record worker finish");
+            })
+        });
+        assert_eq!(
+            handle.try_enroll_stream(fixture.stream_id.clone()),
+            IngressShadowDisposition::Enqueued,
+            "pre-enrolling the handle removes the synthetic enroll race from the lock waiter"
+        );
+        let started_enroll = tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
+            .await
+            .expect("shadow enrollment should start promptly")
+            .expect("enrollment start recorded");
+        assert_eq!(started_enroll, "enroll");
+        let finished_enroll = tokio::time::timeout(Duration::from_millis(250), finished_rx.recv())
+            .await
+            .expect("shadow enrollment should drain promptly")
+            .expect("enrollment finish recorded");
+        assert_eq!(finished_enroll, "enroll");
+
         let mut locker = sqlx::PgConnection::connect(fixture.db.database_url())
             .await
             .expect("open competing PostgreSQL connection");
@@ -1912,20 +2064,6 @@ mod tests {
             "fixture should lock one claim row"
         );
 
-        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-        let (finished_tx, mut finished_rx) = mpsc::unbounded_channel();
-        let processor = fixture.processor.clone();
-        let handle = test_handle(4, 1, move |task| {
-            let processor = processor.clone();
-            let started_tx = started_tx.clone();
-            let finished_tx = finished_tx.clone();
-            Box::pin(async move {
-                started_tx.send(()).expect("record worker start");
-                processor.execute(task).await;
-                finished_tx.send(()).expect("record worker finish");
-            })
-        });
-
         let enqueue_started = std::time::Instant::now();
         let disposition = handle.try_submit(fixture.submission(1, Some("lock-timeout-origin")));
         let enqueue_elapsed = enqueue_started.elapsed();
@@ -1935,10 +2073,11 @@ mod tests {
             "enqueue should remain prompt while the worker blocks on PostgreSQL row locks, took {enqueue_elapsed:?}"
         );
 
-        tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
+        let started_submit = tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
             .await
             .expect("shadow worker should start promptly")
             .expect("worker start recorded");
+        assert_eq!(started_submit, "submit");
         wait_for_lock_waiter(
             &fixture.admin,
             "SELECT 1 FROM clustering_claims WHERE entity =",
@@ -1950,10 +2089,11 @@ mod tests {
                 .is_err(),
             "worker should still be waiting on the locked exact-claim row"
         );
-        tokio::time::timeout(Duration::from_secs(1), finished_rx.recv())
+        let finished_submit = tokio::time::timeout(Duration::from_secs(1), finished_rx.recv())
             .await
             .expect("lock_timeout should end the blocked shadow attempt")
             .expect("worker finish recorded");
+        assert_eq!(finished_submit, "submit");
         assert_eq!(fixture.frontier().await, 0);
         fixture.assert_rows(0, 0, 0, 0).await;
 
@@ -2081,42 +2221,64 @@ mod tests {
     #[tokio::test]
     async fn queue_full_keeps_same_stream_fifo_order() {
         let release_first = Arc::new(Notify::new());
+        let enrollment_finished = Arc::new(Notify::new());
         let started_order = Arc::new(AtomicUsize::new(0));
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
         let handle = test_handle(2, 2, {
             let release_first = release_first.clone();
+            let enrollment_finished = enrollment_finished.clone();
             let started_order = started_order.clone();
-            move |_task| {
+            move |task| {
                 let release_first = release_first.clone();
+                let enrollment_finished = enrollment_finished.clone();
                 let started_order = started_order.clone();
                 let started_tx = started_tx.clone();
                 Box::pin(async move {
-                    let order = started_order.fetch_add(1, Ordering::SeqCst);
-                    started_tx.send(order).expect("record start order");
-                    if order == 0 {
-                        release_first.notified().await;
+                    match task {
+                        IngressShadowTask::Enroll { .. } => {
+                            enrollment_finished.notify_waiters();
+                        }
+                        IngressShadowTask::Submit(_) => {
+                            let order = started_order.fetch_add(1, Ordering::SeqCst);
+                            started_tx.send(order).expect("record start order");
+                            if order == 0 {
+                                release_first.notified().await;
+                            }
+                        }
                     }
                 })
             }
         });
         let stream_a = SmSessionId::new("stream-a");
+        let drained_enrollment = enrollment_finished.notified();
+        let new_submission = |stream_id: SmSessionId| {
+            let message = Message::new(Some(jid::Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            )));
+            let mut submission = base_submission(message);
+            submission.stream_id = stream_id;
+            submission
+        };
 
         assert_eq!(
             handle.try_enroll_stream(stream_a.clone()),
             IngressShadowDisposition::Enqueued
         );
+        tokio::time::timeout(Duration::from_millis(250), drained_enrollment)
+            .await
+            .expect("explicit enrollment should drain before submit FIFO assertions");
         assert_eq!(
-            handle.try_enroll_stream(stream_a.clone()),
-            IngressShadowDisposition::Enqueued
-        );
-        // The third enrollment consumes the single reserved enrollment
-        // admission slot; only the fourth sees a genuinely full queue.
-        assert_eq!(
-            handle.try_enroll_stream(stream_a.clone()),
+            handle.try_submit(new_submission(stream_a.clone())),
             IngressShadowDisposition::Enqueued
         );
         assert_eq!(
-            handle.try_enroll_stream(stream_a),
+            handle.try_submit(new_submission(stream_a.clone())),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            handle.try_submit(new_submission(stream_a)),
             IngressShadowDisposition::QueueFull
         );
 
@@ -2141,7 +2303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserved_enrollment_admission_survives_a_saturated_submission_queue() {
+    async fn saturated_submission_queue_still_accepts_sm_enrollment() {
         let hold_submission = Arc::new(Notify::new());
         let handle = test_handle(1, 1, {
             let hold_submission = hold_submission.clone();
@@ -2167,23 +2329,43 @@ mod tests {
         assert_eq!(
             handle.try_enroll_stream(SmSessionId::new("fresh-sm-stream")),
             IngressShadowDisposition::Enqueued,
-            "fresh SM enables retain one reserved admission slot when submit work fills the queue"
+            "fresh SM enables must enqueue even when submit work has exhausted capacity"
         );
 
         hold_submission.notify_waiters();
     }
 
     #[tokio::test]
-    async fn second_fresh_enable_eventually_enrolls_after_reserved_permit_is_held_long() {
-        let hold_submission = Arc::new(Notify::new());
-        let hold_stream_a = Arc::new(Notify::new());
+    async fn failed_enrollment_allows_a_later_submit_to_enqueue_enrollment_again() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let enqueued_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let stream_id = SmSessionId::new("retry-enrollment-stream");
+        enqueued_streams
+            .lock()
+            .expect("enqueued stream mutex")
+            .insert(stream_id.clone());
+
+        clear_failed_enrollment(&enqueued_streams, &stream_id);
+
+        assert!(ensure_stream_enrollment_task(
+            &tx,
+            &enqueued_streams,
+            &stream_id,
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(QueuedIngressShadowTask {
+                task: IngressShadowTask::Enroll { stream_id: queued },
+                ..
+            }) if queued == stream_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_submit_for_unseen_stream_prepends_enrollment() {
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
         let handle = test_handle(1, 1, {
-            let hold_submission = hold_submission.clone();
-            let hold_stream_a = hold_stream_a.clone();
             move |task| {
-                let hold_submission = hold_submission.clone();
-                let hold_stream_a = hold_stream_a.clone();
                 let started_tx = started_tx.clone();
                 Box::pin(async move {
                     match task {
@@ -2191,15 +2373,11 @@ mod tests {
                             started_tx
                                 .send("submit".to_string())
                                 .expect("record submit start");
-                            hold_submission.notified().await;
                         }
                         IngressShadowTask::Enroll { stream_id } => {
                             started_tx
                                 .send(stream_id.to_string())
                                 .expect("record enroll start");
-                            if stream_id.as_str() == "stream-a" {
-                                hold_stream_a.notified().await;
-                            }
                         }
                     }
                 })
@@ -2210,48 +2388,99 @@ mod tests {
                 .parse::<BareJid>()
                 .expect("room jid"),
         )));
-        let stream_a = SmSessionId::new("stream-a");
-        let stream_b = SmSessionId::new("stream-b");
-
+        let mut submission = base_submission(message);
+        submission.stream_id = SmSessionId::new("fresh-stream");
         assert_eq!(
-            handle.try_submit(base_submission(message)),
+            handle.try_submit(submission),
             IngressShadowDisposition::Enqueued
         );
-        assert_eq!(
-            handle.ensure_stream_enrollment(stream_a.clone()),
-            IngressShadowDisposition::Enqueued
-        );
-        assert_eq!(
-            handle.ensure_stream_enrollment(stream_b.clone()),
-            IngressShadowDisposition::QueueFull,
-            "second fresh enable should start as pending while the reserved permit is occupied"
-        );
 
+        let started_enroll = tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
+            .await
+            .expect("synthetic enrollment should start first")
+            .expect("enrollment start recorded");
+        assert_eq!(started_enroll, "fresh-stream");
         let started_submit = tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
             .await
-            .expect("submission should start promptly")
+            .expect("submit should start after enrollment")
             .expect("submission start recorded");
         assert_eq!(started_submit, "submit");
+    }
 
-        hold_submission.notify_waiters();
-        let started_stream_a = tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
-            .await
-            .expect("first fresh enable should eventually start")
-            .expect("stream-a start recorded");
-        assert_eq!(started_stream_a, stream_a.to_string());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(75), started_rx.recv())
+    #[tokio::test]
+    async fn saturated_enable_keeps_enrollment_ahead_of_the_first_submission() {
+        let release_blocker = Arc::new(Notify::new());
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let handle = test_handle(1, 1, {
+            let release_blocker = release_blocker.clone();
+            move |task| {
+                let release_blocker = release_blocker.clone();
+                let started_tx = started_tx.clone();
+                Box::pin(async move {
+                    match task {
+                        IngressShadowTask::Submit(submission)
+                            if submission.stream_id.as_str() == "blocking-stream" =>
+                        {
+                            started_tx
+                                .send("blocking-submit".to_string())
+                                .expect("record blocker start");
+                            release_blocker.notified().await;
+                        }
+                        IngressShadowTask::Enroll { stream_id } => {
+                            started_tx
+                                .send(format!("enroll:{stream_id}"))
+                                .expect("record enrollment start");
+                        }
+                        IngressShadowTask::Submit(submission) => {
+                            started_tx
+                                .send(format!("submit:{}", submission.stream_id))
+                                .expect("record submission start");
+                        }
+                    }
+                })
+            }
+        });
+        let message = Message::new(Some(jid::Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+        let mut blocking = base_submission(message.clone());
+        blocking.stream_id = SmSessionId::new("blocking-stream");
+        let mut first_for_fresh = base_submission(message);
+        first_for_fresh.stream_id = SmSessionId::new("fresh-stream");
+
+        assert_eq!(
+            handle.try_submit(blocking),
+            IngressShadowDisposition::Enqueued
+        );
+        let started_blocking_enroll =
+            tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
                 .await
-                .is_err(),
-            "second fresh enable must remain pending while stream-a still holds the reserved permit"
+                .expect("blocking stream enrollment should start first")
+                .expect("blocking enrollment start recorded");
+        assert_eq!(started_blocking_enroll, "enroll:blocking-stream");
+        let started_blocker = tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
+            .await
+            .expect("blocking submission should start")
+            .expect("blocker start recorded");
+        assert_eq!(started_blocker, "blocking-submit");
+        assert_eq!(
+            handle.try_enroll_stream(SmSessionId::new("fresh-stream")),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            handle.try_submit(first_for_fresh),
+            IngressShadowDisposition::QueueFull,
+            "the first fresh submission still obeys submit capacity after its enrollment is queued"
         );
 
-        hold_stream_a.notify_waiters();
-        let started_stream_b = tokio::time::timeout(Duration::from_millis(500), started_rx.recv())
+        release_blocker.notify_waiters();
+        let started_enroll = tokio::time::timeout(Duration::from_millis(250), started_rx.recv())
             .await
-            .expect("second fresh enable should eventually start once the permit is released")
-            .expect("stream-b start recorded");
-        assert_eq!(started_stream_b, stream_b.to_string());
+            .expect("fresh enrollment should run after the blocker")
+            .expect("fresh enrollment start recorded");
+        assert_eq!(started_enroll, "enroll:fresh-stream");
     }
 
     async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {

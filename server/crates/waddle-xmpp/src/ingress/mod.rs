@@ -21,7 +21,7 @@ pub use alias::{resolve_alias, AliasConflict, AliasOutcome, AliasResolution, Sto
 pub use digest::{DigestContext, DigestInput, DigestInputError, DigestVersion, SemanticDigest};
 pub use effect_intent::{
     EffectIntentCodecError, EncodedEffectIntent, IngressEffectIntent, IngressEffectKey,
-    MAX_EFFECT_INTENT_PAYLOAD_BYTES,
+    RelayTargetIdentity, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
 };
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;

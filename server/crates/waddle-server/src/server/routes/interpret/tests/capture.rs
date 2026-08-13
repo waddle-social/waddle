@@ -105,10 +105,7 @@ async fn groupchat_inbox_boundary_records_inbox_and_notification_intents() {
         }));
     assert!(snapshot
         .intents
-        .contains(&IngressEffectIntent::NotificationActivityPreview {
-            owner,
-            audience: Vec::new(),
-        }));
+        .contains(&IngressEffectIntent::NotificationActivityPreview { owner }));
 }
 
 #[tokio::test]
@@ -159,10 +156,7 @@ async fn offline_delivery_boundary_records_notification_preview_intent() {
     let snapshot = capture_snapshot(&capture);
     assert!(snapshot
         .intents
-        .contains(&IngressEffectIntent::NotificationActivityPreview {
-            owner: recipient,
-            audience: Vec::new(),
-        }));
+        .contains(&IngressEffectIntent::NotificationActivityPreview { owner: recipient }));
 }
 
 #[tokio::test]
@@ -196,10 +190,7 @@ async fn archive_direct_boundary_records_notification_activity_preview_intent() 
     let snapshot = capture_snapshot(&capture);
     assert!(snapshot
         .intents
-        .contains(&IngressEffectIntent::NotificationActivityPreview {
-            owner,
-            audience: Vec::new(),
-        }));
+        .contains(&IngressEffectIntent::NotificationActivityPreview { owner }));
 }
 
 #[tokio::test]

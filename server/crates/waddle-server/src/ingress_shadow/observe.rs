@@ -13,6 +13,8 @@ use waddle_xmpp::telemetry::{
 pub enum IngressShadowDecisionClass {
     Accepted,
     ExistingSameDigest,
+    IntentDivergence,
+    RemoteRouteAmbiguous,
     AliasConflict,
     CaptureOverflow,
     SemanticMalformed,
@@ -176,6 +178,10 @@ fn decision_class(class: IngressShadowDecisionClass) -> Option<MetricDecisionCla
         IngressShadowDecisionClass::Accepted => Some(MetricDecisionClass::Accepted),
         IngressShadowDecisionClass::ExistingSameDigest => {
             Some(MetricDecisionClass::ExistingSameDigest)
+        }
+        IngressShadowDecisionClass::IntentDivergence => Some(MetricDecisionClass::IntentDivergence),
+        IngressShadowDecisionClass::RemoteRouteAmbiguous => {
+            Some(MetricDecisionClass::RemoteRouteAmbiguous)
         }
         IngressShadowDecisionClass::AliasConflict => Some(MetricDecisionClass::AliasConflict),
         IngressShadowDecisionClass::CaptureOverflow => Some(MetricDecisionClass::CaptureOverflow),

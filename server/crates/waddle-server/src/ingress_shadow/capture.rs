@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use jid::BareJid;
-use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey};
+use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey, RelayTargetIdentity};
 use waddle_xmpp::muc::RoomClaimFenceContext;
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
 use xmpp_parsers::message::{Lang, Message};
@@ -24,6 +24,10 @@ pub enum ShadowSemanticRejectedReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShadowDecisionMarker {
+    AmbiguousDispatchToRoomRemote {
+        room: BareJid,
+        relay_target: RelayTargetIdentity,
+    },
     AuthorizationDenied {
         reason: ShadowAuthorizationDeniedReason,
     },

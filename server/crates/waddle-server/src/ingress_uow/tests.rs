@@ -1,15 +1,15 @@
 #[cfg(feature = "clustering")]
 use chrono::{TimeZone, Utc};
+#[cfg(feature = "clustering")]
 use sqlx::Connection;
 use uuid::Uuid;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch, SemanticDigest, SmIngressId};
+#[cfg(feature = "clustering")]
 use waddle_xmpp::{
     auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
-    ingress::{
-        AliasOutcome, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
-        ProtocolEpoch, SemanticDigest, SmIngressId,
-    },
+    ingress::{AliasOutcome, AliasResolution, DeliveryKey, IngressOrdinal, NormalizedTarget},
     ownership::{ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity},
     pending_delivery::SmSessionId,
 };
@@ -21,21 +21,20 @@ use waddle_xmpp::{
     },
     mam::{ArchivedMessage, MamTxStoreOutcome},
 };
+#[cfg(feature = "clustering")]
 use waddle_xmpp_core::xep0359::OriginId;
 #[cfg(feature = "clustering")]
 use waddle_xmpp_core::xep0359::StanzaId;
 #[cfg(feature = "clustering")]
 use xmpp_parsers::message::MessageType;
 
-use super::{
-    CanonicalMessageRepository, DeliveryEffectRepository, IngressUowError,
-    PostgresIngressUnitOfWork, SmIngressRepository,
-};
+use super::{CanonicalMessageRepository, IngressUowError, PostgresIngressUnitOfWork};
 #[cfg(feature = "clustering")]
 use super::{
-    ClaimRepository, EffectIntentRepository, EffectIntentWriteOutcome, HandledFrontierOutcome,
-    HandledFrontierRepository, InboxRepository, IngressUowTransaction, MamArchiveRepository,
-    PrincipalAssertion, PrincipalRepository, ShadowFrontierOutcome, SmIngressStreamRepository,
+    ClaimRepository, DeliveryEffectRepository, EffectIntentRepository, EffectIntentWriteOutcome,
+    HandledFrontierOutcome, HandledFrontierRepository, InboxRepository, IngressUowTransaction,
+    MamArchiveRepository, PrincipalAssertion, PrincipalRepository, ShadowFrontierOutcome,
+    SmIngressRepository, SmIngressStreamRepository,
 };
 use crate::{
     config::LineageConfig,
@@ -192,8 +191,12 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
     );
     let raw_intent = fixture
         .execute(
-            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, payload_version, payload) VALUES (?::uuid, 0, 0, 1, ?)",
-            crate::db_params![message_key.to_storage().to_string(), vec![1_u8]],
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, 0, 0, ?, 1, ?)",
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                vec![0_u8; 32],
+                vec![1_u8]
+            ],
         )
         .await;
     assert!(
@@ -855,12 +858,16 @@ async fn shadow_frontier_advances_idempotently_and_detects_gaps() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn effect_intents_are_ordered_idempotent_and_conflict_safely() {
+async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_alias_divergence() {
     let Some(fixture) = Fixture::open("effect_intents").await else {
         return;
     };
     let message_key = MessageKey::new();
     let intents = vec![
+        IngressEffectIntent::RouteDirect {
+            recipient: "juliet@example.com".parse().expect("valid recipient"),
+            fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+        },
         IngressEffectIntent::InboxProject {
             owner: "romeo@example.com".parse().expect("valid owner"),
             increment_unread: true,
@@ -885,7 +892,7 @@ async fn effect_intents_are_ordered_idempotent_and_conflict_safely() {
     let conn = fixture.db.guard().await.expect("read effect rows");
     let mut rows = conn
         .query(
-            "SELECT effect_ordinal::text, kind::int FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
+            "SELECT effect_ordinal::text, kind::int, octet_length(semantic_identity_hash) FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
             crate::db_params![message_key.to_storage().to_string()],
         )
         .await
@@ -895,9 +902,13 @@ async fn effect_intents_are_ordered_idempotent_and_conflict_safely() {
         stored.push((
             row.get::<String>(0).expect("ordinal"),
             row.get::<i64>(1).expect("kind"),
+            row.get::<i32>(2).expect("semantic hash length"),
         ));
     }
-    assert_eq!(stored, vec![("0".to_string(), 1), ("1".to_string(), 6)]);
+    assert_eq!(
+        stored,
+        vec![("0".to_string(), 1, 32), ("1".to_string(), 6, 32)]
+    );
 
     let mut replay = fixture.begin().await;
     assert_eq!(
@@ -908,16 +919,80 @@ async fn effect_intents_are_ordered_idempotent_and_conflict_safely() {
     );
     replay.commit().await.expect("commit replay");
 
-    let mut conflict = fixture.begin().await;
     let differing = [IngressEffectIntent::RouteDirect {
         recipient: "juliet@example.com".parse().expect("valid recipient"),
         fanout: vec!["juliet@example.com/laptop".parse().expect("valid fanout")],
     }];
+    let mut existing_alias_divergence = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all_existing_alias(
+            &mut existing_alias_divergence,
+            message_key,
+            &differing,
+        )
+        .await
+        .expect("existing-alias divergence should advance"),
+        EffectIntentWriteOutcome::IntentDivergence
+    );
+    existing_alias_divergence
+        .commit()
+        .await
+        .expect("commit existing-alias divergence");
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
+
+    let subset = [IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("valid recipient"),
+        fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+    }];
+    let mut subset_divergence = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all_existing_alias(
+            &mut subset_divergence,
+            message_key,
+            &subset,
+        )
+        .await
+        .expect("subset divergence should advance"),
+        EffectIntentWriteOutcome::IntentDivergence
+    );
+    subset_divergence
+        .commit()
+        .await
+        .expect("commit subset divergence");
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
+
+    let mut conflict = fixture.begin().await;
     assert!(matches!(
         EffectIntentRepository::record_all(&mut conflict, message_key, &differing).await,
         Err(IngressUowError::EffectIntentConflict)
     ));
     drop(conflict);
+
+    let empty_message_key = MessageKey::new();
+    let mut empty_original = fixture.begin().await;
+    CanonicalMessageRepository::record(&mut empty_original, empty_message_key, &digest(10))
+        .await
+        .expect("record parent with no effect intents");
+    empty_original
+        .commit()
+        .await
+        .expect("commit parent with no effect intents");
+    let mut empty_existing_alias = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all_existing_alias(
+            &mut empty_existing_alias,
+            empty_message_key,
+            &subset,
+        )
+        .await
+        .expect("existing alias with new effects must not write"),
+        EffectIntentWriteOutcome::IntentDivergence
+    );
+    empty_existing_alias
+        .commit()
+        .await
+        .expect("commit empty existing-alias divergence");
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
 
     let mut missing = fixture.begin().await;
     assert!(matches!(
@@ -1224,12 +1299,14 @@ impl FixtureValues {
 struct Fixture {
     db: Database,
     uow: PostgresIngressUnitOfWork,
+    #[cfg(feature = "clustering")]
     lineage: LineageConfig,
     /// The canonical identity source bound into `uow` (clustering only).
     #[cfg(feature = "clustering")]
     node_identity: SharedNodeIdentity,
     admin: sqlx::PgPool,
     schema: String,
+    #[cfg(feature = "clustering")]
     schema_url: String,
 }
 
@@ -1280,11 +1357,13 @@ impl Fixture {
         Some(Self {
             db,
             uow,
+            #[cfg(feature = "clustering")]
             lineage,
             #[cfg(feature = "clustering")]
             node_identity,
             admin,
             schema,
+            #[cfg(feature = "clustering")]
             schema_url,
         })
     }
@@ -1456,6 +1535,7 @@ impl Fixture {
         rows.next().await.expect("read committed row").is_some()
     }
 
+    #[cfg(feature = "clustering")]
     async fn count(&self, table: &str) -> i64 {
         let conn = self.db.guard().await.expect("database guard");
         let mut rows = conn
@@ -1511,6 +1591,8 @@ impl Fixture {
 }
 
 async fn initialize_existing_store_schemas(db: &Database, schema_url: &str) {
+    #[cfg(not(feature = "clustering"))]
+    let _ = db;
     #[cfg(feature = "clustering")]
     {
         let claims = crate::clustering::claims::PostgresClaimStore::new(db.clone());

@@ -205,7 +205,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 presence_show, presence_status, presence_priority, replay_gap_through,
                 presence_payloads, bare_jid, auth_context_id, auth_context_version,
                 principal_auth_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,

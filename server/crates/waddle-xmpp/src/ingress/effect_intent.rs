@@ -14,6 +14,29 @@ use crate::{
 /// Largest accepted version-one storage payload, matching the database check.
 pub const MAX_EFFECT_INTENT_PAYLOAD_BYTES: usize = 65_536;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RelayTargetIdentity {
+    pub node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_epoch: Option<String>,
+}
+
+impl RelayTargetIdentity {
+    pub fn owner_node(node_id: impl Into<String>, node_epoch: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            node_epoch: Some(node_epoch.into()),
+        }
+    }
+
+    pub fn relay_node(node_id: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            node_epoch: None,
+        }
+    }
+}
+
 /// A frozen effect decision; it carries no executable callback or mutable
 /// lookup and can therefore be durably replayed without re-deriving policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +60,10 @@ pub enum IngressEffectIntent {
         recipient: FullJid,
         sender: FullJid,
     },
+    DispatchToRoomRemote {
+        room: BareJid,
+        relay_target: RelayTargetIdentity,
+    },
     RecipientSmAppend {
         stream: SmSessionId,
     },
@@ -50,7 +77,6 @@ pub enum IngressEffectIntent {
     },
     NotificationActivityPreview {
         owner: BareJid,
-        audience: Vec<FullJid>,
     },
     CallSignal {
         recipient: FullJid,
@@ -77,6 +103,7 @@ pub enum IngressEffectKey {
     RouteDirect(BareJid),
     RouteMucGroupchat(BareJid),
     RouteOccupantPm(FullJid),
+    DispatchToRoomRemote(BareJid, RelayTargetIdentity),
     RecipientSmAppend(SmSessionId),
     Carbons(FullJid),
     InboxProject(BareJid),
@@ -94,14 +121,23 @@ impl IngressEffectKey {
             Self::RouteDirect(value) => (1, value.to_string()),
             Self::RouteMucGroupchat(value) => (2, value.to_string()),
             Self::RouteOccupantPm(value) => (3, value.to_string()),
-            Self::RecipientSmAppend(value) => (4, value.as_str().to_string()),
-            Self::Carbons(value) => (5, value.to_string()),
-            Self::InboxProject(value) => (6, value.to_string()),
-            Self::NotificationActivityPreview(value) => (7, value.to_string()),
-            Self::CallSignal(value) => (8, value.to_string()),
-            Self::Pin(value) => (9, value.to_string()),
-            Self::Extension(value) => (10, value.to_string()),
-            Self::ErrorReply(value) => (11, value.to_string()),
+            Self::DispatchToRoomRemote(room, relay_target) => (
+                4,
+                format!(
+                    "{}|{}|{}",
+                    room,
+                    relay_target.node_id,
+                    relay_target.node_epoch.as_deref().unwrap_or("")
+                ),
+            ),
+            Self::RecipientSmAppend(value) => (5, value.as_str().to_string()),
+            Self::Carbons(value) => (6, value.to_string()),
+            Self::InboxProject(value) => (7, value.to_string()),
+            Self::NotificationActivityPreview(value) => (8, value.to_string()),
+            Self::CallSignal(value) => (9, value.to_string()),
+            Self::Pin(value) => (10, value.to_string()),
+            Self::Extension(value) => (11, value.to_string()),
+            Self::ErrorReply(value) => (12, value.to_string()),
         }
     }
 }
@@ -129,6 +165,9 @@ impl IngressEffectIntent {
             }
             Self::RouteOccupantPm { recipient, .. } => {
                 IngressEffectKey::RouteOccupantPm(recipient.clone())
+            }
+            Self::DispatchToRoomRemote { room, relay_target } => {
+                IngressEffectKey::DispatchToRoomRemote(room.clone(), relay_target.clone())
             }
             Self::RecipientSmAppend { stream } => {
                 IngressEffectKey::RecipientSmAppend(stream.clone())
@@ -226,6 +265,10 @@ enum StoredEffectIntent {
         recipient: FullJid,
         sender: FullJid,
     },
+    DispatchToRoomRemote {
+        room: BareJid,
+        relay_target: RelayTargetIdentity,
+    },
     RecipientSmAppend {
         stream: SmSessionId,
     },
@@ -239,7 +282,6 @@ enum StoredEffectIntent {
     },
     NotificationActivityPreview {
         owner: BareJid,
-        audience: Vec<FullJid>,
     },
     CallSignal {
         recipient: FullJid,
@@ -266,6 +308,7 @@ impl StoredEffectIntent {
             Self::RouteDirect { .. } => 1,
             Self::RouteMucGroupchat { .. } => 2,
             Self::RouteOccupantPm { .. } => 3,
+            Self::DispatchToRoomRemote { .. } => 12,
             Self::RecipientSmAppend { .. } => 4,
             Self::Carbons { .. } => 5,
             Self::InboxProject { .. } => 6,
@@ -312,6 +355,9 @@ impl StoredEffectIntent {
             IngressEffectIntent::RouteOccupantPm { recipient, sender } => {
                 Self::RouteOccupantPm { recipient, sender }
             }
+            IngressEffectIntent::DispatchToRoomRemote { room, relay_target } => {
+                Self::DispatchToRoomRemote { room, relay_target }
+            }
             IngressEffectIntent::RecipientSmAppend { stream } => Self::RecipientSmAppend { stream },
             IngressEffectIntent::Carbons {
                 mut carbon_recipients,
@@ -330,12 +376,8 @@ impl StoredEffectIntent {
                 owner,
                 increment_unread,
             },
-            IngressEffectIntent::NotificationActivityPreview {
-                owner,
-                mut audience,
-            } => {
-                canonicalize(&mut audience);
-                Self::NotificationActivityPreview { owner, audience }
+            IngressEffectIntent::NotificationActivityPreview { owner } => {
+                Self::NotificationActivityPreview { owner }
             }
             IngressEffectIntent::CallSignal {
                 recipient,
@@ -390,6 +432,9 @@ impl StoredEffectIntent {
             Self::RouteOccupantPm { recipient, sender } => {
                 IngressEffectIntent::RouteOccupantPm { recipient, sender }
             }
+            Self::DispatchToRoomRemote { room, relay_target } => {
+                IngressEffectIntent::DispatchToRoomRemote { room, relay_target }
+            }
             Self::RecipientSmAppend { stream } => IngressEffectIntent::RecipientSmAppend { stream },
             Self::Carbons {
                 carbon_recipients,
@@ -405,8 +450,8 @@ impl StoredEffectIntent {
                 owner,
                 increment_unread,
             },
-            Self::NotificationActivityPreview { owner, audience } => {
-                IngressEffectIntent::NotificationActivityPreview { owner, audience }
+            Self::NotificationActivityPreview { owner } => {
+                IngressEffectIntent::NotificationActivityPreview { owner }
             }
             Self::CallSignal {
                 recipient,
@@ -536,6 +581,10 @@ mod tests {
                 recipient: full("juliet@example.test/laptop"),
                 sender: full("romeo@example.test/phone"),
             },
+            IngressEffectIntent::DispatchToRoomRemote {
+                room: bare("room@conference.example.test"),
+                relay_target: RelayTargetIdentity::owner_node("relay-node", "relay-epoch"),
+            },
             IngressEffectIntent::RecipientSmAppend {
                 stream: SmSessionId::new("stream-1"),
             },
@@ -549,7 +598,6 @@ mod tests {
             },
             IngressEffectIntent::NotificationActivityPreview {
                 owner: bare("romeo@example.test"),
-                audience: vec![full("romeo@example.test/phone")],
             },
             IngressEffectIntent::CallSignal {
                 recipient: full("romeo@example.test/phone"),
@@ -577,10 +625,11 @@ mod tests {
             r#"{"version":1,"intent":{"type":"route_direct","recipient":"romeo@example.test","fanout":["romeo@example.test/phone"]}}"#,
             r#"{"version":1,"intent":{"type":"route_muc_groupchat","room":"room@conference.example.test","occupants":["juliet@example.test/laptop"],"reflection":"romeo@example.test/phone","room_generation":7}}"#,
             r#"{"version":1,"intent":{"type":"route_occupant_pm","recipient":"juliet@example.test/laptop","sender":"romeo@example.test/phone"}}"#,
+            r#"{"version":1,"intent":{"type":"dispatch_to_room_remote","room":"room@conference.example.test","relay_target":{"node_id":"relay-node","node_epoch":"relay-epoch"}}}"#,
             r#"{"version":1,"intent":{"type":"recipient_sm_append","stream":"stream-1"}}"#,
             r#"{"version":1,"intent":{"type":"carbons","carbon_recipients":["romeo@example.test/phone"],"excluded_source":"romeo@example.test/laptop"}}"#,
             r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","increment_unread":true}}"#,
-            r#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","audience":["romeo@example.test/phone"]}}"#,
+            r#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test"}}"#,
             r#"{"version":1,"intent":{"type":"call_signal","recipient":"romeo@example.test/phone","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"pin","room":"room@conference.example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"extension","recipient":"romeo@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
@@ -598,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_unordered_audiences() {
+    fn canonicalizes_unordered_fanout_audiences() {
         let first = IngressEffectIntent::RouteDirect {
             recipient: bare("romeo@example.test"),
             fanout: vec![
@@ -617,6 +666,23 @@ mod tests {
         assert_eq!(
             first.encode_v1().expect("encode first"),
             second.encode_v1().expect("encode second")
+        );
+    }
+
+    #[test]
+    fn relay_target_without_epoch_round_trips() {
+        let intent = IngressEffectIntent::DispatchToRoomRemote {
+            room: bare("room@conference.example.test"),
+            relay_target: RelayTargetIdentity::relay_node("relay-node"),
+        };
+        let encoded = intent.encode_v1().expect("encode sample");
+        assert_eq!(
+            IngressEffectIntent::decode_v1(encoded.kind, &encoded.payload).expect("decode sample"),
+            intent
+        );
+        assert_eq!(
+            encoded.payload,
+            br#"{"version":1,"intent":{"type":"dispatch_to_room_remote","room":"room@conference.example.test","relay_target":{"node_id":"relay-node"}}}"#
         );
     }
 

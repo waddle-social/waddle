@@ -3,7 +3,7 @@ use crate::ingress_shadow::{
     IngressShadowRoomFence, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
     ShadowSemanticRejectedReason,
 };
-use waddle_xmpp::ingress::{EntityGeneration, IngressEffectIntent};
+use waddle_xmpp::ingress::{EntityGeneration, IngressEffectIntent, RelayTargetIdentity};
 
 /// Bind the subject mutation emitted from one frozen room snapshot to
 /// that actor incarnation's immutable ownership proof. This is mandatory
@@ -119,32 +119,63 @@ pub(super) async fn dispatch_to_room(
                 )
                 .await
             {
-                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(
-                    replies,
-                )) => {
-                    for reply in replies {
-                        match reply.to_element_string() {
-                            Ok(xml) => outcome.frames.push(xml),
-                            Err(error) => {
-                                warn!(
-                                    room = %room_jid,
-                                    %error,
-                                    "DispatchToRoom: failed to serialize remote MUC reply"
-                                );
+                MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
+                    OrderedRelayMucProxyOutcome::Delivered(replies) => {
+                        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+                            capture_delivered_remote_room_route(
+                                capture,
+                                &room_jid,
+                                attempt.relay_target,
+                            );
+                        }
+                        for reply in replies {
+                            match reply.to_element_string() {
+                                Ok(xml) => outcome.frames.push(xml),
+                                Err(error) => {
+                                    warn!(
+                                        room = %room_jid,
+                                        %error,
+                                        "DispatchToRoom: failed to serialize remote MUC reply"
+                                    );
+                                }
                             }
                         }
+                        return outcome;
                     }
-                    return outcome;
-                }
-                // Attempted-but-failed AND retryable routing states
-                // (claim lookup/lease trouble, origin claim held
-                // elsewhere) bounce a wait-class retry error. Falling
-                // through to the local registry here would misreport a
-                // healthy REMOTE room as `<item-not-found/>` (review P2
-                // on PR #1277).
-                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
-                | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
-                | MucProxyRouteDecision::RoomClaimUnavailable
+                    // Attempted-but-failed AND retryable routing states
+                    // (claim lookup/lease trouble, origin claim held
+                    // elsewhere) bounce a wait-class retry error. Falling
+                    // through to the local registry here would misreport a
+                    // healthy REMOTE room as `<item-not-found/>` (review P2
+                    // on PR #1277).
+                    OrderedRelayMucProxyOutcome::Unavailable
+                    | OrderedRelayMucProxyOutcome::Dropped => {
+                        clear_provisional_shadow_room_fence(deps);
+                        push_sender_error_reply(
+                            deps,
+                            &mut outcome,
+                            &incoming,
+                            &room_jid,
+                            &sender_full,
+                            resource_constraint_error(
+                                "This room is temporarily unreachable; please retry.",
+                            ),
+                        );
+                        return outcome;
+                    }
+                    OrderedRelayMucProxyOutcome::MaybeCommitted
+                    | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+                            capture_ambiguous_remote_room_route(
+                                capture,
+                                &room_jid,
+                                attempt.relay_target,
+                            );
+                        }
+                        return outcome;
+                    }
+                },
+                MucProxyRouteDecision::RoomClaimUnavailable
                 | MucProxyRouteDecision::OriginUnavailable => {
                     clear_provisional_shadow_room_fence(deps);
                     push_sender_error_reply(
@@ -157,12 +188,6 @@ pub(super) async fn dispatch_to_room(
                             "This room is temporarily unreachable; please retry.",
                         ),
                     );
-                    return outcome;
-                }
-                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
-                | MucProxyRouteDecision::Attempted(
-                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-                ) => {
                     return outcome;
                 }
                 // The local registry is authoritative: the room claim is
@@ -597,21 +622,23 @@ pub(super) async fn dispatch_to_room(
     outcome.feedback.extend(nested.feedback);
 
     if retry_suppression.is_none() && routed_connections > 0 {
-        let room_generation = snapshot
-            .claim_fence
-            .as_ref()
-            .and_then(|fence| u64::try_from(fence.epoch.0).ok())
-            .map(EntityGeneration::from_storage)
-            .unwrap_or(EntityGeneration::INITIAL);
-        deps.capture_intent(IngressEffectIntent::RouteMucGroupchat {
-            room: room_jid.clone(),
-            occupants: occupants
-                .iter()
-                .map(|occupant| occupant.full_jid.clone())
-                .collect(),
-            reflection: sender_full.clone(),
-            room_generation,
-        });
+        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+            let room_generation = snapshot
+                .claim_fence
+                .as_ref()
+                .and_then(|fence| u64::try_from(fence.epoch.0).ok())
+                .map(EntityGeneration::from_storage)
+                .unwrap_or(EntityGeneration::INITIAL);
+            capture.record_intent(IngressEffectIntent::RouteMucGroupchat {
+                room: room_jid.clone(),
+                occupants: occupants
+                    .iter()
+                    .map(|occupant| occupant.full_jid.clone())
+                    .collect(),
+                reflection: sender_full.clone(),
+                room_generation,
+            });
+        }
     }
 
     // The marker controls only this nested room batch. Consume it here rather
@@ -664,6 +691,28 @@ fn clear_provisional_shadow_room_fence(deps: &Deps<'_>) {
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
         capture.clear_room_fence();
     }
+}
+
+pub(super) fn capture_delivered_remote_room_route(
+    capture: &crate::ingress_shadow::IngressEffectCapture,
+    room: &jid::BareJid,
+    relay_target: RelayTargetIdentity,
+) {
+    capture.record_intent(IngressEffectIntent::DispatchToRoomRemote {
+        room: room.clone(),
+        relay_target,
+    });
+}
+
+pub(super) fn capture_ambiguous_remote_room_route(
+    capture: &crate::ingress_shadow::IngressEffectCapture,
+    room: &jid::BareJid,
+    relay_target: RelayTargetIdentity,
+) {
+    capture.record_marker(ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
+        room: room.clone(),
+        relay_target,
+    });
 }
 
 /// Serialize a XEP-0045 message error reply from the room to the sender

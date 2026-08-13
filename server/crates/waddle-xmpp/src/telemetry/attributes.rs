@@ -325,6 +325,8 @@ impl MetricAttribute for PushRetryReason {
 pub enum IngressDecisionClass {
     Accepted,
     ExistingSameDigest,
+    IntentDivergence,
+    RemoteRouteAmbiguous,
     AliasConflict,
     CaptureOverflow,
     SemanticMalformed,
@@ -337,9 +339,11 @@ pub enum IngressDecisionClass {
 }
 
 impl IngressDecisionClass {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Accepted,
         Self::ExistingSameDigest,
+        Self::IntentDivergence,
+        Self::RemoteRouteAmbiguous,
         Self::AliasConflict,
         Self::CaptureOverflow,
         Self::SemanticMalformed,
@@ -362,6 +366,8 @@ impl MetricAttribute for IngressDecisionClass {
         match self {
             Self::Accepted => "accepted",
             Self::ExistingSameDigest => "existing_same_digest",
+            Self::IntentDivergence => "intent_divergence",
+            Self::RemoteRouteAmbiguous => "remote_route_ambiguous",
             Self::AliasConflict => "alias_conflict",
             Self::CaptureOverflow => "capture_overflow",
             Self::SemanticMalformed => "semantic_malformed",
