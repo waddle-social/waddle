@@ -646,8 +646,20 @@ impl RoomActor {
         // actor incarnation. Do not let a later transient store failure
         // override that proof through a later uncertain probe while the
         // registry is still converging the non-serving actor's removal.
-        if self.seal_state == RoomSealState::OwnershipLost {
-            return Err(PreMutationOwnershipError::NotOwner);
+        match self.seal_state {
+            RoomSealState::OwnershipLost => {
+                return Err(PreMutationOwnershipError::NotOwner);
+            }
+            // A sealed actor must emit no new effects: `Destroying` means
+            // the registry is committing a terminal destroy (callers retry
+            // through the registry) and `Inactive` means it is converging a
+            // dormancy eviction. Zero-durable-delta mutations reach only
+            // this gate, so refusing here is what makes the pre-seal
+            // actually prevent kicks/presence/SFU effects mid-destroy.
+            RoomSealState::Destroying { .. } | RoomSealState::Inactive => {
+                return Err(PreMutationOwnershipError::OwnershipUnavailable);
+            }
+            RoomSealState::Open => {}
         }
         let Some(store) = self.durable_store.clone() else {
             return Ok(());
@@ -1594,6 +1606,12 @@ impl kameo::message::Message<ApplyPin> for RoomActor {
         msg: ApplyPin,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // Pins are in-memory-only state, but a sealed actor must not mutate
+        // at all: mid-destroy/mid-eviction the registry owns convergence and
+        // this incarnation's memory is about to be discarded or replaced.
+        if self.seal_state != RoomSealState::Open {
+            return;
+        }
         match msg.change {
             PinStateChange::Pin(entry) => {
                 self.room.upsert_pin(entry);

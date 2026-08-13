@@ -4241,6 +4241,91 @@ async fn inactive_seal_strengthens_to_ownership_lost_on_join() {
 }
 
 #[tokio::test]
+async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
+    use crate::muc::pin::{PinPreview, PinStateChange, PinnedEntry};
+    use chrono::Utc;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Moderator,
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("join before seal");
+
+    actor
+        .ask(SealForDestroy {
+            attempt: crate::muc::DestroyAttemptId::generate(),
+        })
+        .await
+        .expect("pre-seal for destroy");
+
+    // Zero-durable-delta admin work (a role-only change) reaches only the
+    // pre-mutation gate; the destroy pre-seal must refuse it so no kicks,
+    // presence, or SFU effects race the terminal commit.
+    let role_only = actor
+        .ask(ApplyAdminItems {
+            sender_jid: alice.clone(),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::Visitor),
+                reason: None,
+            }],
+        })
+        .await;
+    assert!(
+        matches!(
+            role_only,
+            Err(SendError::HandlerError(
+                AdminApplyError::OwnershipUnavailable
+            ))
+        ),
+        "destroy pre-seal must refuse zero-delta mutations: {role_only:?}"
+    );
+
+    // Pins are ungated in-memory state; the seal must still make them inert.
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    let target = StanzaId::new(
+        "pin-during-destroy".to_string(),
+        jid::Jid::from(room_jid.clone()),
+    );
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(PinnedEntry {
+                target_stanza_id: target,
+                pinner_jid: "admin@example.com".parse().expect("valid jid"),
+                pinned_at: Utc::now(),
+                preview: PinPreview::new(
+                    "alice@example.com".parse().expect("valid jid"),
+                    Some("alice".into()),
+                    "sealed",
+                    Utc::now(),
+                ),
+            }),
+        })
+        .await
+        .expect("pin ask completes");
+    assert!(
+        actor
+            .ask(GetPinList)
+            .await
+            .expect("pins readable")
+            .is_empty(),
+        "a sealed actor must not mutate pin state"
+    );
+}
+
+#[tokio::test]
 async fn ownership_lost_seal_blocks_a_later_mutation() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store.clone()).await;
