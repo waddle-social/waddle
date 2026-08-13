@@ -1322,6 +1322,7 @@ impl RoomRegistryActor {
         waddle_id: String,
         channel_id: String,
         config: RoomConfig,
+        initial_affiliations: Vec<super::durable::AffiliationEntry>,
         claim_fence: &super::RoomClaimFenceContext,
     ) -> Result<(RoomPreparationGuard, bool), RoomPreparationError> {
         // Establish the exact fence before any preparation-time durable I/O.
@@ -1331,7 +1332,23 @@ impl RoomRegistryActor {
         if let Some(store) = &self.durable_store {
             store.establish_claim_fence(&room_jid, claim_fence.clone());
         }
-        let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
+        let mut room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
+        // Store-less (non-clustered) deployments have no durable `Create`
+        // commit and no `RestoreDurableRoomState` round-trip, so the
+        // creation spec's initial affiliations must seed actor memory here
+        // or they would be silently dropped. With a durable store the
+        // fenced `Create` commit followed by the restore installs the
+        // authoritative snapshot instead; seeding here would survive a
+        // `Restored`-origin hydration (restore never clears entries) and
+        // corrupt an existing room's membership, so it stays store-less
+        // only.
+        if self.durable_store.is_none() {
+            for entry in initial_affiliations {
+                if let Some(affiliation) = entry.affiliation {
+                    room.set_affiliation(entry.jid, affiliation);
+                }
+            }
+        }
         let actor_guard = RoomPreparationGuard::new(RoomActor::spawn(RoomActor::new(
             room,
             self.occupant_id_secret.clone(),
@@ -1380,6 +1397,7 @@ impl RoomRegistryActor {
         waddle_id: String,
         channel_id: String,
         config: RoomConfig,
+        initial_affiliations: Vec<super::durable::AffiliationEntry>,
         registry_ref: &ActorRef<Self>,
     ) -> Result<DemandRoomPreparation, RoomRegistryError> {
         let has_async_work = self.durable_store.is_some() || self.membership_source.is_some();
@@ -1396,6 +1414,7 @@ impl RoomRegistryActor {
                 waddle_id,
                 channel_id,
                 config,
+                initial_affiliations,
                 &claim_fence,
             )
             .await
@@ -1448,6 +1467,7 @@ impl RoomRegistryActor {
                 creation_spec.waddle_id.clone(),
                 creation_spec.channel_id.clone(),
                 creation_spec.config.clone(),
+                creation_spec.initial_affiliations.clone(),
                 &registry_ref,
             )
             .await?
@@ -3476,6 +3496,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                 snapshot.waddle_id,
                 snapshot.channel_id,
                 snapshot.config,
+                Vec::new(),
                 &claim_fence,
             )
             .await

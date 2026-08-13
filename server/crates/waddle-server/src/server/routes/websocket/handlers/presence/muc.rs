@@ -2641,7 +2641,12 @@ mod resolver_sync_retry_tests {
             Affiliation::Outcast,
             "an unrelated member mutation must not invalidate the carried revision"
         );
-        assert_eq!(store.checks(), 3);
+        // Two sync workers check ownership once each; the interleaved
+        // `ChangeAffiliation` carries a durable delta, so its ownership
+        // authority is the in-transaction fence assert inside
+        // `commit_room_mutation` (#1645) — the separate pre-commit probe
+        // this count used to include no longer exists.
+        assert_eq!(store.checks(), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2705,9 +2710,12 @@ mod resolver_sync_retry_tests {
             Affiliation::Outcast,
             "stale-source work must not erase a newer completion chain"
         );
+        // The leading `ChangeAffiliation` commits its durable delta under
+        // the in-transaction fence assert (#1645) instead of a counted
+        // pre-commit probe, leaving one counted check per sync worker.
         assert_eq!(
             store.checks(),
-            3,
+            2,
             "stale work must not consume ownership-check or worker capacity"
         );
     }
