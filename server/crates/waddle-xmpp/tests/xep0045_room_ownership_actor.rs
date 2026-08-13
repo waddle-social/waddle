@@ -4,8 +4,10 @@
 //! admit an occupant or apply resolver-derived affiliation state. Otherwise
 //! two owners could independently authorize the same XEP-0045 room.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use jid::BareJid;
 use kameo::actor::{ActorRef, Spawn};
@@ -43,6 +45,7 @@ struct OwnershipStore {
     expected_owner: NodeIdentity,
     expected_epoch: ClaimEpoch,
     observed_loads: AtomicUsize,
+    established_fences: Mutex<HashMap<BareJid, RoomClaimFenceContext>>,
     lifecycle: std::sync::OnceLock<RoomLifecycleId>,
     next_revision: AtomicUsize,
 }
@@ -67,6 +70,7 @@ impl OwnershipStore {
             expected_owner,
             expected_epoch,
             observed_loads: AtomicUsize::new(0),
+            established_fences: Mutex::new(HashMap::new()),
             lifecycle: std::sync::OnceLock::new(),
             next_revision: AtomicUsize::new(0),
         }
@@ -115,10 +119,15 @@ impl MucDurableStore for OwnershipStore {
         _intent: RoomDurableMutation,
     ) -> RoomCommitFuture<'a> {
         let validation = self.validate_fence(room_jid, fence);
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
         let state = self.state.load(Ordering::SeqCst);
         let coordinates = self.next_commit_coordinates();
         Box::pin(async move {
             validation.map_err(|_| RoomCommitError::NotOwner)?;
+            if !established {
+                return Err(RoomCommitError::OwnershipUnavailable);
+            }
             match state {
                 OWNED => Ok(coordinates),
                 DEPOSED => Err(RoomCommitError::NotOwner),
@@ -147,6 +156,13 @@ impl MucDurableStore for OwnershipStore {
                 _ => unreachable!("test ownership state"),
             }
         })
+    }
+
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
     }
 
     fn check_exact_claim_fence<'a>(
@@ -198,6 +214,10 @@ async fn spawn_unrestored_fenced_room() -> (
 
 async fn spawn_fenced_room() -> (ActorRef<RoomActor>, Arc<OwnershipStore>) {
     let (actor, store, claim_fence) = spawn_unrestored_fenced_room().await;
+    store.establish_claim_fence(
+        &"ownership@muc.example.com".parse().expect("valid room JID"),
+        claim_fence.clone(),
+    );
     actor
         .ask(RestoreDurableRoomState {
             store: Arc::clone(&store) as Arc<dyn MucDurableStore>,

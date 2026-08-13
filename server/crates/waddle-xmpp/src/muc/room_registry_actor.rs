@@ -23,7 +23,7 @@ use super::room_actor::{
     HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState, SealForDestroy,
     SealGuard, SealIfInactive, SealIfInactiveOutcome, UnsealDestroy, UnsealInactive,
 };
-use super::{MucRoom, RoomConfig, RoomDurableMutation};
+use super::{MucRoom, RoomCommitError, RoomConfig, RoomDurableMutation};
 use crate::metrics;
 use crate::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
@@ -1871,16 +1871,8 @@ impl RoomRegistryActor {
         room_jid: &BareJid,
     ) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
         if self.destroy_attempts.contains_key(room_jid) {
-            if self
-                .rooms
-                .get(room_jid)
-                .is_some_and(|entry| !entry.actor_ref.is_alive())
-            {
-                // The recovery target died. Let the ordinary dead-actor
-                // path below retire its exact fence instead of permanently
-                // deferring the room behind an orphaned attempt marker.
-                self.destroy_attempts.remove(room_jid);
-            } else {
+            self.reconcile_destroy_attempt(room_jid).await;
+            if self.destroy_attempts.contains_key(room_jid) {
                 return Err(RoomRegistryError::OwnershipReconciliationPending(
                     room_jid.clone(),
                 ));
@@ -1968,6 +1960,78 @@ impl RoomRegistryActor {
             }
             Ok(false) | Err(_) => {
                 warn!(room = %room_jid, "failed destroy could not unseal its matching attempt");
+            }
+        }
+    }
+
+    /// Resume a destroy that reached the actor but lost its registry reply.
+    /// The attempt id is retained until the same actor confirms the seal and
+    /// the terminal durable transition either completes or is safely reopened.
+    /// This runs on ordinary lookup and reaper touches, not only on another
+    /// explicit destroy request, so an ambiguous reply cannot wedge a room.
+    async fn reconcile_destroy_attempt(&mut self, room_jid: &BareJid) {
+        let Some(attempt) = self.destroy_attempts.get(room_jid).copied() else {
+            return;
+        };
+        let Some(entry) = self.rooms.get(room_jid).cloned() else {
+            self.destroy_attempts.remove(room_jid);
+            return;
+        };
+        if !entry.actor_ref.is_alive() {
+            // Let the normal dead-actor path retire the exact fence.  The
+            // attempt belongs to the dead incarnation, never its successor.
+            self.destroy_attempts.remove(room_jid);
+            return;
+        }
+
+        let sealed = matches!(
+            entry
+                .actor_ref
+                .ask(SealForDestroy { attempt })
+                .mailbox_timeout(SEAL_ASK_TIMEOUT)
+                .reply_timeout(SEAL_ASK_TIMEOUT)
+                .await,
+            Ok(RoomSealState::Destroying { attempt: current }) if current == attempt
+        );
+        if !sealed {
+            warn!(room = %room_jid, "destroy reconciliation could not confirm its matching pre-seal attempt");
+            return;
+        }
+
+        let commit = match &self.durable_store {
+            Some(store) => {
+                store
+                    .commit_room_mutation(
+                        room_jid,
+                        &entry.claim_fence,
+                        RoomDurableMutation::Destroy,
+                    )
+                    .await
+            }
+            None => Ok(super::RoomCommittedCoordinates {
+                lifecycle: super::RoomLifecycleId::generate(),
+                revision: super::RoomRevision::initial(),
+            }),
+        };
+        match commit {
+            Ok(_) => {
+                self.rooms.remove(room_jid);
+                self.publish_room_count();
+                self.poisoned_rooms.remove(room_jid);
+                self.destroy_attempts.remove(room_jid);
+                self.release_room_claim(room_jid, &entry.claim_fence).await;
+                info!(room = %room_jid, "completed a previously ambiguous room destroy");
+            }
+            Err(RoomCommitError::NotOwner | RoomCommitError::StateMissing) => {
+                // A deposed actor must never be reopened.  StateMissing on a
+                // destroy means the durable room has already been removed.
+                self.destroy_attempts.remove(room_jid);
+                self.evict_ownership_lost_room(room_jid, entry).await;
+                info!(room = %room_jid, "evicted room after terminal destroy reconciliation result");
+            }
+            Err(error) => {
+                warn!(room = %room_jid, %error, "transient destroy reconciliation failure; reopening matching actor attempt");
+                self.recover_failed_destroy(room_jid, &entry, attempt).await;
             }
         }
     }
@@ -3828,10 +3892,22 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                         )
                         .await
                     {
-                        warn!(room = %msg.room_jid, %error, "durable room destroy commit failed; reconciling the sealed attempt");
-                        self.recover_failed_destroy(&msg.room_jid, &entry, attempt)
-                            .await;
-                        return DestroyRoomOutcome::DurableWipeFailed;
+                        match error {
+                            RoomCommitError::NotOwner | RoomCommitError::StateMissing => {
+                                // Ownership loss and an already-removed durable
+                                // room are terminal for this exact actor. Never
+                                // unseal and accidentally return it to service.
+                                self.destroy_attempts.remove(&msg.room_jid);
+                                self.evict_ownership_lost_room(&msg.room_jid, entry).await;
+                                return DestroyRoomOutcome::Destroyed;
+                            }
+                            error => {
+                                warn!(room = %msg.room_jid, %error, "durable room destroy commit failed; reconciling the sealed attempt");
+                                self.recover_failed_destroy(&msg.room_jid, &entry, attempt)
+                                    .await;
+                                return DestroyRoomOutcome::DurableWipeFailed;
+                            }
+                        }
                     }
                 }
             } else if let (Some(store), Some(claim_fence)) = (&self.durable_store, pending_fence) {
@@ -3852,6 +3928,14 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                     .commit_room_mutation(&msg.room_jid, &claim_fence, RoomDurableMutation::Destroy)
                     .await
                 {
+                    if matches!(
+                        error,
+                        RoomCommitError::NotOwner | RoomCommitError::StateMissing
+                    ) {
+                        self.pending_room_preparations.remove(&msg.room_jid);
+                        self.destroy_attempts.remove(&msg.room_jid);
+                        return DestroyRoomOutcome::Destroyed;
+                    }
                     warn!(room = %msg.room_jid, %error, "durable pending-room destroy commit failed; keeping the preparation intact");
                     return DestroyRoomOutcome::DurableWipeFailed;
                 }
@@ -4010,6 +4094,11 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                         )
                         .await
                     {
+                        if matches!(error, RoomCommitError::NotOwner) {
+                            self.evict_ownership_lost_room(&msg.room_jid, entry).await;
+                            info!(room = %msg.room_jid, "evicted room after ownership loss during dormancy commit");
+                            return true;
+                        }
                         let _ = entry.actor_ref.tell(UnsealInactive).await;
                         warn!(room = %msg.room_jid, %error, "durable dormancy commit failed; keeping room active");
                         return false;
@@ -4077,6 +4166,15 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
         if self.pending_room_preparations.contains_key(&msg.room_jid) {
             return false;
         }
+        if self.destroy_attempts.contains_key(&msg.room_jid) {
+            self.reconcile_destroy_attempt(&msg.room_jid).await;
+            if !self.rooms.contains_key(&msg.room_jid) {
+                return true;
+            }
+            if self.destroy_attempts.contains_key(&msg.room_jid) {
+                return false;
+            }
+        }
         let Some(entry) = self.rooms.get(&msg.room_jid).cloned() else {
             return false;
         };
@@ -4131,6 +4229,11 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                         )
                         .await
                     {
+                        if matches!(error, RoomCommitError::NotOwner) {
+                            self.evict_ownership_lost_room(&msg.room_jid, entry).await;
+                            info!(room = %msg.room_jid, "evicted room after ownership loss during dormancy recovery");
+                            return true;
+                        }
                         let _ = entry.actor_ref.tell(UnsealInactive).await;
                         warn!(room = %msg.room_jid, %error, "durable dormancy recovery commit failed; keeping room active");
                         return false;

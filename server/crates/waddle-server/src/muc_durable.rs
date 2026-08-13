@@ -696,6 +696,36 @@ impl PostgresMucRoomStore {
             .await
             .map_err(Self::commit_error)?;
             (lifecycle, revision, RoomLifecycleState::Active)
+        } else if matches!(intent, RoomDurableMutation::Destroy) {
+            // A pre-lifecycle room row is a valid legacy state.  Destroy is
+            // terminal, so it must claim that legacy incarnation and wipe it
+            // while the exclusive claim lock is held; otherwise an Activate
+            // serialized behind us could adopt and republish the row.
+            let mut room_rows = tx
+                .query(
+                    "SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ?",
+                    crate::db_params![room_jid.to_string()],
+                )
+                .await
+                .map_err(Self::commit_error)?;
+            if room_rows
+                .next()
+                .await
+                .map_err(Self::commit_error)?
+                .is_none()
+            {
+                return Err(RoomCommitError::StateMissing);
+            }
+            drop(room_rows);
+            let lifecycle = RoomLifecycleId::generate();
+            let revision = RoomRevision::initial();
+            tx.execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params![lifecycle.to_string(), room_jid.to_string(), revision.as_i64(), RoomLifecycleState::Active.as_db_str()],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+            (lifecycle, revision, RoomLifecycleState::Active)
         } else {
             return Err(RoomCommitError::StateMissing);
         };
@@ -1794,6 +1824,7 @@ mod tests {
         let Some((store, claim_store, db, me)) = clean_store().await else {
             return;
         };
+        let store = std::sync::Arc::new(store);
         let room_jid = unique_room_jid("lane-a2-activate");
         let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
         let epoch = claim_store
@@ -1953,6 +1984,132 @@ mod tests {
             adopted.lifecycle.to_string()
         );
         assert_eq!(adoption_room_row.get::<i64>(1).expect("room revision"), 1);
+
+        // Destroy and Activate both take the exclusive claim lock. A legacy
+        // row must therefore be destroyed into a tombstone, not rejected as
+        // StateMissing and left available for a later activation to adopt.
+        let legacy_destroy = unique_room_jid("lane-c4-legacy-destroy");
+        let legacy_destroy_entity = Entity::new(EntityType::RoomActor, legacy_destroy.to_string());
+        let legacy_destroy_epoch = claim_store
+            .ensure_claimed(&legacy_destroy_entity, &me)
+            .await
+            .expect("legacy destroy room claim");
+        let legacy_destroy_fence =
+            RoomClaimFenceContext::new(legacy_destroy_entity, me.clone(), legacy_destroy_epoch);
+        store.record_claim_fence(&legacy_destroy, legacy_destroy_fence.clone());
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json) VALUES (?, ?, ?, ?)",
+                crate::db_params![legacy_destroy.to_string(), "legacy", "legacy", "{}"],
+            )
+            .await
+            .expect("seed destroyable legacy room row");
+        let destroyed_legacy = store
+            .commit_room_mutation(
+                &legacy_destroy,
+                &legacy_destroy_fence,
+                RoomDurableMutation::Destroy,
+            )
+            .await
+            .expect("destroy adopts and removes legacy state atomically");
+        assert!(matches!(
+            store
+                .commit_room_mutation(
+                    &legacy_destroy,
+                    &legacy_destroy_fence,
+                    RoomDurableMutation::Activate,
+                )
+                .await,
+            Err(RoomCommitError::StateMissing)
+        ));
+        let mut destroyed_legacy_rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT state, revision FROM clustering_muc_room_lifecycles WHERE lifecycle_id = ?",
+                crate::db_params![destroyed_legacy.lifecycle.to_string()],
+            )
+            .await
+            .expect("query legacy tombstone");
+        let destroyed_legacy_row = destroyed_legacy_rows
+            .next()
+            .await
+            .expect("read legacy tombstone")
+            .expect("legacy tombstone exists");
+        assert_eq!(
+            destroyed_legacy_row.get::<String>(0).expect("state"),
+            "tombstoned"
+        );
+        assert_eq!(destroyed_legacy_row.get::<i64>(1).expect("revision"), 2);
+
+        // Exercise the actual race: legacy adoption and terminal cleanup
+        // contend on the exclusive claim lock. Destroy must leave no row
+        // that a concurrently queued activation can resurrect.
+        let raced_legacy = unique_room_jid("lane-c4-activate-destroy-race");
+        let raced_entity = Entity::new(EntityType::RoomActor, raced_legacy.to_string());
+        let raced_epoch = claim_store
+            .ensure_claimed(&raced_entity, &me)
+            .await
+            .expect("raced legacy room claim");
+        let raced_fence = RoomClaimFenceContext::new(raced_entity, me.clone(), raced_epoch);
+        store.record_claim_fence(&raced_legacy, raced_fence.clone());
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json) VALUES (?, ?, ?, ?)",
+                crate::db_params![raced_legacy.to_string(), "legacy", "legacy", "{}"],
+            )
+            .await
+            .expect("seed raced legacy room row");
+        let activate_store = store.clone();
+        let activate_jid = raced_legacy.clone();
+        let activate_fence = raced_fence.clone();
+        let activate = tokio::spawn(async move {
+            activate_store
+                .commit_room_mutation(
+                    &activate_jid,
+                    &activate_fence,
+                    RoomDurableMutation::Activate,
+                )
+                .await
+        });
+        let destroy_store = store.clone();
+        let destroy_jid = raced_legacy.clone();
+        let destroy_fence = raced_fence.clone();
+        let destroy = tokio::spawn(async move {
+            destroy_store
+                .commit_room_mutation(&destroy_jid, &destroy_fence, RoomDurableMutation::Destroy)
+                .await
+        });
+        let (_activate, destroyed) = tokio::join!(activate, destroy);
+        destroyed
+            .expect("destroy task")
+            .expect("destroy completes terminally after legacy activation race");
+        let mut raced_rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT count(*) FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![raced_legacy.to_string()],
+            )
+            .await
+            .expect("query raced room rows");
+        let raced_room_count: i64 = raced_rows
+            .next()
+            .await
+            .expect("read raced room count")
+            .expect("raced room count")
+            .get(0)
+            .expect("raced room count value");
+        assert_eq!(
+            raced_room_count, 0,
+            "destroy leaves no legacy row to revive"
+        );
 
         let missing = unique_room_jid("lane-a2-activate-missing");
         let missing_entity = Entity::new(EntityType::RoomActor, missing.to_string());

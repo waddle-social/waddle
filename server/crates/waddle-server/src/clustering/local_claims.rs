@@ -1849,7 +1849,7 @@ mod tests {
             &'a self,
             room_jid: &'a jid::BareJid,
             fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-            _intent: waddle_xmpp::muc::RoomDurableMutation,
+            intent: waddle_xmpp::muc::RoomDurableMutation,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = validate_local_room_fence(room_jid, fence) {
                 return Box::pin(async move {
@@ -1857,11 +1857,17 @@ mod tests {
                     Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
                 });
             }
+            // Preparation-time Create/Activate commits ride this store too
+            // (#1645); only the Config commit under test participates in
+            // the started/persisted ordering proof.
+            let is_config = matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Config { .. });
             Box::pin(async move {
-                self.started.notify_one();
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                self.persisted
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                if is_config {
+                    self.started.notify_one();
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    self.persisted
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
                     lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
                     revision: waddle_xmpp::muc::RoomRevision::initial(),

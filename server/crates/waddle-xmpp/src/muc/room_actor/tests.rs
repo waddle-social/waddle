@@ -3534,57 +3534,69 @@ struct FakeDurableStore {
     load_calls: std::sync::atomic::AtomicUsize,
     save_calls: std::sync::atomic::AtomicUsize,
     saved_affiliations: std::sync::Mutex<Vec<(BareJid, BareJid, Affiliation)>>,
+    established_fences:
+        std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
     lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
     next_revision: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeDurableStore {
+    fn with_established_test_fence(store: std::sync::Arc<Self>) -> std::sync::Arc<Self> {
+        let room_jid = test_room().room_jid;
+        <Self as crate::muc::durable::MucDurableStore>::establish_claim_fence(
+            &*store,
+            &room_jid,
+            test_claim_fence(&room_jid),
+        );
+        store
+    }
+
     fn owned() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             ..Default::default()
-        })
+        }))
     }
 
     fn deposed() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(false)),
             ..Default::default()
-        })
+        }))
     }
 
     fn transient_failure() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(None),
             ..Default::default()
-        })
+        }))
     }
 
     fn owned_but_persist_fails() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             fail_persist: true,
             lose_config_persist_ownership: false,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
             saved_affiliations: std::sync::Mutex::new(Vec::new()),
             ..Default::default()
-        })
+        }))
     }
 
     fn owned_but_config_persist_loses_ownership() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             lose_config_persist_ownership: true,
             ..Default::default()
-        })
+        }))
     }
 
     fn ownership_lost_during_restore() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             lose_restore_ownership: true,
             ..Default::default()
-        })
+        }))
     }
 
     fn save_call_count(&self) -> usize {
@@ -3634,6 +3646,8 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         }
         self.save_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
         let lose_ownership = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
             && self.lose_config_persist_ownership;
         let committed_affiliations = match intent {
@@ -3656,7 +3670,9 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         let fail = self.fail_persist;
         let coordinates = self.next_commit_coordinates();
         Box::pin(async move {
-            if lose_ownership {
+            if !established {
+                Err(crate::muc::RoomCommitError::OwnershipUnavailable)
+            } else if lose_ownership {
                 Err(crate::muc::RoomCommitError::NotOwner)
             } else if fail {
                 Err(crate::muc::RoomCommitError::Database(
@@ -3698,6 +3714,13 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         })
     }
 
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: crate::muc::RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
+    }
+
     fn check_exact_claim_fence<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3724,6 +3747,8 @@ struct FailNthAffiliationSaveStore {
     save_calls: std::sync::atomic::AtomicUsize,
     lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
     next_revision: std::sync::atomic::AtomicUsize,
+    established_fences:
+        std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
 }
 
 impl FailNthAffiliationSaveStore {
@@ -3733,6 +3758,7 @@ impl FailNthAffiliationSaveStore {
             save_calls: std::sync::atomic::AtomicUsize::new(0),
             lifecycle: std::sync::OnceLock::new(),
             next_revision: std::sync::atomic::AtomicUsize::new(0),
+            established_fences: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -3782,6 +3808,8 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
                 | crate::muc::RoomDurableMutation::MediatedInviteRollback(_)
                 | crate::muc::RoomDurableMutation::Create { .. }
         );
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
         let fail = if counts_as_affiliation_commit {
             let call = self
                 .save_calls
@@ -3793,7 +3821,9 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
         };
         let coordinates = self.next_commit_coordinates();
         Box::pin(async move {
-            if fail {
+            if !established {
+                Err(crate::muc::RoomCommitError::OwnershipUnavailable)
+            } else if fail {
                 Err(crate::muc::RoomCommitError::Database(
                     crate::muc::durable::RoomCommitDatabaseError::sanitized(),
                 ))
@@ -3816,6 +3846,13 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
         })
     }
 
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: crate::muc::RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
+    }
+
     fn check_exact_claim_fence<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3830,11 +3867,11 @@ async fn spawn_room_actor_with_store(
     store: std::sync::Arc<dyn crate::muc::durable::MucDurableStore>,
 ) -> ActorRef<RoomActor> {
     let actor = spawn_room_actor().await;
+    let room_jid = test_room().room_jid;
+    let claim_fence = test_claim_fence(&room_jid);
+    store.establish_claim_fence(&room_jid, claim_fence.clone());
     actor
-        .ask(RestoreDurableRoomState {
-            store,
-            claim_fence: test_claim_fence(&test_room().room_jid),
-        })
+        .ask(RestoreDurableRoomState { store, claim_fence })
         .await
         .expect("restore");
     actor
@@ -3886,6 +3923,8 @@ struct FlakyThenRecoveringStore {
     banned: BareJid,
     lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
     next_revision: std::sync::atomic::AtomicUsize,
+    established_fences:
+        std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
 }
 
 impl FlakyThenRecoveringStore {
@@ -3896,6 +3935,7 @@ impl FlakyThenRecoveringStore {
             banned,
             lifecycle: std::sync::OnceLock::new(),
             next_revision: std::sync::atomic::AtomicUsize::new(0),
+            established_fences: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -3927,12 +3967,17 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
         _intent: crate::muc::RoomDurableMutation,
     ) -> crate::muc::RoomCommitFuture<'a> {
         let validation = validate_test_claim_fence(room_jid, fence);
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
         let coordinates = self.next_commit_coordinates();
         Box::pin(async move {
             validation.map_err(|error| match error {
                 crate::XmppError::OwnershipLost { .. } => crate::muc::RoomCommitError::NotOwner,
                 _ => crate::muc::RoomCommitError::OwnershipUnavailable,
             })?;
+            if !established {
+                return Err(crate::muc::RoomCommitError::OwnershipUnavailable);
+            }
             Ok(coordinates)
         })
     }
@@ -3971,6 +4016,13 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
         })
     }
 
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: crate::muc::RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
+    }
+
     fn check_exact_claim_fence<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3998,10 +4050,17 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
     // in-line retry (calls 0 and 1); the SECOND retry (call 2) succeeds.
     let store = FlakyThenRecoveringStore::new(2, banned.clone());
     let actor = spawn_room_actor().await;
+    let room_jid = test_room().room_jid;
+    let claim_fence = test_claim_fence(&room_jid);
+    <FlakyThenRecoveringStore as crate::muc::durable::MucDurableStore>::establish_claim_fence(
+        &*store,
+        &room_jid,
+        claim_fence.clone(),
+    );
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
-            claim_fence: test_claim_fence(&test_room().room_jid),
+            claim_fence,
         })
         .await
         .expect("restore ask itself always replies, even on a load failure");

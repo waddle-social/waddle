@@ -46,6 +46,7 @@ struct PendingRoomOwnershipResponsibilityCountForTest;
 
 struct RememberDestroyAttemptForTest {
     room_jid: BareJid,
+    attempt: crate::muc::DestroyAttemptId,
 }
 
 impl kameo::message::Message<RememberDestroyAttemptForTest> for RoomRegistryActor {
@@ -56,8 +57,7 @@ impl kameo::message::Message<RememberDestroyAttemptForTest> for RoomRegistryActo
         msg: RememberDestroyAttemptForTest,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.destroy_attempts
-            .insert(msg.room_jid, crate::muc::DestroyAttemptId::generate());
+        self.destroy_attempts.insert(msg.room_jid, msg.attempt);
     }
 }
 
@@ -1343,6 +1343,139 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn ordinary_lookup_reconciles_a_destroy_attempt_after_lost_seal_replies() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("lost-destroy-seal-replies");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        assert!(matches!(
+            actor
+                .ask(crate::muc::room_actor::SealForDestroy { attempt })
+                .await,
+            Ok(RoomSealState::Destroying { attempt: current }) if current == attempt
+        ));
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("record lost reply attempt");
+
+        assert_eq!(
+            registry
+                .ask(GetRoom { room_jid: jid })
+                .await
+                .expect("lookup"),
+            None,
+            "a later lookup must finish the same destroy attempt rather than remain pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn sealed_room_reaper_reconciles_a_retained_destroy_attempt() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("reaped-lost-destroy-seal-replies");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        actor
+            .ask(crate::muc::room_actor::SealForDestroy { attempt })
+            .await
+            .expect("seal before reaper reconciliation");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("record lost reply attempt");
+
+        assert!(
+            registry
+                .ask(ReapSealedRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("reap"),
+            "reaper must resume the retained destroy attempt"
+        );
+        assert!(registry
+            .ask(GetRoom { room_jid: jid })
+            .await
+            .expect("lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_destroy_commit_errors_evict_instead_of_reopening_the_actor() {
+        for (name, durable_store) in [
+            (
+                "not-owner",
+                Arc::new(RecordingDurableStore {
+                    destroy_not_owner: true,
+                    ..RecordingDurableStore::default()
+                }),
+            ),
+            (
+                "state-missing",
+                Arc::new(RecordingDurableStore {
+                    destroy_state_missing: true,
+                    ..RecordingDurableStore::default()
+                }),
+            ),
+        ] {
+            let registry = spawn_registry().await;
+            let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+            wire_recording_store_with_claims(
+                &registry,
+                claim_store,
+                SharedNodeIdentity::new(this_identity()),
+                durable_store,
+            )
+            .await;
+            let jid = test_room_jid(&format!("terminal-destroy-{name}"));
+            let actor = registry
+                .ask(GetOrCreateRoom {
+                    room_jid: jid.clone(),
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+                .expect("create room")
+                .actor_ref;
+
+            assert_eq!(
+                registry
+                    .ask(DestroyRoom {
+                        room_jid: jid.clone(),
+                        reason: DestroyRoomReason::Destroy,
+                    })
+                    .await
+                    .expect("destroy"),
+                DestroyRoomOutcome::Destroyed
+            );
+            actor.wait_for_shutdown().await;
+            assert!(
+                registry
+                    .ask(GetRoom { room_jid: jid })
+                    .await
+                    .expect("lookup")
+                    .is_none(),
+                "{name} must not leave the pre-sealed actor discoverable"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dead_actor_cleanup_clears_an_orphaned_destroy_attempt() {
         let registry = spawn_registry().await;
         let jid = test_room_jid("orphaned-destroy-attempt");
@@ -1351,9 +1484,15 @@ mod ownership_claims_tests {
             .await
             .expect("create room")
             .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        actor
+            .ask(crate::muc::room_actor::SealForDestroy { attempt })
+            .await
+            .expect("seal actor before reconciliation crash");
         registry
             .ask(RememberDestroyAttemptForTest {
                 room_jid: jid.clone(),
+                attempt,
             })
             .await
             .expect("remember destroy attempt");
@@ -2212,14 +2351,16 @@ mod ownership_claims_tests {
         demote_notifications: Mutex<Vec<(String, String)>>,
         deleted_rooms: Mutex<Vec<String>>,
         fail_deletes: bool,
+        destroy_not_owner: bool,
+        destroy_state_missing: bool,
         local_identity: Option<SharedNodeIdentity>,
         authoritative_claim_store: Mutex<Option<Arc<dyn ClaimStore>>>,
         exact_claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
         published_claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
-        /// The static-load fake lets a fresh `Create` perform its required
-        /// post-commit hydration without consuming the test's initial-restore
-        /// blocker a second time.
-        post_create_reload_credits: Mutex<HashMap<BareJid, ()>>,
+        /// State committed by this fake. Keeping Create snapshots lets the
+        /// post-create reload prove the same owner/configuration that would
+        /// be visible from the real durable store before publication.
+        persisted_room_states: Mutex<HashMap<BareJid, DurableRoomState>>,
         lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
         next_revision: AtomicUsize,
     }
@@ -2311,8 +2452,35 @@ mod ownership_claims_tests {
             let allow_config_save = self.allow_config_save.clone();
             let starting_fence = fence.clone();
             let fail_deletes = self.fail_deletes;
+            let destroy_not_owner = self.destroy_not_owner;
+            let destroy_state_missing = self.destroy_state_missing;
             let deleted_rooms = &self.deleted_rooms;
-            let created = matches!(intent, crate::muc::RoomDurableMutation::Create { .. });
+            let created_state = match &intent {
+                crate::muc::RoomDurableMutation::Create {
+                    waddle_id,
+                    channel_id,
+                    config,
+                    initial_affiliations,
+                } => Some(DurableRoomState {
+                    waddle_id: waddle_id.clone(),
+                    channel_id: channel_id.clone(),
+                    config: config.clone(),
+                    subject: None,
+                    affiliations: initial_affiliations
+                        .iter()
+                        .filter_map(|entry| {
+                            entry.affiliation.map(|affiliation| {
+                                crate::muc::affiliation::AffiliationEntry::new(
+                                    entry.jid.clone(),
+                                    affiliation,
+                                )
+                            })
+                        })
+                        .collect(),
+                }),
+                _ => None,
+            };
+            let destroys = matches!(intent, crate::muc::RoomDurableMutation::Destroy);
             let coordinates = self.next_commit_coordinates();
             Box::pin(async move {
                 if store.exact_claim_fences.lock().expect("lock").get(room_jid) != Some(fence) {
@@ -2349,7 +2517,13 @@ mod ownership_claims_tests {
                     });
                     std::future::pending().await
                 }
-                if matches!(intent, crate::muc::RoomDurableMutation::Destroy) {
+                if destroys {
+                    if destroy_not_owner {
+                        return Err(crate::muc::RoomCommitError::NotOwner);
+                    }
+                    if destroy_state_missing {
+                        return Err(crate::muc::RoomCommitError::StateMissing);
+                    }
                     if fail_deletes {
                         return Err(crate::muc::RoomCommitError::Database(
                             crate::muc::durable::RoomCommitDatabaseError::sanitized(),
@@ -2359,13 +2533,18 @@ mod ownership_claims_tests {
                         .lock()
                         .expect("lock")
                         .push(room_jid.to_string());
-                }
-                if created {
                     store
-                        .post_create_reload_credits
+                        .persisted_room_states
                         .lock()
                         .expect("lock")
-                        .insert(room_jid.clone(), ());
+                        .remove(room_jid);
+                }
+                if let Some(created_state) = created_state {
+                    store
+                        .persisted_room_states
+                        .lock()
+                        .expect("lock")
+                        .insert(room_jid.clone(), created_state);
                 }
                 Ok(coordinates)
             })
@@ -2384,14 +2563,14 @@ mod ownership_claims_tests {
             Box::pin(async move {
                 store.validate_claim_fence(room_jid, fence).await?;
                 let load_call = store.load_calls.fetch_add(1, Ordering::SeqCst) + 1;
-                let post_create_reload = store
-                    .post_create_reload_credits
+                let persisted = store
+                    .persisted_room_states
                     .lock()
                     .expect("lock")
-                    .remove(room_jid)
-                    .is_some();
+                    .get(room_jid)
+                    .cloned();
                 let should_block = store.block_all_loads
-                    || (!post_create_reload && store.block_load_for.as_ref() == Some(room_jid))
+                    || (persisted.is_none() && store.block_load_for.as_ref() == Some(room_jid))
                     || store
                         .block_load_from_call
                         .is_some_and(|first_blocked_call| load_call >= first_blocked_call);
@@ -2444,7 +2623,7 @@ mod ownership_claims_tests {
                 if fail_load {
                     Err(crate::XmppError::internal("load refused by test store"))
                 } else {
-                    Ok(result)
+                    Ok(persisted.or(result))
                 }
             })
         }
@@ -3129,7 +3308,11 @@ mod ownership_claims_tests {
             .await
             .expect("retry task")
             .expect("instant room retry");
-        assert_eq!(acquisition.creation, RoomCreation::Created);
+        assert_eq!(
+            acquisition.creation,
+            RoomCreation::Existing,
+            "the cancelled creator's committed snapshot must be restored rather than recreated"
+        );
     }
 
     #[tokio::test]
