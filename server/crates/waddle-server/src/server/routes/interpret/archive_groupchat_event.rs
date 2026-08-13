@@ -12,6 +12,17 @@ pub(super) enum ArchiveGroupchatEventOutcome {
     OwnershipLost(Box<Message>),
 }
 
+fn capture_archive_authoritative_intent(deps: &Deps<'_>, room: &BareJid, archive_id: &str) {
+    deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
+        archive: room.clone(),
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+            archive_id.to_string(),
+            jid::Jid::from(room.clone()),
+        ),
+        by: room.clone(),
+    });
+}
+
 pub(super) async fn archive_groupchat_event(
     deps: &Deps<'_>,
     room: BareJid,
@@ -55,6 +66,7 @@ pub(super) async fn archive_groupchat_event(
     {
         ArchiveGroupchatOutcome::Stored(result) => result,
         ArchiveGroupchatOutcome::Deduplicated(result) => {
+            capture_archive_authoritative_intent(deps, &room, &result.stored_id);
             return ArchiveGroupchatEventOutcome::Deduplicated {
                 rewrite: result.rewrite,
                 sender: sender.to_bare(),
@@ -79,14 +91,7 @@ pub(super) async fn archive_groupchat_event(
         archive_id = %archive_id.stored_id,
         "ArchiveGroupchat: persisted"
     );
-    deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
-        archive: room.clone(),
-        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
-            archive_id.stored_id.clone(),
-            jid::Jid::from(room.clone()),
-        ),
-        by: room.clone(),
-    });
+    capture_archive_authoritative_intent(deps, &room, &archive_id.stored_id);
     update_groupchat_link_preview_refs(deps, &room, &archive_id.stored_id, &message).await;
     // Notification activity ingest (slice 2b): committing the sender's
     // groupchat message into the room archive is the strongest

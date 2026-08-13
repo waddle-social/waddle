@@ -62,70 +62,18 @@ fn try_enqueue_shadow_stream_enrollment(
     ingress_shadow: &crate::ingress_shadow::IngressShadowHandle,
     stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
 ) {
-    try_enqueue_shadow_stream_enrollment_with(
-        stream_id,
-        |stream_id| ingress_shadow.try_enroll_stream(stream_id),
-        |stream_id| {
-            let ingress_shadow = ingress_shadow.clone();
-            tokio::spawn(retry_shadow_stream_enrollment(
-                ingress_shadow,
-                stream_id,
-                std::time::Duration::from_millis(10),
-                3,
-            ));
-        },
-    );
+    try_enqueue_shadow_stream_enrollment_with(stream_id, |stream_id| {
+        ingress_shadow.ensure_stream_enrollment(stream_id)
+    });
 }
 
 fn try_enqueue_shadow_stream_enrollment_with(
     stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
-    mut try_enroll: impl FnMut(
+    mut ensure_enrollment: impl FnMut(
         waddle_xmpp::pending_delivery::SmSessionId,
     ) -> crate::ingress_shadow::IngressShadowDisposition,
-    mut schedule_retry: impl FnMut(waddle_xmpp::pending_delivery::SmSessionId),
 ) {
-    let disposition = try_enroll(stream_id.clone());
-    if matches!(
-        disposition,
-        crate::ingress_shadow::IngressShadowDisposition::QueueFull
-            | crate::ingress_shadow::IngressShadowDisposition::Closed
-    ) {
-        schedule_retry(stream_id.clone());
-    }
-}
-
-async fn retry_shadow_stream_enrollment(
-    ingress_shadow: crate::ingress_shadow::IngressShadowHandle,
-    stream_id: waddle_xmpp::pending_delivery::SmSessionId,
-    delay: std::time::Duration,
-    attempts: usize,
-) {
-    retry_shadow_stream_enrollment_with(
-        |stream_id| ingress_shadow.try_enroll_stream(stream_id),
-        stream_id,
-        delay,
-        attempts,
-    )
-    .await;
-}
-
-async fn retry_shadow_stream_enrollment_with(
-    mut try_enroll: impl FnMut(
-        waddle_xmpp::pending_delivery::SmSessionId,
-    ) -> crate::ingress_shadow::IngressShadowDisposition,
-    stream_id: waddle_xmpp::pending_delivery::SmSessionId,
-    delay: std::time::Duration,
-    attempts: usize,
-) {
-    for _ in 0..attempts {
-        tokio::time::sleep(delay).await;
-        match try_enroll(stream_id.clone()) {
-            crate::ingress_shadow::IngressShadowDisposition::Enqueued
-            | crate::ingress_shadow::IngressShadowDisposition::Disabled => return,
-            crate::ingress_shadow::IngressShadowDisposition::QueueFull
-            | crate::ingress_shadow::IngressShadowDisposition::Closed => {}
-        }
-    }
+    let _ = ensure_enrollment(stream_id.clone());
 }
 
 impl SmEnableCommit {
@@ -307,7 +255,7 @@ mod enable_claim_guard_tests {
 
 #[cfg(test)]
 mod shadow_enrollment_tests {
-    use super::{retry_shadow_stream_enrollment_with, try_enqueue_shadow_stream_enrollment_with};
+    use super::try_enqueue_shadow_stream_enrollment_with;
     use crate::ingress_shadow::IngressShadowDisposition;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -319,17 +267,13 @@ mod shadow_enrollment_tests {
         let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("sm-enable-stream");
         let attempts = Arc::new(AtomicUsize::new(0));
 
-        try_enqueue_shadow_stream_enrollment_with(
-            &stream_id,
-            {
-                let attempts = attempts.clone();
-                move |_stream_id| {
-                    attempts.fetch_add(1, Ordering::SeqCst);
-                    IngressShadowDisposition::Enqueued
-                }
-            },
-            |_stream_id| panic!("successful enrollment must not schedule retry"),
-        );
+        try_enqueue_shadow_stream_enrollment_with(&stream_id, {
+            let attempts = attempts.clone();
+            move |_stream_id| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                IngressShadowDisposition::Enqueued
+            }
+        });
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -344,76 +288,15 @@ mod shadow_enrollment_tests {
             IngressShadowDisposition::Enqueued,
         ] {
             let attempts = Arc::new(AtomicUsize::new(0));
-            let retries = Arc::new(AtomicUsize::new(0));
-            try_enqueue_shadow_stream_enrollment_with(
-                &stream_id,
-                {
-                    let attempts = attempts.clone();
-                    move |_stream_id| {
-                        attempts.fetch_add(1, Ordering::SeqCst);
-                        disposition
-                    }
-                },
-                {
-                    let retries = retries.clone();
-                    move |_stream_id| {
-                        retries.fetch_add(1, Ordering::SeqCst);
-                    }
-                },
-            );
-            assert_eq!(attempts.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                retries.load(Ordering::SeqCst),
-                usize::from(matches!(
-                    disposition,
-                    IngressShadowDisposition::QueueFull | IngressShadowDisposition::Closed
-                ))
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn queue_full_shadow_enrollment_retries_until_a_slot_opens() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("retry-stream");
-        retry_shadow_stream_enrollment_with(
-            {
+            try_enqueue_shadow_stream_enrollment_with(&stream_id, {
                 let attempts = attempts.clone();
                 move |_stream_id| {
-                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                        IngressShadowDisposition::QueueFull
-                    } else {
-                        IngressShadowDisposition::Enqueued
-                    }
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    disposition
                 }
-            },
-            stream_id,
-            std::time::Duration::ZERO,
-            3,
-        )
-        .await;
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn queue_full_then_retry_succeeds() {
-        let retry_stream = waddle_xmpp::pending_delivery::SmSessionId::new("retry-stream");
-        let attempts = Arc::new(AtomicUsize::new(0));
-
-        retry_shadow_stream_enrollment_with(
-            {
-                let attempts = attempts.clone();
-                move |_stream_id| match attempts.fetch_add(1, Ordering::SeqCst) {
-                    0 | 1 => IngressShadowDisposition::QueueFull,
-                    _ => IngressShadowDisposition::Enqueued,
-                }
-            },
-            retry_stream,
-            std::time::Duration::from_millis(1),
-            3,
-        )
-        .await;
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+            });
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
     }
 }
 

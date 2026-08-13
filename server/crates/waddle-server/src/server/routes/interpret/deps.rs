@@ -68,6 +68,11 @@ pub struct InterpretOutcome {
     /// wire stanza it extracts BEFORE interpreting, so live/MAM id
     /// parity holds under origin-id retries.
     pub(crate) archive_id_rewrites: Vec<ArchiveIdRewrite>,
+    /// Count of [`OutboundEvent::RouteToConnection`] events that reached the
+    /// final interpreter boundary for this batch. `dispatch_to_room` uses this
+    /// to capture room fanout only when routing actually survived later
+    /// archive/subject suppression.
+    pub(crate) route_to_connection_events: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

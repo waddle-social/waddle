@@ -16,6 +16,8 @@
 
 #![cfg(feature = "clustering")]
 
+mod ingress_shadow_support;
+
 use uuid::Uuid;
 use waddle_server::clustering::claims::PostgresClaimStore;
 use waddle_server::config::LineageConfig;
@@ -29,6 +31,8 @@ use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity,
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
+
+use crate::ingress_shadow_support::ShadowFixture;
 
 struct Fixture {
     db: Database,
@@ -325,4 +329,105 @@ async fn handled_frontier_rejects_gaps_without_advancing() {
         "stale handled offers must not advance the stored frontier"
     );
     fixture.close().await;
+}
+
+/// XEP-0198 §4 defines handled stanzas as the server's accepted
+/// responsibility frontier. The shadow worker must mirror that boundary:
+/// contiguous handled submissions advance, a byte-identical retransmit is
+/// idempotent, and a gap offer is stale until the missing handled stanza
+/// arrives.
+#[tokio::test]
+async fn shadow_pipeline_tracks_accepted_idempotent_and_stale_handled_ordinals() {
+    let Some(fixture) = ShadowFixture::open("xep0198_pipeline").await else {
+        return;
+    };
+
+    fixture
+        .enqueue(fixture.submission_with_intents(
+            1,
+            Some("origin-1"),
+            "first handled body",
+            Vec::new(),
+        ))
+        .await;
+    fixture.wait_for_frontier(1).await;
+    assert_eq!(count_table(&fixture, "ingress_messages").await, 1);
+    assert_eq!(count_table(&fixture, "ingress_origin_aliases").await, 1);
+    assert_eq!(count_table(&fixture, "ingress_sm_refs").await, 1);
+
+    fixture
+        .enqueue(fixture.submission_with_intents(
+            1,
+            Some("origin-1"),
+            "first handled body",
+            Vec::new(),
+        ))
+        .await;
+    fixture
+        .enqueue(fixture.submission_with_intents(2, None, "second handled body", Vec::new()))
+        .await;
+    fixture.wait_for_frontier(2).await;
+    assert_eq!(
+        count_table(&fixture, "ingress_messages").await,
+        2,
+        "the replayed handled ordinal must not mint a second canonical message"
+    );
+    assert_eq!(
+        count_table(&fixture, "ingress_origin_aliases").await,
+        1,
+        "the replayed origin-id must preserve its first alias binding"
+    );
+    assert_eq!(
+        count_table(&fixture, "ingress_sm_refs").await,
+        2,
+        "only the two distinct handled ordinals may bind SM refs"
+    );
+
+    fixture
+        .enqueue(fixture.submission_with_intents(
+            4,
+            None,
+            "gap before handled ordinal three",
+            Vec::new(),
+        ))
+        .await;
+    fixture
+        .enqueue(fixture.submission_with_intents(3, None, "third handled body", Vec::new()))
+        .await;
+    fixture.wait_for_frontier(3).await;
+    assert_eq!(
+        fixture.frontier().await,
+        Some(3),
+        "the stale gap offer must not advance beyond the last contiguous handled stanza"
+    );
+    assert_eq!(
+        count_table(&fixture, "ingress_messages").await,
+        3,
+        "the stale gap offer must not persist a shadow message"
+    );
+    assert_eq!(
+        count_table(&fixture, "ingress_sm_refs").await,
+        3,
+        "only accepted handled ordinals may produce SM refs"
+    );
+    assert!(
+        fixture.message_key_for_ordinal(4).await.is_none(),
+        "the stale handled gap must not bind ordinal four"
+    );
+
+    fixture.close().await;
+}
+
+async fn count_table(fixture: &ShadowFixture, table: &str) -> i64 {
+    let conn = fixture.db.guard().await.expect("database connection");
+    let mut rows = conn
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+        .await
+        .expect("count rows");
+    rows.next()
+        .await
+        .expect("read count row")
+        .expect("count row exists")
+        .get(0)
+        .expect("decode count")
 }

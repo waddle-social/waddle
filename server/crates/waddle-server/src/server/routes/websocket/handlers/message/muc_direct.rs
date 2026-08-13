@@ -38,6 +38,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Modify,
             DefinedCondition::BadRequest,
             "Groupchat messages must be addressed to the room bare JID.",
@@ -62,6 +63,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Requested room not found.",
@@ -74,6 +76,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
@@ -88,6 +91,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::NotAcceptable,
             "Only room occupants may send private messages.",
@@ -103,6 +107,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "Private messages are not allowed for your role in this room.",
@@ -112,6 +117,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Requested occupant not found.",
@@ -126,6 +132,7 @@ async fn handle_muc_private_message(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -298,6 +305,7 @@ async fn handle_muc_private_message(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::RecipientUnavailable,
                 "The occupant could not be reached; please retry.",
@@ -411,6 +419,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -423,6 +432,7 @@ async fn handle_muc_mediated_decline(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "You have no outstanding invitation to this room.",
@@ -446,6 +456,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Modify,
                 DefinedCondition::BadRequest,
                 "Several invitations are outstanding; the decline must name its inviter.",
@@ -472,6 +483,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -516,6 +528,7 @@ async fn handle_muc_mediated_decline(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
@@ -608,23 +621,40 @@ fn canonicalize_muc_private_payloads(
 fn message_error_frame(
     incoming: &Message,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
     error_type: ErrorType,
     condition: DefinedCondition,
     text: &'static str,
 ) -> String {
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+    let capture_condition = waddle_xmpp::StanzaErrorCondition::from_xmpp(&condition);
     let reply = message_error_reply(
         &stamped,
         StanzaError::new(error_type, condition, "en", text),
     );
-    stanza_to_string(reply).unwrap_or_default()
+    match stanza_to_string(reply) {
+        Ok(xml) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::ErrorReply {
+                    recipient: bound_jid.clone(),
+                    condition: capture_condition,
+                });
+            }
+            xml
+        }
+        Err(_) => String::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ingress_shadow::IngressEffectCapture;
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use kameo::actor::ActorRef;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::{
         extract_occupant_id_from_message, generate_occupant_id, OccupantId, OccupantIdSecret,
         NS_OCCUPANT_ID, OCCUPANT_ID_SECRET_MIN_BYTES,
@@ -642,6 +672,24 @@ mod tests {
         m.bodies
             .insert(xmpp_parsers::message::Lang::new(), "psst".to_string());
         m
+    }
+
+    async fn create_test_room(
+        state: &WebSocketState,
+        room_jid: jid::BareJid,
+    ) -> ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid,
+                waddle_id: "w-muc-direct".to_string(),
+                channel_id: "c-muc-direct".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
     }
 
     /// XEP-0421 Business Rules (#1268): MUC private messages MUST carry
@@ -807,5 +855,34 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn muc_private_rejection_records_error_reply_intent() {
+        let state = create_test_websocket_state().await;
+        let room: jid::BareJid = "pm@muc.example.com".parse().expect("room");
+        let _room_actor = create_test_room(state.as_ref(), room.clone()).await;
+        let sender: jid::FullJid = "mallory@example.com/web".parse().expect("sender");
+        let capture = IngressEffectCapture::new(None);
+        let mut incoming = Message::new(Some(
+            "pm@muc.example.com/bob"
+                .parse::<jid::Jid>()
+                .expect("target jid"),
+        ));
+        incoming.type_ = MessageType::Chat;
+        incoming.from = Some(jid::Jid::from(sender.clone()));
+
+        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, Some(&capture))
+            .await
+            .expect("handled");
+
+        assert_eq!(frames.len(), 1);
+        assert!(capture
+            .snapshot()
+            .intents
+            .contains(&IngressEffectIntent::ErrorReply {
+                recipient: sender,
+                condition: waddle_xmpp::StanzaErrorCondition::NotAcceptable,
+            }));
     }
 }

@@ -478,6 +478,7 @@ async fn interpret_with_depth(
                 stanza,
                 call_setup,
             } => {
+                outcome.route_to_connection_events += 1;
                 for stanza in
                     route_to_connection(deps, jid, stanza, recursion_depth, call_setup).await
                 {
@@ -517,6 +518,7 @@ async fn interpret_with_depth(
                     // cannot suppress unrelated siblings in this outer batch.
                     retry_suppression: _,
                     archive_id_rewrites: nested_rewrites,
+                    route_to_connection_events: _,
                 } = nested;
                 outcome.frames.extend(nested_frames);
                 if nested_close {

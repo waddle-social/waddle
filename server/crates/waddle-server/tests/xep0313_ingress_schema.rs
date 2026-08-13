@@ -4,6 +4,9 @@
 //! the XEP-0313 archive UID: XEP-0313 §6.3 defines the MAM `<result/>` id as
 //! the archive identifier and clients must not rely on stanza-id for it.
 
+#[cfg(feature = "clustering")]
+mod ingress_shadow_support;
+
 use chrono::{Duration, Utc};
 use jid::Jid;
 use waddle_server::{
@@ -12,6 +15,9 @@ use waddle_server::{
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NormalizedTarget, SemanticDigest};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
+
+#[cfg(feature = "clustering")]
+use ingress_shadow_support::ShadowFixture;
 
 #[tokio::test]
 async fn internal_message_association_and_digest_are_stable() {
@@ -158,6 +164,76 @@ async fn archive_authoritative_effect_intents_bind_the_archive_stanza_id() {
     .expect("decode persisted archive effect intent");
     assert_eq!(decoded, intent);
     fixture.close().await;
+}
+
+/// XEP-0313 §5.1.3 and §6.3 require the archive to assign the authoritative
+/// UID while XEP-0359's stanza-id is merely the replay binding. The shadow
+/// pipeline must therefore persist the captured archive stanza-id exactly on
+/// the authoritative effect row for the handled message.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn shadow_pipeline_binds_archive_authoritative_intent_to_archive_stanza_id() {
+    let Some(fixture) = ShadowFixture::open("xep0313_pipeline").await else {
+        return;
+    };
+    let archive = fixture.principal.bare_jid().clone();
+    let intent = IngressEffectIntent::ArchiveAuthoritative {
+        archive: archive.clone(),
+        stanza_id: StanzaId::new("mam-archive-uid-1", Jid::from(archive.clone())),
+        by: archive,
+    };
+
+    fixture
+        .enqueue(fixture.submission_with_intents(
+            1,
+            Some("mam-origin"),
+            "archive authoritative body",
+            vec![intent.clone()],
+        ))
+        .await;
+    fixture.wait_for_frontier(1).await;
+
+    let message_key = fixture
+        .message_key_for_ordinal(1)
+        .await
+        .expect("accepted handled ordinal should bind a canonical message");
+    let intents = effect_intents_for_message(&fixture, message_key).await;
+
+    assert_eq!(
+        intents,
+        vec![intent],
+        "the persisted authoritative archive intent must retain the archive stanza-id verbatim"
+    );
+
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+async fn effect_intents_for_message(
+    fixture: &ShadowFixture,
+    message_key: MessageKey,
+) -> Vec<IngressEffectIntent> {
+    let conn = fixture.db.guard().await.expect("database connection");
+    let mut rows = conn
+        .query(
+            "SELECT kind::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
+            waddle_server::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("read effect intents");
+    let mut intents = Vec::new();
+    while let Some(row) = rows.next().await.expect("iterate effect intents") {
+        let kind: i64 = row.get(0).expect("decode effect kind");
+        let payload: Vec<u8> = row.get(1).expect("decode effect payload");
+        intents.push(
+            IngressEffectIntent::decode_v1(
+                i32::try_from(kind).expect("effect kind fits in i32"),
+                &payload,
+            )
+            .expect("decode effect intent"),
+        );
+    }
+    intents
 }
 
 fn digest(byte: u8) -> SemanticDigest {

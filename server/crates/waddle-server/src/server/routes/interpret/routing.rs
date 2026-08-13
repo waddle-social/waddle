@@ -111,6 +111,7 @@ pub(super) async fn run_headless_recipient_pass(
         // Headless pass emits no wire copy, so there is nothing to
         // rewrite.
         archive_id_rewrites: _,
+        route_to_connection_events: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,
@@ -290,6 +291,7 @@ pub(super) async fn run_fanout_recipient_pass(
         // batch-local retry marker is not meaningful to the outer batch.
         retry_suppression: _,
         archive_id_rewrites,
+        route_to_connection_events: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,

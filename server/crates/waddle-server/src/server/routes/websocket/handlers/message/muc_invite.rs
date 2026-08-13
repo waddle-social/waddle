@@ -22,6 +22,7 @@
 
 use tracing::warn;
 use waddle_xmpp::{
+    ingress::IngressEffectIntent,
     muc::room_actor::{ChangeAffiliation, GetSnapshot},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
@@ -67,6 +68,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::NotAuthorized,
             "Authentication required.",
@@ -87,6 +89,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Requested room not found.",
@@ -96,6 +99,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
@@ -112,6 +116,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::NotAcceptable,
             "Only room occupants may send invitations.",
@@ -127,6 +132,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "Only room admins may invite people to a members-only room.",
@@ -140,6 +146,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Invitee is not a local user.",
@@ -149,6 +156,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Modify,
             DefinedCondition::JidMalformed,
             "Invitee must be a user JID with a localpart.",
@@ -166,6 +174,7 @@ pub(super) async fn handle_muc_mediated_invite(
             return Some(vec![error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Cancel,
                 DefinedCondition::ItemNotFound,
                 "Invitee does not exist.",
@@ -180,6 +189,7 @@ pub(super) async fn handle_muc_mediated_invite(
             return Some(vec![error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -234,6 +244,7 @@ pub(super) async fn handle_muc_mediated_invite(
             return Some(vec![error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -259,6 +270,7 @@ pub(super) async fn handle_muc_mediated_invite(
                 return Some(vec![error_frame(
                     incoming,
                     bound_jid,
+                    ingress_effect_capture,
                     ErrorType::Wait,
                     DefinedCondition::InternalServerError,
                     "Internal server error.",
@@ -304,6 +316,7 @@ pub(super) async fn handle_muc_mediated_invite(
             return Some(vec![error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -364,6 +377,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
@@ -538,17 +552,30 @@ fn build_mediated_invite_payload(
 fn error_frame(
     incoming: &Message,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
     error_type: ErrorType,
     condition: DefinedCondition,
     text: &'static str,
 ) -> String {
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+    let capture_condition = waddle_xmpp::StanzaErrorCondition::from_xmpp(&condition);
     let reply = message_error_reply(
         &stamped,
         StanzaError::new(error_type, condition, "en", text),
     );
-    stanza_to_string(reply).unwrap_or_default()
+    match stanza_to_string(reply) {
+        Ok(xml) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::ErrorReply {
+                    recipient: bound_jid.clone(),
+                    condition: capture_condition,
+                });
+            }
+            xml
+        }
+        Err(_) => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -602,6 +629,46 @@ mod tests {
             .contains(&IngressEffectIntent::RouteDirect {
                 recipient,
                 fanout: Vec::new(),
+            }));
+    }
+
+    #[tokio::test]
+    async fn mediated_invite_auth_rejection_records_error_reply_intent() {
+        let state = create_test_websocket_state().await;
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let capture = IngressEffectCapture::new(None);
+        let mut message = Message::new(Some(
+            "room@muc.example.com"
+                .parse::<jid::Jid>()
+                .expect("room jid"),
+        ));
+        message.type_ = MessageType::Normal;
+        message.from = Some(jid::Jid::from(sender.clone()));
+        message.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .attr(
+                            minidom::rxml::xml_ncname!("to").to_owned(),
+                            "bob@example.com",
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+
+        let frames =
+            handle_muc_mediated_invite(&message, state.as_ref(), &sender, None, Some(&capture))
+                .await
+                .expect("handled");
+
+        assert_eq!(frames.len(), 1);
+        assert!(capture
+            .snapshot()
+            .intents
+            .contains(&IngressEffectIntent::ErrorReply {
+                recipient: sender,
+                condition: waddle_xmpp::StanzaErrorCondition::NotAuthorized,
             }));
     }
 }

@@ -570,27 +570,6 @@ pub(super) async fn dispatch_to_room(
         .filter(|event| matches!(event, OutboundEvent::RouteToConnection { .. }))
         .count();
     fanout_span.record("recipients", recipients);
-    // This is the live MUC decision boundary: the actor snapshot has admitted
-    // the sender and the room pipeline has frozen the fanout before any
-    // recursive delivery can mutate routing state. Capture the primary route
-    // intent here so an accepted room message cannot shadow-commit only its
-    // secondary archive/inbox effects.
-    let room_generation = snapshot
-        .claim_fence
-        .as_ref()
-        .and_then(|fence| u64::try_from(fence.epoch.0).ok())
-        .map(EntityGeneration::from_storage)
-        .unwrap_or(EntityGeneration::INITIAL);
-    deps.capture_intent(IngressEffectIntent::RouteMucGroupchat {
-        room: room_jid.clone(),
-        occupants: occupants
-            .iter()
-            .map(|occupant| occupant.full_jid.clone())
-            .collect(),
-        reflection: sender_full.clone(),
-        room_generation,
-    });
-
     // 6. Recursively interpret the chain's emitted events. Pass the
     //    depth through unchanged: `recursion_depth` is the headless
     //    offline-recipient pass guard, and the room handler chain
@@ -610,11 +589,30 @@ pub(super) async fn dispatch_to_room(
         fanout_started.elapsed().as_secs_f64() * 1000.0,
     );
     let retry_suppression = nested.retry_suppression;
+    let routed_connections = nested.route_to_connection_events;
     outcome.frames.extend(nested.frames);
     if nested.close {
         outcome.close = true;
     }
     outcome.feedback.extend(nested.feedback);
+
+    if retry_suppression.is_none() && routed_connections > 0 {
+        let room_generation = snapshot
+            .claim_fence
+            .as_ref()
+            .and_then(|fence| u64::try_from(fence.epoch.0).ok())
+            .map(EntityGeneration::from_storage)
+            .unwrap_or(EntityGeneration::INITIAL);
+        deps.capture_intent(IngressEffectIntent::RouteMucGroupchat {
+            room: room_jid.clone(),
+            occupants: occupants
+                .iter()
+                .map(|occupant| occupant.full_jid.clone())
+                .collect(),
+            reflection: sender_full.clone(),
+            room_generation,
+        });
+    }
 
     // The marker controls only this nested room batch. Consume it here rather
     // than folding it into the returned outcome, where it could leak into an
