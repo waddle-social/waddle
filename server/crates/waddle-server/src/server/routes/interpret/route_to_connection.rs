@@ -285,8 +285,8 @@ async fn route_to_full_jid(
     }
     // #1488 ticket ownership: the ordered-relay path owns and closes
     // the call-setup ticket whenever it handles the delivery
-    // (`Some`) — its deferred-handoff branch returns a synthetic
-    // `Delivered` immediately and only learns the real disposition in
+    // (`Some`) — its deferred-handoff branch returns synthetic
+    // `MaybeCommitted` immediately and only learns the real disposition in
     // a spawned completion task, so the close must happen there, not
     // here. When the relay declines (`None`), the local delivery path
     // closes the ticket from its own outcome via the shared

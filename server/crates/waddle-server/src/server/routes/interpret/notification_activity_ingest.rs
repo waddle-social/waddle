@@ -160,6 +160,7 @@ pub(super) async fn record_chat_state_activity(
             sender,
             NotificationActivityMutation::ChatState {
                 conversation: conversation.clone(),
+                state,
             },
         );
     }

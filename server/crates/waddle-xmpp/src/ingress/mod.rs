@@ -23,9 +23,10 @@ pub use effect_intent::{
     DmPinMutationAction, EffectIntentCodecError, EffectMessageIdentity, FrozenStanzaError,
     FrozenStanzaErrorAddress, FrozenStanzaErrorConditionPayload, FrozenStanzaErrorText,
     FrozenStanzaErrorTexts, FrozenStanzaErrorType, GroupDmMembershipGrant, InboxProjectionMutation,
-    IngressEffectIntent, IngressEffectKey, NotificationActivityMutation,
-    NotificationCandidateOutcome, PinAction, RecipientSmAppendIdentity, RelayNodeEpoch,
-    RelayNodeId, RelayTargetIdentity, RetractionTombstoneMutation, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
+    IngressEffectIntent, IngressEffectKey, LinkPreviewMediaRefMutation, LinkPreviewMediaRefState,
+    NotificationActivityMutation, NotificationCandidateOutcome, PinAction,
+    RecipientSmAppendIdentity, RelayNodeEpoch, RelayNodeId, RelayTargetIdentity,
+    RetractionTombstoneMutation, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
 };
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;

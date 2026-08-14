@@ -6,6 +6,8 @@ use jid::{BareJid, FullJid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
+use waddle_xmpp_core::mam::{RichMessageId, ThreadId};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::{
     message::Lang,
@@ -14,7 +16,7 @@ use xmpp_parsers::{
 
 use crate::{
     error::StanzaErrorCondition, ingress::EntityGeneration, muc::SubjectState,
-    pending_delivery::SmSessionId, protocol::CarbonKind,
+    pending_delivery::SmSessionId, protocol::CarbonKind, xep::xep0085::ChatState,
 };
 
 /// Largest accepted version-one storage payload, matching the database check.
@@ -180,6 +182,7 @@ pub enum NotificationCandidateOutcome {
 pub enum NotificationActivityMutation {
     ChatState {
         conversation: BareJid,
+        state: ChatState,
     },
     ChatStateGone {
         conversation: BareJid,
@@ -204,7 +207,14 @@ pub enum NotificationActivityMutation {
 impl NotificationActivityMutation {
     pub fn storage_identity(&self) -> String {
         match self {
-            Self::ChatState { conversation } => format!("chat_state|{}", conversation),
+            Self::ChatState {
+                conversation,
+                state,
+            } => format!(
+                "chat_state|{}|{}",
+                conversation,
+                chat_state_storage_identity(*state)
+            ),
             Self::ChatStateGone { conversation } => {
                 format!("chat_state_gone|{}", conversation)
             }
@@ -249,11 +259,11 @@ pub enum InboxProjectionMutation {
     },
     GroupchatThread {
         room: BareJid,
-        thread_id: String,
+        thread_id: ThreadId,
     },
     GroupchatChannelAndThread {
         room: BareJid,
-        thread_id: String,
+        thread_id: ThreadId,
         increment_unread: bool,
     },
 }
@@ -270,7 +280,7 @@ impl InboxProjectionMutation {
                 increment_unread,
             } => format!("groupchat_channel|{}|{}", room, increment_unread),
             Self::GroupchatThread { room, thread_id } => {
-                format!("groupchat_thread|{}|{}", room, thread_id)
+                format!("groupchat_thread|{}|{}", room, thread_id.as_str())
             }
             Self::GroupchatChannelAndThread {
                 room,
@@ -278,9 +288,48 @@ impl InboxProjectionMutation {
                 increment_unread,
             } => format!(
                 "groupchat_channel_and_thread|{}|{}|{}",
-                room, thread_id, increment_unread
+                room,
+                thread_id.as_str(),
+                increment_unread
             ),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkPreviewMediaRefState {
+    Current,
+    Unreferenced,
+}
+
+impl LinkPreviewMediaRefState {
+    pub fn storage_identity(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Unreferenced => "unreferenced",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewMediaRefMutation {
+    pub upload_slot_id: Uuid,
+    pub archive: BareJid,
+    pub message_id: RichMessageId,
+    pub current_archive_stanza_id: StanzaId,
+    pub state: LinkPreviewMediaRefState,
+}
+
+impl LinkPreviewMediaRefMutation {
+    pub fn storage_identity(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.upload_slot_id,
+            self.archive,
+            self.message_id.as_str(),
+            stanza_storage_identity(&self.current_archive_stanza_id),
+            self.state.storage_identity()
+        )
     }
 }
 
@@ -598,6 +647,16 @@ fn carbon_kind_storage_identity(kind: CarbonKind) -> &'static str {
     }
 }
 
+fn chat_state_storage_identity(state: ChatState) -> &'static str {
+    match state {
+        ChatState::Active => "active",
+        ChatState::Composing => "composing",
+        ChatState::Paused => "paused",
+        ChatState::Inactive => "inactive",
+        ChatState::Gone => "gone",
+    }
+}
+
 fn pin_action_storage_identity(action: PinAction) -> &'static str {
     match action {
         PinAction::Pin => "pin",
@@ -650,6 +709,9 @@ pub enum IngressEffectIntent {
         owner: BareJid,
         mutation: NotificationActivityMutation,
     },
+    LinkPreviewMediaRef {
+        mutation: LinkPreviewMediaRefMutation,
+    },
     RetractionTombstone {
         mutation: RetractionTombstoneMutation,
     },
@@ -699,6 +761,7 @@ pub enum IngressEffectKey {
     Carbons(FullJid, CarbonKind),
     InboxProject(BareJid, String),
     NotificationActivityPreview(BareJid, String),
+    LinkPreviewMediaRef(String),
     RetractionTombstone(String),
     DmPinMutation(String),
     GroupDmMembershipGrant(String),
@@ -734,6 +797,7 @@ impl IngressEffectKey {
             Self::NotificationActivityPreview(owner, mutation) => {
                 format!("{}|{}", owner, mutation)
             }
+            Self::LinkPreviewMediaRef(identity) => identity.clone(),
             Self::RetractionTombstone(identity) => identity.clone(),
             Self::DmPinMutation(identity) => identity.clone(),
             Self::GroupDmMembershipGrant(identity) => identity.clone(),
@@ -757,15 +821,16 @@ impl IngressEffectKey {
             Self::Carbons(..) => 6,
             Self::InboxProject(..) => 7,
             Self::NotificationActivityPreview(..) => 8,
-            Self::RetractionTombstone(..) => 9,
-            Self::DmPinMutation(..) => 10,
-            Self::GroupDmMembershipGrant(..) => 11,
-            Self::GroupDmInviteLedger(..) => 12,
-            Self::RoomSubjectMutation(..) => 13,
-            Self::CallSignal(..) => 14,
-            Self::Pin(..) => 15,
-            Self::Extension(..) => 16,
-            Self::ErrorReply(..) => 17,
+            Self::LinkPreviewMediaRef(..) => 9,
+            Self::RetractionTombstone(..) => 10,
+            Self::DmPinMutation(..) => 11,
+            Self::GroupDmMembershipGrant(..) => 12,
+            Self::GroupDmInviteLedger(..) => 13,
+            Self::RoomSubjectMutation(..) => 14,
+            Self::CallSignal(..) => 15,
+            Self::Pin(..) => 16,
+            Self::Extension(..) => 17,
+            Self::ErrorReply(..) => 18,
         };
         (class, self.storage_identity())
     }
@@ -825,6 +890,9 @@ impl IngressEffectIntent {
                     owner.clone(),
                     mutation.storage_identity(),
                 )
+            }
+            Self::LinkPreviewMediaRef { mutation } => {
+                IngressEffectKey::LinkPreviewMediaRef(mutation.storage_identity())
             }
             Self::RetractionTombstone { mutation } => {
                 IngressEffectKey::RetractionTombstone(mutation.storage_identity())
@@ -1165,16 +1233,17 @@ impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
                 room,
                 increment_unread,
             },
-            InboxProjectionMutation::GroupchatThread { room, thread_id } => {
-                Self::GroupchatThread { room, thread_id }
-            }
+            InboxProjectionMutation::GroupchatThread { room, thread_id } => Self::GroupchatThread {
+                room,
+                thread_id: thread_id.as_str().to_owned(),
+            },
             InboxProjectionMutation::GroupchatChannelAndThread {
                 room,
                 thread_id,
                 increment_unread,
             } => Self::GroupchatChannelAndThread {
                 room,
-                thread_id,
+                thread_id: thread_id.as_str().to_owned(),
                 increment_unread,
             },
         }
@@ -1182,8 +1251,8 @@ impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
 }
 
 impl StoredInboxProjectionMutation {
-    fn into_domain(self) -> InboxProjectionMutation {
-        match self {
+    fn into_domain(self) -> Result<InboxProjectionMutation, EffectIntentCodecError> {
+        Ok(match self {
             Self::Direct {
                 peer,
                 increment_unread,
@@ -1198,19 +1267,22 @@ impl StoredInboxProjectionMutation {
                 room,
                 increment_unread,
             },
-            Self::GroupchatThread { room, thread_id } => {
-                InboxProjectionMutation::GroupchatThread { room, thread_id }
-            }
+            Self::GroupchatThread { room, thread_id } => InboxProjectionMutation::GroupchatThread {
+                room,
+                thread_id: ThreadId::new(thread_id)
+                    .ok_or(EffectIntentCodecError::MalformedPayload)?,
+            },
             Self::GroupchatChannelAndThread {
                 room,
                 thread_id,
                 increment_unread,
             } => InboxProjectionMutation::GroupchatChannelAndThread {
                 room,
-                thread_id,
+                thread_id: ThreadId::new(thread_id)
+                    .ok_or(EffectIntentCodecError::MalformedPayload)?,
                 increment_unread,
             },
-        }
+        })
     }
 }
 
@@ -1219,6 +1291,7 @@ impl StoredInboxProjectionMutation {
 enum StoredNotificationActivityMutation {
     ChatState {
         conversation: BareJid,
+        state: u8,
     },
     ChatStateGone {
         conversation: BareJid,
@@ -1243,9 +1316,13 @@ enum StoredNotificationActivityMutation {
 impl From<NotificationActivityMutation> for StoredNotificationActivityMutation {
     fn from(value: NotificationActivityMutation) -> Self {
         match value {
-            NotificationActivityMutation::ChatState { conversation } => {
-                Self::ChatState { conversation }
-            }
+            NotificationActivityMutation::ChatState {
+                conversation,
+                state,
+            } => Self::ChatState {
+                conversation,
+                state: chat_state_tag(state),
+            },
             NotificationActivityMutation::ChatStateGone { conversation } => {
                 Self::ChatStateGone { conversation }
             }
@@ -1278,9 +1355,13 @@ impl From<NotificationActivityMutation> for StoredNotificationActivityMutation {
 impl StoredNotificationActivityMutation {
     fn into_domain(self) -> Result<NotificationActivityMutation, EffectIntentCodecError> {
         Ok(match self {
-            Self::ChatState { conversation } => {
-                NotificationActivityMutation::ChatState { conversation }
-            }
+            Self::ChatState {
+                conversation,
+                state,
+            } => NotificationActivityMutation::ChatState {
+                conversation,
+                state: chat_state_from_tag(state)?,
+            },
             Self::ChatStateGone { conversation } => {
                 NotificationActivityMutation::ChatStateGone { conversation }
             }
@@ -1306,6 +1387,39 @@ impl StoredNotificationActivityMutation {
                 archive_stanza_id,
                 outcome: notification_candidate_outcome_from_tag(outcome)?,
             },
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredLinkPreviewMediaRefMutation {
+    upload_slot_id: Uuid,
+    archive: BareJid,
+    message_id: RichMessageId,
+    current_archive_stanza_id: StanzaId,
+    state: u8,
+}
+
+impl From<LinkPreviewMediaRefMutation> for StoredLinkPreviewMediaRefMutation {
+    fn from(value: LinkPreviewMediaRefMutation) -> Self {
+        Self {
+            upload_slot_id: value.upload_slot_id,
+            archive: value.archive,
+            message_id: value.message_id,
+            current_archive_stanza_id: value.current_archive_stanza_id,
+            state: link_preview_media_ref_state_tag(value.state),
+        }
+    }
+}
+
+impl StoredLinkPreviewMediaRefMutation {
+    fn into_domain(self) -> Result<LinkPreviewMediaRefMutation, EffectIntentCodecError> {
+        Ok(LinkPreviewMediaRefMutation {
+            upload_slot_id: self.upload_slot_id,
+            archive: self.archive,
+            message_id: self.message_id,
+            current_archive_stanza_id: self.current_archive_stanza_id,
+            state: link_preview_media_ref_state_from_tag(self.state)?,
         })
     }
 }
@@ -1408,6 +1522,9 @@ enum StoredEffectIntent {
         owner: BareJid,
         mutation: StoredNotificationActivityMutation,
     },
+    LinkPreviewMediaRef {
+        mutation: StoredLinkPreviewMediaRefMutation,
+    },
     RetractionTombstone {
         mutation: StoredRetractionTombstoneMutation,
     },
@@ -1458,6 +1575,7 @@ impl StoredEffectIntent {
             Self::Carbons { .. } => 5,
             Self::InboxProject { .. } => 6,
             Self::NotificationActivityPreview { .. } => 7,
+            Self::LinkPreviewMediaRef { .. } => 18,
             Self::RetractionTombstone { .. } => 14,
             Self::DmPinMutation { .. } => 15,
             Self::GroupDmMembershipGrant { .. } => 16,
@@ -1545,6 +1663,9 @@ impl StoredEffectIntent {
                     mutation: mutation.into(),
                 }
             }
+            IngressEffectIntent::LinkPreviewMediaRef { mutation } => Self::LinkPreviewMediaRef {
+                mutation: mutation.into(),
+            },
             IngressEffectIntent::RetractionTombstone { mutation } => Self::RetractionTombstone {
                 mutation: mutation.into(),
             },
@@ -1655,7 +1776,7 @@ impl StoredEffectIntent {
             },
             Self::InboxProject { owner, mutation } => IngressEffectIntent::InboxProject {
                 owner,
-                mutation: mutation.into_domain(),
+                mutation: mutation.into_domain()?,
             },
             Self::NotificationActivityPreview { owner, mutation } => {
                 IngressEffectIntent::NotificationActivityPreview {
@@ -1663,6 +1784,9 @@ impl StoredEffectIntent {
                     mutation: mutation.into_domain()?,
                 }
             }
+            Self::LinkPreviewMediaRef { mutation } => IngressEffectIntent::LinkPreviewMediaRef {
+                mutation: mutation.into_domain()?,
+            },
             Self::RetractionTombstone { mutation } => IngressEffectIntent::RetractionTombstone {
                 mutation: mutation.into(),
             },
@@ -1793,6 +1917,44 @@ fn notification_candidate_outcome_from_tag(
     })
 }
 
+fn link_preview_media_ref_state_tag(state: LinkPreviewMediaRefState) -> u8 {
+    match state {
+        LinkPreviewMediaRefState::Current => 0,
+        LinkPreviewMediaRefState::Unreferenced => 1,
+    }
+}
+
+fn link_preview_media_ref_state_from_tag(
+    tag: u8,
+) -> Result<LinkPreviewMediaRefState, EffectIntentCodecError> {
+    Ok(match tag {
+        0 => LinkPreviewMediaRefState::Current,
+        1 => LinkPreviewMediaRefState::Unreferenced,
+        _ => return Err(EffectIntentCodecError::MalformedPayload),
+    })
+}
+
+fn chat_state_tag(state: ChatState) -> u8 {
+    match state {
+        ChatState::Active => 0,
+        ChatState::Composing => 1,
+        ChatState::Paused => 2,
+        ChatState::Inactive => 3,
+        ChatState::Gone => 4,
+    }
+}
+
+fn chat_state_from_tag(tag: u8) -> Result<ChatState, EffectIntentCodecError> {
+    Ok(match tag {
+        0 => ChatState::Active,
+        1 => ChatState::Composing,
+        2 => ChatState::Paused,
+        3 => ChatState::Inactive,
+        4 => ChatState::Gone,
+        _ => return Err(EffectIntentCodecError::MalformedPayload),
+    })
+}
+
 fn condition_tag(condition: StanzaErrorCondition) -> u8 {
     use StanzaErrorCondition::*;
     match condition {
@@ -1874,6 +2036,7 @@ fn frozen_error_type_from_tag(tag: u8) -> Result<FrozenStanzaErrorType, EffectIn
 #[cfg(test)]
 mod tests {
     use jid::Jid;
+    use waddle_xmpp_core::mam::ThreadId;
     use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType as XmppStanzaErrorType};
 
@@ -1892,6 +2055,14 @@ mod tests {
             "stable-1",
             "archive@example.test".parse::<Jid>().expect("valid JID"),
         )
+    }
+
+    fn thread_id(value: &str) -> ThreadId {
+        ThreadId::new(value).expect("valid thread id")
+    }
+
+    fn rich_message_id(value: &str) -> RichMessageId {
+        RichMessageId::new(value).expect("valid message id")
     }
 
     fn samples() -> Vec<IngressEffectIntent> {
@@ -1942,6 +2113,16 @@ mod tests {
                     conversation: bare("room@conference.example.test"),
                     archive_stanza_id: stanza_id(),
                     outcome: NotificationCandidateOutcome::Inserted,
+                },
+            },
+            IngressEffectIntent::LinkPreviewMediaRef {
+                mutation: LinkPreviewMediaRefMutation {
+                    upload_slot_id: Uuid::parse_str("d5c7a44f-7c8c-4587-b0fb-f0e68444d36a")
+                        .expect("uuid"),
+                    archive: bare("room@conference.example.test"),
+                    message_id: rich_message_id("client-msg-1"),
+                    current_archive_stanza_id: stanza_id(),
+                    state: LinkPreviewMediaRefState::Current,
                 },
             },
             IngressEffectIntent::RetractionTombstone {
@@ -2017,6 +2198,7 @@ mod tests {
             r#"{"version":1,"intent":{"type":"carbons","carbon_recipients":["romeo@example.test/phone"],"excluded_source":"romeo@example.test/laptop","kind":0}}"#,
             r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","mutation":{"type":"direct","peer":"juliet@example.test","increment_unread":true}}}"#,
             r#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","mutation":{"type":"notification_candidate","conversation":"room@conference.example.test","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"outcome":0}}}"#,
+            r#"{"version":1,"intent":{"type":"link_preview_media_ref","mutation":{"upload_slot_id":"d5c7a44f-7c8c-4587-b0fb-f0e68444d36a","archive":"room@conference.example.test","message_id":"client-msg-1","current_archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"state":0}}}"#,
             r#"{"version":1,"intent":{"type":"retraction_tombstone","mutation":{"archive":"archive@example.test","target_stanza_id":{"id":"target-1","by":"archive@example.test"},"retraction_stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"dm_pin_mutation","first_peer":"juliet@example.test","second_peer":"romeo@example.test","target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
             r#"{"version":1,"intent":{"type":"group_dm_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
@@ -2159,7 +2341,7 @@ mod tests {
             owner: bare("romeo@example.test"),
             mutation: InboxProjectionMutation::GroupchatChannelAndThread {
                 room: bare("room@conference.example.test"),
-                thread_id: "thread-1".to_string(),
+                thread_id: thread_id("thread-1"),
                 increment_unread: true,
             },
         };
@@ -2184,6 +2366,79 @@ mod tests {
                 intent
             );
         }
+    }
+
+    #[test]
+    fn inbox_thread_decode_rejects_empty_thread_ids() {
+        let payload = br#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","mutation":{"type":"groupchat_thread","room":"room@conference.example.test","thread_id":"   "}}}"#;
+        assert_eq!(
+            IngressEffectIntent::decode_v1(6, payload),
+            Err(EffectIntentCodecError::MalformedPayload)
+        );
+    }
+
+    #[test]
+    fn chat_state_effect_round_trips_with_distinct_semantic_identity() {
+        let active = IngressEffectIntent::NotificationActivityPreview {
+            owner: bare("romeo@example.test"),
+            mutation: NotificationActivityMutation::ChatState {
+                conversation: bare("juliet@example.test"),
+                state: ChatState::Active,
+            },
+        };
+        let paused = IngressEffectIntent::NotificationActivityPreview {
+            owner: bare("romeo@example.test"),
+            mutation: NotificationActivityMutation::ChatState {
+                conversation: bare("juliet@example.test"),
+                state: ChatState::Paused,
+            },
+        };
+
+        let encoded = active.encode_v1().expect("encode active chat state");
+        assert_eq!(
+            encoded.payload(),
+            br#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","mutation":{"type":"chat_state","conversation":"juliet@example.test","state":0}}}"#
+        );
+        assert_eq!(
+            IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                .expect("decode active chat state"),
+            active
+        );
+        assert_ne!(active.semantic_key(), paused.semantic_key());
+    }
+
+    #[test]
+    fn link_preview_media_ref_identity_distinguishes_state_and_archive() {
+        let slot = Uuid::parse_str("d5c7a44f-7c8c-4587-b0fb-f0e68444d36a").expect("uuid");
+        let current = IngressEffectIntent::LinkPreviewMediaRef {
+            mutation: LinkPreviewMediaRefMutation {
+                upload_slot_id: slot,
+                archive: bare("room@conference.example.test"),
+                message_id: rich_message_id("client-msg-1"),
+                current_archive_stanza_id: stanza_id(),
+                state: LinkPreviewMediaRefState::Current,
+            },
+        };
+        let stale = IngressEffectIntent::LinkPreviewMediaRef {
+            mutation: LinkPreviewMediaRefMutation {
+                upload_slot_id: slot,
+                archive: bare("room@conference.example.test"),
+                message_id: rich_message_id("client-msg-1"),
+                current_archive_stanza_id: StanzaId::new(
+                    "stable-2",
+                    "archive@example.test".parse::<Jid>().expect("valid JID"),
+                ),
+                state: LinkPreviewMediaRefState::Unreferenced,
+            },
+        };
+
+        let encoded = current.encode_v1().expect("encode current ref");
+        assert_eq!(
+            IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                .expect("decode current ref"),
+            current
+        );
+        assert_ne!(current.semantic_key(), stale.semantic_key());
     }
 
     #[test]

@@ -567,7 +567,7 @@ async fn update_direct_link_preview_refs(
         .as_deref()
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
-    crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs(
+    for intent in crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs_with_effects(
         global_db_actor,
         state.deps.auth_state.base_url.as_str(),
         archive_jid,
@@ -575,7 +575,10 @@ async fn update_direct_link_preview_refs(
         archive_id,
         message,
     )
-    .await;
+    .await
+    {
+        deps.capture_intent(intent);
+    }
 }
 
 pub(super) async fn resolve_direct_correction_target_message_id(

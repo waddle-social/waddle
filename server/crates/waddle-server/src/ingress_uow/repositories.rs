@@ -333,6 +333,31 @@ impl SmIngressStreamRepository {
             .map_err(|_| IngressUowError::InvalidStoredSmIngressId)
     }
 
+    /// Fence a retirement's unclaimed check against concurrent claim writes.
+    /// A missing row cannot be protected by a row lock, so this rare cleanup
+    /// path holds the claims table's SHARE lock through its shadow deletion.
+    #[cfg(feature = "clustering")]
+    pub async fn fence_claim_absence_for_retirement(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<bool, IngressUowError> {
+        transaction
+            .transaction_mut()
+            .execute("LOCK TABLE clustering_claims IN SHARE MODE", ())
+            .await?;
+        let mut rows = transaction
+            .transaction_mut()
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND entity_type = ?",
+                crate::db_params![
+                    format!("sm_session:{}", stream_id.as_str()),
+                    "sm_session".to_string(),
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_none())
+    }
+
     /// Advance only the next contiguous shadow ordinal for the locked stream.
     pub async fn advance_frontier(
         transaction: &mut IngressUowTransaction<'_>,

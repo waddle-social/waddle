@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use tracing::warn;
 use waddle_xmpp::{
-    ingress::{FrozenStanzaError, IngressEffectIntent},
+    ingress::{FrozenStanzaError, GroupDmMembershipGrant, IngressEffectIntent},
     muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
@@ -100,6 +100,9 @@ pub(super) async fn handle_group_dm_mediated_invite(
                 error = %error,
                 "Suppressing group-DM invite because blocklist lookup failed"
             );
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_marker(ShadowDecisionMarker::OperationalFenceLoss);
+            }
             return Some(vec![]);
         }
     };
@@ -370,6 +373,18 @@ pub(super) async fn handle_group_dm_mediated_invite(
         )]);
     }
 
+    if let Some(capture) = ingress_effect_capture {
+        let grant = GroupDmMembershipGrant {
+            room: room_jid.clone(),
+            invitee: invitee.clone(),
+            inviter: bound_jid.to_bare(),
+        };
+        capture.record_intent(IngressEffectIntent::GroupDmMembershipGrant {
+            grant: grant.clone(),
+        });
+        capture.record_intent(IngressEffectIntent::GroupDmInviteLedger { grant });
+    }
+
     Some(vec![])
 }
 
@@ -449,9 +464,75 @@ async fn record_group_dm_archive_boundary(
 mod tests {
     use super::*;
     use kameo::actor::Spawn;
+    use std::sync::Arc;
     use waddle_xmpp::muc::room_actor::{GetRoomSnapshot, HydrateDurableRecipients, RoomActor};
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::muc::{MucRoom, RoomConfig};
+    use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
+
+    fn group_dm_invite_message(
+        room_jid: &jid::BareJid,
+        sender: &jid::FullJid,
+        invitee: &str,
+    ) -> xmpp_parsers::message::Message {
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+        message.type_ = xmpp_parsers::message::MessageType::Normal;
+        message.from = Some(jid::Jid::from(sender.clone()));
+        message.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .attr(minidom::rxml::xml_ncname!("to").to_owned(), invitee)
+                        .build(),
+                )
+                .build(),
+        );
+        message
+    }
+
+    async fn create_group_dm_room(
+        state: &WebSocketState,
+        room_jid: &jid::BareJid,
+        channel_id: &str,
+    ) -> kameo::actor::ActorRef<RoomActor> {
+        crate::server::xmpp_channels::upsert_xmpp_channel(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &crate::server::xmpp_channels::XmppChannelUpsert {
+                id: channel_id.to_string(),
+                name: "Invite Test".to_string(),
+                description: None,
+                channel_type: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                position: 0,
+                is_default: false,
+                pin_permission: Default::default(),
+                members_only: true,
+                public_room: false,
+            },
+        )
+        .await
+        .expect("seed group-DM channel row");
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                channel_id: channel_id.to_string(),
+                config: RoomConfig {
+                    group_dm: true,
+                    persistent: true,
+                    members_only: true,
+                    public_room: false,
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create room")
+    }
 
     async fn durable_recipients(
         room_actor: &kameo::actor::ActorRef<RoomActor>,
@@ -545,57 +626,9 @@ mod tests {
         let capture = IngressEffectCapture::new(None);
         let room_jid: jid::BareJid = "group-dm-invite@muc.example.com".parse().expect("room jid");
         let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
-        crate::server::xmpp_channels::upsert_xmpp_channel(
-            state.deps.app_state.db_pool.global_actor().clone(),
-            &crate::server::xmpp_channels::XmppChannelUpsert {
-                id: "group-dm-invite".to_string(),
-                name: "Invite Test".to_string(),
-                description: None,
-                channel_type: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
-                position: 0,
-                is_default: false,
-                pin_permission: Default::default(),
-                members_only: true,
-                public_room: false,
-            },
-        )
-        .await
-        .expect("seed group-DM channel row");
-        state
-            .deps
-            .protocol
-            .room_registry
-            .ask(CreateRoom {
-                room_jid: room_jid.clone(),
-                waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
-                channel_id: "group-dm-invite".to_string(),
-                config: RoomConfig {
-                    group_dm: true,
-                    persistent: true,
-                    members_only: true,
-                    public_room: false,
-                    ..RoomConfig::default()
-                },
-            })
-            .await
-            .expect("create room");
+        create_group_dm_room(state.as_ref(), &room_jid, "group-dm-invite").await;
 
-        let mut message =
-            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-        message.type_ = xmpp_parsers::message::MessageType::Normal;
-        message.from = Some(jid::Jid::from(sender.clone()));
-        message.payloads.push(
-            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
-                .append(
-                    minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
-                        .attr(
-                            minidom::rxml::xml_ncname!("to").to_owned(),
-                            "bob@example.com",
-                        )
-                        .build(),
-                )
-                .build(),
-        );
+        let message = group_dm_invite_message(&room_jid, &sender, "bob@example.com");
 
         let frames = handle_group_dm_mediated_invite(
             &message,
@@ -623,6 +656,126 @@ mod tests {
                 recipient: sender,
                 error: expected_error,
             }));
+    }
+
+    #[tokio::test]
+    async fn successful_group_dm_invite_records_membership_and_ledger_intents() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let room_jid: jid::BareJid = "group-dm-success@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let invitee: jid::BareJid = "bob@example.com".parse().expect("invitee");
+        let room_actor = create_group_dm_room(state.as_ref(), &room_jid, "group-dm-success").await;
+        crate::server::routes::websocket::tests::seed_local_account(state.as_ref(), "bob").await;
+        room_actor
+            .ask(ChangeAffiliation {
+                jid: sender.to_bare(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("grant inviter membership");
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+
+        let response = handle_group_dm_mediated_invite(
+            &group_dm_invite_message(&room_jid, &sender, "bob@example.com"),
+            state.as_ref(),
+            &sender,
+            Some(&session),
+            Some(&capture),
+        )
+        .await
+        .expect("handler should consume invite");
+
+        assert!(
+            response.is_empty(),
+            "successful invite should not emit an error frame"
+        );
+        let expected = GroupDmMembershipGrant {
+            room: room_jid,
+            invitee,
+            inviter: sender.to_bare(),
+        };
+        let snapshot = capture.snapshot();
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::GroupDmMembershipGrant {
+                grant: expected.clone(),
+            }));
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::GroupDmInviteLedger { grant: expected }));
+    }
+
+    #[tokio::test]
+    async fn blocklist_lookup_failure_records_operational_marker() {
+        struct FailingBlocking;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("synthetic blocking lookup failure")]
+        struct FailingBlockingError;
+
+        #[async_trait::async_trait]
+        impl BlockingStorage for FailingBlocking {
+            async fn list_blocked_jids(
+                &self,
+                _user_jid: &jid::BareJid,
+            ) -> Result<Vec<jid::BareJid>, BlockingStorageError> {
+                Err(BlockingStorageError::new(FailingBlockingError))
+            }
+
+            async fn list_blocked_jid_entries(
+                &self,
+                _user_jid: &jid::BareJid,
+            ) -> Result<Vec<jid::Jid>, BlockingStorageError> {
+                Err(BlockingStorageError::new(FailingBlockingError))
+            }
+        }
+
+        let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
+        let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let blocking: Arc<dyn BlockingStorage> = Arc::new(FailingBlocking);
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_pending_and_blocking(
+            sm_registry,
+            pending,
+            blocking,
+        )
+        .await;
+        let capture = IngressEffectCapture::new(None);
+        let room_jid: jid::BareJid = "group-dm-blocking@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let room_actor = create_group_dm_room(state.as_ref(), &room_jid, "group-dm-blocking").await;
+        crate::server::routes::websocket::tests::seed_local_account(state.as_ref(), "bob").await;
+        room_actor
+            .ask(ChangeAffiliation {
+                jid: sender.to_bare(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("grant inviter membership");
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+
+        let response = handle_group_dm_mediated_invite(
+            &group_dm_invite_message(&room_jid, &sender, "bob@example.com"),
+            state.as_ref(),
+            &sender,
+            Some(&session),
+            Some(&capture),
+        )
+        .await
+        .expect("handler should consume invite");
+
+        assert!(
+            response.is_empty(),
+            "blocklist outage should fail closed without leaking an auth outcome"
+        );
+        assert!(capture
+            .snapshot()
+            .markers
+            .contains(&ShadowDecisionMarker::OperationalFenceLoss));
     }
 }
 

@@ -484,7 +484,10 @@ async fn interpret_with_depth(
                     route_to_connection(deps, jid, stanza, recursion_depth, call_setup).await
                 {
                     match stanza.to_element_string() {
-                        Ok(xml) => outcome.frames.push(xml),
+                        Ok(xml) => {
+                            capture_serialized_route_error_reply(deps, &stanza);
+                            outcome.frames.push(xml);
+                        }
                         Err(err) => {
                             error!(
                                 error = %err,
@@ -874,6 +877,38 @@ async fn interpret_with_depth(
 
     outcome.archive_id_rewrites = archive_id_rewrites;
     outcome
+}
+
+/// `route_to_connection` only yields a message error for the local-account
+/// service-unavailable bounce. Capture it at the same serialization boundary
+/// that writes the reply so an unencodable stanza never becomes a shadow
+/// effect.
+fn capture_serialized_route_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
+    let Stanza::Message(message) = stanza else {
+        return;
+    };
+    if message.type_ != XmppMessageType::Error {
+        return;
+    }
+    let Some(recipient) = message
+        .to
+        .as_ref()
+        .and_then(|recipient| recipient.try_as_full().ok())
+    else {
+        return;
+    };
+    let error = StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ServiceUnavailable,
+        "en",
+        "Service unavailable at this address.",
+    );
+    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+        .expect("server-built stanza error should freeze");
+    deps.capture_intent(IngressEffectIntent::ErrorReply {
+        recipient: recipient.clone(),
+        error: frozen_error,
+    });
 }
 
 async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {

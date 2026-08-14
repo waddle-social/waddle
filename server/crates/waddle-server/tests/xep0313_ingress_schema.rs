@@ -8,13 +8,18 @@
 mod ingress_shadow_support;
 
 use chrono::{Duration, Utc};
+#[cfg(feature = "clustering")]
 use jid::Jid;
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
     ingress_substrate::{PostgresIngressSubstrate, ALIAS_RETENTION},
 };
-use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NormalizedTarget, SemanticDigest};
-use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ingress::{MessageKey, NormalizedTarget, SemanticDigest};
+use waddle_xmpp_core::xep0359::OriginId;
+#[cfg(feature = "clustering")]
+use waddle_xmpp_core::xep0359::StanzaId;
 
 #[cfg(feature = "clustering")]
 use ingress_shadow_support::ShadowFixture;

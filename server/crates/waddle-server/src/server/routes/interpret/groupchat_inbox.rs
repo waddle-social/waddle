@@ -142,7 +142,7 @@ fn groupchat_inbox_mutation(
         (true, true, Some(thread)) => Some(
             waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannelAndThread {
                 room: room.clone(),
-                thread_id: thread.thread_id.clone(),
+                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
                 increment_unread: is_recipient,
             },
         ),
@@ -155,7 +155,7 @@ fn groupchat_inbox_mutation(
         (false, true, Some(thread)) => Some(
             waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThread {
                 room: room.clone(),
-                thread_id: thread.thread_id.clone(),
+                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
             },
         ),
         _ => None,

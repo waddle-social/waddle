@@ -7,7 +7,7 @@ impl OrderedRelayDeliveryBridge {
     /// `call_setup` (#1488): a routed 1:1 call-setup ticket. This
     /// function owns closing it whenever it returns `Some` — in
     /// particular the deferred-handoff branch, whose immediate
-    /// `Delivered` is synthetic (it only suppresses local fallback)
+    /// `MaybeCommitted` is synthetic (it only suppresses local fallback)
     /// and whose real disposition resolves in the spawned completion
     /// task. Returning `None` leaves the ticket with the caller.
     pub(crate) fn try_deliver_full_jid_remote<'a>(
@@ -111,7 +111,7 @@ impl OrderedRelayDeliveryBridge {
                         // (e.g. `RelayAskError::NotFound`) — the non-deferred
                         // path propagates it via `?` so the caller keeps the
                         // local path. The deferred branch already returned a
-                        // synthetic `Delivered`, so it must run that fallback
+                        // synthetic `MaybeCommitted`, so it must run that fallback
                         // itself instead of treating `None` as a lost invite
                         // (#1611 review round 4).
                         let outcome = match bridge.deliver_seeded_remote(seed, true).await {
@@ -136,7 +136,7 @@ impl OrderedRelayDeliveryBridge {
                         );
                         // #1488: this is the point where the deferred
                         // delivery's REAL disposition is known — the
-                        // `Delivered` returned below is synthetic. Close
+                        // `MaybeCommitted` returned below is synthetic. Close
                         // the call-setup ticket here.
                         crate::server::routes::interpret::close_call_setup_from_outcome(
                             call_setup, outcome,
@@ -147,7 +147,7 @@ impl OrderedRelayDeliveryBridge {
                             sfu_for_bounce.as_deref(),
                         ));
                     });
-                    return Some(FullJidDeliveryOutcome::Delivered);
+                    return Some(FullJidDeliveryOutcome::MaybeCommitted);
                 }
             }
 
@@ -276,7 +276,7 @@ impl OrderedRelayDeliveryBridge {
                             sfu_for_bounce.as_deref(),
                         ));
                     });
-                    return Some(FullJidDeliveryOutcome::Delivered);
+                    return Some(FullJidDeliveryOutcome::MaybeCommitted);
                 }
             }
 
