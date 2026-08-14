@@ -212,8 +212,8 @@ pub(crate) use routing::{
     FullJidDeliveryOutcome,
 };
 use routing::{
-    deliver_peer_to_live_only, deliver_to_detached, run_fanout_recipient_pass,
-    run_headless_recipient_pass, FanoutPassResult,
+    deliver_peer_to_live_only, run_fanout_recipient_pass, run_headless_recipient_pass,
+    FanoutPassResult,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

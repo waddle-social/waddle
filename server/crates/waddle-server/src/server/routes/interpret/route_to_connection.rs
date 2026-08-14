@@ -480,8 +480,16 @@ async fn route_dm_to_full_jid(
                 }
                 // Shared pass unavailable (no dispatcher in test
                 // fixtures): fall back to the legacy verbatim queueing
-                // so the message is not lost while resumable.
-                deliver_to_detached(deps.sm_session_registry, &full, stanza.as_ref()).await;
+                // so the message is not lost while resumable. Keep the
+                // successful replay append observable with its own identity.
+                let _ = queue_processed_for_detached(
+                    deps.sm_session_registry,
+                    deps.ingress_effect_capture.as_ref(),
+                    vec![full],
+                    &std::collections::HashSet::new(),
+                    stanza.as_ref(),
+                )
+                .await;
                 return Vec::new();
             }
         }

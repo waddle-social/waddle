@@ -883,10 +883,10 @@ mod tests {
 
         assert_eq!(frames.len(), 1);
         let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
-            ErrorType::Modify,
+            ErrorType::Cancel,
             DefinedCondition::NotAcceptable,
             "en",
-            "Message body required for private message delivery.",
+            "Only room occupants may send private messages.",
         ))
         .expect("server-built stanza error should freeze");
         assert!(capture

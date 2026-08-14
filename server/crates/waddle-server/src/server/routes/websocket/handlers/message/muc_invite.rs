@@ -666,7 +666,7 @@ mod tests {
             ErrorType::Auth,
             DefinedCondition::NotAuthorized,
             "en",
-            "Mediator is not authorized to send invitations.",
+            "Authentication required.",
         ))
         .expect("server-built stanza error should freeze");
         assert!(capture
