@@ -9,6 +9,23 @@ pub(super) fn stanza_message_id(stanza: &Stanza) -> &str {
 
 pub(super) type RemoteDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
+pub(super) type CapturedRemoteDeliveryFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<CapturedRemoteDeliveryOutcome>> + Send + 'a>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedRemoteDeliveryOutcome {
+    pub(crate) outcome: FullJidDeliveryOutcome,
+    pub(crate) recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+}
+
+impl CapturedRemoteDeliveryOutcome {
+    pub(crate) fn from_outcome(outcome: FullJidDeliveryOutcome) -> Self {
+        Self {
+            outcome,
+            recipient_sm_append_streams: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]

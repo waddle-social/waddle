@@ -111,6 +111,19 @@ fn is_definitive_route_capture_outcome(outcome: FullJidDeliveryOutcome) -> bool 
     )
 }
 
+#[cfg(feature = "clustering")]
+fn capture_remote_recipient_sm_appends(
+    deps: &Deps<'_>,
+    streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+) {
+    let Some(capture) = deps.ingress_effect_capture.as_ref() else {
+        return;
+    };
+    for stream in streams {
+        capture.record_recipient_sm_append(stream);
+    }
+}
+
 pub(crate) async fn route_to_connection(
     deps: &Deps<'_>,
     jid: Jid,
@@ -1038,8 +1051,18 @@ fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(target, stanza, origin, call_setup)
+                .try_deliver_full_jid_remote_with_capture(
+                    target,
+                    stanza,
+                    origin,
+                    call_setup,
+                    deps.ingress_effect_capture.clone(),
+                )
                 .await
+                .map(|outcome| {
+                    capture_remote_recipient_sm_appends(deps, outcome.recipient_sm_append_streams);
+                    outcome.outcome
+                })
         }
         #[cfg(not(feature = "clustering"))]
         {

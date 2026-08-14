@@ -7,6 +7,15 @@ pub(crate) struct CarbonRegistryDeps<'a> {
     pub web_socket_state: Option<&'a WebSocketState>,
 }
 
+pub(crate) struct CarbonRegistryFanoutOutcome {
+    pub(crate) carbon_recipients: Vec<FullJid>,
+    // Re-exported to the origin node through the clustering relay reply; the
+    // local capture already recorded each stream, so non-clustering builds
+    // construct but never re-read this field.
+    #[cfg_attr(not(feature = "clustering"), allow(dead_code))]
+    pub(crate) recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+}
+
 pub(super) async fn send_carbons(
     registry: &ConnectionRegistry,
     deps: &Deps<'_>,
@@ -36,9 +45,15 @@ pub(super) async fn send_carbons(
                     .await
                 {
                     match outcome {
-                        crate::clustering::route_bridge::RemoteCarbonFanout::Applied(
+                        crate::clustering::route_bridge::RemoteCarbonFanout::Applied {
                             carbon_recipients,
-                        ) => {
+                            recipient_sm_append_streams,
+                        } => {
+                            if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+                                for stream in recipient_sm_append_streams {
+                                    capture.record_recipient_sm_append(stream);
+                                }
+                            }
                             if let (Some(capture), Some(excluded_source)) = (
                                 deps.ingress_effect_capture.as_ref(),
                                 exclude.first().cloned(),
@@ -80,6 +95,19 @@ pub(crate) async fn send_carbons_to_registry(
     kind: CarbonKind,
     exclude: Vec<FullJid>,
 ) -> Vec<FullJid> {
+    send_carbons_to_registry_with_capture(registry, deps, owner, message, kind, exclude)
+        .await
+        .carbon_recipients
+}
+
+pub(crate) async fn send_carbons_to_registry_with_capture(
+    registry: &ConnectionRegistry,
+    deps: CarbonRegistryDeps<'_>,
+    owner: BareJid,
+    message: Box<Message>,
+    kind: CarbonKind,
+    exclude: Vec<FullJid>,
+) -> CarbonRegistryFanoutOutcome {
     // Per XEP-0280 §5, a carbon copy is the original
     // <message/> wrapped in <sent>/<received> →
     // <forwarded xmlns='urn:xmpp:forward:0'> → original.
@@ -134,9 +162,13 @@ pub(crate) async fn send_carbons_to_registry(
             kind = ?kind,
             "SendCarbons: no carbon-enabled resources to fan out to"
         );
-        return Vec::new();
+        return CarbonRegistryFanoutOutcome {
+            carbon_recipients: Vec::new(),
+            recipient_sm_append_streams: Vec::new(),
+        };
     }
     let mut carbon_recipients = Vec::new();
+    let mut recipient_sm_append_streams = Vec::new();
     for target in live_targets {
         let envelope = match build_carbon_envelope(kind, &message, &owner_str, &target) {
             Ok(env) => env,
@@ -238,8 +270,9 @@ pub(crate) async fn send_carbons_to_registry(
             {
                 Ok(Some(stream)) => {
                     if let Some(capture) = deps.ingress_effect_capture {
-                        capture.record_recipient_sm_append(stream);
+                        capture.record_recipient_sm_append(stream.clone());
                     }
+                    recipient_sm_append_streams.push(stream);
                     carbon_recipients.push(target.clone());
                     debug!(
                         target = %target,
@@ -279,7 +312,10 @@ pub(crate) async fn send_carbons_to_registry(
             });
         }
     }
-    carbon_recipients
+    CarbonRegistryFanoutOutcome {
+        carbon_recipients,
+        recipient_sm_append_streams,
+    }
 }
 
 async fn try_deliver_registered_remote_resource(

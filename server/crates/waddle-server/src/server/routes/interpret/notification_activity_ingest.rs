@@ -136,6 +136,7 @@ pub(super) async fn record_chat_state_activity(
                 sender,
                 NotificationActivityMutation::ChatStateGone {
                     conversation: conversation.clone(),
+                    committed_at_ms: now_ms,
                 },
             );
         }
@@ -161,6 +162,7 @@ pub(super) async fn record_chat_state_activity(
             NotificationActivityMutation::ChatState {
                 conversation: conversation.clone(),
                 state,
+                committed_at_ms: now_ms,
             },
         );
     }
@@ -191,6 +193,7 @@ pub(super) async fn record_read_marker_activity(
             owner,
             NotificationActivityMutation::ReadMarker {
                 conversation: conversation.clone(),
+                committed_at_ms: now_ms,
             },
         );
     }
@@ -248,6 +251,7 @@ pub(super) async fn record_outbound_message_activity(
             sender,
             NotificationActivityMutation::OutboundMessage {
                 conversation: conversation.clone(),
+                committed_at_ms: now_ms,
             },
         );
     }

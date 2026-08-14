@@ -176,7 +176,9 @@ pub(super) async fn handle_dm_pin_message(
         ingress_effect_capture,
         &key,
         entry.target_stanza_id.clone(),
-        waddle_xmpp::ingress::DmPinMutationAction::Pin,
+        waddle_xmpp::ingress::DmPinMutationAction::Pin {
+            entry: entry.clone(),
+        },
     );
 
     let event = build_dm_pin_event_message(
@@ -604,6 +606,7 @@ mod tests {
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state, register_test_connection,
     };
+    use waddle_xmpp::mam::ArchivedMessage;
     use waddle_xmpp::xep::build_pinned_message_element;
 
     #[tokio::test]
@@ -734,5 +737,66 @@ mod tests {
                 recipient: sender,
                 error: expected_error,
             }));
+    }
+
+    #[tokio::test]
+    async fn dm_pin_capture_preserves_the_committed_entry() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let sender_bare = sender.to_bare();
+        let peer: jid::BareJid = "bob@example.com".parse().expect("peer");
+
+        state
+            .deps
+            .protocol
+            .mam_storage
+            .store_message(
+                &sender_bare,
+                &ArchivedMessage {
+                    id: "mam-1".to_string(),
+                    body: Some("important body".to_string()),
+                    message_type: xmpp_parsers::message::MessageType::Chat,
+                    stanza_id: Some(StanzaId::new(
+                        "target-1",
+                        jid::Jid::from(sender_bare.clone()),
+                    )),
+                    ..ArchivedMessage::for_test(
+                        jid::Jid::from(sender.clone()),
+                        jid::Jid::from(peer.clone()),
+                    )
+                },
+            )
+            .await
+            .expect("seed DM archive target");
+
+        let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(peer.clone())));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message.from = Some(jid::Jid::from(sender.clone()));
+        message
+            .payloads
+            .push(build_pinned_message_element(&StanzaId::new(
+                "target-1",
+                jid::Jid::from(sender_bare.clone()),
+            )));
+
+        let frames = handle_dm_pin_message(&message, state.as_ref(), &sender, Some(&capture))
+            .await
+            .expect("handler should complete");
+        assert!(
+            frames.is_empty(),
+            "successful DM pin stays on the event path"
+        );
+        assert!(capture.snapshot().intents.iter().any(|intent| matches!(
+            intent,
+            IngressEffectIntent::DmPinMutation {
+                pair,
+                action: waddle_xmpp::ingress::DmPinMutationAction::Pin { entry },
+                ..
+            } if pair == &(sender_bare.clone(), peer.clone())
+                && entry.target_stanza_id.id == "target-1"
+                && entry.pinner_jid == sender_bare
+                && entry.preview.text == "important body"
+        )));
     }
 }

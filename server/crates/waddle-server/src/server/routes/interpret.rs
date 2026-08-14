@@ -216,6 +216,8 @@ pub(crate) use routing::{
     close_call_setup_from_outcome, deliver_direct_to_full, deliver_peer_to_full_capturing_detached,
     FullJidDeliveryOutcome,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use routing::{deliver_peer_to_full_with_detached_capture, DetachedDeliveryCapture};
 use routing::{
     deliver_peer_to_live_only, run_fanout_recipient_pass, run_headless_recipient_pass,
     FanoutPassResult,

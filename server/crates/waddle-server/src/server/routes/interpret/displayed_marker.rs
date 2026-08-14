@@ -112,8 +112,10 @@ async fn apply_mark_read(
         .await
     {
         Ok(Some(entry)) => {
-            let _ = push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry)
-                .await;
+            let push_recipients =
+                push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry)
+                    .await;
+            capture_displayed_marker_pushes(deps, owner, push_recipients);
             let mutation = match thread_id {
                 Some(thread_id) => {
                     waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThreadRead {
@@ -148,6 +150,20 @@ async fn apply_mark_read(
             );
         }
     }
+}
+
+fn capture_displayed_marker_pushes(deps: &Deps<'_>, owner: &BareJid, fanout: Vec<jid::FullJid>) {
+    let Some(capture) = deps.ingress_effect_capture.as_ref() else {
+        return;
+    };
+    if fanout.is_empty() {
+        return;
+    }
+    capture.record_intent(waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+        recipient: owner.clone(),
+        fanout,
+        route_identity: capture.next_route_identity(),
+    });
 }
 
 #[cfg(test)]

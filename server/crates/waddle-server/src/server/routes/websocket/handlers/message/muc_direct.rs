@@ -574,6 +574,7 @@ async fn handle_muc_mediated_decline(
                 invitee: invite.invitee.clone(),
                 inviter: invite.inviter.clone(),
                 action: MucInviteLedgerAction::Claimed,
+                recorded_at: None,
             },
         });
     }

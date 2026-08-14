@@ -48,7 +48,6 @@ impl OrderedRelayDeliveryBridge {
         origin: &OrderedRelayRouteOrigin,
     ) -> MucProxyRouteDecision {
         if let Some(remote_origin) = remote_resource_origin(origin) {
-            let relay_target = RelayTargetIdentity::relay_node(remote_origin.user_owner.as_str());
             return match Arc::clone(self)
                 .route_remote_resource_origin_muc(
                     remote_origin,
@@ -62,11 +61,7 @@ impl OrderedRelayDeliveryBridge {
                 )
                 .await
             {
-                Some(outcome) => MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-                    relay_target: Some(relay_target),
-                    room_fence: None,
-                    outcome,
-                }),
+                Some(attempt) => MucProxyRouteDecision::Attempted(attempt),
                 // Only `services.get()` misses produce `None` on the
                 // remote-resource path — the bridge is not wired yet.
                 None => MucProxyRouteDecision::RoomClaimUnavailable,
@@ -76,19 +71,7 @@ impl OrderedRelayDeliveryBridge {
             .await
     }
 
-    pub(in super::super) async fn try_proxy_muc_remote_from_local_origin(
-        self: &Arc<Self>,
-        room_jid: &jid::BareJid,
-        stanza: &Stanza,
-        kind: OrderedRelayMucProxyKind,
-        origin: &OrderedRelayRouteOrigin,
-    ) -> Option<OrderedRelayMucProxyOutcome> {
-        self.try_proxy_muc_remote_from_local_origin_decision(room_jid, stanza, kind, origin)
-            .await
-            .into_attempted()
-    }
-
-    pub(super) async fn try_proxy_muc_remote_from_local_origin_decision(
+    pub(in super::super) async fn try_proxy_muc_remote_from_local_origin_decision(
         self: &Arc<Self>,
         room_jid: &jid::BareJid,
         stanza: &Stanza,

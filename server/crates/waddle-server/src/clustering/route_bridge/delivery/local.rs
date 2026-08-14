@@ -80,14 +80,32 @@ pub(in super::super) async fn deliver_local_full_jid_after_target_refresh(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    deliver_local_full_jid_after_target_refresh_with_capture(services, target, stanza)
+        .await
+        .outcome
+}
+
+pub(in super::super) async fn deliver_local_full_jid_after_target_refresh_with_capture(
+    services: &OrderedRelayDeliveryServices,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> crate::server::routes::interpret::DetachedDeliveryCapture {
     if matches!(stanza, Stanza::Iq(_)) {
         return match deliver_reserved_full_jid_peer_live_only(services, target, stanza).await {
-            Ok(()) => FullJidDeliveryOutcome::Delivered,
-            Err(OrderedRelayNackReason::TargetUnavailable) => FullJidDeliveryOutcome::Unavailable,
-            Err(_) => FullJidDeliveryOutcome::Dropped,
+            Ok(()) => crate::server::routes::interpret::DetachedDeliveryCapture::from_outcome(
+                FullJidDeliveryOutcome::Delivered,
+            ),
+            Err(OrderedRelayNackReason::TargetUnavailable) => {
+                crate::server::routes::interpret::DetachedDeliveryCapture::from_outcome(
+                    FullJidDeliveryOutcome::Unavailable,
+                )
+            }
+            Err(_) => crate::server::routes::interpret::DetachedDeliveryCapture::from_outcome(
+                FullJidDeliveryOutcome::Dropped,
+            ),
         };
     }
-    crate::server::routes::interpret::deliver_peer_to_full(
+    crate::server::routes::interpret::deliver_peer_to_full_with_detached_capture(
         Some(&services.user_registry),
         Some(&services.sm_session_registry),
         target,

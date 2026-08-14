@@ -31,6 +31,7 @@ pub(super) fn remote_resource_route_reply(
     RelayRouteRemoteResourceStanzaReply {
         outcome,
         replies: Vec::new(),
+        recipient_sm_append_streams: Vec::new(),
     }
 }
 

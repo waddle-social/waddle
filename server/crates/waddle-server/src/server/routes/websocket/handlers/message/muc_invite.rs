@@ -288,7 +288,7 @@ pub(super) async fn handle_muc_mediated_invite(
     // identical unexpired re-invite is a silent success with NO second
     // delivery — repeated invites can neither flood the invitee nor
     // exhaust their offline pending-delivery quota.
-    match record_invite(
+    let recorded_at = match record_invite(
         state.deps.app_state.db_pool.global_actor().clone(),
         &OutstandingInvite {
             room: room_jid.clone(),
@@ -298,7 +298,7 @@ pub(super) async fn handle_muc_mediated_invite(
     )
     .await
     {
-        Ok(RecordOutcome::New) => {}
+        Ok(RecordOutcome::New { created_at }) => created_at,
         Ok(RecordOutcome::AlreadyOutstanding) => return Some(vec![]),
         Err(error) => {
             warn!(
@@ -325,7 +325,7 @@ pub(super) async fn handle_muc_mediated_invite(
                 "Internal server error.",
             )]);
         }
-    }
+    };
 
     // XEP-0045 §7.8.2: the room adds `from` (the inviter) to the
     // `<invite/>` and sends the invitation from its own bare JID.
@@ -403,6 +403,7 @@ pub(super) async fn handle_muc_mediated_invite(
                 invitee: invitee.clone(),
                 inviter: inviter_bare.clone(),
                 action: MucInviteLedgerAction::Recorded,
+                recorded_at: Some(recorded_at),
             },
         });
     }
@@ -514,7 +515,15 @@ pub(super) async fn deliver_muc_user_message(
     // half-closed socket is indistinguishable from offline here):
     // fall back to the durable queue rather than reporting success
     // for a message nobody received.
-    queue_offline_muc_user_message(state, recipient, &message).await?;
+    let row_id = queue_offline_muc_user_message(state, recipient, &message).await?;
+    if let Some(capture) = ingress_effect_capture {
+        capture.record_intent(IngressEffectIntent::PendingDelivery {
+            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                recipient: recipient.clone(),
+                row_id,
+            },
+        });
+    }
     super::record_route_direct_intent(ingress_effect_capture, recipient.clone(), Vec::new());
     Ok(())
 }
@@ -527,9 +536,10 @@ async fn queue_offline_muc_user_message(
     state: &WebSocketState,
     recipient: &jid::BareJid,
     message: &Message,
-) -> Result<(), MucUserDeliveryError> {
+) -> Result<PendingRowId, MucUserDeliveryError> {
+    let row_id = PendingRowId::fresh();
     let row = PendingRow {
-        id: PendingRowId::fresh(),
+        id: row_id.clone(),
         recipient: recipient.clone(),
         original_receipt_at: chrono::Utc::now(),
         payload: PendingPayload::Transient(Box::new(message.clone())),
@@ -543,7 +553,7 @@ async fn queue_offline_muc_user_message(
         .insert(row)
         .await
     {
-        Ok(InsertOutcome::Inserted) => Ok(()),
+        Ok(InsertOutcome::Inserted) => Ok(row_id),
         Ok(InsertOutcome::QuotaExceeded) => Err(MucUserDeliveryError::QuotaExceeded),
         Err(error) => Err(MucUserDeliveryError::Storage(error.to_string())),
     }
@@ -664,6 +674,17 @@ mod tests {
                     fanout,
                     ..
                 } if captured_recipient == &recipient && fanout.is_empty()
+            )
+        }));
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::PendingDelivery {
+                    mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                        recipient: captured_recipient,
+                        ..
+                    }
+                } if captured_recipient == &recipient
             )
         }));
     }

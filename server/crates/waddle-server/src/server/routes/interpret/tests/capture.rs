@@ -152,10 +152,14 @@ async fn direct_inbox_boundary_records_inbox_project_intent() {
         IngressEffectIntent::InboxProject {
             owner: intent_owner,
             mutation: waddle_xmpp::ingress::InboxProjectionMutation::Direct {
+                entry,
                 increment_unread: true,
-                ..
             },
         } if *intent_owner == owner
+            && entry.partner == "bob@example.com".parse::<jid::BareJid>().expect("peer")
+            && entry.last_stanza_id == "archive-1"
+            && entry.preview.as_deref() == Some("hi")
+            && entry.unread == 1
     )));
 }
 
@@ -198,6 +202,95 @@ async fn direct_inbox_boundary_skips_inbox_project_intent_when_upsert_fails() {
         )),
         "failed direct inbox projection must not record InboxProject",
     );
+}
+
+#[tokio::test]
+async fn displayed_marker_boundary_records_read_timestamp_and_push_route() {
+    use waddle_xmpp::inbox::ConversationKind;
+    use waddle_xmpp::mam::ArchivedMessage;
+    use xmpp_parsers::message::MessageType;
+
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let registry = state.deps.protocol.connection_registry.as_ref();
+    let user_registry = &state.deps.protocol.user_registry;
+    let mam = Arc::clone(&state.deps.protocol.mam_storage);
+    let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::test_with_storage(registry, &mam, &inbox)
+        .with_ingress_effect_capture(Some(capture.clone()));
+    let mut deps = deps;
+    deps.user_registry = Some(user_registry);
+    deps.web_socket_state = Some(state.as_ref());
+
+    let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    let owner_phone: jid::FullJid = "alice@example.com/phone".parse().expect("resource");
+    let (owner_phone_tx, _owner_phone_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(registry, user_registry, &owner_phone, owner_phone_tx).await;
+
+    inbox
+        .upsert(
+            &owner,
+            InboxEntry::new(room.clone(), ConversationKind::MucRoom, "seed-1", 1).with_unread(1),
+            true,
+        )
+        .await
+        .expect("seed unread inbox row");
+    mam.store_message(
+        &room,
+        &ArchivedMessage {
+            id: "msg-1".to_string(),
+            body: Some("hello".to_string()),
+            message_type: MessageType::Groupchat,
+            ..ArchivedMessage::for_test(
+                "room@conference.example.com/alice"
+                    .parse()
+                    .expect("occupant"),
+                jid::Jid::from(room.clone()),
+            )
+        },
+    )
+    .await
+    .expect("seed displayed target");
+
+    let _ = interpret(
+        vec![OutboundEvent::MarkInboxReadFromDisplayed {
+            owner: owner.clone(),
+            room: room.clone(),
+            displayed_message_id: "msg-1".to_string(),
+        }],
+        &deps,
+    )
+    .await;
+
+    let snapshot = capture_snapshot(&capture);
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::NotificationActivityPreview {
+            owner: intent_owner,
+            mutation: waddle_xmpp::ingress::NotificationActivityMutation::ReadMarker {
+                conversation,
+                committed_at_ms,
+            },
+        } if *intent_owner == owner && *conversation == room && *committed_at_ms > 0
+    )));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::InboxProject {
+            owner: intent_owner,
+            mutation: waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannelRead {
+                room: intent_room,
+            },
+        } if *intent_owner == owner && *intent_room == room
+    )));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            ..
+        } if *recipient == owner && *fanout == vec![owner_phone.clone()]
+    )));
 }
 
 #[tokio::test]

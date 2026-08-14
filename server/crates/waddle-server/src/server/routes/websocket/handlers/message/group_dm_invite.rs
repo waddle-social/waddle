@@ -289,7 +289,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
     )
     .await
     {
-        Ok(crate::server::routes::websocket::muc_invites::RecordOutcome::New) => {}
+        Ok(crate::server::routes::websocket::muc_invites::RecordOutcome::New { .. }) => {}
         // #1276 Greptile P1 "Duplicate Invites Redeliver": an identical
         // unexpired re-invite is a silent success with NO second
         // delivery. The member tuple was already granted by the first

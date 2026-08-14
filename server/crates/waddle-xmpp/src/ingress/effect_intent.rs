@@ -17,6 +17,7 @@ use xmpp_parsers::{
 
 use crate::{
     error::StanzaErrorCondition,
+    inbox::InboxEntry,
     ingress::EntityGeneration,
     muc::{pin::PinnedEntry, SubjectState},
     pending_delivery::{PendingRowId, SmSessionId},
@@ -185,15 +186,19 @@ pub enum NotificationActivityMutation {
     ChatState {
         conversation: BareJid,
         state: ChatState,
+        committed_at_ms: i64,
     },
     ChatStateGone {
         conversation: BareJid,
+        committed_at_ms: i64,
     },
     ReadMarker {
         conversation: BareJid,
+        committed_at_ms: i64,
     },
     OutboundMessage {
         conversation: BareJid,
+        committed_at_ms: i64,
     },
     OfflineDelivery {
         conversation: BareJid,
@@ -212,17 +217,28 @@ impl NotificationActivityMutation {
             Self::ChatState {
                 conversation,
                 state,
+                committed_at_ms,
             } => format!(
-                "chat_state|{}|{}",
+                "chat_state|{}|{}|{}",
                 conversation,
-                chat_state_storage_identity(*state)
+                chat_state_storage_identity(*state),
+                committed_at_ms,
             ),
-            Self::ChatStateGone { conversation } => {
-                format!("chat_state_gone|{}", conversation)
+            Self::ChatStateGone {
+                conversation,
+                committed_at_ms,
+            } => {
+                format!("chat_state_gone|{}|{}", conversation, committed_at_ms)
             }
-            Self::ReadMarker { conversation } => format!("read_marker|{}", conversation),
-            Self::OutboundMessage { conversation } => {
-                format!("outbound_message|{}", conversation)
+            Self::ReadMarker {
+                conversation,
+                committed_at_ms,
+            } => format!("read_marker|{}|{}", conversation, committed_at_ms),
+            Self::OutboundMessage {
+                conversation,
+                committed_at_ms,
+            } => {
+                format!("outbound_message|{}|{}", conversation, committed_at_ms)
             }
             Self::OfflineDelivery {
                 conversation,
@@ -252,7 +268,7 @@ impl NotificationActivityMutation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboxProjectionMutation {
     Direct {
-        peer: BareJid,
+        entry: InboxEntry,
         increment_unread: bool,
     },
     GroupchatChannel {
@@ -294,9 +310,13 @@ impl InboxProjectionMutation {
     pub fn storage_identity(&self) -> String {
         match self {
             Self::Direct {
-                peer,
+                entry,
                 increment_unread,
-            } => format!("direct|{}|{}", peer, increment_unread),
+            } => format!(
+                "direct|{}|{}",
+                inbox_entry_storage_identity(entry),
+                increment_unread
+            ),
             Self::GroupchatChannel {
                 room,
                 increment_unread,
@@ -508,9 +528,9 @@ impl LinkPreviewMediaRefMutation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DmPinMutationAction {
-    Pin,
+    Pin { entry: PinnedEntry },
     Unpin,
     RetractionCascadeUnpin,
 }
@@ -606,16 +626,21 @@ pub struct MucInviteLedgerMutation {
     pub invitee: BareJid,
     pub inviter: BareJid,
     pub action: MucInviteLedgerAction,
+    pub recorded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl MucInviteLedgerMutation {
     pub fn storage_identity(&self) -> String {
         format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             self.room,
             self.invitee,
             self.inviter,
-            self.action.storage_identity()
+            self.action.storage_identity(),
+            self.recorded_at
+                .as_ref()
+                .map(chrono::DateTime::to_rfc3339)
+                .unwrap_or_default()
         )
     }
 }
@@ -645,6 +670,34 @@ impl RoomPinMutation {
             Self::Unpin { target_stanza_id } => {
                 format!("unpin|{}", stanza_storage_identity(target_stanza_id))
             }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StoredDmPinMutationAction {
+    Pin { entry: PinnedEntry },
+    Unpin,
+    RetractionCascadeUnpin,
+}
+
+impl From<DmPinMutationAction> for StoredDmPinMutationAction {
+    fn from(value: DmPinMutationAction) -> Self {
+        match value {
+            DmPinMutationAction::Pin { entry } => Self::Pin { entry },
+            DmPinMutationAction::Unpin => Self::Unpin,
+            DmPinMutationAction::RetractionCascadeUnpin => Self::RetractionCascadeUnpin,
+        }
+    }
+}
+
+impl From<StoredDmPinMutationAction> for DmPinMutationAction {
+    fn from(value: StoredDmPinMutationAction) -> Self {
+        match value {
+            StoredDmPinMutationAction::Pin { entry } => Self::Pin { entry },
+            StoredDmPinMutationAction::Unpin => Self::Unpin,
+            StoredDmPinMutationAction::RetractionCascadeUnpin => Self::RetractionCascadeUnpin,
         }
     }
 }
@@ -952,6 +1005,10 @@ fn chat_state_storage_identity(state: ChatState) -> &'static str {
     }
 }
 
+fn inbox_entry_storage_identity(entry: &InboxEntry) -> String {
+    serde_json::to_string(entry).expect("InboxEntry serialization is infallible")
+}
+
 /// A frozen effect decision; it carries no executable callback or mutable
 /// lookup and can therefore be durably replayed without re-deriving policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1185,6 +1242,31 @@ impl IngressEffectIntent {
                     .expect("valid fixture JID"),
             )
         };
+        let direct_entry = || {
+            InboxEntry::new(
+                bare("juliet@example.test"),
+                crate::inbox::ConversationKind::Direct,
+                "stable-1",
+                1_752_768_000,
+            )
+            .with_unread(3)
+            .with_preview("important hello")
+        };
+        let pinned_entry = || PinnedEntry {
+            target_stanza_id: stanza(),
+            pinner_jid: bare("romeo@example.test"),
+            pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc),
+            preview: crate::muc::pin::PinPreview::new(
+                bare("juliet@example.test"),
+                Some("Juliet".to_string()),
+                "important",
+                chrono::DateTime::parse_from_rfc3339("2025-07-27T11:59:00Z")
+                    .expect("timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+        };
         vec![
             Self::ArchiveAuthoritative {
                 archive: bare("archive@example.test"),
@@ -1223,7 +1305,7 @@ impl IngressEffectIntent {
             Self::InboxProject {
                 owner: bare("romeo@example.test"),
                 mutation: InboxProjectionMutation::Direct {
-                    peer: bare("juliet@example.test"),
+                    entry: direct_entry(),
                     increment_unread: true,
                 },
             },
@@ -1283,7 +1365,9 @@ impl IngressEffectIntent {
             Self::DmPinMutation {
                 pair: (bare("juliet@example.test"), bare("romeo@example.test")),
                 target_stanza_id: stanza(),
-                action: DmPinMutationAction::Pin,
+                action: DmPinMutationAction::Pin {
+                    entry: pinned_entry(),
+                },
             },
             Self::MucInviteMembershipGrant {
                 grant: MucInviteMembershipGrant {
@@ -1298,6 +1382,11 @@ impl IngressEffectIntent {
                     invitee: bare("mercutio@example.test"),
                     inviter: bare("romeo@example.test"),
                     action: MucInviteLedgerAction::Recorded,
+                    recorded_at: Some(
+                        chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("timestamp")
+                            .with_timezone(&chrono::Utc),
+                    ),
                 },
             },
             Self::GroupDmMembershipGrant {
@@ -1461,7 +1550,7 @@ impl IngressEffectIntent {
                 pair.0,
                 pair.1,
                 stanza_storage_identity(target_stanza_id),
-                dm_pin_action_storage_identity(*action)
+                dm_pin_action_storage_identity(action)
             )),
             Self::MucInviteMembershipGrant { grant } => {
                 IngressEffectKey::MucInviteMembershipGrant(grant.storage_identity())
@@ -1773,7 +1862,7 @@ impl StoredEffectMessageIdentity {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StoredInboxProjectionMutation {
     Direct {
-        peer: BareJid,
+        entry: InboxEntry,
         increment_unread: bool,
     },
     GroupchatChannel {
@@ -1815,10 +1904,10 @@ impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
     fn from(value: InboxProjectionMutation) -> Self {
         match value {
             InboxProjectionMutation::Direct {
-                peer,
+                entry,
                 increment_unread,
             } => Self::Direct {
-                peer,
+                entry,
                 increment_unread,
             },
             InboxProjectionMutation::GroupchatChannel {
@@ -1882,10 +1971,10 @@ impl StoredInboxProjectionMutation {
     fn into_domain(self) -> Result<InboxProjectionMutation, EffectIntentCodecError> {
         Ok(match self {
             Self::Direct {
-                peer,
+                entry,
                 increment_unread,
             } => InboxProjectionMutation::Direct {
-                peer,
+                entry,
                 increment_unread,
             },
             Self::GroupchatChannel {
@@ -1956,15 +2045,19 @@ enum StoredNotificationActivityMutation {
     ChatState {
         conversation: BareJid,
         state: u8,
+        committed_at_ms: i64,
     },
     ChatStateGone {
         conversation: BareJid,
+        committed_at_ms: i64,
     },
     ReadMarker {
         conversation: BareJid,
+        committed_at_ms: i64,
     },
     OutboundMessage {
         conversation: BareJid,
+        committed_at_ms: i64,
     },
     OfflineDelivery {
         conversation: BareJid,
@@ -1983,19 +2076,33 @@ impl From<NotificationActivityMutation> for StoredNotificationActivityMutation {
             NotificationActivityMutation::ChatState {
                 conversation,
                 state,
+                committed_at_ms,
             } => Self::ChatState {
                 conversation,
                 state: chat_state_tag(state),
+                committed_at_ms,
             },
-            NotificationActivityMutation::ChatStateGone { conversation } => {
-                Self::ChatStateGone { conversation }
-            }
-            NotificationActivityMutation::ReadMarker { conversation } => {
-                Self::ReadMarker { conversation }
-            }
-            NotificationActivityMutation::OutboundMessage { conversation } => {
-                Self::OutboundMessage { conversation }
-            }
+            NotificationActivityMutation::ChatStateGone {
+                conversation,
+                committed_at_ms,
+            } => Self::ChatStateGone {
+                conversation,
+                committed_at_ms,
+            },
+            NotificationActivityMutation::ReadMarker {
+                conversation,
+                committed_at_ms,
+            } => Self::ReadMarker {
+                conversation,
+                committed_at_ms,
+            },
+            NotificationActivityMutation::OutboundMessage {
+                conversation,
+                committed_at_ms,
+            } => Self::OutboundMessage {
+                conversation,
+                committed_at_ms,
+            },
             NotificationActivityMutation::OfflineDelivery {
                 conversation,
                 archive_stanza_id,
@@ -2022,19 +2129,33 @@ impl StoredNotificationActivityMutation {
             Self::ChatState {
                 conversation,
                 state,
+                committed_at_ms,
             } => NotificationActivityMutation::ChatState {
                 conversation,
                 state: chat_state_from_tag(state)?,
+                committed_at_ms,
             },
-            Self::ChatStateGone { conversation } => {
-                NotificationActivityMutation::ChatStateGone { conversation }
-            }
-            Self::ReadMarker { conversation } => {
-                NotificationActivityMutation::ReadMarker { conversation }
-            }
-            Self::OutboundMessage { conversation } => {
-                NotificationActivityMutation::OutboundMessage { conversation }
-            }
+            Self::ChatStateGone {
+                conversation,
+                committed_at_ms,
+            } => NotificationActivityMutation::ChatStateGone {
+                conversation,
+                committed_at_ms,
+            },
+            Self::ReadMarker {
+                conversation,
+                committed_at_ms,
+            } => NotificationActivityMutation::ReadMarker {
+                conversation,
+                committed_at_ms,
+            },
+            Self::OutboundMessage {
+                conversation,
+                committed_at_ms,
+            } => NotificationActivityMutation::OutboundMessage {
+                conversation,
+                committed_at_ms,
+            },
             Self::OfflineDelivery {
                 conversation,
                 archive_stanza_id,
@@ -2295,6 +2416,7 @@ struct StoredMucInviteLedgerMutation {
     invitee: BareJid,
     inviter: BareJid,
     action: u8,
+    recorded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl From<MucInviteLedgerMutation> for StoredMucInviteLedgerMutation {
@@ -2304,6 +2426,7 @@ impl From<MucInviteLedgerMutation> for StoredMucInviteLedgerMutation {
             invitee: value.invitee,
             inviter: value.inviter,
             action: muc_invite_ledger_action_tag(value.action),
+            recorded_at: value.recorded_at,
         }
     }
 }
@@ -2315,6 +2438,7 @@ impl StoredMucInviteLedgerMutation {
             invitee: self.invitee,
             inviter: self.inviter,
             action: muc_invite_ledger_action_from_tag(self.action)?,
+            recorded_at: self.recorded_at,
         })
     }
 }
@@ -2481,7 +2605,7 @@ enum StoredEffectIntent {
         first_peer: BareJid,
         second_peer: BareJid,
         target_stanza_id: StanzaId,
-        action: u8,
+        action: StoredDmPinMutationAction,
     },
     MucInviteMembershipGrant {
         grant: StoredMucInviteMembershipGrant,
@@ -2653,7 +2777,7 @@ impl StoredEffectIntent {
                 first_peer: pair.0,
                 second_peer: pair.1,
                 target_stanza_id,
-                action: dm_pin_action_tag(action),
+                action: action.into(),
             },
             IngressEffectIntent::MucInviteMembershipGrant { grant } => {
                 Self::MucInviteMembershipGrant {
@@ -2803,7 +2927,7 @@ impl StoredEffectIntent {
             } => IngressEffectIntent::DmPinMutation {
                 pair: (first_peer, second_peer),
                 target_stanza_id,
-                action: dm_pin_action_from_tag(action)?,
+                action: action.into(),
             },
             Self::MucInviteMembershipGrant { grant } => {
                 IngressEffectIntent::MucInviteMembershipGrant {
@@ -2935,29 +3059,14 @@ fn muc_invite_ledger_action_from_tag(
     })
 }
 
-fn dm_pin_action_storage_identity(action: DmPinMutationAction) -> &'static str {
+fn dm_pin_action_storage_identity(action: &DmPinMutationAction) -> String {
     match action {
-        DmPinMutationAction::Pin => "pin",
-        DmPinMutationAction::Unpin => "unpin",
-        DmPinMutationAction::RetractionCascadeUnpin => "retraction_cascade_unpin",
+        DmPinMutationAction::Pin { entry } => {
+            serde_json::to_string(entry).expect("PinnedEntry serialization is infallible")
+        }
+        DmPinMutationAction::Unpin => "unpin".to_string(),
+        DmPinMutationAction::RetractionCascadeUnpin => "retraction_cascade_unpin".to_string(),
     }
-}
-
-fn dm_pin_action_tag(action: DmPinMutationAction) -> u8 {
-    match action {
-        DmPinMutationAction::Pin => 0,
-        DmPinMutationAction::Unpin => 1,
-        DmPinMutationAction::RetractionCascadeUnpin => 2,
-    }
-}
-
-fn dm_pin_action_from_tag(tag: u8) -> Result<DmPinMutationAction, EffectIntentCodecError> {
-    Ok(match tag {
-        0 => DmPinMutationAction::Pin,
-        1 => DmPinMutationAction::Unpin,
-        2 => DmPinMutationAction::RetractionCascadeUnpin,
-        _ => return Err(EffectIntentCodecError::MalformedPayload),
-    })
 }
 
 fn notification_candidate_outcome_tag(outcome: NotificationCandidateOutcome) -> u8 {
@@ -3095,6 +3204,7 @@ fn frozen_error_type_from_tag(tag: u8) -> Result<FrozenStanzaErrorType, EffectIn
 
 #[cfg(test)]
 mod tests {
+    use crate::inbox::ConversationKind;
     use jid::Jid;
     use waddle_xmpp_core::mam::ThreadId;
     use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
@@ -3123,6 +3233,35 @@ mod tests {
 
     fn rich_message_id(value: &str) -> RichMessageId {
         RichMessageId::new(value).expect("valid message id")
+    }
+
+    fn direct_entry() -> InboxEntry {
+        InboxEntry::new(
+            bare("juliet@example.test"),
+            ConversationKind::Direct,
+            "stable-1",
+            1_752_768_000,
+        )
+        .with_unread(3)
+        .with_preview("important hello")
+    }
+
+    fn pinned_entry() -> PinnedEntry {
+        PinnedEntry {
+            target_stanza_id: stanza_id(),
+            pinner_jid: bare("romeo@example.test"),
+            pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc),
+            preview: crate::muc::pin::PinPreview::new(
+                bare("juliet@example.test"),
+                Some("Juliet".to_string()),
+                "important",
+                chrono::DateTime::parse_from_rfc3339("2025-07-27T11:59:00Z")
+                    .expect("timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+        }
     }
 
     fn samples() -> Vec<IngressEffectIntent> {
@@ -3164,7 +3303,7 @@ mod tests {
             IngressEffectIntent::InboxProject {
                 owner: bare("romeo@example.test"),
                 mutation: InboxProjectionMutation::Direct {
-                    peer: bare("juliet@example.test"),
+                    entry: direct_entry(),
                     increment_unread: true,
                 },
             },
@@ -3222,7 +3361,9 @@ mod tests {
             IngressEffectIntent::DmPinMutation {
                 pair: (bare("juliet@example.test"), bare("romeo@example.test")),
                 target_stanza_id: stanza_id(),
-                action: DmPinMutationAction::Pin,
+                action: DmPinMutationAction::Pin {
+                    entry: pinned_entry(),
+                },
             },
             IngressEffectIntent::MucInviteMembershipGrant {
                 grant: MucInviteMembershipGrant {
@@ -3237,6 +3378,11 @@ mod tests {
                     invitee: bare("mercutio@example.test"),
                     inviter: bare("romeo@example.test"),
                     action: MucInviteLedgerAction::Recorded,
+                    recorded_at: Some(
+                        chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("timestamp")
+                            .with_timezone(&chrono::Utc),
+                    ),
                 },
             },
             IngressEffectIntent::GroupDmMembershipGrant {
@@ -3343,15 +3489,15 @@ mod tests {
             r#"{"version":1,"intent":{"type":"dispatch_to_room_remote","room":"room@conference.example.test","relay_target":{"node_id":"relay-node","node_epoch":"relay-epoch"}}}"#,
             r#"{"version":1,"intent":{"type":"recipient_sm_append","stream":"stream-1","append_identity":0}}"#,
             r#"{"version":1,"intent":{"type":"carbons","carbon_recipients":["romeo@example.test/phone"],"excluded_source":"romeo@example.test/laptop","kind":0}}"#,
-            r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","mutation":{"type":"direct","peer":"juliet@example.test","increment_unread":true}}}"#,
+            r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","mutation":{"type":"direct","entry":{"partner":"juliet@example.test","kind":"Direct","last_stanza_id":"stable-1","last_updated":1752768000,"unread":3,"preview":"important hello","thread_id":null,"thread_title":null,"reply_count":0,"author":null,"call_thread_kind":null,"call_thread_media":null,"call_ended_at":null,"call_duration":null},"increment_unread":true}}}"#,
             r#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","mutation":{"type":"notification_candidate","conversation":"room@conference.example.test","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"outcome":0}}}"#,
             r#"{"version":1,"intent":{"type":"groupchat_notification_recovery","mutation":{"recipient":"romeo@example.test","room":"room@conference.example.test","thread_id":"thread-1","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"sender":"juliet@example.test/balcony","is_live_occupant":true,"room_members_only":false,"sender_can_broadcast_channel_mention":true,"created_at_ms":1753620000000,"action":0}}}"#,
             r#"{"version":1,"intent":{"type":"pending_delivery","mutation":{"type":"archived","recipient":"romeo@example.test","row_id":"pending-row-1","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"link_preview_media_ref","mutation":{"upload_slot_id":"d5c7a44f-7c8c-4587-b0fb-f0e68444d36a","archive":"room@conference.example.test","message_id":"client-msg-1","current_archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"state":0}}}"#,
             r#"{"version":1,"intent":{"type":"retraction_tombstone","mutation":{"archive":"archive@example.test","target_stanza_id":{"id":"target-1","by":"archive@example.test"},"retraction_stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
-            r#"{"version":1,"intent":{"type":"dm_pin_mutation","first_peer":"juliet@example.test","second_peer":"romeo@example.test","target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
+            r#"{"version":1,"intent":{"type":"dm_pin_mutation","first_peer":"juliet@example.test","second_peer":"romeo@example.test","target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":{"type":"pin","entry":{"target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"pinner_jid":"romeo@example.test","pinned_at":"2025-07-27T12:00:00Z","preview":{"author_jid":"juliet@example.test","author_nick":"Juliet","text":"important","message_timestamp":"2025-07-27T11:59:00Z"}}}}}"#,
             r#"{"version":1,"intent":{"type":"muc_invite_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
-            r#"{"version":1,"intent":{"type":"muc_invite_ledger","mutation":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test","action":0}}}"#,
+            r#"{"version":1,"intent":{"type":"muc_invite_ledger","mutation":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test","action":0,"recorded_at":"2025-07-27T12:00:00Z"}}}"#,
             r#"{"version":1,"intent":{"type":"group_dm_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test","visible_after":"2025-07-27T12:00:00Z"}}}"#,
             r#"{"version":1,"intent":{"type":"group_dm_invite_ledger","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test","visible_after":"2025-07-27T12:00:00Z"}}}"#,
             r#"{"version":1,"intent":{"type":"room_subject_mutation","room":"room@conference.example.test","state":{"texts":{},"setter":"romeo@example.test","setter_nick":"romeo","set_at":"2025-07-27T12:00:00Z"}}}"#,
@@ -3559,6 +3705,24 @@ mod tests {
                 invitee: bare("mercutio@example.test"),
                 inviter: bare("romeo@example.test"),
                 action: MucInviteLedgerAction::Recorded,
+                recorded_at: Some(
+                    chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                        .expect("timestamp")
+                        .with_timezone(&chrono::Utc),
+                ),
+            },
+        };
+        let recorded_later = IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: bare("room@conference.example.test"),
+                invitee: bare("mercutio@example.test"),
+                inviter: bare("romeo@example.test"),
+                action: MucInviteLedgerAction::Recorded,
+                recorded_at: Some(
+                    chrono::DateTime::parse_from_rfc3339("2025-07-28T12:00:00Z")
+                        .expect("timestamp")
+                        .with_timezone(&chrono::Utc),
+                ),
             },
         };
         let claimed = IngressEffectIntent::MucInviteLedger {
@@ -3567,8 +3731,10 @@ mod tests {
                 invitee: bare("mercutio@example.test"),
                 inviter: bare("romeo@example.test"),
                 action: MucInviteLedgerAction::Claimed,
+                recorded_at: None,
             },
         };
+        assert_ne!(recorded.semantic_key(), recorded_later.semantic_key());
         assert_ne!(recorded.semantic_key(), claimed.semantic_key());
 
         let warning_one = IngressEffectIntent::ErrorReply {
@@ -3761,6 +3927,7 @@ mod tests {
             mutation: NotificationActivityMutation::ChatState {
                 conversation: bare("juliet@example.test"),
                 state: ChatState::Active,
+                committed_at_ms: 1_752_768_000_000,
             },
         };
         let paused = IngressEffectIntent::NotificationActivityPreview {
@@ -3768,13 +3935,14 @@ mod tests {
             mutation: NotificationActivityMutation::ChatState {
                 conversation: bare("juliet@example.test"),
                 state: ChatState::Paused,
+                committed_at_ms: 1_752_768_001_000,
             },
         };
 
         let encoded = active.encode_v1().expect("encode active chat state");
         assert_eq!(
             encoded.payload(),
-            br#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","mutation":{"type":"chat_state","conversation":"juliet@example.test","state":0}}}"#
+            br#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","mutation":{"type":"chat_state","conversation":"juliet@example.test","state":0,"committed_at_ms":1752768000000}}}"#
         );
         assert_eq!(
             IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
@@ -3782,6 +3950,118 @@ mod tests {
             active
         );
         assert_ne!(active.semantic_key(), paused.semantic_key());
+    }
+
+    #[test]
+    fn direct_and_dm_pin_effects_preserve_committed_entries_in_semantic_identity() {
+        let direct_one = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::Direct {
+                entry: direct_entry(),
+                increment_unread: true,
+            },
+        };
+        let direct_two = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::Direct {
+                entry: InboxEntry {
+                    unread: 4,
+                    ..direct_entry()
+                },
+                increment_unread: true,
+            },
+        };
+        let pin_one = IngressEffectIntent::DmPinMutation {
+            pair: (bare("juliet@example.test"), bare("romeo@example.test")),
+            target_stanza_id: stanza_id(),
+            action: DmPinMutationAction::Pin {
+                entry: pinned_entry(),
+            },
+        };
+        let pin_two = IngressEffectIntent::DmPinMutation {
+            pair: (bare("juliet@example.test"), bare("romeo@example.test")),
+            target_stanza_id: stanza_id(),
+            action: DmPinMutationAction::Pin {
+                entry: PinnedEntry {
+                    pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:01:00Z")
+                        .expect("timestamp")
+                        .with_timezone(&chrono::Utc),
+                    ..pinned_entry()
+                },
+            },
+        };
+
+        for intent in [&direct_one, &pin_one] {
+            let encoded = intent.encode_v1().expect("encode widened effect");
+            assert_eq!(
+                IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                    .expect("decode widened effect"),
+                *intent
+            );
+        }
+        assert_ne!(direct_one.semantic_key(), direct_two.semantic_key());
+        assert_ne!(pin_one.semantic_key(), pin_two.semantic_key());
+
+        let direct_delimiter_one = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::Direct {
+                entry: InboxEntry {
+                    preview: Some("a|b".to_string()),
+                    thread_id: None,
+                    ..direct_entry()
+                },
+                increment_unread: true,
+            },
+        };
+        let direct_delimiter_two = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::Direct {
+                entry: InboxEntry {
+                    preview: Some("a".to_string()),
+                    thread_id: Some("b".to_string()),
+                    ..direct_entry()
+                },
+                increment_unread: true,
+            },
+        };
+        let pin_delimiter_one = IngressEffectIntent::DmPinMutation {
+            pair: (bare("juliet@example.test"), bare("romeo@example.test")),
+            target_stanza_id: stanza_id(),
+            action: DmPinMutationAction::Pin {
+                entry: PinnedEntry {
+                    preview: crate::muc::pin::PinPreview::new(
+                        bare("juliet@example.test"),
+                        Some("A|B".to_string()),
+                        "",
+                        pinned_entry().preview.message_timestamp,
+                    ),
+                    ..pinned_entry()
+                },
+            },
+        };
+        let pin_delimiter_two = IngressEffectIntent::DmPinMutation {
+            pair: (bare("juliet@example.test"), bare("romeo@example.test")),
+            target_stanza_id: stanza_id(),
+            action: DmPinMutationAction::Pin {
+                entry: PinnedEntry {
+                    preview: crate::muc::pin::PinPreview::new(
+                        bare("juliet@example.test"),
+                        Some("A".to_string()),
+                        "B",
+                        pinned_entry().preview.message_timestamp,
+                    ),
+                    ..pinned_entry()
+                },
+            },
+        };
+        assert_ne!(
+            direct_delimiter_one.semantic_key(),
+            direct_delimiter_two.semantic_key()
+        );
+        assert_ne!(
+            pin_delimiter_one.semantic_key(),
+            pin_delimiter_two.semantic_key()
+        );
     }
 
     #[test]

@@ -4,7 +4,10 @@ use super::super::*;
 /// snapshot. A timeout after send can be maybe-committed, but must never be
 /// represented as a known empty audience in ingress shadow capture.
 pub(crate) enum RemoteCarbonFanout {
-    Applied(Vec<jid::FullJid>),
+    Applied {
+        carbon_recipients: Vec<jid::FullJid>,
+        recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+    },
     MaybeCommitted,
 }
 
@@ -50,7 +53,10 @@ impl OrderedRelayDeliveryBridge {
             .await
         {
             Ok(reply) if reply.status == RelayRemoteUserSideEffectStatus::Applied => {
-                Some(RemoteCarbonFanout::Applied(reply.carbon_recipients))
+                Some(RemoteCarbonFanout::Applied {
+                    carbon_recipients: reply.carbon_recipients,
+                    recipient_sm_append_streams: reply.recipient_sm_append_streams,
+                })
             }
             Ok(RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::StaleRegistration,
@@ -185,6 +191,7 @@ impl OrderedRelayDeliveryBridge {
             return RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::Unavailable,
                 carbon_recipients: Vec::new(),
+                recipient_sm_append_streams: Vec::new(),
             };
         };
         let registration = self
@@ -201,6 +208,7 @@ impl OrderedRelayDeliveryBridge {
             return RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::StaleRegistration,
                 carbon_recipients: Vec::new(),
+                recipient_sm_append_streams: Vec::new(),
             };
         };
         let actor = match services
@@ -217,6 +225,7 @@ impl OrderedRelayDeliveryBridge {
                 return RelayRemoteUserSideEffectReply {
                     status: RelayRemoteUserSideEffectStatus::StaleRegistration,
                     carbon_recipients: Vec::new(),
+                    recipient_sm_append_streams: Vec::new(),
                 };
             }
             Err(error) => {
@@ -228,6 +237,7 @@ impl OrderedRelayDeliveryBridge {
                 return RelayRemoteUserSideEffectReply {
                     status: RelayRemoteUserSideEffectStatus::Unavailable,
                     carbon_recipients: Vec::new(),
+                    recipient_sm_append_streams: Vec::new(),
                 };
             }
         };
@@ -252,10 +262,11 @@ impl OrderedRelayDeliveryBridge {
                     }
                 },
                 carbon_recipients: Vec::new(),
+                recipient_sm_append_streams: Vec::new(),
             };
         }
 
-        let (status, carbon_recipients) = match msg.effect {
+        let (status, carbon_recipients, recipient_sm_append_streams) = match msg.effect {
             RemoteUserSideEffect::Carbons {
                 owner,
                 message,
@@ -264,8 +275,8 @@ impl OrderedRelayDeliveryBridge {
             } => match message.0 {
                 Stanza::Message(message) => {
                     let web_socket_state = services.web_socket_state.upgrade();
-                    let carbon_recipients =
-                        crate::server::routes::interpret::carbons::send_carbons_to_registry(
+                    let outcome =
+                        crate::server::routes::interpret::carbons::send_carbons_to_registry_with_capture(
                             &services.connection_registry,
                             crate::server::routes::interpret::carbons::CarbonRegistryDeps {
                                 ingress_effect_capture: None,
@@ -278,10 +289,15 @@ impl OrderedRelayDeliveryBridge {
                             exclude,
                         )
                         .await;
-                    (RelayRemoteUserSideEffectStatus::Applied, carbon_recipients)
+                    (
+                        RelayRemoteUserSideEffectStatus::Applied,
+                        outcome.carbon_recipients,
+                        outcome.recipient_sm_append_streams,
+                    )
                 }
                 _ => (
                     RelayRemoteUserSideEffectStatus::StaleRegistration,
+                    Vec::new(),
                     Vec::new(),
                 ),
             },
@@ -295,6 +311,7 @@ impl OrderedRelayDeliveryBridge {
                     return RelayRemoteUserSideEffectReply {
                         status: RelayRemoteUserSideEffectStatus::Unavailable,
                         carbon_recipients: Vec::new(),
+                        recipient_sm_append_streams: Vec::new(),
                     };
                 };
                 crate::server::routes::websocket::handlers::iq::roster::push::send_roster_push_to_sibling_resources(
@@ -305,7 +322,11 @@ impl OrderedRelayDeliveryBridge {
                     &version,
                 )
                 .await;
-                (RelayRemoteUserSideEffectStatus::Applied, Vec::new())
+                (
+                    RelayRemoteUserSideEffectStatus::Applied,
+                    Vec::new(),
+                    Vec::new(),
+                )
             }
             RemoteUserSideEffect::BlocklistPush {
                 user_bare,
@@ -316,18 +337,24 @@ impl OrderedRelayDeliveryBridge {
                     return RelayRemoteUserSideEffectReply {
                         status: RelayRemoteUserSideEffectStatus::Unavailable,
                         carbon_recipients: Vec::new(),
+                        recipient_sm_append_streams: Vec::new(),
                     };
                 };
                 crate::server::routes::websocket::handlers::iq::blocking::send_blocking_pushes(
                     &state, &user_bare, blocked, &jids,
                 )
                 .await;
-                (RelayRemoteUserSideEffectStatus::Applied, Vec::new())
+                (
+                    RelayRemoteUserSideEffectStatus::Applied,
+                    Vec::new(),
+                    Vec::new(),
+                )
             }
         };
         RelayRemoteUserSideEffectReply {
             status,
             carbon_recipients,
+            recipient_sm_append_streams,
         }
     }
 }

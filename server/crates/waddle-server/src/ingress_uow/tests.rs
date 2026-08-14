@@ -161,7 +161,14 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
             &[IngressEffectIntent::InboxProject {
                 owner: "romeo@example.com".parse().expect("valid fixture JID"),
                 mutation: InboxProjectionMutation::Direct {
-                    peer: "juliet@example.com".parse().expect("valid fixture JID"),
+                    entry: InboxEntry::new(
+                        "juliet@example.com".parse().expect("valid fixture JID"),
+                        ConversationKind::Direct,
+                        "stable-1",
+                        1_752_768_000,
+                    )
+                    .with_unread(3)
+                    .with_preview("important hello"),
                     increment_unread: true,
                 },
             }],
@@ -922,7 +929,14 @@ async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_ali
         IngressEffectIntent::InboxProject {
             owner: "romeo@example.com".parse().expect("valid owner"),
             mutation: InboxProjectionMutation::Direct {
-                peer: "juliet@example.com".parse().expect("valid recipient"),
+                entry: InboxEntry::new(
+                    "juliet@example.com".parse().expect("valid recipient"),
+                    ConversationKind::Direct,
+                    "stable-1",
+                    1_752_768_000,
+                )
+                .with_unread(3)
+                .with_preview("important hello"),
                 increment_unread: true,
             },
         },

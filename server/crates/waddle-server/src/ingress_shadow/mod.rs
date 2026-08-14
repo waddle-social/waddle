@@ -169,6 +169,10 @@ impl IngressShadowShutdown {
             .active_task_aborts
             .lock()
             .expect("shadow active task abort handles must not be poisoned");
+        if self.force_stop.is_cancelled() {
+            abort.abort();
+            return;
+        }
         if !finished.load(Ordering::Acquire) {
             tasks.push(ActiveShadowTask { finished, abort });
         }
@@ -733,6 +737,7 @@ fn try_send_worker_task(
                 Ok(permit) => permit,
                 Err(disposition) => return disposition,
             };
+            note_stream_task_enqueued(stream_activity, &stream_id);
             match send_worker_task(
                 tx,
                 QueuedIngressShadowTask {
@@ -740,11 +745,9 @@ fn try_send_worker_task(
                     permit: Some(permit),
                 },
             ) {
-                Ok(()) => {
-                    note_stream_task_enqueued(stream_activity, &stream_id);
-                    IngressShadowDisposition::Enqueued
-                }
+                Ok(()) => IngressShadowDisposition::Enqueued,
                 Err(task) => {
+                    note_stream_task_finished(stream_activity, &stream_id);
                     drop(task.permit);
                     IngressShadowDisposition::Closed
                 }
@@ -1019,24 +1022,13 @@ async fn run_retirement_retry_dispatcher(
                     .scan_requested = false;
                 continue;
             };
-            match orphaned_shadow_streams(database, dispatcher.capacity).await {
+            match orphaned_shadow_streams(database, dispatcher.capacity.saturating_add(1)).await {
                 Ok(orphaned) => {
                     let mut state = dispatcher
                         .state
                         .lock()
                         .expect("retirement retry dispatcher mutex must not be poisoned");
-                    state.scan_requested = false;
-                    for stream_id in orphaned {
-                        if !state.queued_members.insert(stream_id.clone()) {
-                            continue;
-                        }
-                        if state.queued.len() >= dispatcher.capacity {
-                            state.queued_members.remove(&stream_id);
-                            state.scan_requested = true;
-                            break;
-                        }
-                        state.queued.push_back(stream_id);
-                    }
+                    queue_scanned_retirements(&mut state, orphaned, dispatcher.capacity);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "ingress shadow orphan retirement retry scan failed");
@@ -1086,6 +1078,28 @@ async fn run_retirement_retry_dispatcher(
                 unreachable!("worker retry path cannot be disabled")
             }
         }
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn queue_scanned_retirements(
+    state: &mut RetirementRetryState,
+    orphaned: Vec<SmSessionId>,
+    capacity: usize,
+) {
+    let mut orphaned = orphaned.into_iter();
+    let scanned_page: Vec<_> = orphaned.by_ref().take(capacity).collect();
+    state.scan_requested = orphaned.next().is_some();
+    for stream_id in scanned_page {
+        if !state.queued_members.insert(stream_id.clone()) {
+            continue;
+        }
+        if state.queued.len() >= capacity {
+            state.queued_members.remove(&stream_id);
+            state.scan_requested = true;
+            break;
+        }
+        state.queued.push_back(stream_id);
     }
 }
 
@@ -2139,7 +2153,7 @@ mod tests {
     use chrono::Duration as ChronoDuration;
     use jid::{BareJid, Jid};
     use sqlx::Connection;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::{oneshot, Notify};
     use tokio::time::Duration;
     use uuid::Uuid;
@@ -3560,6 +3574,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tasks_registered_after_force_stop_are_aborted_immediately() {
+        let shutdown = Arc::new(IngressShadowShutdown::default());
+        shutdown.force_stop();
+
+        let task_handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        shutdown.track_active_task(Arc::new(AtomicBool::new(false)), task_handle.abort_handle());
+
+        let join_error = tokio::time::timeout(Duration::from_millis(250), task_handle)
+            .await
+            .expect("force-stopped registration should abort promptly")
+            .expect_err("aborted task should not complete successfully");
+        assert!(join_error.is_cancelled());
+        assert!(
+            shutdown
+                .active_task_aborts
+                .lock()
+                .expect("shadow active task abort handles must not be poisoned")
+                .is_empty(),
+            "late-registered tasks must not remain tracked after force-stop"
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_claim_lock_timeout_keeps_enqueue_prompt() {
         let Some(fixture) = ShadowFixture::open("claim_lock_timeout").await else {
             return;
@@ -3857,6 +3896,50 @@ mod tests {
         assert_eq!(second_started, 1);
     }
 
+    #[test]
+    fn closed_submit_admission_rolls_back_stream_activity() {
+        let stream_id = SmSessionId::new("stream-a");
+        let tx = Arc::new(std::sync::Mutex::new(None));
+        let enqueued_streams = Arc::new(std::sync::Mutex::new(HashSet::from([stream_id.clone()])));
+        let retiring_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let stream_activity = Arc::new(std::sync::Mutex::new(StreamActivityState::default()));
+        let retirement_retry_dispatcher = RetirementRetryDispatcher {
+            state: Arc::new(std::sync::Mutex::new(RetirementRetryState::default())),
+            notify: Arc::new(Notify::new()),
+            capacity: 1,
+        };
+        let submission_capacity = Arc::new(Semaphore::new(1));
+        let enrollment_capacity = Arc::new(Semaphore::new(1));
+
+        let disposition = try_send_worker_task(
+            WorkerTaskContext {
+                tx: &tx,
+                enqueued_streams: &enqueued_streams,
+                retiring_streams: &retiring_streams,
+                retirement_retry_dispatcher: &retirement_retry_dispatcher,
+                stream_activity: &stream_activity,
+                submission_capacity: &submission_capacity,
+                enrollment_capacity: &enrollment_capacity,
+                retirement_capacity: 1,
+            },
+            IngressShadowTask::Submit(Box::new(base_submission(Message::new(Some(Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            )))))),
+        );
+
+        assert_eq!(disposition, IngressShadowDisposition::Closed);
+        assert!(
+            stream_is_idle(&stream_activity, &stream_id),
+            "a failed publish must restore the stream to idle"
+        );
+        assert!(
+            wait_for_stream_idle_notifier(&stream_activity, &stream_id).is_none(),
+            "a failed publish must not strand an idle waiter behind leaked activity"
+        );
+    }
+
     #[tokio::test]
     async fn stream_idle_wait_includes_queued_shadow_submission() {
         let started = Arc::new(Notify::new());
@@ -3904,6 +3987,31 @@ mod tests {
                 .await,
             "the stream becomes transferable only after its shadow work finishes"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn immediate_submission_completion_does_not_leave_pending_activity() {
+        let handle = IngressShadowHandle::spawn_test_worker(8, 8, |_kind, _stream_id| async {});
+        let stream_id = SmSessionId::new("stream-a");
+
+        for _ in 0..128 {
+            let message = Message::new(Some(jid::Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            )));
+            assert_eq!(
+                handle.try_submit(base_submission(message)),
+                IngressShadowDisposition::Enqueued
+            );
+            tokio::task::yield_now().await;
+            assert!(
+                handle
+                    .wait_for_stream_idle(&stream_id, Duration::from_millis(250))
+                    .await,
+                "fast submissions must not leave leaked pending activity behind"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3962,6 +4070,59 @@ mod tests {
         assert!(
             state.scan_requested,
             "overflow is recovered from durable rows"
+        );
+    }
+
+    #[test]
+    fn retirement_retry_scan_keeps_rescan_after_full_or_duplicate_pages() {
+        let mut empty_state = RetirementRetryState::default();
+        queue_scanned_retirements(
+            &mut empty_state,
+            vec![
+                SmSessionId::new("retire-a"),
+                SmSessionId::new("retire-b"),
+                SmSessionId::new("retire-c"),
+            ],
+            2,
+        );
+        assert_eq!(
+            empty_state.queued.iter().cloned().collect::<Vec<_>>(),
+            vec![SmSessionId::new("retire-a"), SmSessionId::new("retire-b")]
+        );
+        assert!(
+            empty_state.scan_requested,
+            "a full SQL page must keep the durable rescan armed for the next page"
+        );
+
+        let mut duplicate_state = RetirementRetryState::default();
+        duplicate_state
+            .queued_members
+            .insert(SmSessionId::new("retire-a"));
+        duplicate_state
+            .queued
+            .push_back(SmSessionId::new("retire-a"));
+        duplicate_state
+            .queued_members
+            .insert(SmSessionId::new("retire-b"));
+        duplicate_state
+            .queued
+            .push_back(SmSessionId::new("retire-b"));
+        queue_scanned_retirements(
+            &mut duplicate_state,
+            vec![
+                SmSessionId::new("retire-a"),
+                SmSessionId::new("retire-b"),
+                SmSessionId::new("retire-c"),
+            ],
+            2,
+        );
+        assert_eq!(
+            duplicate_state.queued.iter().cloned().collect::<Vec<_>>(),
+            vec![SmSessionId::new("retire-a"), SmSessionId::new("retire-b")]
+        );
+        assert!(
+            duplicate_state.scan_requested,
+            "already-queued rows still require another scan when the SQL page was full"
         );
     }
 
