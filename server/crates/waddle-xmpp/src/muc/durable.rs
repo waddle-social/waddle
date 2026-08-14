@@ -105,7 +105,13 @@ pub enum RoomDurableMutation {
     },
     MediatedInviteGrant(AffiliationEntry),
     MediatedInviteRollback(AffiliationEntry),
-    Destroy,
+    /// Tombstone the room under its exact claim. When this destroy originated
+    /// from an owner IQ, `completion_attempt` identifies the server-owned
+    /// post-commit cleanup record that must become visible in the same
+    /// transaction as the tombstone.
+    Destroy {
+        completion_attempt: Option<DestroyAttemptId>,
+    },
     /// Terminally destroy an unpublished room and release its exact claim in
     /// the same durable transaction. This prevents a preparation that was
     /// already in flight from committing `Create` after the destroy returns.

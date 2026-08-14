@@ -257,6 +257,9 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
         // the join path refuses a second nick for the same full JID, so
         // this is normally a single entry — but pre-existing ghost
@@ -373,6 +376,9 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
         msg: PresenceUpdateData,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -450,6 +456,9 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
         msg: UpsertMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -496,6 +505,9 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
         msg: ClearMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -580,6 +592,9 @@ impl kameo::message::Message<UpsertInCallState> for RoomActor {
         msg: UpsertInCallState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };

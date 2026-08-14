@@ -2305,12 +2305,15 @@ pub(crate) async fn register_destroy_completion(
 
 /// Forget owner-IQ work after a destroy was conclusively refused before the
 /// registry could attach it to a retained attempt.
-pub(crate) async fn cancel_destroy_completion(state: &WebSocketState, room_jid: &BareJid) {
+pub(crate) async fn cancel_destroy_completion_attempt(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+) {
     if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .cancel_destroy_completion(room_jid.clone())
+        .cancel_destroy_completion_attempt(attempt)
         .await
     {
-        warn!(room = %room_jid, %error, "Failed to discard refused MUC destroy completion");
+        warn!(%error, "Failed to discard refused MUC destroy completion");
     }
 }
 
@@ -2322,6 +2325,7 @@ pub(crate) async fn drain_destroy_completions(
     state: &WebSocketState,
     inline_session: Option<&FullJid>,
 ) -> Vec<String> {
+    let mut durable_redrive_safe = true;
     let completions = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .take_destroy_completions()
         .await
@@ -2334,14 +2338,54 @@ pub(crate) async fn drain_destroy_completions(
     };
     let mut frames = Vec::new();
     for completion in completions {
-        frames.extend(
-            super::handlers::iq::muc_owner_moderation::complete_destroy_post_commit(
-                state,
-                completion,
-                inline_session,
-            )
-            .await,
-        );
+        let attempt = completion.attempt;
+        match super::handlers::iq::muc_owner_moderation::complete_destroy_post_commit(
+            state,
+            completion,
+            inline_session,
+        )
+        .await
+        {
+            Ok(completion_frames) => {
+                let persisted_acknowledged = super::handlers::iq::muc_owner_moderation::acknowledge_persisted_destroy_completion(state, attempt).await;
+                if persisted_acknowledged {
+                    if let Err(error) =
+                        RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                            .ack_destroy_completion(attempt)
+                            .await
+                    {
+                        warn!(%error, "Failed to acknowledge completed MUC destroy cleanup");
+                    }
+                } else {
+                    // Do not immediately re-read the same successfully
+                    // completed durable row below. The next janitor tick
+                    // retries its lease after the acknowledgement failure.
+                    durable_redrive_safe = false;
+                    if let Err(error) =
+                        RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                            .requeue_destroy_completion(attempt)
+                            .await
+                    {
+                        warn!(%error, "Failed to retain MUC destroy completion after durable acknowledgement failure");
+                    }
+                }
+                frames.extend(completion_frames);
+            }
+            Err(()) => {
+                if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                    .requeue_destroy_completion(attempt)
+                    .await
+                {
+                    warn!(%error, "Failed to requeue incomplete MUC destroy cleanup");
+                }
+            }
+        }
+    }
+    // Lease in-memory work first. Its successful acknowledgement deletes the
+    // matching durable row before the crash-recovery sweep sees it, avoiding
+    // duplicate XEP-0045 destroy presences on the ordinary request path.
+    if durable_redrive_safe {
+        super::handlers::iq::muc_owner_moderation::drain_persisted_destroy_completions(state).await;
     }
     frames
 }
@@ -2412,6 +2456,7 @@ pub(crate) async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) 
 /// timeout) is surfaced as `Err`, NOT coerced to `NotRegistered`: the
 /// atomic handler either fully applied or not at all, so the caller must
 /// answer with a retryable wait-class error rather than `item-not-found`.
+#[cfg(test)]
 pub(crate) async fn destroy_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,

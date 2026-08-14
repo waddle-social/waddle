@@ -179,6 +179,76 @@ async fn mediated_invite_prepare_abort_finalize_and_ack_are_idempotent() {
 }
 
 #[tokio::test]
+async fn destroy_seal_preserves_mediated_invite_lifecycle_bookkeeping() {
+    let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
+    let operation_id = invite_operation_id();
+    let grant = actor
+        .ask(AuthorizeMediatedInvite {
+            operation_id,
+            inviter,
+            invitee,
+        })
+        .await
+        .expect("authorize")
+        .grant
+        .expect("temporary grant");
+    actor
+        .ask(PrepareMediatedInviteGrantRollback {
+            grant: grant.clone(),
+        })
+        .await
+        .expect("prepare rollback");
+    let attempt = crate::muc::DestroyAttemptId::generate();
+    actor
+        .ask(SealForDestroy { attempt })
+        .await
+        .expect("seal room");
+
+    assert_eq!(
+        actor
+            .ask(FinalizeMediatedInviteGrant { operation_id })
+            .await
+            .expect("sealed finalization"),
+        MediatedInviteGrantFinalization::RoomSealed,
+    );
+    assert_eq!(
+        actor
+            .ask(AcknowledgeMediatedInviteOperation { operation_id })
+            .await
+            .expect("sealed acknowledgement"),
+        MediatedInviteOperationAcknowledgement::RoomSealed,
+    );
+    assert_eq!(
+        actor
+            .ask(AbortMediatedInviteGrantRollback {
+                grant: grant.clone(),
+            })
+            .await
+            .expect("sealed abort"),
+        MediatedInviteRollbackAbort::RoomSealed,
+    );
+    assert!(actor
+        .ask(UnsealDestroy { attempt })
+        .await
+        .expect("unseal matching attempt"),);
+    assert_eq!(
+        actor
+            .ask(FinalizeMediatedInviteGrant { operation_id })
+            .await
+            .expect("finalization after unseal"),
+        MediatedInviteGrantFinalization::RollbackPending,
+        "the sealed calls must not advance or discard the prepared operation",
+    );
+    assert_eq!(
+        actor
+            .ask(AbortMediatedInviteGrantRollback { grant })
+            .await
+            .expect("abort after unseal"),
+        MediatedInviteRollbackAbort::Aborted,
+    );
+}
+
+#[tokio::test]
 async fn mediated_invite_rollback_commit_replays_exact_outcome_until_acknowledged() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
     let store = FakeDurableStore::owned();

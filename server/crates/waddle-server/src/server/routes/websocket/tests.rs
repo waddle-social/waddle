@@ -610,6 +610,11 @@ async fn create_test_websocket_state_with_extension_manager(
 
     let runner = MigrationRunner::global();
     runner.run(db_pool.global()).await.expect("migrations");
+    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
+        db_pool.global().clone(),
+    )
+    .await
+    .expect("MUC destroy completion outbox");
 
     let server_config = ServerConfig::test_homeserver();
     let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");

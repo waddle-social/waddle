@@ -808,6 +808,9 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
         _msg: EnforceMembersOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(AdminItemsApplied::default());
+        }
         Ok(enforce_members_only(
             &mut self.room,
             &self.occupant_id_secret,

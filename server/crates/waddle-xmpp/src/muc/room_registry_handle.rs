@@ -36,18 +36,19 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CancelDestroyCompletion, CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom,
-    DemoteRoomIfOwner, DestroyCompletion, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome,
-    DestroyRoomReason, DrainRoomOwnershipForShutdown, GetOrCreateRoom,
+    AckDestroyCompletion, CancelDestroyCompletion, CancelDestroyCompletionAttempt,
+    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
+    DestroyCompletion, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
+    DestroyRoomWithAttempt, DrainRoomOwnershipForShutdown, GetOrCreateRoom,
     GetOrCreateRoomWithInitialAffiliations, GetPendingReclaimedRoomBacklog,
     GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
     IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
     ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
     PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome,
     ReconcileReclaimedRoom, RegisterDestroyCompletion, RememberPendingReclaimedRoom,
-    ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
-    RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, TakeDestroyCompletions,
-    WireClusteringClaims,
+    RequeueDestroyCompletion, ReservePendingReclaimedRoom, RetryPendingRoomReleases,
+    RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome, RoomRegistryActor,
+    RoomRegistryError, TakeDestroyCompletions, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -429,17 +430,51 @@ impl RoomRegistry {
     );
 
     registry_method!(
+        /// Destroy a room using the exact owner-IQ attempt that registered its
+        /// completion snapshot.
+        destroy_room_with_attempt(
+            room_jid: BareJid,
+            attempt: super::DestroyAttemptId
+        ) -> DestroyRoomOutcome,
+        "destroy_room_with_attempt",
+        DestroyRoomWithAttempt {
+            room_jid,
+            reason: DestroyRoomReason::Destroy,
+            attempt
+        }
+    );
+
+    registry_method!(
         cancel_destroy_completion(room_jid: BareJid) -> (),
         "cancel_destroy_completion",
         CancelDestroyCompletion { room_jid }
     );
 
     registry_method!(
-        /// Drain owner-IQ destroy work completed by the registry, including
-        /// destroys reconciled after their original reply was lost.
+        cancel_destroy_completion_attempt(attempt: super::DestroyAttemptId) -> (),
+        "cancel_destroy_completion_attempt",
+        CancelDestroyCompletionAttempt { attempt }
+    );
+
+    registry_method!(
+        /// Lease owner-IQ destroy work completed by the registry, including
+        /// destroys reconciled after their original reply was lost. Callers
+        /// must explicitly ack or requeue each leased attempt.
         take_destroy_completions() -> Vec<DestroyCompletion>,
         "take_destroy_completions",
         TakeDestroyCompletions
+    );
+
+    registry_method!(
+        ack_destroy_completion(attempt: super::DestroyAttemptId) -> bool,
+        "ack_destroy_completion",
+        AckDestroyCompletion { attempt }
+    );
+
+    registry_method!(
+        requeue_destroy_completion(attempt: super::DestroyAttemptId) -> bool,
+        "requeue_destroy_completion",
+        RequeueDestroyCompletion { attempt }
     );
 
     registry_method!(

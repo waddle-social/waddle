@@ -57,7 +57,7 @@ impl kameo::message::Message<RememberDestroyAttemptForTest> for RoomRegistryActo
         msg: RememberDestroyAttemptForTest,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let completion = self.destroy_completions_waiting.remove(&msg.room_jid);
+        let completion = self.destroy_completions_waiting.remove(&msg.attempt);
         self.destroy_attempts.insert(
             msg.room_jid,
             RetainedDestroyAttempt {
@@ -1339,6 +1339,7 @@ mod ownership_claims_tests {
             .await
             .expect("create room")
             .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
         let snapshot = actor
             .ask(crate::muc::room_actor::GetSnapshot)
             .await
@@ -1346,6 +1347,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
                     request: crate::muc::DestroyRequest::default(),
@@ -1356,9 +1358,10 @@ mod ownership_claims_tests {
 
         assert_eq!(
             registry
-                .ask(DestroyRoom {
+                .ask(DestroyRoomWithAttempt {
                     room_jid: jid.clone(),
                     reason: DestroyRoomReason::Destroy,
+                    attempt,
                 })
                 .await
                 .expect("destroy"),
@@ -1493,6 +1496,7 @@ mod ownership_claims_tests {
             .await
             .expect("create room")
             .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
         let snapshot = actor
             .ask(crate::muc::room_actor::GetSnapshot)
             .await
@@ -1500,6 +1504,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
                     request: crate::muc::DestroyRequest::default(),
@@ -1507,7 +1512,6 @@ mod ownership_claims_tests {
             })
             .await
             .expect("register destroy completion");
-        let attempt = crate::muc::DestroyAttemptId::generate();
         actor
             .ask(crate::muc::room_actor::SealForDestroy { attempt })
             .await
@@ -1538,7 +1542,215 @@ mod ownership_claims_tests {
             1,
             "reconciliation must retain cleanup work"
         );
+        assert_eq!(completions[0].attempt, attempt);
         assert_eq!(completions[0].room_jid, jid);
+    }
+
+    #[tokio::test]
+    async fn take_destroy_completions_requires_explicit_ack_or_requeue() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("destroy-completion-lease");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        let snapshot = actor
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot");
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    attempt,
+                    room_jid: jid.clone(),
+                    room: snapshot.room,
+                    request: crate::muc::DestroyRequest::default(),
+                },
+            })
+            .await
+            .expect("register destroy completion");
+        assert_eq!(
+            registry
+                .ask(DestroyRoomWithAttempt {
+                    room_jid: jid,
+                    reason: DestroyRoomReason::Destroy,
+                    attempt,
+                })
+                .await
+                .expect("destroy"),
+            DestroyRoomOutcome::Destroyed,
+        );
+
+        let first_lease = registry
+            .ask(TakeDestroyCompletions)
+            .await
+            .expect("first lease");
+        assert_eq!(first_lease.len(), 1);
+        assert_eq!(first_lease[0].attempt, attempt);
+        assert!(
+            registry
+                .ask(TakeDestroyCompletions)
+                .await
+                .expect("second lease")
+                .is_empty(),
+            "leased completions must not be redelivered before ack/requeue"
+        );
+        assert!(
+            registry
+                .ask(RequeueDestroyCompletion { attempt })
+                .await
+                .expect("requeue"),
+            "the leased completion can be returned to the ready queue"
+        );
+        let second_lease = registry
+            .ask(TakeDestroyCompletions)
+            .await
+            .expect("leased after requeue");
+        assert_eq!(second_lease.len(), 1);
+        assert_eq!(second_lease[0].attempt, attempt);
+        assert!(
+            registry
+                .ask(AckDestroyCompletion { attempt })
+                .await
+                .expect("ack"),
+            "ack must release the leased completion"
+        );
+        assert!(registry
+            .ask(TakeDestroyCompletions)
+            .await
+            .expect("post-ack lease")
+            .is_empty());
+        assert!(
+            !registry
+                .ask(RequeueDestroyCompletion { attempt })
+                .await
+                .expect("requeue after ack"),
+            "acked completions cannot be requeued again"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_completion_attempts_do_not_overwrite_each_other_for_the_same_room() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("destroy-attempt-keying");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let snapshot = actor
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot");
+        let first_attempt = crate::muc::DestroyAttemptId::generate();
+        let second_attempt = crate::muc::DestroyAttemptId::generate();
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    attempt: first_attempt,
+                    room_jid: jid.clone(),
+                    room: snapshot.room.clone(),
+                    request: crate::muc::DestroyRequest {
+                        reason: Some("first".to_string()),
+                        ..crate::muc::DestroyRequest::default()
+                    },
+                },
+            })
+            .await
+            .expect("register first destroy completion");
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    attempt: second_attempt,
+                    room_jid: jid.clone(),
+                    room: snapshot.room,
+                    request: crate::muc::DestroyRequest {
+                        reason: Some("second".to_string()),
+                        ..crate::muc::DestroyRequest::default()
+                    },
+                },
+            })
+            .await
+            .expect("register second destroy completion");
+        actor
+            .ask(crate::muc::room_actor::SealForDestroy {
+                attempt: first_attempt,
+            })
+            .await
+            .expect("seal first attempt");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+                attempt: first_attempt,
+            })
+            .await
+            .expect("retain first attempt");
+
+        assert_eq!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("reconcile first attempt"),
+            None,
+        );
+        let completions = registry
+            .ask(TakeDestroyCompletions)
+            .await
+            .expect("take completions");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].attempt, first_attempt);
+        assert_eq!(completions[0].room_jid, jid);
+        assert_eq!(completions[0].request.reason.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn plain_destroy_does_not_consume_an_owner_iq_completion_snapshot() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("plain-destroy-no-owner-snapshot");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        let snapshot = actor
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot");
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    attempt,
+                    room_jid: jid.clone(),
+                    room: snapshot.room,
+                    request: crate::muc::DestroyRequest::default(),
+                },
+            })
+            .await
+            .expect("register owner completion");
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid,
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("plain destroy"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        assert!(
+            registry
+                .ask(TakeDestroyCompletions)
+                .await
+                .expect("take completions")
+                .is_empty(),
+            "a plain destroy must never run cleanup from an owner-IQ snapshot"
+        );
     }
 
     #[tokio::test]
@@ -2974,7 +3186,7 @@ mod ownership_claims_tests {
             };
             let destroys = matches!(
                 intent,
-                crate::muc::RoomDurableMutation::Destroy
+                crate::muc::RoomDurableMutation::Destroy { .. }
                     | crate::muc::RoomDurableMutation::DestroyAndReleaseClaim
             );
             let releases_claim = matches!(

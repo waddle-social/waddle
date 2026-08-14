@@ -802,23 +802,41 @@ impl RoomActor {
         }
     }
 
-    /// Refuse admission through an already sealed actor while allowing an
-    /// inactivity seal to strengthen into a definitive ownership-loss seal.
+    /// Refuse effectful external work through an already sealed actor while
+    /// allowing an inactivity seal to strengthen into a definitive
+    /// ownership-loss seal.
     ///
-    /// The ownership probe's result never makes an inactive actor joinable:
-    /// it only preserves the stronger cause for the registry's reaper. A
-    /// transient probe failure therefore still returns `RoomSealed` and
-    /// leaves the original inactivity seal intact.
-    async fn reject_sealed_join(&mut self) -> Result<(), RoomActorError> {
+    /// The ownership probe's result never makes an inactive actor usable
+    /// again: it only preserves the stronger cause for the registry's
+    /// reaper. A transient probe failure therefore still leaves the original
+    /// inactivity seal intact.
+    async fn effectful_work_is_permitted(&mut self) -> bool {
         match self.seal_state {
-            RoomSealState::Open => Ok(()),
-            RoomSealState::OwnershipLost => Err(RoomActorError::RoomSealed),
+            RoomSealState::Open => true,
+            RoomSealState::OwnershipLost => false,
             RoomSealState::Inactive => {
                 let _ = self.gate_join_ownership().await;
+                false
+            }
+            RoomSealState::Destroying { .. } => false,
+        }
+    }
+
+    async fn reject_sealed_effects(&mut self) -> Result<(), RoomActorError> {
+        if self.effectful_work_is_permitted().await {
+            return Ok(());
+        }
+        match self.seal_state {
+            RoomSealState::Destroying { .. } => Err(RoomActorError::OwnershipUnavailable),
+            RoomSealState::Open => Ok(()),
+            RoomSealState::OwnershipLost | RoomSealState::Inactive => {
                 Err(RoomActorError::RoomSealed)
             }
-            RoomSealState::Destroying { .. } => Err(RoomActorError::OwnershipUnavailable),
         }
+    }
+
+    async fn reject_sealed_join(&mut self) -> Result<(), RoomActorError> {
+        self.reject_sealed_effects().await
     }
 
     fn classify_durable_persist_error(&mut self, error: RoomCommitError) -> DurablePersistError {
@@ -1221,6 +1239,7 @@ impl kameo::message::Message<Leave> for RoomActor {
     type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.reject_sealed_effects().await?;
         self.room
             .remove_occupant(&msg.nick)
             .map(|_| ())
@@ -1599,19 +1618,17 @@ pub struct ApplyPin {
 }
 
 impl kameo::message::Message<ApplyPin> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: ApplyPin,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        // Pins are in-memory-only state, but a sealed actor must not mutate
-        // at all: mid-destroy/mid-eviction the registry owns convergence and
-        // this incarnation's memory is about to be discarded or replaced.
-        if self.seal_state != RoomSealState::Open {
-            return;
-        }
+        // Pins are in-memory-only state, but their system-message broadcast
+        // is an externally visible effect. Refuse both while sealed so the
+        // interpreter cannot announce a pin the actor did not retain.
+        self.reject_sealed_effects().await?;
         match msg.change {
             PinStateChange::Pin(entry) => {
                 self.room.upsert_pin(entry);
@@ -1620,6 +1637,7 @@ impl kameo::message::Message<ApplyPin> for RoomActor {
                 self.room.remove_pin_by_target(&target_stanza_id);
             }
         }
+        Ok(())
     }
 }
 

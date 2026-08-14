@@ -15,6 +15,7 @@ pub mod inbox;
 pub mod ingress_substrate;
 /// Atomic PostgreSQL ingress transaction seam (#1654).
 pub mod ingress_uow;
+pub mod muc_destroy_completion_outbox;
 /// Postgres-backed durable MUC room ownership state (ADR-0017 Phase 3
 /// Slice 7). Gated behind the `clustering` Cargo feature for the same
 /// reason as `sm_persistence_fenced`: it depends on `clustering::relay`/

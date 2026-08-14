@@ -128,6 +128,9 @@ pub enum MediatedInviteRollbackError {
 pub enum MediatedInviteRollbackAbort {
     Aborted,
     NotPrepared,
+    /// The room is sealed for eviction or destruction; retry through the
+    /// lifecycle owner rather than altering rollback authority in place.
+    RoomSealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
@@ -135,6 +138,9 @@ pub enum MediatedInviteGrantFinalization {
     Finalized,
     RollbackPending,
     Superseded,
+    /// The room is sealed for eviction or destruction; its idempotency record
+    /// remains intact for recovery.
+    RoomSealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
@@ -142,6 +148,9 @@ pub enum MediatedInviteOperationAcknowledgement {
     Acknowledged,
     Pending,
     Unknown,
+    /// The room is sealed for eviction or destruction; the operation record
+    /// remains retained rather than being acknowledged away.
+    RoomSealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -156,6 +156,9 @@ impl kameo::message::Message<AbortMediatedInviteGrantRollback> for RoomActor {
         msg: AbortMediatedInviteGrantRollback,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.seal_state.is_sealed() {
+            return MediatedInviteRollbackAbort::RoomSealed;
+        }
         if self.invite_rollback_is_prepared(&msg.grant) {
             self.invite_operations
                 .get_mut(&msg.grant.operation_id)

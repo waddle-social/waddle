@@ -3881,6 +3881,28 @@ async fn spawn_room_actor_with_store(
     actor
 }
 
+async fn seal_for_destroy(actor: &ActorRef<RoomActor>) {
+    actor
+        .ask(SealForDestroy {
+            attempt: crate::muc::DestroyAttemptId::generate(),
+        })
+        .await
+        .expect("pre-seal for destroy");
+}
+
+fn correlated_groupchat_message() -> xmpp_parsers::message::Message {
+    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    message.id = Some(xmpp_parsers::message::Id(
+        "sealed-groupchat-message".to_string(),
+    ));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "sealed room message".into(),
+    );
+    message
+}
+
 #[tokio::test]
 async fn ownership_lost_during_restore_is_terminal_and_never_retries() {
     let store = FakeDurableStore::ownership_lost_during_restore();
@@ -4259,12 +4281,7 @@ async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
         .await
         .expect("join before seal");
 
-    actor
-        .ask(SealForDestroy {
-            attempt: crate::muc::DestroyAttemptId::generate(),
-        })
-        .await
-        .expect("pre-seal for destroy");
+    seal_for_destroy(&actor).await;
 
     // Zero-durable-delta admin work (a role-only change) reaches only the
     // pre-mutation gate; the destroy pre-seal must refuse it so no kicks,
@@ -4299,7 +4316,7 @@ async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
         "pin-during-destroy".to_string(),
         jid::Jid::from(room_jid.clone()),
     );
-    actor
+    let pin_result = actor
         .ask(ApplyPin {
             change: PinStateChange::Pin(PinnedEntry {
                 target_stanza_id: target,
@@ -4313,8 +4330,16 @@ async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
                 ),
             }),
         })
-        .await
-        .expect("pin ask completes");
+        .await;
+    assert!(
+        matches!(
+            pin_result,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "destroy pre-seal must refuse pin state changes: {pin_result:?}"
+    );
     assert!(
         actor
             .ask(GetPinList)
@@ -4322,6 +4347,303 @@ async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
             .expect("pins readable")
             .is_empty(),
         "a sealed actor must not mutate pin state"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_members_only_enforcement() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice,
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    let applied = actor
+        .ask(EnforceMembersOnly)
+        .await
+        .expect("sealed enforcement");
+    assert_eq!(
+        applied,
+        AdminItemsApplied::default(),
+        "a sealed actor must not eject occupants or synthesize 322 presences"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        1,
+        "sealed enforcement must leave the occupant set untouched"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_leave_by_real_jid_effects() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(LeaveByRealJid { sender_jid: alice })
+            .await
+            .expect("leave ask")
+            .is_none(),
+        "a sealed actor must not emit leave effects from a queued session departure"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        1,
+        "sealed leave handling must not mutate occupancy"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_presence_reflection() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(PresenceUpdateData { sender_jid: alice })
+            .await
+            .expect("presence ask")
+            .is_none(),
+        "a sealed actor must not return broadcast recipients for plain presence reflection"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_muji_upserts() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                muji: audio_muji(),
+            })
+            .await
+            .expect("muji ask")
+            .is_none(),
+        "a sealed actor must refuse queued Muji advertisements"
+    );
+    assert!(
+        actor
+            .ask(GetActiveMujiSessions)
+            .await
+            .expect("active Muji sessions")
+            .is_empty(),
+        "refused Muji work must not mutate active call state"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_muji_clears() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+    actor
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("seed muji")
+        .expect("occupant can advertise before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(ClearMujiPresence {
+                sender_jid: alice.clone(),
+            })
+            .await
+            .expect("clear ask")
+            .is_none(),
+        "a sealed actor must not clear call presence or emit reflected clears"
+    );
+    assert_eq!(
+        actor
+            .ask(GetActiveMujiSessions)
+            .await
+            .expect("active Muji sessions"),
+        vec![alice],
+        "refused clears must leave prior Muji state untouched"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_in_call_state_updates() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(UpsertInCallState {
+                sender_jid: alice,
+                state: crate::xep::InCallPresenceState {
+                    hand_raised: true,
+                    muted: false,
+                },
+            })
+            .await
+            .expect("in-call ask")
+            .is_none(),
+        "a sealed actor must not mutate in-call state or emit reflected presence"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .in_call_sessions_for_nick("alice")
+            .is_empty(),
+        "refused in-call updates must leave the session state empty"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_legacy_leave_handler() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    let leave = actor
+        .ask(Leave {
+            nick: "alice".to_string(),
+        })
+        .await;
+    assert!(
+        matches!(
+            leave,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "a sealed actor must reject the legacy leave mutation path: {leave:?}"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        1,
+        "refused legacy leave must not remove the occupant"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_groupchat_broadcasts() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    let broadcast = actor
+        .ask(BuildGroupchatBroadcast {
+            sender_jid: alice,
+            message: correlated_groupchat_message(),
+        })
+        .await;
+    assert!(
+        matches!(
+            broadcast,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "a sealed actor must not fan out queued groupchat messages: {broadcast:?}"
     );
 }
 

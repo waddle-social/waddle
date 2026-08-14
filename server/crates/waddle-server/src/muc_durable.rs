@@ -198,6 +198,11 @@ impl PostgresMucRoomStore {
             published_claim_fences: DashMap::new(),
         };
         store.ensure_schema().await.map_err(db_err)?;
+        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
+            store.db.clone(),
+        )
+        .await
+        .map_err(db_err)?;
         Ok(store)
     }
 
@@ -643,7 +648,7 @@ impl PostgresMucRoomStore {
             .map_err(|_| RoomCommitError::OwnershipUnavailable)?;
         let exclusive_claim = matches!(
             intent,
-            RoomDurableMutation::Destroy
+            RoomDurableMutation::Destroy { .. }
                 | RoomDurableMutation::DestroyAndReleaseClaim
                 | RoomDurableMutation::Dormancy
                 | RoomDurableMutation::Activate
@@ -760,7 +765,7 @@ impl PostgresMucRoomStore {
             .await
             .map_err(Self::commit_error)?;
             (lifecycle, revision, RoomLifecycleState::Active)
-        } else if matches!(intent, RoomDurableMutation::Destroy) {
+        } else if matches!(intent, RoomDurableMutation::Destroy { .. }) {
             // A pre-lifecycle room row is a valid legacy state.  Destroy is
             // terminal, so it must claim that legacy incarnation and wipe it
             // while the exclusive claim lock is held; otherwise an Activate
@@ -830,7 +835,7 @@ impl PostgresMucRoomStore {
             && !matches!(
                 intent,
                 RoomDurableMutation::Activate
-                    | RoomDurableMutation::Destroy
+                    | RoomDurableMutation::Destroy { .. }
                     | RoomDurableMutation::DestroyAndReleaseClaim
                     | RoomDurableMutation::Dormancy
             )
@@ -930,7 +935,7 @@ impl PostgresMucRoomStore {
                     Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
                 }
             }
-            RoomDurableMutation::Destroy | RoomDurableMutation::DestroyAndReleaseClaim => {
+            RoomDurableMutation::Destroy { .. } | RoomDurableMutation::DestroyAndReleaseClaim => {
                 tx.execute(
                     "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ?",
                     crate::db_params![room_jid.to_string()],
@@ -964,8 +969,25 @@ impl PostgresMucRoomStore {
                 }
             }
         }
+        if let RoomDurableMutation::Destroy {
+            completion_attempt: Some(attempt),
+        } = intent
+        {
+            let armed = tx
+                .execute(
+                    "UPDATE clustering_muc_destroy_outbox \
+                     SET available_at_ms = ?, lease_token = NULL, leased_at_ms = NULL \
+                     WHERE attempt_id = ?",
+                    crate::db_params![crate::time::now_ms(), attempt.as_uuid().to_string()],
+                )
+                .await
+                .map_err(Self::commit_error)?;
+            if armed != 1 {
+                return Err(commit_database_error());
+            }
+        }
         let final_state = match intent {
-            RoomDurableMutation::Destroy | RoomDurableMutation::DestroyAndReleaseClaim => {
+            RoomDurableMutation::Destroy { .. } | RoomDurableMutation::DestroyAndReleaseClaim => {
                 RoomLifecycleState::Tombstoned
             }
             RoomDurableMutation::Dormancy => RoomLifecycleState::Dormant,
@@ -1625,6 +1647,9 @@ mod tests {
         conn.execute("DELETE FROM clustering_muc_room_lifecycles", ())
             .await
             .expect("clean room lifecycles");
+        conn.execute("DELETE FROM clustering_muc_destroy_outbox", ())
+            .await
+            .expect("clean destroy completion outbox");
         Some((store, claim_store, db, me))
     }
 
@@ -1651,6 +1676,9 @@ mod tests {
         conn.execute("DROP TABLE IF EXISTS clustering_muc_rooms", ())
             .await
             .expect("drop rooms");
+        conn.execute("DROP TABLE IF EXISTS clustering_muc_destroy_outbox", ())
+            .await
+            .expect("drop destroy completion outbox");
         Some(db)
     }
 
@@ -1856,6 +1884,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn destroy_commit_arms_its_completion_outbox_atomically() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let conn = db.guard().await.expect("guard");
+
+        let room_jid = unique_room_jid("destroy-completion-transaction");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: "waddle".to_string(),
+                    channel_id: "channel".to_string(),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("create room before destroy");
+
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        assert!(matches!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::Destroy {
+                        completion_attempt: Some(attempt),
+                    },
+                )
+                .await,
+            Err(RoomCommitError::Database(_))
+        ));
+
+        let mut room_rows = conn
+            .query(
+                "SELECT COUNT(*) FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query rolled-back room");
+        assert_eq!(
+            room_rows
+                .next()
+                .await
+                .expect("read rolled-back room")
+                .expect("rolled-back room count")
+                .get::<i64>(0)
+                .expect("decode rolled-back room count"),
+            1,
+            "a missing completion record must roll the terminal destroy back"
+        );
+        drop(room_rows);
+
+        conn.execute(
+            "INSERT INTO clustering_muc_destroy_outbox \
+             (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+             VALUES (?, '{}', ?, NULL, NULL)",
+            crate::db_params![attempt.as_uuid().to_string(), i64::MAX],
+        )
+        .await
+        .expect("persist inert completion before destroy");
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: Some(attempt),
+                },
+            )
+            .await
+            .expect("destroy commits with its completion record");
+
+        let mut outbox_rows = conn
+            .query(
+                "SELECT available_at_ms FROM clustering_muc_destroy_outbox WHERE attempt_id = ?",
+                crate::db_params![attempt.as_uuid().to_string()],
+            )
+            .await
+            .expect("query armed completion");
+        let available_at_ms: i64 = outbox_rows
+            .next()
+            .await
+            .expect("read armed completion")
+            .expect("armed completion row")
+            .get(0)
+            .expect("decode completion availability");
+        assert_ne!(
+            available_at_ms,
+            i64::MAX,
+            "the completion must become recoverable with the committed tombstone"
+        );
+    }
+
+    #[tokio::test]
     async fn non_create_mutations_require_matching_lifecycle_and_dormant_state_is_not_mutable() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, _db, me)) = clean_store().await else {
@@ -1913,7 +2045,9 @@ mod tests {
             ),
             RoomDurableMutation::Dormancy,
             RoomDurableMutation::Activate,
-            RoomDurableMutation::Destroy,
+            RoomDurableMutation::Destroy {
+                completion_attempt: None,
+            },
         ] {
             assert!(
                 matches!(
@@ -2226,7 +2360,9 @@ mod tests {
             .commit_room_mutation(
                 &legacy_destroy,
                 &legacy_destroy_fence,
-                RoomDurableMutation::Destroy,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: None,
+                },
             )
             .await
             .expect("destroy adopts and removes legacy state atomically");
@@ -2298,7 +2434,13 @@ mod tests {
         let destroy_fence = raced_fence.clone();
         let destroy = tokio::spawn(async move {
             destroy_store
-                .commit_room_mutation(&destroy_jid, &destroy_fence, RoomDurableMutation::Destroy)
+                .commit_room_mutation(
+                    &destroy_jid,
+                    &destroy_fence,
+                    RoomDurableMutation::Destroy {
+                        completion_attempt: None,
+                    },
+                )
                 .await
         });
         let (_activate, destroyed) = tokio::join!(activate, destroy);
@@ -2743,7 +2885,13 @@ mod tests {
             let store = Arc::clone(&store);
             async move {
                 store
-                    .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Destroy)
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Destroy {
+                            completion_attempt: None,
+                        },
+                    )
                     .await
                     .expect("destroy follows lock order")
             }
