@@ -211,6 +211,7 @@ impl From<DurablePersistError> for AdminApplyError {
             DurablePersistError::NotOwner => AdminApplyError::NotOwner,
             DurablePersistError::OwnershipUnavailable => AdminApplyError::OwnershipUnavailable,
             DurablePersistError::PersistFailed => AdminApplyError::PersistFailed,
+            DurablePersistError::CommitOutcomeUnknown => AdminApplyError::NotOwner,
         }
     }
 }
@@ -256,6 +257,8 @@ pub enum AffiliationMutationError {
     OwnershipUnavailable,
     #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
+    #[error("durable room mutation commit outcome could not be reconciled")]
+    CommitOutcomeUnknown,
     #[error("invitee affiliation is fenced pending invite rollback acknowledgement")]
     InviteRollbackPending,
 }
@@ -276,6 +279,7 @@ impl From<DurablePersistError> for AffiliationMutationError {
             DurablePersistError::NotOwner => Self::NotOwner,
             DurablePersistError::OwnershipUnavailable => Self::OwnershipUnavailable,
             DurablePersistError::PersistFailed => Self::PersistFailed,
+            DurablePersistError::CommitOutcomeUnknown => Self::CommitOutcomeUnknown,
         }
     }
 }
@@ -290,6 +294,8 @@ pub enum DurablePersistError {
     OwnershipUnavailable,
     #[error("durable persist failed")]
     PersistFailed,
+    #[error("durable room mutation commit outcome could not be reconciled")]
+    CommitOutcomeUnknown,
 }
 
 impl From<DurablePersistError> for RoomMutationError {
@@ -298,6 +304,7 @@ impl From<DurablePersistError> for RoomMutationError {
             DurablePersistError::NotOwner => RoomMutationError::NotOwner,
             DurablePersistError::OwnershipUnavailable => RoomMutationError::OwnershipUnavailable,
             DurablePersistError::PersistFailed => RoomMutationError::PersistFailed,
+            DurablePersistError::CommitOutcomeUnknown => RoomMutationError::NotOwner,
         }
     }
 }
@@ -854,7 +861,7 @@ impl RoomActor {
                     room = %self.room.room_jid,
                     "durable mutation commit outcome is unknown; sealing stale actor for retirement"
                 );
-                DurablePersistError::NotOwner
+                DurablePersistError::CommitOutcomeUnknown
             }
             RoomCommitError::NotOwner => {
                 self.seal_state = RoomSealState::OwnershipLost;
@@ -1509,6 +1516,7 @@ impl From<DurablePersistError> for UpdateGroupDmConfigByMemberError {
                 UpdateGroupDmConfigByMemberError::OwnershipUnavailable
             }
             DurablePersistError::PersistFailed => UpdateGroupDmConfigByMemberError::PersistFailed,
+            DurablePersistError::CommitOutcomeUnknown => UpdateGroupDmConfigByMemberError::NotOwner,
         }
     }
 }
@@ -1597,6 +1605,7 @@ impl From<DurablePersistError> for SetSubjectError {
             DurablePersistError::NotOwner => Self::NotOwner,
             DurablePersistError::OwnershipUnavailable => Self::OwnershipUnavailable,
             DurablePersistError::PersistFailed => Self::PersistFailedBeforeApply,
+            DurablePersistError::CommitOutcomeUnknown => Self::NotOwner,
         }
     }
 }

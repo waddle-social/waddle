@@ -33,7 +33,7 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use super::affiliation::DurableMembershipSource;
-use super::durable::MucDurableStore;
+use super::durable::{ChannelId, MucDurableStore, WaddleId};
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     AbortDestroyRoomAttempt, AckDestroyCompletion, CancelDestroyCompletion,
@@ -369,8 +369,8 @@ impl RoomRegistry {
         /// before the actor is exposed to any waiter.
         get_or_create_room_with_initial_affiliations(
             room_jid: BareJid,
-            waddle_id: String,
-            channel_id: String,
+            waddle_id: WaddleId,
+            channel_id: ChannelId,
             config: RoomConfig,
             initial_affiliations: Vec<super::durable::AffiliationEntry>
         ) -> RoomAcquisition,

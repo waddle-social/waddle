@@ -1167,8 +1167,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
                         .get_or_create_room_with_initial_affiliations(
                             room_jid.clone(),
-                            waddle_id,
-                            channel_id,
+                            waddle_xmpp::muc::durable::WaddleId::new(waddle_id),
+                            waddle_xmpp::muc::durable::ChannelId::new(channel_id),
                             config,
                             initial_affiliations,
                         )

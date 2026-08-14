@@ -1077,8 +1077,8 @@ async fn channel_reconciliation_invalidates_pre_policy_change_repairs() {
     actor
         .ask(ReconcileChannelBackedRoom {
             room_jid: "testroom@muc.example.com".parse().expect("room JID"),
-            waddle_id: "waddle-2".to_string(),
-            channel_id: "channel-2".to_string(),
+            waddle_id: crate::muc::durable::WaddleId::new("waddle-2".to_string()),
+            channel_id: crate::muc::durable::ChannelId::new("channel-2".to_string()),
             desired_config: RoomConfig {
                 members_only: true,
                 ..RoomConfig::default()
@@ -4675,6 +4675,36 @@ async fn destroy_seal_blocks_groupchat_broadcasts() {
 }
 
 #[tokio::test]
+async fn destroy_seal_blocks_room_dispatch_snapshots() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    let snapshot = actor.ask(GetRoomSnapshot { sender_jid: alice }).await;
+    assert!(
+        matches!(
+            snapshot,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "a sealed actor must not mint dispatch-authorizing room snapshots: {snapshot:?}"
+    );
+}
+
+#[tokio::test]
 async fn ownership_lost_seal_blocks_a_later_mutation() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store.clone()).await;
@@ -4872,6 +4902,42 @@ async fn change_affiliation_durable_commit_blocks_the_mutation_when_deposed() {
         affiliation,
         Affiliation::None,
         "a rejected durable affiliation commit must never apply in memory"
+    );
+}
+
+#[tokio::test]
+async fn change_affiliation_surfaces_ambiguous_commit_outcome_without_compensation_proof() {
+    let actor =
+        spawn_room_actor_with_store(FakeDurableStore::owned_but_commit_outcome_is_unknown()).await;
+    let jid: BareJid = "carol@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(ChangeAffiliation {
+            jid: jid.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                AffiliationMutationError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable affiliation commit must not masquerade as a failed grant: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must still retire after the ambiguous commit"
+    );
+    assert_eq!(
+        actor
+            .ask(GetAffiliation { jid })
+            .await
+            .expect("affiliation query"),
+        Affiliation::None,
+        "the actor must not apply an in-memory affiliation after an ambiguous durable commit"
     );
 }
 

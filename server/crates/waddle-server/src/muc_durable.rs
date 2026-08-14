@@ -85,6 +85,13 @@ enum CommitReconciliation {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DestroyCompletionAttemptProof {
+    Missing,
+    Inert { lifecycle: Option<RoomLifecycleId> },
+    Armed { lifecycle: Option<RoomLifecycleId> },
+}
+
 fn is_retryable_tx_error(error: &DatabaseError) -> bool {
     matches!(
         error,
@@ -648,6 +655,39 @@ impl PostgresMucRoomStore {
         }
     }
 
+    async fn load_destroy_completion_attempt_proof(
+        &self,
+        attempt: &DestroyAttemptId,
+    ) -> Result<DestroyCompletionAttemptProof, RoomCommitError> {
+        let conn = self.db.guard().await.map_err(Self::commit_error)?;
+        let mut rows = conn
+            .query(
+                "SELECT lifecycle_id, available_at_ms \
+                 FROM clustering_muc_destroy_outbox \
+                 WHERE attempt_id = ?",
+                crate::db_params![attempt.as_uuid().to_string()],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        let Some(row) = rows.next().await.map_err(Self::commit_error)? else {
+            return Ok(DestroyCompletionAttemptProof::Missing);
+        };
+        let lifecycle: Option<String> = row.get(0).map_err(Self::commit_error)?;
+        let lifecycle = lifecycle
+            .map(|value| {
+                uuid::Uuid::parse_str(&value)
+                    .map(RoomLifecycleId::from_uuid)
+                    .map_err(|_| commit_database_error())
+            })
+            .transpose()?;
+        let available_at_ms: i64 = row.get(1).map_err(Self::commit_error)?;
+        Ok(if available_at_ms == i64::MAX {
+            DestroyCompletionAttemptProof::Inert { lifecycle }
+        } else {
+            DestroyCompletionAttemptProof::Armed { lifecycle }
+        })
+    }
+
     async fn reconcile_ambiguous_commit(
         &self,
         room_jid: &BareJid,
@@ -692,21 +732,62 @@ impl PostgresMucRoomStore {
             .map_err(Self::commit_error)?
             .is_some();
         drop(room_rows);
+        let destroy_attempt_proof = match intent {
+            RoomDurableMutation::Destroy {
+                completion_attempt: Some(attempt),
+            }
+            | RoomDurableMutation::DestroyAndReleaseClaim {
+                completion_attempt: Some(attempt),
+            } => Some(self.load_destroy_completion_attempt_proof(attempt).await?),
+            _ => None,
+        };
+        let terminal_coordinates_committed = lifecycle_state.as_deref()
+            == Some(RoomLifecycleState::Tombstoned.as_db_str())
+            && !room_matches;
 
         match intent {
-            RoomDurableMutation::Destroy { .. } => Ok(
-                if lifecycle_state.as_deref() == Some(RoomLifecycleState::Tombstoned.as_db_str())
-                    && !room_matches
-                {
+            RoomDurableMutation::Destroy {
+                completion_attempt: Some(_),
+            } => Ok(match destroy_attempt_proof {
+                Some(DestroyCompletionAttemptProof::Armed {
+                    lifecycle: Some(lifecycle),
+                }) if terminal_coordinates_committed && lifecycle == coordinates.lifecycle => {
                     CommitReconciliation::Committed
-                } else {
-                    CommitReconciliation::NotCommitted
-                },
-            ),
-            RoomDurableMutation::DestroyAndReleaseClaim { .. } => {
-                if lifecycle_state.as_deref() == Some(RoomLifecycleState::Tombstoned.as_db_str())
-                    && !room_matches
+                }
+                Some(DestroyCompletionAttemptProof::Missing)
+                | Some(DestroyCompletionAttemptProof::Inert { .. })
+                | Some(DestroyCompletionAttemptProof::Armed { .. })
+                    if terminal_coordinates_committed =>
                 {
+                    CommitReconciliation::Unknown
+                }
+                _ => CommitReconciliation::NotCommitted,
+            }),
+            RoomDurableMutation::Destroy { .. } => Ok(if terminal_coordinates_committed {
+                CommitReconciliation::Committed
+            } else {
+                CommitReconciliation::NotCommitted
+            }),
+            RoomDurableMutation::DestroyAndReleaseClaim {
+                completion_attempt: Some(_),
+            } => Ok(match destroy_attempt_proof {
+                Some(DestroyCompletionAttemptProof::Armed {
+                    lifecycle: Some(lifecycle),
+                }) if terminal_coordinates_committed && lifecycle == coordinates.lifecycle => {
+                    CommitReconciliation::Committed
+                }
+                Some(DestroyCompletionAttemptProof::Armed { lifecycle: None }) => {
+                    CommitReconciliation::Committed
+                }
+                Some(DestroyCompletionAttemptProof::Missing)
+                | Some(DestroyCompletionAttemptProof::Inert { .. })
+                | Some(DestroyCompletionAttemptProof::Armed { .. }) => {
+                    CommitReconciliation::Unknown
+                }
+                None => CommitReconciliation::Unknown,
+            }),
+            RoomDurableMutation::DestroyAndReleaseClaim { .. } => {
+                if terminal_coordinates_committed {
                     return Ok(CommitReconciliation::Committed);
                 }
 
@@ -3172,6 +3253,159 @@ mod tests {
                 .expect("reconcile foreign takeover"),
             CommitReconciliation::Unknown,
             "an absent original fence has no durable proof that coordinate-less cleanup committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinate_less_destroy_reconciliation_accepts_a_matching_completion_attempt_proof() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("pending-destroy-armed-proof");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let attempt = DestroyAttemptId::generate();
+
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_destroy_outbox \
+                 (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+                 VALUES (?, '{}', ?, NULL, NULL)",
+                crate::db_params![attempt.as_uuid().to_string(), i64::MAX],
+            )
+            .await
+            .expect("persist inert completion reservation");
+
+        let coordinates = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::DestroyAndReleaseClaim {
+                    completion_attempt: Some(attempt),
+                },
+            )
+            .await
+            .expect("pending destroy release commits");
+
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &RoomDurableMutation::DestroyAndReleaseClaim {
+                        completion_attempt: Some(attempt),
+                    },
+                    coordinates,
+                )
+                .await
+                .expect("reconcile exact coordinate-less destroy attempt"),
+            CommitReconciliation::Committed,
+            "an armed matching destroy completion proves the exact coordinate-less cleanup committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_reconciliation_requires_the_exact_completion_attempt_proof() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("destroy-ambiguous-wrong-attempt");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        let created = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-ambiguous-destroy"),
+                    channel_id: channel_id("channel-ambiguous-destroy"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("seed room");
+        let attempt = DestroyAttemptId::generate();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_destroy_outbox \
+                 (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+                 VALUES (?, '{}', ?, NULL, NULL)",
+                crate::db_params![attempt.as_uuid().to_string(), i64::MAX],
+            )
+            .await
+            .expect("persist inert completion reservation");
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: Some(attempt),
+                },
+            )
+            .await
+            .expect("destroy commits");
+
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "DELETE FROM clustering_muc_destroy_outbox WHERE attempt_id = ?",
+                crate::db_params![attempt.as_uuid().to_string()],
+            )
+            .await
+            .expect("remove exact completion proof");
+        let foreign_attempt = DestroyAttemptId::generate();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_destroy_outbox \
+                 (attempt_id, payload_json, lifecycle_id, available_at_ms, lease_token, leased_at_ms) \
+                 VALUES (?, '{}', ?, ?, NULL, NULL)",
+                crate::db_params![
+                    foreign_attempt.as_uuid().to_string(),
+                    created.lifecycle.to_string(),
+                    crate::time::now_ms(),
+                ],
+            )
+            .await
+            .expect("persist foreign armed completion");
+
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &RoomDurableMutation::Destroy {
+                        completion_attempt: Some(attempt),
+                    },
+                    RoomCommittedCoordinates {
+                        lifecycle: created.lifecycle,
+                        revision: RoomRevision::from_stored(2).expect("destroy revision"),
+                    },
+                )
+                .await
+                .expect("reconcile destroy without exact attempt proof"),
+            CommitReconciliation::Unknown,
+            "tombstoned coordinates alone must not prove a different completion attempt committed"
         );
     }
 

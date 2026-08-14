@@ -190,27 +190,38 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Internal server error.",
         )]);
     }
-    if room_actor
+    match room_actor
         .ask(ChangeAffiliation {
             jid: invitee.clone(),
             affiliation: waddle_xmpp::Affiliation::Member,
         })
         .await
-        .is_err()
     {
-        let _ = delete_group_dm_archive_boundary(state, &room_jid, &invitee).await;
-        crate::admin::channels::rollback_group_dm_member_tuple(
-            &state.deps.app_state,
-            &channel_id,
-            &invitee,
-        )
-        .await;
-        return Some(vec![error_reply(
-            incoming,
-            bound_jid,
-            GroupDmInviteError::InternalServerError,
-            "Internal server error.",
-        )]);
+        Ok(()) => {}
+        Err(error) => {
+            if super::muc_invite::should_compensate_failed_affiliation_grant(&error) {
+                let _ = delete_group_dm_archive_boundary(state, &room_jid, &invitee).await;
+                crate::admin::channels::rollback_group_dm_member_tuple(
+                    &state.deps.app_state,
+                    &channel_id,
+                    &invitee,
+                )
+                .await;
+            } else {
+                warn!(
+                    room = %room_jid,
+                    invitee = %invitee,
+                    error = %error,
+                    "group-DM invite grant has unknown durable outcome; leaving state for reconciliation"
+                );
+            }
+            return Some(vec![error_reply(
+                incoming,
+                bound_jid,
+                GroupDmInviteError::InternalServerError,
+                "Internal server error.",
+            )]);
+        }
     }
     let room_name = match room_actor.ask(GetConfig).await {
         Ok(config) => config.name,

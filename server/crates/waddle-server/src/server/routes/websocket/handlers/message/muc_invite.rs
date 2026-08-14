@@ -22,7 +22,7 @@
 
 use tracing::warn;
 use waddle_xmpp::{
-    muc::room_actor::{ChangeAffiliation, GetSnapshot},
+    muc::room_actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
     pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
@@ -209,21 +209,31 @@ pub(super) async fn handle_muc_mediated_invite(
     let granted_membership = snapshot.room.config.members_only
         && previous_invitee_affiliation < waddle_xmpp::Affiliation::Member;
     if granted_membership {
-        if room_actor
+        match room_actor
             .ask(ChangeAffiliation {
                 jid: invitee.clone(),
                 affiliation: waddle_xmpp::Affiliation::Member,
             })
             .await
-            .is_err()
         {
-            return Some(vec![error_frame(
-                incoming,
-                bound_jid,
-                ErrorType::Wait,
-                DefinedCondition::InternalServerError,
-                "Internal server error.",
-            )]);
+            Ok(()) => {}
+            Err(error) => {
+                if !should_compensate_failed_affiliation_grant(&error) {
+                    warn!(
+                        room = %room_jid,
+                        invitee = %invitee,
+                        error = %error,
+                        "members-only invite grant has unknown durable outcome; leaving state for reconciliation"
+                    );
+                }
+                return Some(vec![error_frame(
+                    incoming,
+                    bound_jid,
+                    ErrorType::Wait,
+                    DefinedCondition::InternalServerError,
+                    "Internal server error.",
+                )]);
+            }
         }
         if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) {
             if let Err(error) = super::super::iq::persist_managed_channel_affiliation(
@@ -408,6 +418,15 @@ async fn rollback_membership_grant(
         .await;
 }
 
+pub(super) fn should_compensate_failed_affiliation_grant(
+    error: &kameo::error::SendError<ChangeAffiliation, AffiliationMutationError>,
+) -> bool {
+    !matches!(
+        error,
+        kameo::error::SendError::HandlerError(AffiliationMutationError::CommitOutcomeUnknown)
+    )
+}
+
 /// Deliver a room-authored `<message/>` to every connected resource of
 /// `recipient`, falling back to a durable pending-delivery row when
 /// the user is offline — mediated invites and declines must not be
@@ -531,4 +550,24 @@ fn error_frame(
         StanzaError::new(error_type, condition, "en", text),
     );
     stanza_to_string(reply).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_compensate_failed_affiliation_grant;
+    use waddle_xmpp::muc::room_actor::ChangeAffiliation;
+
+    #[test]
+    fn ambiguous_affiliation_grant_errors_do_not_trigger_compensation() {
+        assert!(!should_compensate_failed_affiliation_grant(
+            &kameo::error::SendError::<ChangeAffiliation, _>::HandlerError(
+                waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown
+            )
+        ));
+        assert!(should_compensate_failed_affiliation_grant(
+            &kameo::error::SendError::<ChangeAffiliation, _>::HandlerError(
+                waddle_xmpp::muc::room_actor::AffiliationMutationError::PersistFailed
+            )
+        ));
+    }
 }

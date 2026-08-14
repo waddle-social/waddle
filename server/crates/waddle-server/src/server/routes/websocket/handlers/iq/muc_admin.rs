@@ -144,6 +144,355 @@ fn affiliation_updates_match_room(
         .all(|(jid, affiliation)| room.get_affiliation(jid) == *affiliation)
 }
 
+fn role_updates_match_room(
+    before: &waddle_xmpp::muc::MucRoom,
+    after: &waddle_xmpp::muc::MucRoom,
+    items: &[AdminItem],
+) -> bool {
+    items.iter().all(|item| {
+        let (Some(target_nick), Some(new_role)) = (item.nick.as_ref(), item.role) else {
+            return false;
+        };
+        let Some(before_occupant) = before.get_occupant(target_nick) else {
+            return false;
+        };
+        match new_role {
+            waddle_xmpp::Role::None => after.get_occupant(target_nick).is_none(),
+            _ => after
+                .get_occupant(target_nick)
+                .is_some_and(|after_occupant| {
+                    after_occupant.real_jid == before_occupant.real_jid
+                        && after_occupant.affiliation == before_occupant.affiliation
+                        && after_occupant.role == new_role
+                }),
+        }
+    })
+}
+
+fn admin_items_match_room(
+    before: &waddle_xmpp::muc::MucRoom,
+    after: &waddle_xmpp::muc::MucRoom,
+    items: &[AdminItem],
+) -> bool {
+    if is_role_change_query(items) {
+        role_updates_match_room(before, after, items)
+    } else {
+        let affiliation_updates: Vec<(BareJid, Affiliation)> = items
+            .iter()
+            .filter_map(|item| item.jid.clone().zip(item.affiliation))
+            .collect();
+        affiliation_updates_match_room(after, &affiliation_updates)
+    }
+}
+
+fn all_room_sessions(room: &waddle_xmpp::muc::MucRoom) -> Vec<FullJid> {
+    room.occupants
+        .values()
+        .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+        .collect()
+}
+
+fn occupants_for_bare(
+    room: &waddle_xmpp::muc::MucRoom,
+    target_jid: &BareJid,
+) -> Vec<waddle_xmpp::muc::Occupant> {
+    room.occupants
+        .values()
+        .filter(|occupant| occupant.real_jid.to_bare() == *target_jid)
+        .cloned()
+        .collect()
+}
+
+fn session_voices(
+    room: &waddle_xmpp::muc::MucRoom,
+    target_jid: &BareJid,
+) -> Vec<(FullJid, waddle_xmpp::Voice)> {
+    let moderation = room.moderation();
+    occupants_for_bare(room, target_jid)
+        .into_iter()
+        .flat_map(|occupant| {
+            let voice = occupant.role.voice(moderation);
+            room.get_occupant_sessions(&occupant.nick)
+                .into_iter()
+                .map(move |session| (session, voice))
+        })
+        .collect()
+}
+
+fn changed_session_voices(
+    before: &[(FullJid, waddle_xmpp::Voice)],
+    after: &[(FullJid, waddle_xmpp::Voice)],
+) -> Vec<(FullJid, waddle_xmpp::Voice)> {
+    let before_map: std::collections::BTreeMap<FullJid, waddle_xmpp::Voice> =
+        before.iter().cloned().collect();
+    let after_map: std::collections::BTreeMap<FullJid, waddle_xmpp::Voice> =
+        after.iter().cloned().collect();
+    after_map
+        .into_iter()
+        .filter(|(session, voice)| before_map.get(session) != Some(voice))
+        .collect()
+}
+
+fn replay_affiliation_change_from_snapshot(
+    room: &mut waddle_xmpp::muc::MucRoom,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    target_jid: BareJid,
+    new_affiliation: Affiliation,
+    actor: &BareJid,
+    reason: Option<&str>,
+) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
+    let voices_before = session_voices(room, &target_jid);
+    if room
+        .set_affiliation(target_jid.clone(), new_affiliation)
+        .is_none()
+    {
+        return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+    }
+    let affected_occupants = occupants_for_bare(room, &target_jid);
+    if affected_occupants.is_empty() {
+        return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+    }
+
+    if new_affiliation == Affiliation::Outcast {
+        let mut presence_updates = Vec::new();
+        let mut removed_by_moderation = Vec::new();
+        for occupant in &affected_occupants {
+            let from_room_jid = room
+                .room_jid
+                .with_resource_str(&occupant.nick)
+                .expect("nick was previously accepted as resource");
+            let removed_sessions = room.get_occupant_sessions(&occupant.nick);
+            let occupant_bare = occupant.real_jid.to_bare();
+            presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+                let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                    bare_jid: &occupant_bare,
+                    real_jid: Some(&occupant.real_jid),
+                    secret: occupant_id_secret,
+                };
+                let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
+                let presence = waddle_xmpp::muc::build_ban_presence(
+                    &from_room_jid,
+                    &recipient,
+                    waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                    reason,
+                    Some(actor),
+                    &occupant_identity,
+                );
+                (recipient, presence)
+            }));
+            removed_by_moderation.extend(removed_sessions);
+        }
+        for occupant in affected_occupants {
+            room.remove_occupant(&occupant.nick);
+        }
+        return waddle_xmpp::muc::room_actor::AdminItemsApplied {
+            presence_updates,
+            removed_by_moderation,
+            voice_changes: Vec::new(),
+        };
+    }
+
+    if room.config.members_only && new_affiliation < Affiliation::Member {
+        let mut presence_updates = Vec::new();
+        let removed_by_moderation: Vec<FullJid> = affected_occupants
+            .iter()
+            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+            .collect();
+        for occupant in &affected_occupants {
+            let from_room_jid = room
+                .room_jid
+                .with_resource_str(&occupant.nick)
+                .expect("nick was previously accepted as resource");
+            let removed_sessions = room.get_occupant_sessions(&occupant.nick);
+            let occupant_bare = occupant.real_jid.to_bare();
+            presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+                let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                    bare_jid: &occupant_bare,
+                    real_jid: Some(&occupant.real_jid),
+                    secret: occupant_id_secret,
+                };
+                let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
+                let presence = waddle_xmpp::muc::build_membership_removal_presence(
+                    &from_room_jid,
+                    &recipient,
+                    "321",
+                    waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                    Some(actor),
+                    &occupant_identity,
+                );
+                (recipient, presence)
+            }));
+        }
+        for occupant in affected_occupants {
+            room.remove_occupant(&occupant.nick);
+        }
+        return waddle_xmpp::muc::room_actor::AdminItemsApplied {
+            presence_updates,
+            removed_by_moderation,
+            voice_changes: Vec::new(),
+        };
+    }
+
+    let mut presence_updates = Vec::new();
+    for occupant in &affected_occupants {
+        let from_room_jid = room
+            .room_jid
+            .with_resource_str(&occupant.nick)
+            .expect("nick was previously accepted as resource");
+        let affected_sessions = room.get_occupant_sessions(&occupant.nick);
+        let occupant_bare = occupant.real_jid.to_bare();
+        presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+            let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                bare_jid: &occupant_bare,
+                real_jid: Some(&occupant.real_jid),
+                secret: occupant_id_secret,
+            };
+            let is_self = affected_sessions.iter().any(|jid| jid == &recipient);
+            let presence = waddle_xmpp::muc::build_affiliation_change_presence(
+                &from_room_jid,
+                &recipient,
+                new_affiliation,
+                occupant.role,
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                &occupant_identity,
+            );
+            (recipient, presence)
+        }));
+    }
+
+    waddle_xmpp::muc::room_actor::AdminItemsApplied {
+        presence_updates,
+        removed_by_moderation: Vec::new(),
+        voice_changes: changed_session_voices(&voices_before, &session_voices(room, &target_jid)),
+    }
+}
+
+fn replay_role_change_from_snapshot(
+    room: &mut waddle_xmpp::muc::MucRoom,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    target_nick: &str,
+    new_role: waddle_xmpp::Role,
+    actor: &BareJid,
+    reason: Option<&str>,
+) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
+    let Some(target_occupant) = room.get_occupant(target_nick).cloned() else {
+        return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+    };
+    let from_room_jid = room
+        .room_jid
+        .with_resource_str(target_nick)
+        .expect("nick was previously accepted as resource");
+    let target_bare = target_occupant.real_jid.to_bare();
+    let target_sessions = room.get_occupant_sessions(target_nick);
+    if new_role == waddle_xmpp::Role::None {
+        let mut presence_updates = Vec::new();
+        for recipient in all_room_sessions(room) {
+            let target_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                bare_jid: &target_bare,
+                real_jid: Some(&target_occupant.real_jid),
+                secret: occupant_id_secret,
+            };
+            let is_self = target_sessions.iter().any(|jid| jid == &recipient);
+            let presence = waddle_xmpp::muc::build_kick_presence(
+                &from_room_jid,
+                &recipient,
+                target_occupant.affiliation,
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                reason,
+                Some(actor),
+                &target_identity,
+            );
+            presence_updates.push((recipient, presence));
+        }
+        room.remove_occupant(target_nick);
+        return waddle_xmpp::muc::room_actor::AdminItemsApplied {
+            presence_updates,
+            removed_by_moderation: target_sessions,
+            voice_changes: Vec::new(),
+        };
+    }
+
+    let before_voice = target_occupant.role.voice(room.moderation());
+    if let Some(occupant) = room.occupants.get_mut(target_nick) {
+        occupant.role = new_role;
+    }
+    let new_voice = new_role.voice(room.moderation());
+    let voice_changes: Vec<_> = if before_voice != new_voice {
+        target_sessions
+            .iter()
+            .cloned()
+            .map(|session| (session, new_voice))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut presence_updates = Vec::new();
+    for recipient in all_room_sessions(room) {
+        let target_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+            bare_jid: &target_bare,
+            real_jid: Some(&target_occupant.real_jid),
+            secret: occupant_id_secret,
+        };
+        let is_self = target_sessions.iter().any(|jid| jid == &recipient);
+        let presence = waddle_xmpp::muc::build_role_change_presence(
+            &from_room_jid,
+            &recipient,
+            target_occupant.affiliation,
+            new_role,
+            waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+            &target_identity,
+        );
+        presence_updates.push((recipient, presence));
+    }
+    waddle_xmpp::muc::room_actor::AdminItemsApplied {
+        presence_updates,
+        removed_by_moderation: Vec::new(),
+        voice_changes,
+    }
+}
+
+fn recover_committed_admin_effects(
+    room: &waddle_xmpp::muc::MucRoom,
+    items: &[AdminItem],
+    sender_jid: &FullJid,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
+    let mut replay_room = room.clone();
+    let actor = sender_jid.to_bare();
+    let mut recovered = waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+    for item in items {
+        let applied = if let (Some(target_jid), Some(new_affiliation)) =
+            (item.jid.clone(), item.affiliation)
+        {
+            replay_affiliation_change_from_snapshot(
+                &mut replay_room,
+                occupant_id_secret,
+                target_jid,
+                new_affiliation,
+                &actor,
+                item.reason.as_deref(),
+            )
+        } else if let (Some(target_nick), Some(new_role)) = (item.nick.as_deref(), item.role) {
+            replay_role_change_from_snapshot(
+                &mut replay_room,
+                occupant_id_secret,
+                target_nick,
+                new_role,
+                &actor,
+                item.reason.as_deref(),
+            )
+        } else {
+            continue;
+        };
+        recovered.presence_updates.extend(applied.presence_updates);
+        recovered
+            .removed_by_moderation
+            .extend(applied.removed_by_moderation);
+        recovered.voice_changes.extend(applied.voice_changes);
+    }
+    recovered
+}
+
 pub(super) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
@@ -334,7 +683,7 @@ pub(super) async fn handle_muc_admin_iq(
             .filter_map(|item| item.jid.clone().zip(item.affiliation))
             .collect()
     };
-    if !affiliation_updates.is_empty() {
+    let pre_apply_snapshot = if is_role_change_query(&items) || !affiliation_updates.is_empty() {
         match room_actor
             .ask(GetSnapshot)
             .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
@@ -413,6 +762,7 @@ pub(super) async fn handle_muc_admin_iq(
                         conflict_iq_error("Cannot remove the last owner from a room."),
                     )];
                 }
+                Some(snapshot)
             }
             Err(_) => {
                 return vec![build_iq_error_xml_typed(
@@ -423,7 +773,9 @@ pub(super) async fn handle_muc_admin_iq(
                 )];
             }
         }
-    }
+    } else {
+        None
+    };
     let managed_channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid);
     let durable_previous_affiliations = if affiliation_updates.is_empty() {
         Vec::new()
@@ -696,15 +1048,38 @@ pub(super) async fn handle_muc_admin_iq(
             // already have durably committed and assigned `self.room` before
             // its reply was delayed by durable-recipient rehydration. Query a
             // mailbox-ordered snapshot before restoring the optimistic
-            // managed-channel tuples, or their authorization projection could
-            // diverge from the committed room state.
-            let rollback_required = match room_actor
+            // managed-channel tuples. If the snapshot proves the affiliation
+            // batch committed, reconstruct the caller-owned outward effects so
+            // bans, membership removals, and voice changes are not dropped.
+            let mut rollback_required = false;
+            let recovered_applied = match room_actor
                 .ask(GetSnapshot)
                 .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                 .await
             {
-                Ok(snapshot) => {
-                    !affiliation_updates_match_room(&snapshot.room, &affiliation_updates)
+                Ok(snapshot)
+                    if pre_apply_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot_before_apply| {
+                            admin_items_match_room(
+                                &snapshot_before_apply.room,
+                                &snapshot.room,
+                                &query.items,
+                            )
+                        }) =>
+                {
+                    pre_apply_snapshot.as_ref().map(|snapshot_before_apply| {
+                        recover_committed_admin_effects(
+                            &snapshot_before_apply.room,
+                            &query.items,
+                            sender_jid,
+                            &state.deps.occupant_id_secret,
+                        )
+                    })
+                }
+                Ok(_) => {
+                    rollback_required = true;
+                    None
                 }
                 Err(snapshot_error) => {
                     warn!(
@@ -712,28 +1087,31 @@ pub(super) async fn handle_muc_admin_iq(
                         error = ?snapshot_error,
                         "Could not reconcile ambiguous MUC admin actor failure"
                     );
-                    // Fail closed against restoring stale permissions when
-                    // the committed actor state cannot be observed.
-                    false
+                    None
                 }
             };
-            if rollback_required {
-                rollback_admin_affiliations(
-                    state,
-                    managed_channel_id.as_deref(),
-                    &durable_previous_affiliations,
-                )
-                .await;
+            if let Some(applied) = recovered_applied {
+                warn!(room = %room_jid, error = ?error, "MUC admin actor reply was ambiguous but the committed affiliation batch was reconciled");
+                applied
+            } else {
+                if rollback_required {
+                    rollback_admin_affiliations(
+                        state,
+                        managed_channel_id.as_deref(),
+                        &durable_previous_affiliations,
+                    )
+                    .await;
+                }
+                warn!(room = %room_jid, error = ?error, rollback_required, "MUC admin actor result was ambiguous");
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    resource_constraint_iq_error(
+                        "This room's update outcome is being reconciled; please retry.",
+                    ),
+                )];
             }
-            warn!(room = %room_jid, error = ?error, rollback_required, "MUC admin actor result was ambiguous");
-            return vec![build_iq_error_xml_typed(
-                iq.id(),
-                response_from,
-                response_to,
-                resource_constraint_iq_error(
-                    "This room's update outcome is being reconciled; please retry.",
-                ),
-            )];
         }
     };
     // XEP-0045 §8.2/§9.1 stanza ordering (#1265 item 6): the kicked/
@@ -810,6 +1188,32 @@ pub(super) async fn handle_muc_admin_iq(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::muc::{Occupant, RoomConfig};
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+    fn test_secret() -> OccupantIdSecret {
+        OccupantIdSecret::new(b"occupant-id-secret-at-least-32-bytes".to_vec())
+            .expect("test secret meets minimum length")
+    }
+
+    fn seat(
+        room: &mut waddle_xmpp::muc::MucRoom,
+        nick: &str,
+        jid: &str,
+        affiliation: Affiliation,
+        role: waddle_xmpp::Role,
+    ) {
+        let real_jid: FullJid = jid.parse().expect("occupant full jid");
+        room.set_affiliation(real_jid.to_bare(), affiliation);
+        room.add_occupant(Occupant {
+            real_jid,
+            nick: nick.to_string(),
+            role,
+            affiliation,
+            is_remote: false,
+            home_server: None,
+        });
+    }
 
     #[test]
     fn affiliation_reconciliation_requires_every_update_in_the_actor_snapshot() {
@@ -834,6 +1238,378 @@ mod tests {
         assert!(
             affiliation_updates_match_room(&room, &updates),
             "a mailbox-ordered snapshot preserves a projection that the actor committed"
+        );
+    }
+
+    #[test]
+    fn committed_ban_recovery_replays_presence_and_removal_side_effects() {
+        let room_jid: BareJid = "admin-ban-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig {
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "admin",
+            "admin@example.com/web",
+            Affiliation::Owner,
+            waddle_xmpp::Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "target",
+            "target@example.com/web",
+            Affiliation::Member,
+            waddle_xmpp::Role::Participant,
+        );
+
+        let applied = recover_committed_admin_effects(
+            &room,
+            &[AdminItem {
+                jid: Some("target@example.com".parse().expect("target bare jid")),
+                nick: None,
+                affiliation: Some(Affiliation::Outcast),
+                role: None,
+                reason: Some("cleanup".to_string()),
+            }],
+            &"admin@example.com/web".parse().expect("admin full jid"),
+            &test_secret(),
+        );
+        let target_full_jid: FullJid = "target@example.com/web".parse().expect("target full jid");
+
+        assert_eq!(
+            applied.removed_by_moderation,
+            vec![target_full_jid.clone()],
+            "a reconciled ban must still evict the target session"
+        );
+        assert_eq!(
+            applied.presence_updates.len(),
+            2,
+            "the ban must still notify both the target and the moderator"
+        );
+        let self_ban = applied
+            .presence_updates
+            .iter()
+            .find(|(recipient, _)| recipient == &target_full_jid)
+            .expect("self ban presence");
+        let self_ban_xml = stanza_to_xml(&Stanza::Presence(self_ban.1.clone()));
+        assert!(
+            self_ban_xml.contains("code='301'") && self_ban_xml.contains("code='110'"),
+            "the banned occupant must still receive 301 + 110 self-presence: {self_ban_xml}"
+        );
+    }
+
+    #[test]
+    fn committed_members_only_removal_recovery_replays_status_321_presence() {
+        let room_jid: BareJid = "admin-members-only-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig {
+                members_only: true,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "admin",
+            "admin@example.com/web",
+            Affiliation::Owner,
+            waddle_xmpp::Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "member",
+            "member@example.com/web",
+            Affiliation::Member,
+            waddle_xmpp::Role::Participant,
+        );
+
+        let applied = recover_committed_admin_effects(
+            &room,
+            &[AdminItem {
+                jid: Some("member@example.com".parse().expect("member bare jid")),
+                nick: None,
+                affiliation: Some(Affiliation::None),
+                role: None,
+                reason: None,
+            }],
+            &"admin@example.com/web".parse().expect("admin full jid"),
+            &test_secret(),
+        );
+        let member_full_jid: FullJid = "member@example.com/web".parse().expect("member full jid");
+
+        assert_eq!(
+            applied.removed_by_moderation,
+            vec![member_full_jid.clone()],
+            "losing membership in a members-only room must still evict the session"
+        );
+        let self_removal = applied
+            .presence_updates
+            .iter()
+            .find(|(recipient, _)| recipient == &member_full_jid)
+            .expect("self removal presence");
+        let self_removal_xml = stanza_to_xml(&Stanza::Presence(self_removal.1.clone()));
+        assert!(
+            self_removal_xml.contains("code='321'"),
+            "members-only removal must still replay status 321: {self_removal_xml}"
+        );
+    }
+
+    #[test]
+    fn committed_role_reconciliation_requires_post_snapshot_to_match_exact_role_intent() {
+        let room_jid: BareJid = "admin-role-reconciliation@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut before = waddle_xmpp::muc::MucRoom::new(
+            room_jid.clone(),
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig::default(),
+        );
+        seat(
+            &mut before,
+            "target",
+            "target@example.com/web",
+            Affiliation::Member,
+            waddle_xmpp::Role::Participant,
+        );
+
+        let mut after = before.clone();
+        assert!(
+            !admin_items_match_room(
+                &before,
+                &after,
+                &[AdminItem {
+                    jid: None,
+                    nick: Some("target".to_string()),
+                    affiliation: None,
+                    role: Some(waddle_xmpp::Role::Moderator),
+                    reason: None,
+                }],
+            ),
+            "an unchanged snapshot must not prove a role mutation committed"
+        );
+
+        after
+            .occupants
+            .get_mut("target")
+            .expect("target occupant")
+            .role = waddle_xmpp::Role::Moderator;
+        assert!(
+            admin_items_match_room(
+                &before,
+                &after,
+                &[AdminItem {
+                    jid: None,
+                    nick: Some("target".to_string()),
+                    affiliation: None,
+                    role: Some(waddle_xmpp::Role::Moderator),
+                    reason: None,
+                }],
+            ),
+            "a mailbox-ordered snapshot must prove a committed devoice/promote role change"
+        );
+
+        let mut kicked = before.clone();
+        kicked.remove_occupant("target");
+        assert!(
+            admin_items_match_room(
+                &before,
+                &kicked,
+                &[AdminItem {
+                    jid: None,
+                    nick: Some("target".to_string()),
+                    affiliation: None,
+                    role: Some(waddle_xmpp::Role::None),
+                    reason: Some("cleanup".to_string()),
+                }],
+            ),
+            "a kicked nick disappearing from the post-apply snapshot proves the role-none commit"
+        );
+    }
+
+    #[test]
+    fn committed_kick_recovery_replays_presence_and_removal_side_effects() {
+        let room_jid: BareJid = "admin-kick-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig {
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "admin",
+            "admin@example.com/web",
+            Affiliation::Owner,
+            waddle_xmpp::Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "target",
+            "target@example.com/web",
+            Affiliation::Member,
+            waddle_xmpp::Role::Participant,
+        );
+
+        let applied = recover_committed_admin_effects(
+            &room,
+            &[AdminItem {
+                jid: None,
+                nick: Some("target".to_string()),
+                affiliation: None,
+                role: Some(waddle_xmpp::Role::None),
+                reason: Some("cleanup".to_string()),
+            }],
+            &"admin@example.com/web".parse().expect("admin full jid"),
+            &test_secret(),
+        );
+        let target_full_jid: FullJid = "target@example.com/web".parse().expect("target full jid");
+
+        assert_eq!(
+            applied.removed_by_moderation,
+            vec![target_full_jid.clone()],
+            "a reconciled kick must still evict the target session"
+        );
+        let self_removal = applied
+            .presence_updates
+            .iter()
+            .find(|(recipient, _)| recipient == &target_full_jid)
+            .expect("self removal presence");
+        let self_removal_xml = stanza_to_xml(&Stanza::Presence(self_removal.1.clone()));
+        assert!(
+            self_removal_xml.contains("code='307'") && self_removal_xml.contains("code='110'"),
+            "kick recovery must still replay the 307 self-presence: {self_removal_xml}"
+        );
+    }
+
+    #[test]
+    fn committed_affiliation_voice_change_recovery_replays_voice_convergence() {
+        let room_jid: BareJid = "admin-voice-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig {
+                moderated: true,
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "owner",
+            "owner@example.com/web",
+            Affiliation::Owner,
+            waddle_xmpp::Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "mallory",
+            "mallory@example.com/web",
+            Affiliation::Admin,
+            waddle_xmpp::Role::Moderator,
+        );
+
+        let applied = recover_committed_admin_effects(
+            &room,
+            &[AdminItem {
+                jid: Some("mallory@example.com".parse().expect("mallory bare jid")),
+                nick: None,
+                affiliation: Some(Affiliation::None),
+                role: None,
+                reason: None,
+            }],
+            &"owner@example.com/web".parse().expect("owner full jid"),
+            &test_secret(),
+        );
+
+        assert!(
+            applied.removed_by_moderation.is_empty(),
+            "an open-room demotion should not evict the occupant"
+        );
+        assert_eq!(
+            applied.voice_changes,
+            vec![(
+                "mallory@example.com/web".parse().expect("mallory full jid"),
+                waddle_xmpp::Voice::Muted,
+            )],
+            "a reconciled demotion must still re-converge the occupant's SFU voice grant"
+        );
+    }
+
+    #[test]
+    fn committed_role_voice_change_recovery_replays_voice_convergence() {
+        let room_jid: BareJid = "admin-role-voice-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig {
+                moderated: true,
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "owner",
+            "owner@example.com/web",
+            Affiliation::Owner,
+            waddle_xmpp::Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "mallory",
+            "mallory@example.com/web",
+            Affiliation::Member,
+            waddle_xmpp::Role::Participant,
+        );
+
+        let applied = recover_committed_admin_effects(
+            &room,
+            &[AdminItem {
+                jid: None,
+                nick: Some("mallory".to_string()),
+                affiliation: None,
+                role: Some(waddle_xmpp::Role::Visitor),
+                reason: None,
+            }],
+            &"owner@example.com/web".parse().expect("owner full jid"),
+            &test_secret(),
+        );
+
+        assert!(
+            applied.removed_by_moderation.is_empty(),
+            "a devoice is not a removal"
+        );
+        assert_eq!(
+            applied.voice_changes,
+            vec![(
+                "mallory@example.com/web".parse().expect("mallory full jid"),
+                waddle_xmpp::Voice::Muted,
+            )],
+            "a reconciled role demotion must still converge the occupant's SFU voice grant"
         );
     }
 }

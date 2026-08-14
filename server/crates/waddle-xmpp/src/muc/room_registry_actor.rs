@@ -1672,12 +1672,58 @@ impl RoomRegistryActor {
                 ));
             }
         };
-        if preparing.is_none() {
+        let Some(preparing_coordinates) = preparing else {
             return Ok(());
-        }
+        };
 
         let claim_fence = self.acquire_room_claim(room_jid, registry_ref).await?;
         store.establish_claim_fence(room_jid, claim_fence.clone());
+        let exact_preparing = match tokio::time::timeout(
+            ROOM_OWNERSHIP_CALL_TIMEOUT,
+            store.find_preparing_room(room_jid),
+        )
+        .await
+        {
+            Ok(Ok(preparing)) => preparing,
+            Ok(Err(error)) => {
+                warn!(room = %room_jid, %error, "could not re-check durable preparing-room recovery state after claim acquisition");
+                self.release_room_claim(room_jid, &claim_fence).await;
+                return Err(RoomRegistryError::OwnershipReconciliationPending(
+                    room_jid.clone(),
+                ));
+            }
+            Err(_) => {
+                warn!(room = %room_jid, "timed out re-checking durable preparing-room recovery state after claim acquisition");
+                self.release_room_claim(room_jid, &claim_fence).await;
+                return Err(RoomRegistryError::OwnershipReconciliationPending(
+                    room_jid.clone(),
+                ));
+            }
+        };
+        match exact_preparing {
+            Some(current) if current == preparing_coordinates => {}
+            Some(current) => {
+                info!(
+                    room = %room_jid,
+                    observed_lifecycle = %preparing_coordinates.lifecycle,
+                    current_lifecycle = %current.lifecycle,
+                    "durable preparing lifecycle changed before stranded cleanup could commit"
+                );
+                self.release_room_claim(room_jid, &claim_fence).await;
+                return Err(RoomRegistryError::OwnershipReconciliationPending(
+                    room_jid.clone(),
+                ));
+            }
+            None => {
+                info!(
+                    room = %room_jid,
+                    observed_lifecycle = %preparing_coordinates.lifecycle,
+                    "durable preparing lifecycle cleared before stranded cleanup could commit"
+                );
+                self.release_room_claim(room_jid, &claim_fence).await;
+                return Ok(());
+            }
+        }
         match store
             .commit_room_mutation(
                 room_jid,
@@ -2329,10 +2375,7 @@ impl RoomRegistryActor {
             return;
         }
 
-        if matches!(
-            retained.phase,
-            DestroyAttemptPhase::SnapshotPreseal | DestroyAttemptPhase::RegisteredPreDestroy
-        ) {
+        if matches!(retained.phase, DestroyAttemptPhase::SnapshotPreseal) {
             match entry
                 .actor_ref
                 .ask(UnsealDestroy { attempt })
@@ -2349,6 +2392,11 @@ impl RoomRegistryActor {
                 }
             }
             return;
+        }
+        if matches!(retained.phase, DestroyAttemptPhase::RegisteredPreDestroy) {
+            // Once the owner-IQ completion is registered, only a definite
+            // non-delivery may reopen the seal. A lost caller/task deadline
+            // must keep reconciling toward the terminal destroy instead.
         }
 
         let sealed = matches!(
@@ -2780,43 +2828,43 @@ impl RoomRegistryActor {
                             unreachable!("handled before preparation-origin dispatch")
                         }
                     },
-                    RoomPreparationOrigin::Reclaimed { previous_owner } => {
-                        match error {
-                            RoomPublicationError::ClaimLost => {
-                                self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
-                                self.finish_unpublished_ownership_loss(
-                                    room_jid.clone(),
-                                    claim_fence.clone(),
-                                    registry_ref.clone(),
-                                )
-                            }
-                            RoomPublicationError::LocalIdentityChanged => {
-                                self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
-                                self.transfer_exact_responsibility_to_pending_release(
-                                    room_jid.clone(),
-                                    claim_fence.clone(),
-                                );
-                                self.start_detached_room_release(
-                                    room_jid.clone(),
-                                    claim_fence,
-                                    registry_ref,
-                                );
-                                ReclaimedRoomOutcome::PendingRetry
-                            }
-                            RoomPublicationError::OwnershipUnavailable
-                            | RoomPublicationError::ReconciliationPending => {
-                                self.remember_pending_reclaimed_room(
-                                    room_jid.clone(),
-                                    claim_fence,
-                                    previous_owner,
-                                );
-                                ReclaimedRoomOutcome::PendingRetry
-                            }
-                            RoomPublicationError::PublishOutcomeUnknown => {
-                                unreachable!("only fresh demand publication can lose Publish acknowledgement")
-                            }
+                    RoomPreparationOrigin::Reclaimed { previous_owner } => match error {
+                        RoomPublicationError::ClaimLost => {
+                            self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
+                            self.finish_unpublished_ownership_loss(
+                                room_jid.clone(),
+                                claim_fence.clone(),
+                                registry_ref.clone(),
+                            )
                         }
-                    }
+                        RoomPublicationError::LocalIdentityChanged => {
+                            self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
+                            self.transfer_exact_responsibility_to_pending_release(
+                                room_jid.clone(),
+                                claim_fence.clone(),
+                            );
+                            self.start_detached_room_release(
+                                room_jid.clone(),
+                                claim_fence,
+                                registry_ref,
+                            );
+                            ReclaimedRoomOutcome::PendingRetry
+                        }
+                        RoomPublicationError::OwnershipUnavailable
+                        | RoomPublicationError::ReconciliationPending => {
+                            self.remember_pending_reclaimed_room(
+                                room_jid.clone(),
+                                claim_fence,
+                                previous_owner,
+                            );
+                            ReclaimedRoomOutcome::PendingRetry
+                        }
+                        RoomPublicationError::PublishOutcomeUnknown => {
+                            unreachable!(
+                                "only fresh demand publication can lose Publish acknowledgement"
+                            )
+                        }
+                    },
                 };
                 Self::reply_preparation_failure(&room_jid, waiters, reclaimed_outcome);
             }
@@ -4319,8 +4367,8 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
 /// its first observable incarnation.
 pub struct GetOrCreateRoomWithInitialAffiliations {
     pub room_jid: BareJid,
-    pub waddle_id: String,
-    pub channel_id: String,
+    pub waddle_id: WaddleId,
+    pub channel_id: ChannelId,
     pub config: RoomConfig,
     pub initial_affiliations: Vec<super::durable::AffiliationEntry>,
 }
@@ -4340,8 +4388,8 @@ impl kameo::message::Message<GetOrCreateRoomWithInitialAffiliations> for RoomReg
             )));
         }
         let creation_spec = Arc::new(RoomCreationSpec {
-            waddle_id: msg.waddle_id,
-            channel_id: msg.channel_id,
+            waddle_id: msg.waddle_id.into_string(),
+            channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: msg.initial_affiliations,
         });
@@ -4618,6 +4666,64 @@ impl RoomRegistryActor {
             .retain(|_, completion| completion.room_jid != *room_jid);
     }
 
+    async fn destroy_durable_room_without_local_entry(
+        &mut self,
+        room_jid: &BareJid,
+        ctx: &mut Context<Self, DestroyRoomOutcome>,
+    ) -> DestroyRoomOutcome {
+        let Some(store) = self.durable_store.clone() else {
+            return DestroyRoomOutcome::NotRegistered;
+        };
+        let claim_fence = match self.acquire_room_claim(room_jid, ctx.actor_ref()).await {
+            Ok(claim_fence) => claim_fence,
+            Err(RoomRegistryError::OwnershipUnavailable(_))
+            | Err(RoomRegistryError::OwnershipReconciliationPending(_))
+            | Err(RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
+                return DestroyRoomOutcome::DurableWipeFailed;
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "failed to acquire exact claim for explicit destroy without a local room entry"
+                );
+                return DestroyRoomOutcome::DurableWipeFailed;
+            }
+        };
+        store.establish_claim_fence(room_jid, claim_fence.clone());
+        let outcome = match store
+            .commit_room_mutation(
+                room_jid,
+                &claim_fence,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: None,
+                },
+            )
+            .await
+        {
+            Ok(_) => DestroyRoomOutcome::Destroyed,
+            Err(RoomCommitError::StateMissing) => DestroyRoomOutcome::NotRegistered,
+            Err(RoomCommitError::NotOwner) => DestroyRoomOutcome::DurableWipeFailed,
+            Err(RoomCommitError::CommitOutcomeUnknown) => {
+                warn!(
+                    room = %room_jid,
+                    "explicit destroy without a local room entry has unknown durable commit outcome"
+                );
+                DestroyRoomOutcome::DurableWipeFailed
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "explicit destroy without a local room entry failed its durable commit"
+                );
+                DestroyRoomOutcome::DurableWipeFailed
+            }
+        };
+        self.release_room_claim(room_jid, &claim_fence).await;
+        outcome
+    }
+
     async fn handle_destroy_room_message(
         &mut self,
         room_jid: BareJid,
@@ -4824,6 +4930,10 @@ impl RoomRegistryActor {
                         completed_pending_preparation = completion;
                     }
                 }
+            } else if completion_attempt.is_none() && !self.poisoned_rooms.contains(&room_jid) {
+                return self
+                    .destroy_durable_room_without_local_entry(&room_jid, ctx)
+                    .await;
             }
         }
         let removed_entry = self.rooms.remove(&room_jid);
@@ -5073,19 +5183,28 @@ impl kameo::message::Message<CancelDestroyCompletionAttempt> for RoomRegistryAct
 pub struct TakeDestroyCompletions;
 
 impl kameo::message::Message<TakeDestroyCompletions> for RoomRegistryActor {
-    type Reply = Vec<DestroyCompletion>;
+    type Reply = DelegatedReply<Vec<DestroyCompletion>>;
 
     async fn handle(
         &mut self,
         _msg: TakeDestroyCompletions,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let completions: Vec<_> = self.pending_destroy_completions.drain(..).collect();
-        for completion in &completions {
-            self.leased_destroy_completions
-                .insert(completion.attempt, completion.clone());
+        let (delegated, reply) = ctx.reply_sender();
+        if let Some(reply) = reply {
+            if Self::try_send_reply(reply, completions.clone()) {
+                for completion in &completions {
+                    self.leased_destroy_completions
+                        .insert(completion.attempt, completion.clone());
+                }
+            } else {
+                self.pending_destroy_completions.extend(completions);
+            }
+        } else {
+            self.pending_destroy_completions.extend(completions);
         }
-        completions
+        delegated
     }
 }
 
@@ -5175,7 +5294,11 @@ pub struct DestroyRoomIfInactive {
 /// [`ROOM_REGISTRY_REPLY_TIMEOUT`](super::room_registry_handle::ROOM_REGISTRY_REPLY_TIMEOUT)
 /// so the outer registry ask still gets a reply.
 const SEAL_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const SNAPSHOT_PRESEAL_RECONCILE_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+/// A snapshot pre-seal must outlive the websocket stanza wedge backstop (15s)
+/// so a slow but still-live owner-IQ destroy can persist/register its
+/// completion before the registry attempts bounded recovery. Definite
+/// non-delivery still reopens immediately through `AbortDestroyRoomAttempt`.
+const SNAPSHOT_PRESEAL_RECONCILE_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
 
 impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
     type Reply = bool;

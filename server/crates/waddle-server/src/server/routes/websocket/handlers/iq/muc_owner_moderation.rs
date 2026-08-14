@@ -470,6 +470,8 @@ async fn complete_destroy_snapshot(
 const DESTROY_COMPLETION_LEASE_TIMEOUT_MS: i64 = 30_000;
 const DESTROY_COMPLETION_LEASE_RENEWAL_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(10);
+const DESTROY_COMPLETION_DRAIN_BATCH_LIMIT: i64 = 32;
+const DESTROY_COMPLETION_RETRY_DELAY_MS: i64 = 1_000;
 
 fn destroy_completion_origin_instance_id() -> &'static str {
     static INSTANCE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -814,9 +816,11 @@ pub(crate) async fn finalize_persisted_destroy_completion(
         )
     } else {
         (
-            "UPDATE clustering_muc_destroy_outbox SET lease_token = NULL, leased_at_ms = NULL \
+            "UPDATE clustering_muc_destroy_outbox \
+             SET available_at_ms = ?, lease_token = NULL, leased_at_ms = NULL \
              WHERE attempt_id = ? AND lease_token = ?",
             crate::db_params![
+                crate::time::now_ms().saturating_add(DESTROY_COMPLETION_RETRY_DELAY_MS),
                 completion.attempt.as_uuid().to_string(),
                 completion.lease_token.clone()
             ],
@@ -841,13 +845,13 @@ pub(crate) async fn finalize_persisted_destroy_completion(
     }
 }
 
-/// Redrive persisted completion work after a process exit or an app-storage
-/// failure. Every execution, including inline owner-IQ cleanup, uses the
-/// same conditional lease helper above.
-pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) {
+async fn list_due_destroy_completion_attempts(
+    state: &WebSocketState,
+    now: i64,
+    limit: i64,
+) -> Vec<waddle_xmpp::muc::DestroyAttemptId> {
     use crate::db::{row_value, ValueExt};
 
-    let now = crate::time::now_ms();
     let rows = match state
         .deps
         .app_state
@@ -856,28 +860,38 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
         .ask(crate::db::actor::DbQuery {
             sql: "SELECT attempt_id FROM clustering_muc_destroy_outbox \
                   WHERE available_at_ms <= ? AND \
-                  (lease_token IS NULL OR leased_at_ms < ?) LIMIT 32"
+                  (lease_token IS NULL OR leased_at_ms < ?) \
+                  ORDER BY available_at_ms ASC, attempt_id ASC \
+                  LIMIT ?"
                 .to_string(),
-            params: crate::db_params![now, now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS],
+            params: crate::db_params![now, now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS, limit],
         })
         .await
     {
         Ok(rows) => rows,
         Err(error) => {
             warn!(%error, "Failed to list persisted MUC destroy completions");
-            return;
+            return Vec::new();
         }
     };
-    for row in rows {
-        let Ok(attempt_id) = row_value(&row, 0).and_then(ValueExt::as_string) else {
-            warn!("Invalid persisted MUC destroy attempt id");
-            continue;
-        };
-        let Ok(attempt_id) = uuid::Uuid::parse_str(&attempt_id) else {
-            warn!(attempt = %attempt_id, "Invalid persisted MUC destroy attempt id");
-            continue;
-        };
-        let attempt = waddle_xmpp::muc::DestroyAttemptId::from_uuid(attempt_id);
+
+    rows.into_iter()
+        .filter_map(|row| {
+            let attempt_id = row_value(&row, 0).and_then(ValueExt::as_string).ok()?;
+            let attempt_id = uuid::Uuid::parse_str(&attempt_id).ok()?;
+            Some(waddle_xmpp::muc::DestroyAttemptId::from_uuid(attempt_id))
+        })
+        .collect()
+}
+
+/// Redrive persisted completion work after a process exit or an app-storage
+/// failure. Every execution, including inline owner-IQ cleanup, uses the
+/// same conditional lease helper above.
+pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) {
+    let now = crate::time::now_ms();
+    for attempt in
+        list_due_destroy_completion_attempts(state, now, DESTROY_COMPLETION_DRAIN_BATCH_LIMIT).await
+    {
         let Some(completion) = claim_persisted_destroy_completion(state, attempt).await else {
             continue;
         };
@@ -1666,6 +1680,9 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
 #[cfg(test)]
 mod destroy_completion_tests {
     use super::*;
+    use crate::db::actor::{DbExecute, DbQueryOne};
+    use crate::db::{row_value, Value};
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
 
     fn snapshot(attempt: waddle_xmpp::muc::DestroyAttemptId) -> DestroyCompletionSnapshot {
         DestroyCompletionSnapshot {
@@ -1696,5 +1713,117 @@ mod destroy_completion_tests {
             &snapshot,
             "not-a-uuid"
         ));
+    }
+
+    fn persisted_snapshot_payload(snapshot: &DestroyCompletionSnapshot) -> String {
+        serde_json::to_string(&PersistedDestroyCompletion {
+            attempt: snapshot.attempt.as_uuid(),
+            room_jid: snapshot.room_jid.to_string(),
+            reason: snapshot.request.reason.clone(),
+            alternate_venue: snapshot
+                .request
+                .alternate_venue
+                .as_ref()
+                .map(ToString::to_string),
+            password: snapshot.request.password.clone(),
+            members: snapshot.members.iter().map(ToString::to_string).collect(),
+            recipients: snapshot
+                .recipients
+                .iter()
+                .map(|(nick, sessions)| PersistedDestroyRecipient {
+                    nick: nick.clone(),
+                    sessions: sessions.iter().map(ToString::to_string).collect(),
+                })
+                .collect(),
+        })
+        .expect("serialize persisted destroy snapshot")
+    }
+
+    async fn insert_persisted_completion(
+        state: &WebSocketState,
+        snapshot: &DestroyCompletionSnapshot,
+        available_at_ms: i64,
+    ) {
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "INSERT INTO clustering_muc_destroy_outbox \
+                      (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+                      VALUES (?, ?, ?, NULL, NULL)"
+                    .to_string(),
+                params: crate::db_params![
+                    snapshot.attempt.as_uuid().to_string(),
+                    persisted_snapshot_payload(snapshot),
+                    available_at_ms,
+                ],
+            })
+            .await
+            .expect("insert persisted destroy completion");
+    }
+
+    #[tokio::test]
+    async fn failed_destroy_completion_reschedules_behind_older_due_work() {
+        let state = create_test_websocket_state().await;
+        let failed_attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let failed_snapshot = snapshot(failed_attempt);
+        let original_due_at = crate::time::now_ms() - 10_000;
+        insert_persisted_completion(&state, &failed_snapshot, original_due_at).await;
+
+        let claimed = claim_persisted_destroy_completion(&state, failed_attempt)
+            .await
+            .expect("claim failed retry row");
+        let retry_floor = crate::time::now_ms();
+        assert!(
+            finalize_persisted_destroy_completion(&state, &claimed, false).await,
+            "failed completion release should keep the outbox row"
+        );
+
+        let retried_row = state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbQueryOne {
+                sql:
+                    "SELECT available_at_ms FROM clustering_muc_destroy_outbox WHERE attempt_id = ?"
+                        .to_string(),
+                params: crate::db_params![failed_attempt.as_uuid().to_string()],
+            })
+            .await
+            .expect("load retried row")
+            .expect("retried row remains");
+        let retried_due_at: i64 = match row_value(&retried_row, 0).expect("load retried due time") {
+            Value::Integer(value) => *value,
+            _ => panic!("retried due time must be an integer"),
+        };
+        assert!(
+            retried_due_at >= retry_floor.saturating_add(DESTROY_COMPLETION_RETRY_DELAY_MS),
+            "failed completion should requeue with nonzero backoff"
+        );
+
+        for _ in 0..DESTROY_COMPLETION_DRAIN_BATCH_LIMIT {
+            let other_attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+            insert_persisted_completion(&state, &snapshot(other_attempt), retry_floor).await;
+        }
+
+        let selected = list_due_destroy_completion_attempts(
+            &state,
+            retried_due_at,
+            DESTROY_COMPLETION_DRAIN_BATCH_LIMIT,
+        )
+        .await;
+
+        assert_eq!(
+            selected.len(),
+            DESTROY_COMPLETION_DRAIN_BATCH_LIMIT as usize,
+            "the drain should still cap each batch"
+        );
+        assert!(
+            !selected.contains(&failed_attempt),
+            "a failed completion must yield one batch window to older due work after release"
+        );
     }
 }

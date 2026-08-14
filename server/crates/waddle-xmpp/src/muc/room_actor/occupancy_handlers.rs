@@ -114,7 +114,10 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     ))
                     .await
                     .map_err(|error| match error {
-                        super::DurablePersistError::NotOwner => RoomActorError::RoomSealed,
+                        super::DurablePersistError::NotOwner
+                        | super::DurablePersistError::CommitOutcomeUnknown => {
+                            RoomActorError::RoomSealed
+                        }
                         super::DurablePersistError::OwnershipUnavailable
                         | super::DurablePersistError::PersistFailed => {
                             RoomActorError::OwnershipUnavailable
@@ -664,8 +667,8 @@ impl kameo::message::Message<PingSelfCheck> for RoomActor {
 
 pub struct ReconcileChannelBackedRoom {
     pub room_jid: BareJid,
-    pub waddle_id: String,
-    pub channel_id: String,
+    pub waddle_id: WaddleId,
+    pub channel_id: ChannelId,
     pub desired_config: RoomConfig,
 }
 
@@ -677,10 +680,16 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         msg: ReconcileChannelBackedRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let ReconcileChannelBackedRoom {
+            room_jid,
+            waddle_id,
+            channel_id,
+            desired_config,
+        } = msg;
         // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
         self.gate_mutation().await?;
-        let instant_name = msg.room_jid.node().map(|node| node.to_string());
-        let mut desired_config = msg.desired_config;
+        let instant_name = room_jid.node().map(|node| node.to_string());
+        let mut desired_config = desired_config;
         desired_config.description = self.room.config.description.clone();
         if !self.room.config.name.is_empty()
             && instant_name.as_deref() != Some(self.room.config.name.as_str())
@@ -690,12 +699,12 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         let desired_config = desired_config.normalized();
         self.commit_durable(RoomDurableMutation::Config {
             config: desired_config.clone(),
-            waddle_id: WaddleId::new(msg.waddle_id.clone()),
-            channel_id: ChannelId::new(msg.channel_id.clone()),
+            waddle_id: waddle_id.clone(),
+            channel_id: channel_id.clone(),
         })
         .await?;
-        self.room.waddle_id = msg.waddle_id;
-        self.room.channel_id = msg.channel_id;
+        self.room.waddle_id = waddle_id.into_string();
+        self.room.channel_id = channel_id.into_string();
         self.replace_config(desired_config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
