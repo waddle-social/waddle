@@ -65,6 +65,36 @@ async fn spawn_room_actor() -> ActorRef<RoomActor> {
     RoomActor::spawn(RoomActor::new(test_room(), test_secret()))
 }
 
+#[tokio::test]
+async fn restoring_live_roster_rederives_occupant_authorization() {
+    let mut stale_room = test_room();
+    stale_room.add_occupant(crate::muc::Occupant {
+        real_jid: test_full_jid("visitor"),
+        nick: "visitor".to_string(),
+        role: Role::Participant,
+        affiliation: crate::Affiliation::None,
+        is_remote: false,
+        home_server: None,
+    });
+    let mut authoritative_room = test_room();
+    authoritative_room.config.moderated = true;
+    let actor = RoomActor::spawn(RoomActor::new(authoritative_room, test_secret()));
+
+    actor
+        .ask(RestoreLiveRoster { room: stale_room })
+        .await
+        .expect("restore live roster");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+    let visitor = snapshot
+        .room
+        .occupants
+        .get("visitor")
+        .expect("restored visitor");
+    assert_eq!(visitor.affiliation, crate::Affiliation::None);
+    assert_eq!(visitor.role, Role::Visitor);
+}
+
 async fn current_admission_revision(actor: &ActorRef<RoomActor>) -> u64 {
     actor
         .ask(GetSnapshot)

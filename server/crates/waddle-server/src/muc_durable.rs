@@ -813,14 +813,13 @@ impl PostgresMucRoomStore {
         let conn = self.db.guard().await.map_err(Self::commit_error)?;
         let mut reconcile_rows = conn
             .query(
-                "SELECT lifecycles.state, lifecycles.mutation_fingerprint, CASE WHEN EXISTS(SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ? AND lifecycle_id = ? AND revision = ?) THEN 1 ELSE 0 END AS room_exists FROM clustering_muc_room_lifecycles lifecycles WHERE lifecycles.room_jid = ? AND lifecycles.lifecycle_id = ? AND lifecycles.revision = ?",
+                "SELECT lifecycles.state, lifecycles.mutation_fingerprint, lifecycles.revision, CASE WHEN EXISTS(SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ? AND lifecycle_id = ? AND revision = ?) THEN 1 ELSE 0 END AS room_exists FROM clustering_muc_room_lifecycles lifecycles WHERE lifecycles.room_jid = ? AND lifecycles.lifecycle_id = ?",
                 crate::db_params![
                     room_jid.to_string(),
                     coordinates.lifecycle.to_string(),
                     coordinates.revision.as_i64(),
                     room_jid.to_string(),
                     coordinates.lifecycle.to_string(),
-                    coordinates.revision.as_i64(),
                 ],
             )
             .await
@@ -834,12 +833,19 @@ impl PostgresMucRoomStore {
                     Some((
                         row.get::<String>(0).map_err(Self::commit_error)?,
                         row.get::<Option<String>>(1).map_err(Self::commit_error)?,
+                        row.get::<i64>(2).map_err(Self::commit_error)?,
                     )),
-                    row.get::<i64>(2).map_err(Self::commit_error)? != 0,
+                    row.get::<i64>(3).map_err(Self::commit_error)? != 0,
                 ))
             })
             .transpose()?
             .unwrap_or((None, false));
+        if lifecycle_state
+            .as_ref()
+            .is_some_and(|(_, _, revision)| *revision > coordinates.revision.as_i64())
+        {
+            return Ok(CommitReconciliation::Unknown);
+        }
         let destroy_attempt_proof = match intent {
             RoomDurableMutation::Destroy {
                 completion_attempt: Some(attempt),
@@ -849,14 +855,20 @@ impl PostgresMucRoomStore {
             } => Some(self.load_destroy_completion_attempt_proof(attempt).await?),
             _ => None,
         };
-        let exact_intent_reconciled = lifecycle_state.as_ref().and_then(|(_, fingerprint)| {
-            fingerprint
-                .as_deref()
-                .map(|fingerprint| fingerprint == expected_fingerprint)
-        });
+        let exact_intent_reconciled = lifecycle_state
+            .as_ref()
+            .and_then(|(_, fingerprint, revision)| {
+                (*revision == coordinates.revision.as_i64()).then_some(fingerprint)
+            })
+            .and_then(|fingerprint| {
+                fingerprint
+                    .as_deref()
+                    .map(|fingerprint| fingerprint == expected_fingerprint)
+            });
         let terminal_coordinates_committed =
-            lifecycle_state.as_ref().map(|(state, _)| state.as_str())
-                == Some(RoomLifecycleState::Tombstoned.as_db_str())
+            lifecycle_state.as_ref().and_then(|(state, _, revision)| {
+                (*revision == coordinates.revision.as_i64()).then_some(state.as_str())
+            }) == Some(RoomLifecycleState::Tombstoned.as_db_str())
                 && !room_matches;
 
         match intent {
@@ -1101,12 +1113,23 @@ impl PostgresMucRoomStore {
         room_jid: &BareJid,
         fence: &RoomClaimFenceContext,
         intent: &RoomDurableMutation,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<RoomCommittedCoordinates, RoomCommitError> {
-        let Some(_identity_guard) = self.node_identity.guard_if_current(&fence.owner).await else {
+        let identity_guard = if let Some(authority) = authority {
+            if !self.node_identity.owns_guard(authority) || authority.identity() != &fence.owner {
+                remove_room_claim_fence_if(&self.exact_claim_fences, room_jid, fence);
+                remove_room_claim_fence_if(&self.published_claim_fences, room_jid, fence);
+                return Err(RoomCommitError::NotOwner);
+            }
+            None
+        } else {
+            self.node_identity.guard_if_current(&fence.owner).await
+        };
+        if authority.is_none() && identity_guard.is_none() {
             remove_room_claim_fence_if(&self.exact_claim_fences, room_jid, fence);
             remove_room_claim_fence_if(&self.published_claim_fences, room_jid, fence);
             return Err(RoomCommitError::NotOwner);
-        };
+        }
         let mut tx = self
             .db
             .begin()
@@ -1819,7 +1842,36 @@ impl MucDurableStore for PostgresMucRoomStore {
         Box::pin(async move {
             for attempt in 0..ROOM_COMMIT_RETRY_ATTEMPTS {
                 match self
-                    .commit_room_mutation_once(room_jid, fence, &intent)
+                    .commit_room_mutation_once(room_jid, fence, &intent, None)
+                    .await
+                {
+                    Ok(coordinates) => return Ok(coordinates),
+                    Err(RoomCommitError::RetryExhausted)
+                        if attempt + 1 < ROOM_COMMIT_RETRY_ATTEMPTS =>
+                    {
+                        let jitter = (uuid::Uuid::now_v7().as_u128() % 4) as u64;
+                        let delay =
+                            std::time::Duration::from_millis(2 + attempt as u64 * 3 + jitter);
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(RoomCommitError::RetryExhausted)
+        })
+    }
+
+    fn commit_room_mutation_with_authority<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        intent: RoomDurableMutation,
+        authority: &'a waddle_xmpp::ownership::CurrentNodeIdentityGuard,
+    ) -> RoomCommitFuture<'a> {
+        Box::pin(async move {
+            for attempt in 0..ROOM_COMMIT_RETRY_ATTEMPTS {
+                match self
+                    .commit_room_mutation_once(room_jid, fence, &intent, Some(authority))
                     .await
                 {
                     Ok(coordinates) => return Ok(coordinates),

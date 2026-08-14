@@ -36,7 +36,7 @@ use jid::BareJid;
 
 use super::affiliation::AffiliationEntry as StoredAffiliationEntry;
 use super::{RoomConfig, SubjectState};
-use crate::ownership::{ClaimEpoch, Entity, NodeIdentity};
+use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::types::Affiliation;
 use crate::XmppError;
 
@@ -317,6 +317,20 @@ pub trait MucDurableStore: Send + Sync {
         fence: &'a RoomClaimFenceContext,
         intent: RoomDurableMutation,
     ) -> RoomCommitFuture<'a>;
+
+    /// Commit with publication authority that is already held by the caller.
+    /// Implementations that share that authority gate must reuse it rather
+    /// than acquire a nested read guard while a writer may be queued.
+    fn commit_room_mutation_with_authority<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        intent: RoomDurableMutation,
+        authority: &'a CurrentNodeIdentityGuard,
+    ) -> RoomCommitFuture<'a> {
+        let _ = authority;
+        self.commit_room_mutation(room_jid, fence, intent)
+    }
 
     /// Whether a committed destroy's server-owned completion is still
     /// present.  Demand-side creation must wait while it is, even after a

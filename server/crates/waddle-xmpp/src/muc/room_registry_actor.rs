@@ -1486,13 +1486,18 @@ impl RoomRegistryActor {
         // rotation waits for this exact publication boundary. Never carry
         // this guard in a mailbox message, where registry backlog could delay
         // self-fencing indefinitely.
-        let Some(_identity_guard) = self.node_identity.guard_if_current(&owner).await else {
+        let Some(identity_guard) = self.node_identity.guard_if_current(&owner).await else {
             return Err(RoomPublicationError::LocalIdentityChanged);
         };
         if matches!(durable_origin, DurableRoomOrigin::New) {
             if let Some(store) = &self.durable_store {
                 match store
-                    .commit_room_mutation(&room_jid, &claim_fence, RoomDurableMutation::Publish)
+                    .commit_room_mutation_with_authority(
+                        &room_jid,
+                        &claim_fence,
+                        RoomDurableMutation::Publish,
+                        &identity_guard,
+                    )
                     .await
                 {
                     Ok(_) => {}
@@ -4918,7 +4923,12 @@ impl RoomRegistryActor {
                     room = %room_jid,
                     "explicit destroy without a local room entry has unknown durable commit outcome"
                 );
-                DestroyRoomOutcome::DurableWipeFailed
+                self.begin_preparing_destroy_recovery(
+                    room_jid.clone(),
+                    claim_fence,
+                    ctx.actor_ref().clone(),
+                );
+                return DestroyRoomOutcome::DurableWipeFailed;
             }
             Err(error) => {
                 warn!(

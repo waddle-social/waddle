@@ -38,7 +38,7 @@ use crate::server::routes::websocket::muc_invites::{
 };
 use crate::server::routes::websocket::WebSocketState;
 
-async fn recover_actor_after_ambiguous_invite_grant(
+pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -53,7 +53,7 @@ async fn recover_actor_after_ambiguous_invite_grant(
             actor_ref: stale_actor.clone(),
         })
         .await;
-    state
+    let recovered = state
         .deps
         .protocol
         .room_registry
@@ -65,7 +65,14 @@ async fn recover_actor_after_ambiguous_invite_grant(
         })
         .await
         .ok()
-        .map(|acquisition| acquisition.actor_ref)
+        .map(|acquisition| acquisition.actor_ref)?;
+    recovered
+        .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
+            room: snapshot.room.clone(),
+        })
+        .await
+        .ok()?;
+    Some(recovered)
 }
 
 /// Handle a mediated invitation to a non-group-DM room. Returns `None`
@@ -271,9 +278,9 @@ pub(super) async fn handle_muc_mediated_invite(
                     {
                         if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) {
                             if let Ok(
-                                waddle_xmpp::Affiliation::Owner
+                                affiliation @ (waddle_xmpp::Affiliation::Owner
                                 | waddle_xmpp::Affiliation::Admin
-                                | waddle_xmpp::Affiliation::Member,
+                                | waddle_xmpp::Affiliation::Member),
                             ) = recovered_actor
                                 .ask(GetSnapshot)
                                 .await
@@ -284,7 +291,7 @@ pub(super) async fn handle_muc_mediated_invite(
                                         state,
                                         &channel_id,
                                         &invitee,
-                                        waddle_xmpp::Affiliation::Member,
+                                        affiliation,
                                     )
                                     .await
                                 {
@@ -327,7 +334,11 @@ pub(super) async fn handle_muc_mediated_invite(
                 state,
                 &channel_id,
                 &invitee,
-                waddle_xmpp::Affiliation::Member,
+                if granted_membership {
+                    waddle_xmpp::Affiliation::Member
+                } else {
+                    previous_invitee_affiliation
+                },
             )
             .await
             {

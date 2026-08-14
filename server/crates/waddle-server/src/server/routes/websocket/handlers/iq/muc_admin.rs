@@ -277,10 +277,10 @@ async fn reconcile_ambiguous_admin_result(
                 occupant_id_secret,
             ) {
                 AdminReconciliationOutcome::Committed(applied) => (Some(applied), false),
-                AdminReconciliationOutcome::NotCommitted
-                | AdminReconciliationOutcome::Inconclusive => (None, true),
+                AdminReconciliationOutcome::NotCommitted => (None, true),
+                AdminReconciliationOutcome::Inconclusive => (None, false),
             },
-            None => (None, true),
+            None => (None, false),
         },
         Err(snapshot_error) => {
             warn!(
@@ -1135,8 +1135,7 @@ pub(super) async fn handle_muc_admin_iq(
                     warn!(room = %room_jid, "MUC admin commit outcome was ambiguous but the committed affiliation batch was reconciled");
                     applied
                 }
-                AdminReconciliationOutcome::NotCommitted
-                | AdminReconciliationOutcome::Inconclusive => {
+                AdminReconciliationOutcome::NotCommitted => {
                     rollback_admin_affiliations(
                         state,
                         managed_channel_id.as_deref(),
@@ -1144,6 +1143,17 @@ pub(super) async fn handle_muc_admin_iq(
                     )
                     .await;
                     warn!(room = %room_jid, "MUC admin commit outcome is ambiguous and the fresh actor could not prove the batch committed; restored previous managed-channel affiliations");
+                    return vec![build_iq_error_xml_typed(
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "This room's update outcome is being reconciled; please retry.",
+                        ),
+                    )];
+                }
+                AdminReconciliationOutcome::Inconclusive => {
+                    warn!(room = %room_jid, "MUC admin commit outcome remains inconclusive; retaining optimistic managed-channel affiliations for later reconciliation");
                     return vec![build_iq_error_xml_typed(
                         iq.id(),
                         response_from,

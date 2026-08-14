@@ -104,6 +104,13 @@ async fn recover_exact_room_after_ambiguous_config_commit(
         )
         .await
         .map_err(|error| format!("config outcome recovery failed: {error:?}"))?;
+    recovered
+        .actor_ref
+        .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
+            room: recovery_snapshot.room.clone(),
+        })
+        .await
+        .map_err(|error| format!("recovered roster restore failed: {error:?}"))?;
     let recovered_snapshot = recovered
         .actor_ref
         .ask(GetSnapshot)
@@ -243,7 +250,6 @@ pub(super) async fn apply_muc_owner_config(
 
     config = config.normalized();
     let mut recovered_broadcast_room = None;
-    let mut recovered_members_only_effects = None;
     let mut recovered_voice_roster = None;
     let expected_revision = match room_actor
         .ask(UpdateConfig {
@@ -279,11 +285,13 @@ pub(super) async fn apply_muc_owner_config(
                 }
             }
             if !previous_members_only && config.members_only {
-                recovered_members_only_effects = Some(
-                    waddle_xmpp::muc::room_actor::enforce_members_only_from_room(
-                        &mut room_with_reconciled_config,
-                        &state.deps.occupant_id_secret,
-                    ),
+                // Drop evicted non-members from the reconciled broadcast
+                // roster; the applied removal effects come from the live
+                // actor's EnforceMembersOnlyAffiliations ask below, so the
+                // in-memory effects are discarded here.
+                let _ = waddle_xmpp::muc::room_actor::enforce_members_only_from_room(
+                    &mut room_with_reconciled_config,
+                    &state.deps.occupant_id_secret,
                 );
             }
             recovered_voice_roster = Some(
@@ -397,9 +405,7 @@ pub(super) async fn apply_muc_owner_config(
     }
 
     if !previous_members_only && config.members_only {
-        let applied = if let Some(applied) = recovered_members_only_effects {
-            applied
-        } else if let Some(affiliations) = managed_enforcement_affiliations {
+        let applied = if let Some(affiliations) = managed_enforcement_affiliations {
             room_actor
                 .ask(EnforceMembersOnlyAffiliations { affiliations })
                 .await

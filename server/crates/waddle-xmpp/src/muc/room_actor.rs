@@ -81,6 +81,46 @@ pub struct RoomSnapshot {
     pub admission_revision: u64,
 }
 
+/// Transfer the live, non-durable room state into an authoritative successor.
+/// Durable configuration, subject, and affiliations already installed on the
+/// successor remain authoritative; only the roster and its ephemeral state
+/// are restored.
+pub struct RestoreLiveRoster {
+    pub room: MucRoom,
+}
+
+impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RestoreLiveRoster,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let config = self.room.config.clone();
+        let subject = self.room.subject.clone();
+        let affiliations = self.room.affiliation_list.clone();
+        let mut restored = msg.room;
+        restored.config = config;
+        restored.subject = subject;
+        restored.affiliation_list = affiliations;
+        let restored_occupants = restored
+            .occupants
+            .iter()
+            .map(|(nick, occupant)| (nick.clone(), occupant.real_jid.to_bare()))
+            .collect::<Vec<_>>();
+        for (nick, jid) in restored_occupants {
+            let affiliation = restored.get_affiliation(&jid);
+            let role = restored.derive_role_from_affiliation(affiliation);
+            if let Some(occupant) = restored.occupants.get_mut(&nick) {
+                occupant.affiliation = affiliation;
+                occupant.role = role;
+            }
+        }
+        self.room = restored;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct JoinExistingOccupant {
     pub jid: FullJid,
