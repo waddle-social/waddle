@@ -2286,9 +2286,7 @@ pub(crate) async fn get_room_actor_result(
     room_jid: &BareJid,
 ) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
     let registry = RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
-    let result = registry.get_room(room_jid.clone()).await;
-    drain_destroy_completions(state, None).await;
-    result
+    registry.get_room(room_jid.clone()).await
 }
 
 /// Register owner-IQ cleanup before starting its destroy. If the registry
@@ -2325,7 +2323,6 @@ pub(crate) async fn drain_destroy_completions(
     state: &WebSocketState,
     inline_session: Option<&FullJid>,
 ) -> Vec<String> {
-    let mut durable_redrive_safe = true;
     let completions = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .take_destroy_completions()
         .await
@@ -2339,15 +2336,29 @@ pub(crate) async fn drain_destroy_completions(
     let mut frames = Vec::new();
     for completion in completions {
         let attempt = completion.attempt;
-        match super::handlers::iq::muc_owner_moderation::complete_destroy_post_commit(
+        let Some(lease) =
+            super::handlers::iq::muc_owner_moderation::claim_persisted_destroy_completion(
+                state, attempt,
+            )
+            .await
+        else {
+            if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .requeue_destroy_completion(attempt)
+                .await
+            {
+                warn!(%error, "Failed to retain MUC destroy completion without a durable lease");
+            }
+            continue;
+        };
+        match super::handlers::iq::muc_owner_moderation::complete_leased_destroy_completion(
             state,
-            completion,
+            &lease,
             inline_session,
         )
         .await
         {
             Ok(completion_frames) => {
-                let persisted_acknowledged = super::handlers::iq::muc_owner_moderation::acknowledge_persisted_destroy_completion(state, attempt).await;
+                let persisted_acknowledged = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, true).await;
                 if persisted_acknowledged {
                     if let Err(error) =
                         RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -2357,10 +2368,6 @@ pub(crate) async fn drain_destroy_completions(
                         warn!(%error, "Failed to acknowledge completed MUC destroy cleanup");
                     }
                 } else {
-                    // Do not immediately re-read the same successfully
-                    // completed durable row below. The next janitor tick
-                    // retries its lease after the acknowledgement failure.
-                    durable_redrive_safe = false;
                     if let Err(error) =
                         RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
                             .requeue_destroy_completion(attempt)
@@ -2372,6 +2379,7 @@ pub(crate) async fn drain_destroy_completions(
                 frames.extend(completion_frames);
             }
             Err(()) => {
+                let _ = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, false).await;
                 if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
                     .requeue_destroy_completion(attempt)
                     .await
@@ -2381,12 +2389,7 @@ pub(crate) async fn drain_destroy_completions(
             }
         }
     }
-    // Lease in-memory work first. Its successful acknowledgement deletes the
-    // matching durable row before the crash-recovery sweep sees it, avoiding
-    // duplicate XEP-0045 destroy presences on the ordinary request path.
-    if durable_redrive_safe {
-        super::handlers::iq::muc_owner_moderation::drain_persisted_destroy_completions(state).await;
-    }
+    super::handlers::iq::muc_owner_moderation::drain_persisted_destroy_completions(state).await;
     frames
 }
 

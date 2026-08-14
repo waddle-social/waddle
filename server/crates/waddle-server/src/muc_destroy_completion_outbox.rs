@@ -48,11 +48,17 @@ impl MucDestroyCompletionOutboxStore {
             CREATE TABLE IF NOT EXISTS clustering_muc_destroy_outbox (
                 attempt_id      TEXT PRIMARY KEY,
                 payload_json    TEXT NOT NULL,
+                lifecycle_id    TEXT,
                 available_at_ms BIGINT NOT NULL,
                 lease_token     TEXT,
                 leased_at_ms    BIGINT
             )
             "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            "ALTER TABLE clustering_muc_destroy_outbox ADD COLUMN IF NOT EXISTS lifecycle_id TEXT",
             (),
         )
         .await?;
@@ -86,9 +92,10 @@ impl MucDestroyCompletionOutboxStore {
             .execute(
                 r#"
                 CREATE TABLE IF NOT EXISTS clustering_muc_destroy_outbox (
-                    attempt_id      TEXT PRIMARY KEY,
-                    payload_json    TEXT NOT NULL,
-                    available_at_ms INTEGER NOT NULL,
+                attempt_id      TEXT PRIMARY KEY,
+                payload_json    TEXT NOT NULL,
+                lifecycle_id    TEXT,
+                available_at_ms INTEGER NOT NULL,
                     lease_token     TEXT,
                     leased_at_ms    INTEGER
                 )
@@ -96,6 +103,18 @@ impl MucDestroyCompletionOutboxStore {
                 (),
             )
             .await?;
+        if let Err(error) = connection
+            .execute(
+                "ALTER TABLE clustering_muc_destroy_outbox ADD COLUMN lifecycle_id TEXT",
+                (),
+            )
+            .await
+        {
+            let message = error.to_string().to_lowercase();
+            if !message.contains("duplicate column") && !message.contains("already exists") {
+                return Err(error);
+            }
+        }
         connection
             .execute(
                 "CREATE INDEX IF NOT EXISTS clustering_muc_destroy_outbox_due_idx \
@@ -149,6 +168,7 @@ mod tests {
         for (column, nullable) in [
             ("attempt_id", "NO"),
             ("payload_json", "NO"),
+            ("lifecycle_id", "YES"),
             ("available_at_ms", "NO"),
             ("lease_token", "YES"),
             ("leased_at_ms", "YES"),

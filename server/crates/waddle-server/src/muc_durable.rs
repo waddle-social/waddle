@@ -976,9 +976,13 @@ impl PostgresMucRoomStore {
             let armed = tx
                 .execute(
                     "UPDATE clustering_muc_destroy_outbox \
-                     SET available_at_ms = ?, lease_token = NULL, leased_at_ms = NULL \
+                     SET lifecycle_id = ?, available_at_ms = ?, lease_token = NULL, leased_at_ms = NULL \
                      WHERE attempt_id = ?",
-                    crate::db_params![crate::time::now_ms(), attempt.as_uuid().to_string()],
+                    crate::db_params![
+                        lifecycle.to_string(),
+                        crate::time::now_ms(),
+                        attempt.as_uuid().to_string()
+                    ],
                 )
                 .await
                 .map_err(Self::commit_error)?;
@@ -1899,7 +1903,7 @@ mod tests {
             .expect("claim");
         let fence = RoomClaimFenceContext::new(entity, me, epoch);
         store.record_claim_fence(&room_jid, fence.clone());
-        store
+        let created = store
             .commit_room_mutation(
                 &room_jid,
                 &fence,
@@ -1968,22 +1972,27 @@ mod tests {
 
         let mut outbox_rows = conn
             .query(
-                "SELECT available_at_ms FROM clustering_muc_destroy_outbox WHERE attempt_id = ?",
+                "SELECT available_at_ms, lifecycle_id FROM clustering_muc_destroy_outbox WHERE attempt_id = ?",
                 crate::db_params![attempt.as_uuid().to_string()],
             )
             .await
             .expect("query armed completion");
-        let available_at_ms: i64 = outbox_rows
+        let outbox_row = outbox_rows
             .next()
             .await
             .expect("read armed completion")
-            .expect("armed completion row")
-            .get(0)
-            .expect("decode completion availability");
+            .expect("armed completion row");
+        let available_at_ms: i64 = outbox_row.get(0).expect("decode completion availability");
         assert_ne!(
             available_at_ms,
             i64::MAX,
             "the completion must become recoverable with the committed tombstone"
+        );
+        let lifecycle_id: String = outbox_row.get(1).expect("decode completion lifecycle");
+        assert_eq!(
+            lifecycle_id,
+            created.lifecycle.to_string(),
+            "the completion must be fenced to the lifecycle its destroy tombstoned"
         );
     }
 

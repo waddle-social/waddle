@@ -65,9 +65,16 @@ struct PersistedDestroyRecipient {
 struct DestroyCompletionSnapshot {
     attempt: waddle_xmpp::muc::DestroyAttemptId,
     room_jid: BareJid,
+    lifecycle: Option<waddle_xmpp::muc::RoomLifecycleId>,
     request: DestroyRequest,
     members: Vec<BareJid>,
     recipients: Vec<(String, Vec<FullJid>)>,
+}
+
+pub(crate) struct LeasedDestroyCompletion {
+    pub(crate) attempt: waddle_xmpp::muc::DestroyAttemptId,
+    lease_token: String,
+    snapshot: DestroyCompletionSnapshot,
 }
 
 fn persisted_destroy_snapshot_matches_attempt(
@@ -154,6 +161,7 @@ impl TryFrom<PersistedDestroyCompletion> for DestroyCompletionSnapshot {
         Ok(Self {
             attempt: waddle_xmpp::muc::DestroyAttemptId::from_uuid(value.attempt),
             room_jid,
+            lifecycle: None,
             request: DestroyRequest {
                 reason: value.reason,
                 alternate_venue,
@@ -195,9 +203,13 @@ impl TryFrom<PersistedDestroyCompletion> for DestroyCompletionSnapshot {
 async fn wipe_destroyed_room_durable_state(
     state: &WebSocketState,
     room_jid: &BareJid,
+    lifecycle: Option<waddle_xmpp::muc::RoomLifecycleId>,
     members: &[BareJid],
-) -> Result<(), ()> {
+) -> Result<bool, ()> {
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
+    if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
+        return Ok(false);
+    }
     if let Err(error) = crate::server::routes::websocket::muc_invites::delete_room_invites(
         db_actor.clone(),
         room_jid,
@@ -210,6 +222,9 @@ async fn wipe_destroyed_room_durable_state(
             "Failed to delete outstanding invites for destroyed room"
         );
         return Err(());
+    }
+    if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
+        return Ok(false);
     }
     if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
         let channel = match crate::server::xmpp_state::get_xmpp_channel(
@@ -237,6 +252,9 @@ async fn wipe_destroyed_room_durable_state(
             // with the room or the members stay durably entitled to a
             // room that no longer exists.
             for member in members {
+                if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
+                    return Ok(false);
+                }
                 if let Err(error) = crate::admin::channels::remove_group_dm_member_tuple(
                     &state.deps.app_state,
                     &channel_id,
@@ -271,6 +289,9 @@ async fn wipe_destroyed_room_durable_state(
         // Boundaries fall only after the member tuples above: an
         // absent boundary means full-history visibility, so this
         // delete is only safe once no tuple authorizes MAM reads.
+        if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
+            return Ok(false);
+        }
         if let Err(error) = db_actor
             .ask(crate::db::actor::DbExecute {
                 sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ?".to_string(),
@@ -285,6 +306,9 @@ async fn wipe_destroyed_room_durable_state(
             );
             return Err(());
         }
+        if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
+            return Ok(false);
+        }
         if let Err(error) =
             crate::server::xmpp_channels::delete_xmpp_channel(db_actor.clone(), &channel_id).await
         {
@@ -297,42 +321,110 @@ async fn wipe_destroyed_room_durable_state(
             return Err(());
         }
     }
-    Ok(())
+    Ok(true)
+}
+
+/// A retry from an old room incarnation must never mutate a replacement that
+/// reused the same room JID. The clustered room catalog is the lifecycle
+/// back-link: the recorded lifecycle must still be the tombstone and no newer
+/// live catalog row may have appeared before any app-owned destructive step.
+async fn destroyed_lifecycle_is_current(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    lifecycle: Option<waddle_xmpp::muc::RoomLifecycleId>,
+) -> Result<bool, ()> {
+    use crate::db::{row_value, Value};
+
+    let Some(lifecycle) = lifecycle else {
+        // A clustered legacy row without a lifecycle cannot be safely replayed
+        // after a room-JID reuse. Return an error rather than a stale-result
+        // success, so the lease is released and the completion remains visible
+        // for explicit recovery instead of being acknowledged without cleanup.
+        #[cfg(feature = "clustering")]
+        if state
+            .deps
+            .app_state
+            .clustering_claims
+            .muc_durable_store
+            .is_some()
+        {
+            return Err(());
+        }
+        #[cfg(not(feature = "clustering"))]
+        return Ok(true);
+        #[cfg(feature = "clustering")]
+        return Ok(true);
+    };
+    let rows = state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbQuery {
+            sql: "SELECT EXISTS ( \
+                  SELECT 1 FROM clustering_muc_room_lifecycles destroyed \
+                  WHERE destroyed.lifecycle_id = ? AND destroyed.room_jid = ? \
+                    AND destroyed.state = 'tombstoned' \
+                    AND NOT EXISTS ( \
+                        SELECT 1 FROM clustering_muc_rooms current \
+                        WHERE current.room_jid = ? \
+                    ) \
+                )"
+                .to_string(),
+            params: crate::db_params![
+                lifecycle.to_string(),
+                room_jid.to_string(),
+                room_jid.to_string(),
+            ],
+        })
+        .await
+        .map_err(|error| {
+            warn!(room = %room_jid, lifecycle = %lifecycle, %error, "Failed to verify destroy cleanup lifecycle fence");
+        })?;
+    rows.first()
+        .and_then(|row| row_value(row, 0).ok())
+        .and_then(|value| match value {
+            Value::Integer(value) => Some(*value != 0),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            warn!(room = %room_jid, lifecycle = %lifecycle, "Invalid destroy cleanup lifecycle fence result");
+        })
 }
 
 /// Execute the server-owned half of a committed owner-IQ destroy. The
 /// registry retains this typed completion across lost replies, then hands it
 /// back to this layer once the durable destroy has committed.
-pub(crate) async fn complete_destroy_post_commit(
-    state: &WebSocketState,
-    completion: waddle_xmpp::muc::room_registry_actor::DestroyCompletion,
-    inline_session: Option<&FullJid>,
-) -> Result<Vec<String>, ()> {
-    let persisted = PersistedDestroyCompletion::try_from(&completion)?;
-    let snapshot = DestroyCompletionSnapshot::try_from(persisted)?;
-    complete_destroy_snapshot(state, snapshot, inline_session).await
-}
-
 async fn complete_destroy_snapshot(
     state: &WebSocketState,
     snapshot: DestroyCompletionSnapshot,
     inline_session: Option<&FullJid>,
 ) -> Result<Vec<String>, ()> {
     let room_jid = snapshot.room_jid;
-    if wipe_destroyed_room_durable_state(state, &room_jid, &snapshot.members)
-        .await
-        .is_err()
+    let wipe_completed = match wipe_destroyed_room_durable_state(
+        state,
+        &room_jid,
+        snapshot.lifecycle,
+        &snapshot.members,
+    )
+    .await
     {
-        warn!(
-            room = %room_jid,
-            "Destroy committed but the app-level durable wipe (catalog row / \
-             group-DM tuples / boundaries / invite ledger) did not fully \
-             stick; leftover rows are idempotently re-cleanable and cannot \
-             resurrect the room's ban/affiliation state"
-        );
-        return Err(());
+        Ok(completed) => completed,
+        Err(()) => {
+            warn!(
+                room = %room_jid,
+                "Destroy committed but the app-level durable wipe (catalog row / \
+                 group-DM tuples / boundaries / invite ledger) did not fully \
+                 stick; leftover rows are idempotently re-cleanable and cannot \
+                 resurrect the room's ban/affiliation state"
+            );
+            return Err(());
+        }
+    };
+    if !wipe_completed {
+        debug!(room = %room_jid, "Skipped stale destroy completion after room lifecycle replacement");
+        return Ok(Vec::new());
     }
-
     let mut frames = Vec::new();
     for (nick, sessions) in snapshot.recipients {
         for session_jid in sessions {
@@ -348,7 +440,11 @@ async fn complete_destroy_snapshot(
                 &nick,
                 &session_jid,
                 &snapshot.request,
-                is_inline_session,
+                // This loop sends only a destroyed occupant's own final
+                // unavailable presence to that occupant's sessions. Delivery
+                // being recovered rather than inline cannot change XEP-0045
+                // self-presence semantics (status 110).
+                true,
                 &identity,
             );
             if is_inline_session {
@@ -414,60 +510,209 @@ pub(crate) async fn arm_destroy_completion_recovery(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
 ) -> bool {
-    match state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .ask(crate::db::actor::DbExecute {
-            sql: "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? \
-                  WHERE attempt_id = ?"
-                .to_string(),
-            params: crate::db_params![crate::time::now_ms(), attempt.as_uuid().to_string()],
-        })
-        .await
-    {
-        Ok(_) => true,
-        Err(error) => {
-            warn!(attempt = %attempt.as_uuid(), %error, "Failed to arm persisted MUC destroy cleanup");
-            false
+    for retry in 0..3 {
+        match state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(crate::db::actor::DbExecute {
+                sql: "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? \
+                      WHERE attempt_id = ?"
+                    .to_string(),
+                params: crate::db_params![crate::time::now_ms(), attempt.as_uuid().to_string()],
+            })
+            .await
+        {
+            Ok(1) => return true,
+            Ok(count) => {
+                warn!(attempt = %attempt.as_uuid(), %count, retry, "MUC destroy recovery arm did not update its outbox row")
+            }
+            Err(error) => {
+                warn!(attempt = %attempt.as_uuid(), %error, retry, "Failed to arm persisted MUC destroy cleanup")
+            }
         }
     }
-}
-
-pub(crate) async fn acknowledge_persisted_destroy_completion(
-    state: &WebSocketState,
-    attempt: waddle_xmpp::muc::DestroyAttemptId,
-) -> bool {
-    match state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .ask(crate::db::actor::DbExecute {
-            sql: "DELETE FROM clustering_muc_destroy_outbox WHERE attempt_id = ?".to_string(),
-            params: crate::db_params![attempt.as_uuid().to_string()],
-        })
-        .await
-    {
-        Ok(_) => true,
-        Err(error) => {
-            warn!(attempt = %attempt.as_uuid(), %error, "Failed to acknowledge persisted MUC destroy completion");
-            false
-        }
-    }
+    false
 }
 
 pub(crate) async fn discard_persisted_destroy_completion(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
 ) {
-    let _ = acknowledge_persisted_destroy_completion(state, attempt).await;
+    // This is only called before a destroy commits, while the row is inert
+    // and cannot be leased by the janitor.
+    if let Err(error) = state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "DELETE FROM clustering_muc_destroy_outbox WHERE attempt_id = ? AND available_at_ms = ?"
+                .to_string(),
+            params: crate::db_params![attempt.as_uuid().to_string(), i64::MAX],
+        })
+        .await
+    {
+        warn!(attempt = %attempt.as_uuid(), %error, "Failed to discard inert persisted MUC destroy completion");
+    }
+}
+
+/// Claim an armed completion using the same conditional database lease for
+/// inline and janitor execution. The lease token is required for both
+/// acknowledgement and retry release, so one path cannot delete another
+/// executor's live lease by attempt ID alone.
+pub(crate) async fn claim_persisted_destroy_completion(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+) -> Option<LeasedDestroyCompletion> {
+    use crate::db::{row_value, ValueExt};
+
+    let now = crate::time::now_ms();
+    let lease_token = uuid::Uuid::new_v4().to_string();
+    let claimed = match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "UPDATE clustering_muc_destroy_outbox \
+                  SET lease_token = ?, leased_at_ms = ? \
+                  WHERE attempt_id = ? AND available_at_ms <= ? AND \
+                  (lease_token IS NULL OR leased_at_ms < ?)"
+                .to_string(),
+            params: crate::db_params![
+                lease_token.clone(),
+                now,
+                attempt.as_uuid().to_string(),
+                now,
+                now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS,
+            ],
+        })
+        .await
+    {
+        Ok(count) => count == 1,
+        Err(error) => {
+            warn!(attempt = %attempt.as_uuid(), %error, "Failed to claim persisted MUC destroy completion");
+            false
+        }
+    };
+    if !claimed {
+        return None;
+    }
+    let rows = match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbQuery {
+            sql: "SELECT payload_json, lifecycle_id FROM clustering_muc_destroy_outbox \
+                  WHERE attempt_id = ? AND lease_token = ?"
+                .to_string(),
+            params: crate::db_params![attempt.as_uuid().to_string(), lease_token.clone()],
+        })
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(attempt = %attempt.as_uuid(), %error, "Failed to load claimed MUC destroy completion");
+            return None;
+        }
+    };
+    let Some(row) = rows.first() else {
+        warn!(attempt = %attempt.as_uuid(), "Claimed MUC destroy completion disappeared before load");
+        return None;
+    };
+    let Ok(payload) = row_value(row, 0).and_then(ValueExt::as_string) else {
+        warn!(attempt = %attempt.as_uuid(), "Invalid persisted MUC destroy payload");
+        return None;
+    };
+    let Ok(lifecycle_id) = row_value(row, 1).and_then(ValueExt::as_optional_string) else {
+        warn!(attempt = %attempt.as_uuid(), "Invalid persisted MUC destroy lifecycle id");
+        return None;
+    };
+    let lifecycle = match lifecycle_id {
+        Some(value) => match uuid::Uuid::parse_str(&value) {
+            Ok(value) => Some(waddle_xmpp::muc::RoomLifecycleId::from_uuid(value)),
+            Err(_) => {
+                warn!(attempt = %attempt.as_uuid(), lifecycle = %value, "Invalid persisted MUC destroy lifecycle id");
+                return None;
+            }
+        },
+        None => None,
+    };
+    let Ok(mut snapshot) = serde_json::from_str::<PersistedDestroyCompletion>(&payload)
+        .map_err(|_| ())
+        .and_then(DestroyCompletionSnapshot::try_from)
+    else {
+        warn!(attempt = %attempt.as_uuid(), "Invalid persisted MUC destroy completion payload");
+        return None;
+    };
+    if !persisted_destroy_snapshot_matches_attempt(&snapshot, &attempt.as_uuid().to_string()) {
+        warn!(attempt = %attempt.as_uuid(), "Persisted MUC destroy completion payload does not match its attempt id");
+        return None;
+    }
+    snapshot.lifecycle = lifecycle;
+    Some(LeasedDestroyCompletion {
+        attempt,
+        lease_token,
+        snapshot,
+    })
+}
+
+pub(crate) async fn complete_leased_destroy_completion(
+    state: &WebSocketState,
+    completion: &LeasedDestroyCompletion,
+    inline_session: Option<&FullJid>,
+) -> Result<Vec<String>, ()> {
+    complete_destroy_snapshot(state, completion.snapshot.clone(), inline_session).await
+}
+
+pub(crate) async fn finalize_persisted_destroy_completion(
+    state: &WebSocketState,
+    completion: &LeasedDestroyCompletion,
+    completed: bool,
+) -> bool {
+    let (sql, params) = if completed {
+        (
+            "DELETE FROM clustering_muc_destroy_outbox WHERE attempt_id = ? AND lease_token = ?",
+            crate::db_params![
+                completion.attempt.as_uuid().to_string(),
+                completion.lease_token.clone()
+            ],
+        )
+    } else {
+        (
+            "UPDATE clustering_muc_destroy_outbox SET lease_token = NULL, leased_at_ms = NULL \
+             WHERE attempt_id = ? AND lease_token = ?",
+            crate::db_params![
+                completion.attempt.as_uuid().to_string(),
+                completion.lease_token.clone()
+            ],
+        )
+    };
+    match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: sql.to_string(),
+            params,
+        })
+        .await
+    {
+        Ok(count) => count == 1,
+        Err(error) => {
+            warn!(attempt = %completion.attempt.as_uuid(), %error, "Failed to finalize persisted MUC destroy completion");
+            false
+        }
+    }
 }
 
 /// Redrive persisted completion work after a process exit or an app-storage
-/// failure. The atomic lease prevents two cluster nodes from emitting the
-/// same XEP-0045 presence while they race the same idempotent cleanup.
+/// failure. Every execution, including inline owner-IQ cleanup, uses the
+/// same conditional lease helper above.
 pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) {
     use crate::db::{row_value, ValueExt};
 
@@ -478,11 +723,12 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
         .db_pool
         .global_actor()
         .ask(crate::db::actor::DbQuery {
-            sql: "SELECT attempt_id, payload_json FROM clustering_muc_destroy_outbox \
-                  WHERE available_at_ms <= ? AND \
+            sql: "SELECT attempt_id FROM clustering_muc_destroy_outbox \
+                  WHERE (available_at_ms <= ? OR \
+                         (available_at_ms = ? AND lifecycle_id IS NULL)) AND \
                   (lease_token IS NULL OR leased_at_ms < ?) LIMIT 32"
                 .to_string(),
-            params: crate::db_params![now, now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS],
+            params: crate::db_params![now, i64::MAX, now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS],
         })
         .await
     {
@@ -497,81 +743,25 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
             warn!("Invalid persisted MUC destroy attempt id");
             continue;
         };
-        let Ok(payload) = row_value(&row, 1).and_then(ValueExt::as_string) else {
-            warn!(attempt = %attempt_id, "Invalid persisted MUC destroy payload");
+        let Ok(attempt_id) = uuid::Uuid::parse_str(&attempt_id) else {
+            warn!(attempt = %attempt_id, "Invalid persisted MUC destroy attempt id");
             continue;
         };
-        let lease = uuid::Uuid::new_v4().to_string();
-        let claimed = match state
-            .deps
-            .app_state
-            .db_pool
-            .global_actor()
-            .ask(crate::db::actor::DbExecute {
-                sql: "UPDATE clustering_muc_destroy_outbox \
-                      SET lease_token = ?, leased_at_ms = ? \
-                      WHERE attempt_id = ? AND available_at_ms <= ? AND \
-                      (lease_token IS NULL OR leased_at_ms < ?)"
-                    .to_string(),
-                params: crate::db_params![
-                    lease.clone(),
-                    now,
-                    attempt_id.clone(),
-                    now,
-                    now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS,
-                ],
-            })
-            .await
-        {
-            Ok(count) => count == 1,
-            Err(error) => {
-                warn!(attempt = %attempt_id, %error, "Failed to claim persisted MUC destroy completion");
-                false
-            }
-        };
-        if !claimed {
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::from_uuid(attempt_id);
+        // A non-clustered destroy has no room-store transaction to arm its
+        // inert row. If the owner IQ exhausted its immediate retries, the
+        // janitor keeps retrying this exact transition until recovery is
+        // durably eligible instead of leaving the committed destroy wedged.
+        if !arm_destroy_completion_recovery(state, attempt).await {
             continue;
         }
-        let result = serde_json::from_str::<PersistedDestroyCompletion>(&payload)
-            .map_err(|_| ())
-            .and_then(DestroyCompletionSnapshot::try_from);
-        let completed = match result {
-            Ok(snapshot) if persisted_destroy_snapshot_matches_attempt(&snapshot, &attempt_id) => {
-                complete_destroy_snapshot(state, snapshot, None)
-                    .await
-                    .is_ok()
-            }
-            Ok(_) => {
-                warn!(attempt = %attempt_id, "Persisted MUC destroy completion payload does not match its attempt id");
-                false
-            }
-            Err(()) => false,
+        let Some(completion) = claim_persisted_destroy_completion(state, attempt).await else {
+            continue;
         };
-        let (sql, params) = if completed {
-            (
-                "DELETE FROM clustering_muc_destroy_outbox WHERE attempt_id = ? AND lease_token = ?",
-                crate::db_params![attempt_id.clone(), lease],
-            )
-        } else {
-            (
-                "UPDATE clustering_muc_destroy_outbox SET lease_token = NULL, leased_at_ms = NULL \
-                 WHERE attempt_id = ? AND lease_token = ?",
-                crate::db_params![attempt_id.clone(), lease],
-            )
-        };
-        if let Err(error) = state
-            .deps
-            .app_state
-            .db_pool
-            .global_actor()
-            .ask(crate::db::actor::DbExecute {
-                sql: sql.to_string(),
-                params,
-            })
+        let completed = complete_leased_destroy_completion(state, &completion, None)
             .await
-        {
-            warn!(attempt = %attempt_id, %error, "Failed to finalize persisted MUC destroy completion");
-        }
+            .is_ok();
+        let _ = finalize_persisted_destroy_completion(state, &completion, completed).await;
     }
 }
 
@@ -745,7 +935,23 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     // already armed this attempt's outbox row. Retain the
                     // non-clustered fast path, whose registry has no durable
                     // room-store transaction to extend.
-                    arm_destroy_completion_recovery(state, attempt).await;
+                    #[cfg(feature = "clustering")]
+                    let clustered = state
+                        .deps
+                        .app_state
+                        .clustering_claims
+                        .muc_durable_store
+                        .is_some();
+                    #[cfg(not(feature = "clustering"))]
+                    let clustered = false;
+                    if !clustered && !arm_destroy_completion_recovery(state, attempt).await {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            internal_server_error_iq_error("Internal server error."),
+                        )];
+                    }
                 }
                 // The clustering durable wipe failed and the registry
                 // atomically restored the room — nothing was torn down, so
@@ -1229,6 +1435,7 @@ mod destroy_completion_tests {
         DestroyCompletionSnapshot {
             attempt,
             room_jid: "destroy@muc.example.com".parse().expect("valid bare JID"),
+            lifecycle: None,
             request: DestroyRequest::default(),
             members: Vec::new(),
             recipients: Vec::new(),

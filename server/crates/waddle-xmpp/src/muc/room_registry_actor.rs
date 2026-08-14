@@ -383,6 +383,14 @@ pub enum RoomRegistryError {
 }
 
 impl RoomRegistryActor {
+    fn destroy_completion_blocks_recreation(&self, room_jid: &BareJid) -> bool {
+        self.destroy_completions_waiting
+            .values()
+            .chain(self.pending_destroy_completions.iter())
+            .chain(self.leased_destroy_completions.values())
+            .any(|completion| completion.room_jid == *room_jid)
+    }
+
     /// Create a new registry for the given MUC service domain.
     pub fn new(muc_domain: String, occupant_id_secret: OccupantIdSecret) -> Self {
         info!(domain = %muc_domain, "Creating RoomRegistryActor");
@@ -3665,6 +3673,11 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let room_jid = msg.room_jid;
+        if self.destroy_completion_blocks_recreation(&room_jid) {
+            return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                room_jid,
+            )));
+        }
         let creation_spec = Arc::new(RoomCreationSpec {
             waddle_id: msg.waddle_id,
             channel_id: msg.channel_id,
@@ -3721,6 +3734,11 @@ impl kameo::message::Message<GetOrCreateRoomWithInitialAffiliations> for RoomReg
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let room_jid = msg.room_jid;
+        if self.destroy_completion_blocks_recreation(&room_jid) {
+            return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                room_jid,
+            )));
+        }
         let creation_spec = Arc::new(RoomCreationSpec {
             waddle_id: msg.waddle_id,
             channel_id: msg.channel_id,
