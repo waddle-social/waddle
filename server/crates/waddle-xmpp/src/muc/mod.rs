@@ -32,11 +32,14 @@ pub use admin::{
     KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
 };
 pub use durable::{
-    AffiliationEntry as DurableAffiliationEntry, DestroyAttemptId, DurableRoomState,
-    EphemeralProjectionAuthorization, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
-    RoomCommitDatabaseError, RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates,
-    RoomDurableMutation, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState,
-    RoomMutationCommit, RoomRevision,
+    AdminPresenceKind, AffiliationEntry as DurableAffiliationEntry, DestroyAttemptId,
+    DestroyPassword, DestroyReason, DestroyRecipient, DurableRoomState,
+    EphemeralProjectionAuthorization, MucDurableFuture, MucDurableStore, MucOccupantNick,
+    OccupantPresenceUpdate, OccupantVoiceChange, RoomClaimFenceContext, RoomCommitDatabaseError,
+    RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation, RoomEffect,
+    RoomEffectIntent, RoomEffectKind, RoomEffectOrdinal, RoomEffectReservation,
+    RoomEffectStagingClass, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit,
+    RoomMutationEffects, RoomRevision,
 };
 pub use messages::{
     build_config_change_message, config_change_status_codes, create_broadcast_message,

@@ -312,6 +312,12 @@ impl PostgresMucRoomStore {
         )
         .await
         .map_err(db_err)?;
+        crate::room_effect_outbox::RoomEffectOutboxStore::new(store.db.clone())
+            .await
+            .map_err(|error| {
+                crate::telemetry::mark_span_error("MUC durable storage operation failed");
+                XmppError::internal(format!("room effect outbox bootstrap error: {error}"))
+            })?;
         Ok(store)
     }
 

@@ -40,8 +40,14 @@ use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentit
 use crate::types::Affiliation;
 use crate::XmppError;
 
+mod effects;
 pub mod lifecycle;
 
+pub use effects::{
+    AdminPresenceKind, DestroyPassword, DestroyReason, DestroyRecipient, MucOccupantNick,
+    OccupantPresenceUpdate, OccupantVoiceChange, RoomEffect, RoomEffectKind, RoomEffectReservation,
+    RoomEffectStagingClass, RoomMutationEffects,
+};
 pub use lifecycle::{
     DestroyAttemptId, EphemeralProjectionAuthorization, RoomCommittedCoordinates, RoomEffectIntent,
     RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit, RoomRevision,
