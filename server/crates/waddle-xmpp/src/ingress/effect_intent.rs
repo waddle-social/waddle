@@ -6,7 +6,7 @@ use jid::{BareJid, FullJid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
-use waddle_xmpp_core::xep0359::StanzaId;
+use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::{
     message::Lang,
     stanza_error::{DefinedCondition, ErrorType as XmppStanzaErrorType, StanzaError},
@@ -14,7 +14,7 @@ use xmpp_parsers::{
 
 use crate::{
     error::StanzaErrorCondition, ingress::EntityGeneration, muc::SubjectState,
-    pending_delivery::SmSessionId,
+    pending_delivery::SmSessionId, protocol::CarbonKind,
 };
 
 /// Largest accepted version-one storage payload, matching the database check.
@@ -128,6 +128,197 @@ impl RecipientSmAppendIdentity {
 impl std::fmt::Display for RecipientSmAppendIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+/// Typed identity distinguishing multiple routing/archive effects for the same
+/// bare/full JID within one ingress transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectMessageIdentity {
+    StanzaId(StanzaId),
+    OriginId(OriginId),
+    CaptureOrdinal(u64),
+}
+
+impl EffectMessageIdentity {
+    pub fn stanza(stanza_id: StanzaId) -> Self {
+        Self::StanzaId(stanza_id)
+    }
+
+    pub fn origin(origin_id: OriginId) -> Self {
+        Self::OriginId(origin_id)
+    }
+
+    pub fn capture_ordinal(ordinal: u64) -> Self {
+        Self::CaptureOrdinal(ordinal)
+    }
+
+    pub fn storage_identity(&self) -> String {
+        match self {
+            Self::StanzaId(stanza_id) => {
+                format!("stanza:{}|{}", stanza_id.by, stanza_id.id)
+            }
+            Self::OriginId(origin_id) => format!("origin:{}", origin_id.as_str()),
+            Self::CaptureOrdinal(ordinal) => format!("capture:{ordinal:020}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinAction {
+    Pin,
+    Unpin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationCandidateOutcome {
+    Inserted,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationActivityMutation {
+    ChatState {
+        conversation: BareJid,
+    },
+    ChatStateGone {
+        conversation: BareJid,
+    },
+    ReadMarker {
+        conversation: BareJid,
+    },
+    OutboundMessage {
+        conversation: BareJid,
+    },
+    OfflineDelivery {
+        conversation: BareJid,
+        archive_stanza_id: StanzaId,
+    },
+    NotificationCandidate {
+        conversation: BareJid,
+        archive_stanza_id: StanzaId,
+        outcome: NotificationCandidateOutcome,
+    },
+}
+
+impl NotificationActivityMutation {
+    pub fn storage_identity(&self) -> String {
+        match self {
+            Self::ChatState { conversation } => format!("chat_state|{}", conversation),
+            Self::ChatStateGone { conversation } => {
+                format!("chat_state_gone|{}", conversation)
+            }
+            Self::ReadMarker { conversation } => format!("read_marker|{}", conversation),
+            Self::OutboundMessage { conversation } => {
+                format!("outbound_message|{}", conversation)
+            }
+            Self::OfflineDelivery {
+                conversation,
+                archive_stanza_id,
+            } => format!(
+                "offline_delivery|{}|{}|{}",
+                conversation, archive_stanza_id.by, archive_stanza_id.id
+            ),
+            Self::NotificationCandidate {
+                conversation,
+                archive_stanza_id,
+                outcome,
+            } => format!(
+                "notification_candidate|{}|{}|{}|{}",
+                conversation,
+                archive_stanza_id.by,
+                archive_stanza_id.id,
+                match outcome {
+                    NotificationCandidateOutcome::Inserted => "inserted",
+                    NotificationCandidateOutcome::Duplicate => "duplicate",
+                }
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboxProjectionMutation {
+    Direct {
+        peer: BareJid,
+        increment_unread: bool,
+    },
+    GroupchatChannel {
+        room: BareJid,
+        increment_unread: bool,
+    },
+    GroupchatThread {
+        room: BareJid,
+        thread_id: String,
+    },
+    GroupchatChannelAndThread {
+        room: BareJid,
+        thread_id: String,
+        increment_unread: bool,
+    },
+}
+
+impl InboxProjectionMutation {
+    pub fn storage_identity(&self) -> String {
+        match self {
+            Self::Direct {
+                peer,
+                increment_unread,
+            } => format!("direct|{}|{}", peer, increment_unread),
+            Self::GroupchatChannel {
+                room,
+                increment_unread,
+            } => format!("groupchat_channel|{}|{}", room, increment_unread),
+            Self::GroupchatThread { room, thread_id } => {
+                format!("groupchat_thread|{}|{}", room, thread_id)
+            }
+            Self::GroupchatChannelAndThread {
+                room,
+                thread_id,
+                increment_unread,
+            } => format!(
+                "groupchat_channel_and_thread|{}|{}|{}",
+                room, thread_id, increment_unread
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmPinMutationAction {
+    Pin,
+    Unpin,
+    RetractionCascadeUnpin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetractionTombstoneMutation {
+    pub archive: BareJid,
+    pub target_stanza_id: StanzaId,
+    pub retraction_stanza_id: StanzaId,
+}
+
+impl RetractionTombstoneMutation {
+    pub fn storage_identity(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.archive,
+            stanza_storage_identity(&self.target_stanza_id),
+            stanza_storage_identity(&self.retraction_stanza_id)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDmMembershipGrant {
+    pub room: BareJid,
+    pub invitee: BareJid,
+    pub inviter: BareJid,
+}
+
+impl GroupDmMembershipGrant {
+    pub fn storage_identity(&self) -> String {
+        format!("{}|{}|{}", self.room, self.invitee, self.inviter)
     }
 }
 
@@ -327,6 +518,37 @@ impl FrozenStanzaError {
             (condition, _) => condition.to_xmpp(),
         }
     }
+
+    fn semantic_identity(&self) -> String {
+        let texts = self
+            .texts
+            .iter()
+            .map(|(lang, text)| format!("{}={}", lang, text))
+            .collect::<Vec<_>>()
+            .join("|");
+        let payload = match self.condition_payload.as_ref() {
+            Some(FrozenStanzaErrorConditionPayload::Gone { new_address }) => format!(
+                "gone:{}",
+                new_address
+                    .as_ref()
+                    .map_or("", FrozenStanzaErrorAddress::as_str)
+            ),
+            Some(FrozenStanzaErrorConditionPayload::Redirect { new_address }) => format!(
+                "redirect:{}",
+                new_address
+                    .as_ref()
+                    .map_or("", FrozenStanzaErrorAddress::as_str)
+            ),
+            None => "none".to_string(),
+        };
+        format!(
+            "{}|{}|{}|{}",
+            frozen_error_type_tag(self.error_type),
+            condition_tag(self.condition),
+            texts,
+            payload
+        )
+    }
 }
 
 impl From<StanzaErrorCondition> for FrozenStanzaError {
@@ -365,6 +587,24 @@ fn default_error_type(condition: StanzaErrorCondition) -> FrozenStanzaErrorType 
     }
 }
 
+fn stanza_storage_identity(stanza_id: &StanzaId) -> String {
+    format!("{}|{}", stanza_id.by, stanza_id.id)
+}
+
+fn carbon_kind_storage_identity(kind: CarbonKind) -> &'static str {
+    match kind {
+        CarbonKind::Sent => "sent",
+        CarbonKind::Received => "received",
+    }
+}
+
+fn pin_action_storage_identity(action: PinAction) -> &'static str {
+    match action {
+        PinAction::Pin => "pin",
+        PinAction::Unpin => "unpin",
+    }
+}
+
 /// A frozen effect decision; it carries no executable callback or mutable
 /// lookup and can therefore be durably replayed without re-deriving policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +617,7 @@ pub enum IngressEffectIntent {
     RouteDirect {
         recipient: BareJid,
         fanout: Vec<FullJid>,
+        route_identity: EffectMessageIdentity,
     },
     RouteMucGroupchat {
         room: BareJid,
@@ -399,13 +640,29 @@ pub enum IngressEffectIntent {
     Carbons {
         carbon_recipients: Vec<FullJid>,
         excluded_source: FullJid,
+        kind: CarbonKind,
     },
     InboxProject {
         owner: BareJid,
-        increment_unread: bool,
+        mutation: InboxProjectionMutation,
     },
     NotificationActivityPreview {
         owner: BareJid,
+        mutation: NotificationActivityMutation,
+    },
+    RetractionTombstone {
+        mutation: RetractionTombstoneMutation,
+    },
+    DmPinMutation {
+        pair: (BareJid, BareJid),
+        target_stanza_id: StanzaId,
+        action: DmPinMutationAction,
+    },
+    GroupDmMembershipGrant {
+        grant: GroupDmMembershipGrant,
+    },
+    GroupDmInviteLedger {
+        grant: GroupDmMembershipGrant,
     },
     RoomSubjectMutation {
         room: BareJid,
@@ -418,6 +675,7 @@ pub enum IngressEffectIntent {
     Pin {
         room: BareJid,
         stanza_id: StanzaId,
+        action: PinAction,
     },
     Extension {
         recipient: BareJid,
@@ -432,27 +690,35 @@ pub enum IngressEffectIntent {
 /// Closed semantic identity used to deduplicate a stanza's frozen effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngressEffectKey {
-    ArchiveAuthoritative(BareJid),
-    RouteDirect(BareJid),
+    ArchiveAuthoritative(BareJid, String),
+    RouteDirect(BareJid, String),
     RouteMucGroupchat(BareJid),
     RouteOccupantPm(FullJid),
     DispatchToRoomRemote(BareJid, RelayTargetIdentity),
     RecipientSmAppend(SmSessionId, RecipientSmAppendIdentity),
-    Carbons(FullJid),
-    InboxProject(BareJid),
-    NotificationActivityPreview(BareJid),
+    Carbons(FullJid, CarbonKind),
+    InboxProject(BareJid, String),
+    NotificationActivityPreview(BareJid, String),
+    RetractionTombstone(String),
+    DmPinMutation(String),
+    GroupDmMembershipGrant(String),
+    GroupDmInviteLedger(String),
     RoomSubjectMutation(BareJid),
     CallSignal(FullJid),
-    Pin(BareJid),
+    Pin(BareJid, String),
     Extension(BareJid),
-    ErrorReply(FullJid),
+    ErrorReply(FullJid, String),
 }
 
 impl IngressEffectKey {
     pub fn storage_identity(&self) -> String {
         match self {
-            Self::ArchiveAuthoritative(value) => value.to_string(),
-            Self::RouteDirect(value) => value.to_string(),
+            Self::ArchiveAuthoritative(archive, stanza_identity) => {
+                format!("{}|{}", archive, stanza_identity)
+            }
+            Self::RouteDirect(recipient, route_identity) => {
+                format!("{}|{}", recipient, route_identity)
+            }
             Self::RouteMucGroupchat(value) => value.to_string(),
             Self::RouteOccupantPm(value) => value.to_string(),
             Self::DispatchToRoomRemote(room, relay_target) => {
@@ -461,14 +727,22 @@ impl IngressEffectKey {
             Self::RecipientSmAppend(stream, append_identity) => {
                 format!("{}|{}", stream.as_str(), append_identity.storage_identity())
             }
-            Self::Carbons(value) => value.to_string(),
-            Self::InboxProject(value) => value.to_string(),
-            Self::NotificationActivityPreview(value) => value.to_string(),
+            Self::Carbons(value, kind) => {
+                format!("{}|{}", value, carbon_kind_storage_identity(*kind))
+            }
+            Self::InboxProject(owner, mutation) => format!("{}|{}", owner, mutation),
+            Self::NotificationActivityPreview(owner, mutation) => {
+                format!("{}|{}", owner, mutation)
+            }
+            Self::RetractionTombstone(identity) => identity.clone(),
+            Self::DmPinMutation(identity) => identity.clone(),
+            Self::GroupDmMembershipGrant(identity) => identity.clone(),
+            Self::GroupDmInviteLedger(identity) => identity.clone(),
             Self::RoomSubjectMutation(value) => value.to_string(),
             Self::CallSignal(value) => value.to_string(),
-            Self::Pin(value) => value.to_string(),
+            Self::Pin(room, pin_identity) => format!("{}|{}", room, pin_identity),
             Self::Extension(value) => value.to_string(),
-            Self::ErrorReply(value) => value.to_string(),
+            Self::ErrorReply(value, error_identity) => format!("{}|{}", value, error_identity),
         }
     }
 
@@ -483,11 +757,15 @@ impl IngressEffectKey {
             Self::Carbons(..) => 6,
             Self::InboxProject(..) => 7,
             Self::NotificationActivityPreview(..) => 8,
-            Self::RoomSubjectMutation(..) => 9,
-            Self::CallSignal(..) => 10,
-            Self::Pin(..) => 11,
-            Self::Extension(..) => 12,
-            Self::ErrorReply(..) => 13,
+            Self::RetractionTombstone(..) => 9,
+            Self::DmPinMutation(..) => 10,
+            Self::GroupDmMembershipGrant(..) => 11,
+            Self::GroupDmInviteLedger(..) => 12,
+            Self::RoomSubjectMutation(..) => 13,
+            Self::CallSignal(..) => 14,
+            Self::Pin(..) => 15,
+            Self::Extension(..) => 16,
+            Self::ErrorReply(..) => 17,
         };
         (class, self.storage_identity())
     }
@@ -508,10 +786,19 @@ impl PartialOrd for IngressEffectKey {
 impl IngressEffectIntent {
     pub fn semantic_key(&self) -> IngressEffectKey {
         match self {
-            Self::ArchiveAuthoritative { archive, .. } => {
-                IngressEffectKey::ArchiveAuthoritative(archive.clone())
+            Self::ArchiveAuthoritative {
+                archive, stanza_id, ..
+            } => IngressEffectKey::ArchiveAuthoritative(
+                archive.clone(),
+                stanza_storage_identity(stanza_id),
+            ),
+            Self::RouteDirect {
+                recipient,
+                route_identity,
+                ..
+            } => {
+                IngressEffectKey::RouteDirect(recipient.clone(), route_identity.storage_identity())
             }
-            Self::RouteDirect { recipient, .. } => IngressEffectKey::RouteDirect(recipient.clone()),
             Self::RouteMucGroupchat { room, .. } => {
                 IngressEffectKey::RouteMucGroupchat(room.clone())
             }
@@ -526,24 +813,64 @@ impl IngressEffectIntent {
                 append_identity,
             } => IngressEffectKey::RecipientSmAppend(stream.clone(), *append_identity),
             Self::Carbons {
-                excluded_source, ..
-            } => IngressEffectKey::Carbons(excluded_source.clone()),
-            Self::InboxProject { owner, .. } => IngressEffectKey::InboxProject(owner.clone()),
-            Self::NotificationActivityPreview { owner } => {
-                IngressEffectKey::NotificationActivityPreview(owner.clone())
+                excluded_source,
+                kind,
+                ..
+            } => IngressEffectKey::Carbons(excluded_source.clone(), *kind),
+            Self::InboxProject { owner, mutation } => {
+                IngressEffectKey::InboxProject(owner.clone(), mutation.storage_identity())
+            }
+            Self::NotificationActivityPreview { owner, mutation } => {
+                IngressEffectKey::NotificationActivityPreview(
+                    owner.clone(),
+                    mutation.storage_identity(),
+                )
+            }
+            Self::RetractionTombstone { mutation } => {
+                IngressEffectKey::RetractionTombstone(mutation.storage_identity())
+            }
+            Self::DmPinMutation {
+                pair,
+                target_stanza_id,
+                action,
+            } => IngressEffectKey::DmPinMutation(format!(
+                "{}|{}|{}|{}",
+                pair.0,
+                pair.1,
+                stanza_storage_identity(target_stanza_id),
+                dm_pin_action_storage_identity(*action)
+            )),
+            Self::GroupDmMembershipGrant { grant } => {
+                IngressEffectKey::GroupDmMembershipGrant(grant.storage_identity())
+            }
+            Self::GroupDmInviteLedger { grant } => {
+                IngressEffectKey::GroupDmInviteLedger(grant.storage_identity())
             }
             Self::RoomSubjectMutation { room, .. } => {
                 IngressEffectKey::RoomSubjectMutation(room.clone())
             }
             Self::CallSignal { recipient, .. } => IngressEffectKey::CallSignal(recipient.clone()),
-            Self::Pin { room, .. } => IngressEffectKey::Pin(room.clone()),
+            Self::Pin {
+                room,
+                stanza_id,
+                action,
+            } => IngressEffectKey::Pin(
+                room.clone(),
+                format!(
+                    "{}|{}",
+                    stanza_storage_identity(stanza_id),
+                    pin_action_storage_identity(*action)
+                ),
+            ),
             Self::Extension { recipient, .. } => IngressEffectKey::Extension(recipient.clone()),
-            Self::ErrorReply { recipient, .. } => IngressEffectKey::ErrorReply(recipient.clone()),
+            Self::ErrorReply { recipient, error } => {
+                IngressEffectKey::ErrorReply(recipient.clone(), error.semantic_identity())
+            }
         }
     }
 
     /// Encode the canonical V1 storage representation at the persistence edge.
-    pub fn encode_v1(&self) -> Result<EncodedEffectIntent, EffectIntentCodecError> {
+    fn encode_v1(&self) -> Result<EncodedEffectIntent, EffectIntentCodecError> {
         let intent = StoredEffectIntent::from_domain(self.clone());
         let kind = intent.kind();
         let payload = serde_json::to_vec(&StoredPayload { version: 1, intent })
@@ -552,6 +879,14 @@ impl IngressEffectIntent {
             return Err(EffectIntentCodecError::PayloadTooLarge);
         }
         Ok(EncodedEffectIntent { kind, payload })
+    }
+
+    pub fn with_encoded_v1<T>(
+        &self,
+        f: impl FnOnce(i32, &[u8]) -> T,
+    ) -> Result<T, EffectIntentCodecError> {
+        let encoded = self.encode_v1()?;
+        Ok(f(encoded.kind(), encoded.payload()))
     }
 
     /// Decode a canonical V1 storage representation and reject unknown tags.
@@ -575,9 +910,19 @@ impl IngressEffectIntent {
 
 /// Database-ready version-one payload and its closed table kind tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedEffectIntent {
-    pub kind: i32,
-    pub payload: Vec<u8>,
+struct EncodedEffectIntent {
+    kind: i32,
+    payload: Vec<u8>,
+}
+
+impl EncodedEffectIntent {
+    pub(crate) fn kind(&self) -> i32 {
+        self.kind
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 /// Codec failures intentionally exclude client values and payload bytes.
@@ -751,6 +1096,276 @@ impl StoredFrozenStanzaError {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+enum StoredEffectMessageIdentity {
+    StanzaId { stanza_id: StanzaId },
+    OriginId { origin_id: String },
+    CaptureOrdinal { ordinal: u64 },
+}
+
+impl From<EffectMessageIdentity> for StoredEffectMessageIdentity {
+    fn from(value: EffectMessageIdentity) -> Self {
+        match value {
+            EffectMessageIdentity::StanzaId(stanza_id) => Self::StanzaId { stanza_id },
+            EffectMessageIdentity::OriginId(origin_id) => Self::OriginId {
+                origin_id: origin_id.id,
+            },
+            EffectMessageIdentity::CaptureOrdinal(ordinal) => Self::CaptureOrdinal { ordinal },
+        }
+    }
+}
+
+impl StoredEffectMessageIdentity {
+    fn into_domain(self) -> EffectMessageIdentity {
+        match self {
+            Self::StanzaId { stanza_id } => EffectMessageIdentity::StanzaId(stanza_id),
+            Self::OriginId { origin_id } => {
+                EffectMessageIdentity::OriginId(OriginId::new(origin_id))
+            }
+            Self::CaptureOrdinal { ordinal } => EffectMessageIdentity::CaptureOrdinal(ordinal),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StoredInboxProjectionMutation {
+    Direct {
+        peer: BareJid,
+        increment_unread: bool,
+    },
+    GroupchatChannel {
+        room: BareJid,
+        increment_unread: bool,
+    },
+    GroupchatThread {
+        room: BareJid,
+        thread_id: String,
+    },
+    GroupchatChannelAndThread {
+        room: BareJid,
+        thread_id: String,
+        increment_unread: bool,
+    },
+}
+
+impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
+    fn from(value: InboxProjectionMutation) -> Self {
+        match value {
+            InboxProjectionMutation::Direct {
+                peer,
+                increment_unread,
+            } => Self::Direct {
+                peer,
+                increment_unread,
+            },
+            InboxProjectionMutation::GroupchatChannel {
+                room,
+                increment_unread,
+            } => Self::GroupchatChannel {
+                room,
+                increment_unread,
+            },
+            InboxProjectionMutation::GroupchatThread { room, thread_id } => {
+                Self::GroupchatThread { room, thread_id }
+            }
+            InboxProjectionMutation::GroupchatChannelAndThread {
+                room,
+                thread_id,
+                increment_unread,
+            } => Self::GroupchatChannelAndThread {
+                room,
+                thread_id,
+                increment_unread,
+            },
+        }
+    }
+}
+
+impl StoredInboxProjectionMutation {
+    fn into_domain(self) -> InboxProjectionMutation {
+        match self {
+            Self::Direct {
+                peer,
+                increment_unread,
+            } => InboxProjectionMutation::Direct {
+                peer,
+                increment_unread,
+            },
+            Self::GroupchatChannel {
+                room,
+                increment_unread,
+            } => InboxProjectionMutation::GroupchatChannel {
+                room,
+                increment_unread,
+            },
+            Self::GroupchatThread { room, thread_id } => {
+                InboxProjectionMutation::GroupchatThread { room, thread_id }
+            }
+            Self::GroupchatChannelAndThread {
+                room,
+                thread_id,
+                increment_unread,
+            } => InboxProjectionMutation::GroupchatChannelAndThread {
+                room,
+                thread_id,
+                increment_unread,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StoredNotificationActivityMutation {
+    ChatState {
+        conversation: BareJid,
+    },
+    ChatStateGone {
+        conversation: BareJid,
+    },
+    ReadMarker {
+        conversation: BareJid,
+    },
+    OutboundMessage {
+        conversation: BareJid,
+    },
+    OfflineDelivery {
+        conversation: BareJid,
+        archive_stanza_id: StanzaId,
+    },
+    NotificationCandidate {
+        conversation: BareJid,
+        archive_stanza_id: StanzaId,
+        outcome: u8,
+    },
+}
+
+impl From<NotificationActivityMutation> for StoredNotificationActivityMutation {
+    fn from(value: NotificationActivityMutation) -> Self {
+        match value {
+            NotificationActivityMutation::ChatState { conversation } => {
+                Self::ChatState { conversation }
+            }
+            NotificationActivityMutation::ChatStateGone { conversation } => {
+                Self::ChatStateGone { conversation }
+            }
+            NotificationActivityMutation::ReadMarker { conversation } => {
+                Self::ReadMarker { conversation }
+            }
+            NotificationActivityMutation::OutboundMessage { conversation } => {
+                Self::OutboundMessage { conversation }
+            }
+            NotificationActivityMutation::OfflineDelivery {
+                conversation,
+                archive_stanza_id,
+            } => Self::OfflineDelivery {
+                conversation,
+                archive_stanza_id,
+            },
+            NotificationActivityMutation::NotificationCandidate {
+                conversation,
+                archive_stanza_id,
+                outcome,
+            } => Self::NotificationCandidate {
+                conversation,
+                archive_stanza_id,
+                outcome: notification_candidate_outcome_tag(outcome),
+            },
+        }
+    }
+}
+
+impl StoredNotificationActivityMutation {
+    fn into_domain(self) -> Result<NotificationActivityMutation, EffectIntentCodecError> {
+        Ok(match self {
+            Self::ChatState { conversation } => {
+                NotificationActivityMutation::ChatState { conversation }
+            }
+            Self::ChatStateGone { conversation } => {
+                NotificationActivityMutation::ChatStateGone { conversation }
+            }
+            Self::ReadMarker { conversation } => {
+                NotificationActivityMutation::ReadMarker { conversation }
+            }
+            Self::OutboundMessage { conversation } => {
+                NotificationActivityMutation::OutboundMessage { conversation }
+            }
+            Self::OfflineDelivery {
+                conversation,
+                archive_stanza_id,
+            } => NotificationActivityMutation::OfflineDelivery {
+                conversation,
+                archive_stanza_id,
+            },
+            Self::NotificationCandidate {
+                conversation,
+                archive_stanza_id,
+                outcome,
+            } => NotificationActivityMutation::NotificationCandidate {
+                conversation,
+                archive_stanza_id,
+                outcome: notification_candidate_outcome_from_tag(outcome)?,
+            },
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredRetractionTombstoneMutation {
+    archive: BareJid,
+    target_stanza_id: StanzaId,
+    retraction_stanza_id: StanzaId,
+}
+
+impl From<RetractionTombstoneMutation> for StoredRetractionTombstoneMutation {
+    fn from(value: RetractionTombstoneMutation) -> Self {
+        Self {
+            archive: value.archive,
+            target_stanza_id: value.target_stanza_id,
+            retraction_stanza_id: value.retraction_stanza_id,
+        }
+    }
+}
+
+impl From<StoredRetractionTombstoneMutation> for RetractionTombstoneMutation {
+    fn from(value: StoredRetractionTombstoneMutation) -> Self {
+        Self {
+            archive: value.archive,
+            target_stanza_id: value.target_stanza_id,
+            retraction_stanza_id: value.retraction_stanza_id,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredGroupDmMembershipGrant {
+    room: BareJid,
+    invitee: BareJid,
+    inviter: BareJid,
+}
+
+impl From<GroupDmMembershipGrant> for StoredGroupDmMembershipGrant {
+    fn from(value: GroupDmMembershipGrant) -> Self {
+        Self {
+            room: value.room,
+            invitee: value.invitee,
+            inviter: value.inviter,
+        }
+    }
+}
+
+impl From<StoredGroupDmMembershipGrant> for GroupDmMembershipGrant {
+    fn from(value: StoredGroupDmMembershipGrant) -> Self {
+        Self {
+            room: value.room,
+            invitee: value.invitee,
+            inviter: value.inviter,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum StoredEffectIntent {
     ArchiveAuthoritative {
         archive: BareJid,
@@ -760,6 +1375,7 @@ enum StoredEffectIntent {
     RouteDirect {
         recipient: BareJid,
         fanout: Vec<FullJid>,
+        route_identity: StoredEffectMessageIdentity,
     },
     RouteMucGroupchat {
         room: BareJid,
@@ -782,13 +1398,30 @@ enum StoredEffectIntent {
     Carbons {
         carbon_recipients: Vec<FullJid>,
         excluded_source: FullJid,
+        kind: u8,
     },
     InboxProject {
         owner: BareJid,
-        increment_unread: bool,
+        mutation: StoredInboxProjectionMutation,
     },
     NotificationActivityPreview {
         owner: BareJid,
+        mutation: StoredNotificationActivityMutation,
+    },
+    RetractionTombstone {
+        mutation: StoredRetractionTombstoneMutation,
+    },
+    DmPinMutation {
+        first_peer: BareJid,
+        second_peer: BareJid,
+        target_stanza_id: StanzaId,
+        action: u8,
+    },
+    GroupDmMembershipGrant {
+        grant: StoredGroupDmMembershipGrant,
+    },
+    GroupDmInviteLedger {
+        grant: StoredGroupDmMembershipGrant,
     },
     RoomSubjectMutation {
         room: BareJid,
@@ -801,6 +1434,7 @@ enum StoredEffectIntent {
     Pin {
         room: BareJid,
         stanza_id: StanzaId,
+        action: u8,
     },
     Extension {
         recipient: BareJid,
@@ -824,6 +1458,10 @@ impl StoredEffectIntent {
             Self::Carbons { .. } => 5,
             Self::InboxProject { .. } => 6,
             Self::NotificationActivityPreview { .. } => 7,
+            Self::RetractionTombstone { .. } => 14,
+            Self::DmPinMutation { .. } => 15,
+            Self::GroupDmMembershipGrant { .. } => 16,
+            Self::GroupDmInviteLedger { .. } => 17,
             Self::RoomSubjectMutation { .. } => 13,
             Self::CallSignal { .. } => 8,
             Self::Pin { .. } => 9,
@@ -846,9 +1484,14 @@ impl StoredEffectIntent {
             IngressEffectIntent::RouteDirect {
                 recipient,
                 mut fanout,
+                route_identity,
             } => {
                 canonicalize(&mut fanout);
-                Self::RouteDirect { recipient, fanout }
+                Self::RouteDirect {
+                    recipient,
+                    fanout,
+                    route_identity: route_identity.into(),
+                }
             }
             IngressEffectIntent::RouteMucGroupchat {
                 room,
@@ -883,23 +1526,44 @@ impl StoredEffectIntent {
             IngressEffectIntent::Carbons {
                 mut carbon_recipients,
                 excluded_source,
+                kind,
             } => {
                 canonicalize(&mut carbon_recipients);
                 Self::Carbons {
                     carbon_recipients,
                     excluded_source,
+                    kind: carbon_kind_tag(kind),
                 }
             }
-            IngressEffectIntent::InboxProject {
+            IngressEffectIntent::InboxProject { owner, mutation } => Self::InboxProject {
                 owner,
-                increment_unread,
-            } => Self::InboxProject {
-                owner,
-                increment_unread,
+                mutation: mutation.into(),
             },
-            IngressEffectIntent::NotificationActivityPreview { owner } => {
-                Self::NotificationActivityPreview { owner }
+            IngressEffectIntent::NotificationActivityPreview { owner, mutation } => {
+                Self::NotificationActivityPreview {
+                    owner,
+                    mutation: mutation.into(),
+                }
             }
+            IngressEffectIntent::RetractionTombstone { mutation } => Self::RetractionTombstone {
+                mutation: mutation.into(),
+            },
+            IngressEffectIntent::DmPinMutation {
+                pair,
+                target_stanza_id,
+                action,
+            } => Self::DmPinMutation {
+                first_peer: pair.0,
+                second_peer: pair.1,
+                target_stanza_id,
+                action: dm_pin_action_tag(action),
+            },
+            IngressEffectIntent::GroupDmMembershipGrant { grant } => Self::GroupDmMembershipGrant {
+                grant: grant.into(),
+            },
+            IngressEffectIntent::GroupDmInviteLedger { grant } => Self::GroupDmInviteLedger {
+                grant: grant.into(),
+            },
             IngressEffectIntent::RoomSubjectMutation { room, state } => {
                 Self::RoomSubjectMutation { room, state }
             }
@@ -910,7 +1574,15 @@ impl StoredEffectIntent {
                 recipient,
                 stanza_id,
             },
-            IngressEffectIntent::Pin { room, stanza_id } => Self::Pin { room, stanza_id },
+            IngressEffectIntent::Pin {
+                room,
+                stanza_id,
+                action,
+            } => Self::Pin {
+                room,
+                stanza_id,
+                action: pin_action_tag(action),
+            },
             IngressEffectIntent::Extension {
                 recipient,
                 stanza_id,
@@ -936,9 +1608,15 @@ impl StoredEffectIntent {
                 stanza_id,
                 by,
             },
-            Self::RouteDirect { recipient, fanout } => {
-                IngressEffectIntent::RouteDirect { recipient, fanout }
-            }
+            Self::RouteDirect {
+                recipient,
+                fanout,
+                route_identity,
+            } => IngressEffectIntent::RouteDirect {
+                recipient,
+                fanout,
+                route_identity: route_identity.into_domain(),
+            },
             Self::RouteMucGroupchat {
                 room,
                 occupants,
@@ -969,20 +1647,41 @@ impl StoredEffectIntent {
             Self::Carbons {
                 carbon_recipients,
                 excluded_source,
+                kind,
             } => IngressEffectIntent::Carbons {
                 carbon_recipients,
                 excluded_source,
+                kind: carbon_kind_from_tag(kind)?,
             },
-            Self::InboxProject {
+            Self::InboxProject { owner, mutation } => IngressEffectIntent::InboxProject {
                 owner,
-                increment_unread,
-            } => IngressEffectIntent::InboxProject {
-                owner,
-                increment_unread,
+                mutation: mutation.into_domain(),
             },
-            Self::NotificationActivityPreview { owner } => {
-                IngressEffectIntent::NotificationActivityPreview { owner }
+            Self::NotificationActivityPreview { owner, mutation } => {
+                IngressEffectIntent::NotificationActivityPreview {
+                    owner,
+                    mutation: mutation.into_domain()?,
+                }
             }
+            Self::RetractionTombstone { mutation } => IngressEffectIntent::RetractionTombstone {
+                mutation: mutation.into(),
+            },
+            Self::DmPinMutation {
+                first_peer,
+                second_peer,
+                target_stanza_id,
+                action,
+            } => IngressEffectIntent::DmPinMutation {
+                pair: (first_peer, second_peer),
+                target_stanza_id,
+                action: dm_pin_action_from_tag(action)?,
+            },
+            Self::GroupDmMembershipGrant { grant } => IngressEffectIntent::GroupDmMembershipGrant {
+                grant: grant.into(),
+            },
+            Self::GroupDmInviteLedger { grant } => IngressEffectIntent::GroupDmInviteLedger {
+                grant: grant.into(),
+            },
             Self::RoomSubjectMutation { room, state } => {
                 IngressEffectIntent::RoomSubjectMutation { room, state }
             }
@@ -993,7 +1692,15 @@ impl StoredEffectIntent {
                 recipient,
                 stanza_id,
             },
-            Self::Pin { room, stanza_id } => IngressEffectIntent::Pin { room, stanza_id },
+            Self::Pin {
+                room,
+                stanza_id,
+                action,
+            } => IngressEffectIntent::Pin {
+                room,
+                stanza_id,
+                action: pin_action_from_tag(action)?,
+            },
             Self::Extension {
                 recipient,
                 stanza_id,
@@ -1012,6 +1719,78 @@ impl StoredEffectIntent {
 fn canonicalize(values: &mut Vec<FullJid>) {
     values.sort_by_key(ToString::to_string);
     values.dedup();
+}
+
+fn carbon_kind_tag(kind: CarbonKind) -> u8 {
+    match kind {
+        CarbonKind::Sent => 0,
+        CarbonKind::Received => 1,
+    }
+}
+
+fn carbon_kind_from_tag(tag: u8) -> Result<CarbonKind, EffectIntentCodecError> {
+    Ok(match tag {
+        0 => CarbonKind::Sent,
+        1 => CarbonKind::Received,
+        _ => return Err(EffectIntentCodecError::MalformedPayload),
+    })
+}
+
+fn pin_action_tag(action: PinAction) -> u8 {
+    match action {
+        PinAction::Pin => 0,
+        PinAction::Unpin => 1,
+    }
+}
+
+fn pin_action_from_tag(tag: u8) -> Result<PinAction, EffectIntentCodecError> {
+    Ok(match tag {
+        0 => PinAction::Pin,
+        1 => PinAction::Unpin,
+        _ => return Err(EffectIntentCodecError::MalformedPayload),
+    })
+}
+
+fn dm_pin_action_storage_identity(action: DmPinMutationAction) -> &'static str {
+    match action {
+        DmPinMutationAction::Pin => "pin",
+        DmPinMutationAction::Unpin => "unpin",
+        DmPinMutationAction::RetractionCascadeUnpin => "retraction_cascade_unpin",
+    }
+}
+
+fn dm_pin_action_tag(action: DmPinMutationAction) -> u8 {
+    match action {
+        DmPinMutationAction::Pin => 0,
+        DmPinMutationAction::Unpin => 1,
+        DmPinMutationAction::RetractionCascadeUnpin => 2,
+    }
+}
+
+fn dm_pin_action_from_tag(tag: u8) -> Result<DmPinMutationAction, EffectIntentCodecError> {
+    Ok(match tag {
+        0 => DmPinMutationAction::Pin,
+        1 => DmPinMutationAction::Unpin,
+        2 => DmPinMutationAction::RetractionCascadeUnpin,
+        _ => return Err(EffectIntentCodecError::MalformedPayload),
+    })
+}
+
+fn notification_candidate_outcome_tag(outcome: NotificationCandidateOutcome) -> u8 {
+    match outcome {
+        NotificationCandidateOutcome::Inserted => 0,
+        NotificationCandidateOutcome::Duplicate => 1,
+    }
+}
+
+fn notification_candidate_outcome_from_tag(
+    tag: u8,
+) -> Result<NotificationCandidateOutcome, EffectIntentCodecError> {
+    Ok(match tag {
+        0 => NotificationCandidateOutcome::Inserted,
+        1 => NotificationCandidateOutcome::Duplicate,
+        _ => return Err(EffectIntentCodecError::MalformedPayload),
+    })
 }
 
 fn condition_tag(condition: StanzaErrorCondition) -> u8 {
@@ -1095,7 +1874,7 @@ fn frozen_error_type_from_tag(tag: u8) -> Result<FrozenStanzaErrorType, EffectIn
 #[cfg(test)]
 mod tests {
     use jid::Jid;
-    use waddle_xmpp_core::xep0359::StanzaId;
+    use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType as XmppStanzaErrorType};
 
     use super::*;
@@ -1125,6 +1904,7 @@ mod tests {
             IngressEffectIntent::RouteDirect {
                 recipient: bare("romeo@example.test"),
                 fanout: vec![full("romeo@example.test/phone")],
+                route_identity: EffectMessageIdentity::stanza(stanza_id()),
             },
             IngressEffectIntent::RouteMucGroupchat {
                 room: bare("room@conference.example.test"),
@@ -1147,13 +1927,51 @@ mod tests {
             IngressEffectIntent::Carbons {
                 carbon_recipients: vec![full("romeo@example.test/phone")],
                 excluded_source: full("romeo@example.test/laptop"),
+                kind: CarbonKind::Sent,
             },
             IngressEffectIntent::InboxProject {
                 owner: bare("romeo@example.test"),
-                increment_unread: true,
+                mutation: InboxProjectionMutation::Direct {
+                    peer: bare("juliet@example.test"),
+                    increment_unread: true,
+                },
             },
             IngressEffectIntent::NotificationActivityPreview {
                 owner: bare("romeo@example.test"),
+                mutation: NotificationActivityMutation::NotificationCandidate {
+                    conversation: bare("room@conference.example.test"),
+                    archive_stanza_id: stanza_id(),
+                    outcome: NotificationCandidateOutcome::Inserted,
+                },
+            },
+            IngressEffectIntent::RetractionTombstone {
+                mutation: RetractionTombstoneMutation {
+                    archive: bare("archive@example.test"),
+                    target_stanza_id: StanzaId::new(
+                        "target-1",
+                        "archive@example.test".parse::<Jid>().expect("valid JID"),
+                    ),
+                    retraction_stanza_id: stanza_id(),
+                },
+            },
+            IngressEffectIntent::DmPinMutation {
+                pair: (bare("juliet@example.test"), bare("romeo@example.test")),
+                target_stanza_id: stanza_id(),
+                action: DmPinMutationAction::Pin,
+            },
+            IngressEffectIntent::GroupDmMembershipGrant {
+                grant: GroupDmMembershipGrant {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                },
+            },
+            IngressEffectIntent::GroupDmInviteLedger {
+                grant: GroupDmMembershipGrant {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                },
             },
             IngressEffectIntent::CallSignal {
                 recipient: full("romeo@example.test/phone"),
@@ -1162,6 +1980,7 @@ mod tests {
             IngressEffectIntent::Pin {
                 room: bare("room@conference.example.test"),
                 stanza_id: stanza_id(),
+                action: PinAction::Pin,
             },
             IngressEffectIntent::Extension {
                 recipient: bare("romeo@example.test"),
@@ -1190,24 +2009,28 @@ mod tests {
     fn every_kind_round_trips_through_its_fixed_golden_vector() {
         let golden = [
             r#"{"version":1,"intent":{"type":"archive_authoritative","archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test"}}"#,
-            r#"{"version":1,"intent":{"type":"route_direct","recipient":"romeo@example.test","fanout":["romeo@example.test/phone"]}}"#,
+            r#"{"version":1,"intent":{"type":"route_direct","recipient":"romeo@example.test","fanout":["romeo@example.test/phone"],"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"route_muc_groupchat","room":"room@conference.example.test","occupants":["juliet@example.test/laptop"],"reflection":"romeo@example.test/phone","room_generation":7}}"#,
             r#"{"version":1,"intent":{"type":"route_occupant_pm","recipient":"juliet@example.test/laptop","sender":"romeo@example.test/phone"}}"#,
             r#"{"version":1,"intent":{"type":"dispatch_to_room_remote","room":"room@conference.example.test","relay_target":{"node_id":"relay-node","node_epoch":"relay-epoch"}}}"#,
             r#"{"version":1,"intent":{"type":"recipient_sm_append","stream":"stream-1","append_identity":0}}"#,
-            r#"{"version":1,"intent":{"type":"carbons","carbon_recipients":["romeo@example.test/phone"],"excluded_source":"romeo@example.test/laptop"}}"#,
-            r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","increment_unread":true}}"#,
-            r#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test"}}"#,
+            r#"{"version":1,"intent":{"type":"carbons","carbon_recipients":["romeo@example.test/phone"],"excluded_source":"romeo@example.test/laptop","kind":0}}"#,
+            r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","mutation":{"type":"direct","peer":"juliet@example.test","increment_unread":true}}}"#,
+            r#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","mutation":{"type":"notification_candidate","conversation":"room@conference.example.test","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"outcome":0}}}"#,
+            r#"{"version":1,"intent":{"type":"retraction_tombstone","mutation":{"archive":"archive@example.test","target_stanza_id":{"id":"target-1","by":"archive@example.test"},"retraction_stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
+            r#"{"version":1,"intent":{"type":"dm_pin_mutation","first_peer":"juliet@example.test","second_peer":"romeo@example.test","target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
+            r#"{"version":1,"intent":{"type":"group_dm_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
+            r#"{"version":1,"intent":{"type":"group_dm_invite_ledger","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"call_signal","recipient":"romeo@example.test/phone","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
-            r#"{"version":1,"intent":{"type":"pin","room":"room@conference.example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
+            r#"{"version":1,"intent":{"type":"pin","room":"room@conference.example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
             r#"{"version":1,"intent":{"type":"extension","recipient":"romeo@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"error_reply","recipient":"romeo@example.test/phone","error":{"error_type":3,"condition":13,"texts":[{"lang":"nb","text":"moved"}],"condition_payload":{"type":"redirect","new_address":"xmpp:romeo@example.test/mobile"}}}}"#,
         ];
         for (intent, expected) in samples().into_iter().zip(golden) {
             let encoded = intent.encode_v1().expect("encode sample");
-            assert_eq!(encoded.payload, expected.as_bytes());
+            assert_eq!(encoded.payload(), expected.as_bytes());
             assert_eq!(
-                IngressEffectIntent::decode_v1(encoded.kind, &encoded.payload)
+                IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
                     .expect("decode sample"),
                 intent
             );
@@ -1223,6 +2046,7 @@ mod tests {
                 full("romeo@example.test/laptop"),
                 full("romeo@example.test/phone"),
             ],
+            route_identity: EffectMessageIdentity::origin(OriginId::new("client-origin")),
         };
         let second = IngressEffectIntent::RouteDirect {
             recipient: bare("romeo@example.test"),
@@ -1230,6 +2054,7 @@ mod tests {
                 full("romeo@example.test/laptop"),
                 full("romeo@example.test/phone"),
             ],
+            route_identity: EffectMessageIdentity::origin(OriginId::new("client-origin")),
         };
         assert_eq!(
             first.encode_v1().expect("encode first"),
@@ -1245,11 +2070,12 @@ mod tests {
         };
         let encoded = intent.encode_v1().expect("encode sample");
         assert_eq!(
-            IngressEffectIntent::decode_v1(encoded.kind, &encoded.payload).expect("decode sample"),
+            IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                .expect("decode sample"),
             intent
         );
         assert_eq!(
-            encoded.payload,
+            encoded.payload(),
             br#"{"version":1,"intent":{"type":"dispatch_to_room_remote","room":"room@conference.example.test","relay_target":{"node_id":"relay-node"}}}"#
         );
     }
@@ -1274,6 +2100,104 @@ mod tests {
     }
 
     #[test]
+    fn archive_route_pin_and_error_keys_preserve_repeated_effect_identities() {
+        let archive_one = IngressEffectIntent::ArchiveAuthoritative {
+            archive: bare("archive@example.test"),
+            stanza_id: stanza_id(),
+            by: bare("archive@example.test"),
+        };
+        let archive_two = IngressEffectIntent::ArchiveAuthoritative {
+            archive: bare("archive@example.test"),
+            stanza_id: StanzaId::new(
+                "stable-2",
+                "archive@example.test".parse::<Jid>().expect("valid JID"),
+            ),
+            by: bare("archive@example.test"),
+        };
+        assert_ne!(archive_one.semantic_key(), archive_two.semantic_key());
+
+        let route_one = IngressEffectIntent::RouteDirect {
+            recipient: bare("romeo@example.test"),
+            fanout: vec![full("romeo@example.test/phone")],
+            route_identity: EffectMessageIdentity::origin(OriginId::new("origin-1")),
+        };
+        let route_two = IngressEffectIntent::RouteDirect {
+            recipient: bare("romeo@example.test"),
+            fanout: vec![full("romeo@example.test/phone")],
+            route_identity: EffectMessageIdentity::origin(OriginId::new("origin-2")),
+        };
+        assert_ne!(route_one.semantic_key(), route_two.semantic_key());
+
+        let pin = IngressEffectIntent::Pin {
+            room: bare("room@conference.example.test"),
+            stanza_id: stanza_id(),
+            action: PinAction::Pin,
+        };
+        let unpin = IngressEffectIntent::Pin {
+            room: bare("room@conference.example.test"),
+            stanza_id: stanza_id(),
+            action: PinAction::Unpin,
+        };
+        assert_ne!(pin.semantic_key(), unpin.semantic_key());
+
+        let warning_one = IngressEffectIntent::ErrorReply {
+            recipient: full("romeo@example.test/phone"),
+            error: FrozenStanzaError::from(StanzaErrorCondition::PolicyViolation)
+                .with_text("en", "warning one"),
+        };
+        let warning_two = IngressEffectIntent::ErrorReply {
+            recipient: full("romeo@example.test/phone"),
+            error: FrozenStanzaError::from(StanzaErrorCondition::PolicyViolation)
+                .with_text("en", "warning two"),
+        };
+        assert_ne!(warning_one.semantic_key(), warning_two.semantic_key());
+    }
+
+    #[test]
+    fn typed_inbox_notification_and_carbons_effects_round_trip() {
+        let inbox = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::GroupchatChannelAndThread {
+                room: bare("room@conference.example.test"),
+                thread_id: "thread-1".to_string(),
+                increment_unread: true,
+            },
+        };
+        let notification = IngressEffectIntent::NotificationActivityPreview {
+            owner: bare("romeo@example.test"),
+            mutation: NotificationActivityMutation::OfflineDelivery {
+                conversation: bare("juliet@example.test"),
+                archive_stanza_id: stanza_id(),
+            },
+        };
+        let carbons = IngressEffectIntent::Carbons {
+            carbon_recipients: vec![full("romeo@example.test/phone")],
+            excluded_source: full("romeo@example.test/laptop"),
+            kind: CarbonKind::Received,
+        };
+
+        for intent in [inbox, notification, carbons] {
+            let encoded = intent.encode_v1().expect("encode typed effect");
+            assert_eq!(
+                IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                    .expect("decode typed effect"),
+                intent
+            );
+        }
+    }
+
+    #[test]
+    fn with_encoded_v1_exposes_only_storage_edge_fields() {
+        let intent = samples().remove(0);
+        let encoded = intent.encode_v1().expect("encode sample");
+        let via_visitor = intent
+            .with_encoded_v1(|kind, payload| (kind, payload.to_vec()))
+            .expect("visitor encode");
+        assert_eq!(via_visitor.0, encoded.kind());
+        assert_eq!(via_visitor.1, encoded.payload());
+    }
+
+    #[test]
     fn error_reply_gone_payload_round_trips() {
         let intent = IngressEffectIntent::ErrorReply {
             recipient: full("romeo@example.test/phone"),
@@ -1292,11 +2216,12 @@ mod tests {
 
         let encoded = intent.encode_v1().expect("encode sample");
         assert_eq!(
-            IngressEffectIntent::decode_v1(encoded.kind, &encoded.payload).expect("decode sample"),
+            IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                .expect("decode sample"),
             intent
         );
         assert_eq!(
-            encoded.payload,
+            encoded.payload(),
             br#"{"version":1,"intent":{"type":"error_reply","recipient":"romeo@example.test/phone","error":{"error_type":1,"condition":4,"texts":[{"lang":"en","text":"moved permanently"}],"condition_payload":{"type":"gone","new_address":"xmpp:romeo@example.test/desktop"}}}}"#
         );
     }
@@ -1344,18 +2269,18 @@ mod tests {
     fn rejects_invalid_versions_kinds_and_oversized_payloads() {
         let encoded = samples().remove(0).encode_v1().expect("encode sample");
         let unknown_version = encoded
-            .payload
+            .payload()
             .windows(11)
             .position(|part| part == b"\"version\":1")
             .expect("version marker");
-        let mut version_payload = encoded.payload.clone();
+        let mut version_payload = encoded.payload().to_vec();
         version_payload[unknown_version + 10] = b'2';
         assert_eq!(
-            IngressEffectIntent::decode_v1(encoded.kind, &version_payload),
+            IngressEffectIntent::decode_v1(encoded.kind(), &version_payload),
             Err(EffectIntentCodecError::UnknownPayloadVersion(2))
         );
         assert_eq!(
-            IngressEffectIntent::decode_v1(99, &encoded.payload),
+            IngressEffectIntent::decode_v1(99, encoded.payload()),
             Err(EffectIntentCodecError::UnknownKind(99))
         );
         let oversized = IngressEffectIntent::Extension {
@@ -1371,7 +2296,7 @@ mod tests {
         );
         assert_eq!(
             IngressEffectIntent::decode_v1(
-                encoded.kind,
+                encoded.kind(),
                 &vec![b'x'; MAX_EFFECT_INTENT_PAYLOAD_BYTES + 1],
             ),
             Err(EffectIntentCodecError::PayloadTooLarge)

@@ -46,6 +46,7 @@ pub(super) async fn send_carbons(
                                 capture.record_intent(IngressEffectIntent::Carbons {
                                     carbon_recipients,
                                     excluded_source,
+                                    kind,
                                 });
                             }
                         }
@@ -174,11 +175,10 @@ pub(crate) async fn send_carbons_to_registry(
                 }
                 #[cfg(feature = "clustering")]
                 FullJidDeliveryOutcome::MaybeCommitted => {
-                    carbon_recipients.push(target.clone());
                     debug!(
                         target = %target,
                         kind = ?kind,
-                        "SendCarbons: remote delivery maybe committed; suppressing local fallback"
+                        "SendCarbons: remote delivery maybe committed; suppressing local fallback without recording a definitive carbon recipient"
                     );
                 }
             }
@@ -275,6 +275,7 @@ pub(crate) async fn send_carbons_to_registry(
             capture.record_intent(IngressEffectIntent::Carbons {
                 carbon_recipients: carbon_recipients.clone(),
                 excluded_source,
+                kind,
             });
         }
     }

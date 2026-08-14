@@ -525,11 +525,25 @@ fn parked_shadow_submission(
         return None;
     }
     let stream_id = sm_state.stream_id.as_deref()?;
-    let fence = state
+    if !sm_state.is_resumable() {
+        debug!(
+            stream_id,
+            "ingress shadow explicitly excludes non-resumable SM traffic until a connection-scoped fence exists"
+        );
+        return None;
+    }
+    let Some(fence) = state
         .deps
         .protocol
         .sm_session_registry
-        .current_sm_claim_fence(stream_id)?;
+        .current_sm_claim_fence(stream_id)
+    else {
+        debug!(
+            stream_id,
+            "ingress shadow skipped SM traffic because no current claim fence was present"
+        );
+        return None;
+    };
     let principal =
         authenticated_session.and_then(|session| session.authenticated_principal_ref().ok())?;
     let capture = capture?;
@@ -742,6 +756,12 @@ mod tests {
 #[cfg(test)]
 mod inbound_dispatch_tests {
     use super::*;
+    #[cfg(feature = "clustering")]
+    use crate::ingress_shadow::IngressShadowHandle;
+    #[cfg(feature = "clustering")]
+    use std::sync::Arc;
+    #[cfg(feature = "clustering")]
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
     use xmpp_parsers::message::MessageType;
     use xmpp_parsers::minidom::Element;
 
@@ -819,6 +839,36 @@ mod inbound_dispatch_tests {
         assert_eq!(sequence.0, 1);
         assert_eq!(sm_state.shadow_ordinal.to_storage(), 0);
         assert_eq!(sm_state.get_inbound_count(), 1);
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn non_resumable_sm_explicitly_skips_shadow_parking() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                Arc::new(InMemorySmSessionRegistry::new()),
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.enable("shadow-non-resumable".to_string(), false, Some(300));
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+        let message = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        ));
+        let stanza = Stanza::Message(message);
+        let capture = ingress_effect_capture_for_stanza(websocket_state.as_ref(), None, &stanza)
+            .expect("enabled shadow should allocate capture state");
+
+        assert!(parked_shadow_submission(
+            websocket_state.as_ref(),
+            &sm_state,
+            Some(&session),
+            &stanza,
+            Some(capture),
+        )
+        .is_none());
+        assert_eq!(sm_state.shadow_ordinal.to_storage(), 0);
     }
 
     #[test]

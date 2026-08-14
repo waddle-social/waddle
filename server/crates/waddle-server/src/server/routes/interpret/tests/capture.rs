@@ -110,12 +110,16 @@ async fn direct_inbox_boundary_records_inbox_project_intent() {
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot
-        .intents
-        .contains(&IngressEffectIntent::InboxProject {
-            owner,
-            increment_unread: true,
-        }));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::InboxProject {
+            owner: intent_owner,
+            mutation: waddle_xmpp::ingress::InboxProjectionMutation::Direct {
+                increment_unread: true,
+                ..
+            },
+        } if *intent_owner == owner
+    )));
 }
 
 #[tokio::test]
@@ -150,12 +154,11 @@ async fn direct_inbox_boundary_skips_inbox_project_intent_when_upsert_fails() {
 
     let snapshot = capture_snapshot(&capture);
     assert!(
-        !snapshot
-            .intents
-            .contains(&IngressEffectIntent::InboxProject {
-                owner,
-                increment_unread: true,
-            }),
+        !snapshot.intents.iter().any(|intent| matches!(
+            intent,
+            IngressEffectIntent::InboxProject { owner: intent_owner, .. }
+                if *intent_owner == owner
+        )),
         "failed direct inbox projection must not record InboxProject",
     );
 }
@@ -206,18 +209,17 @@ async fn groupchat_inbox_boundary_records_inbox_and_notification_intents() {
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot
-        .intents
-        .contains(&IngressEffectIntent::InboxProject {
-            owner: owner.clone(),
-            increment_unread: true,
-        }));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::InboxProject { owner: intent_owner, .. }
+            if *intent_owner == owner
+    )));
     assert!(
-        !snapshot
-            .intents
-            .contains(&IngressEffectIntent::NotificationActivityPreview {
-                owner: owner.clone()
-            }),
+        !snapshot.intents.iter().any(|intent| matches!(
+            intent,
+            IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
+                if *intent_owner == owner
+        )),
         "candidate retry without websocket state must not capture preview intent",
     );
 }
@@ -269,15 +271,16 @@ async fn groupchat_inbox_boundary_records_notification_intent_after_candidate_ac
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot
-        .intents
-        .contains(&IngressEffectIntent::InboxProject {
-            owner: owner.clone(),
-            increment_unread: true,
-        }));
-    assert!(snapshot
-        .intents
-        .contains(&IngressEffectIntent::NotificationActivityPreview { owner }));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::InboxProject { owner: intent_owner, .. }
+            if *intent_owner == owner
+    )));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
+            if *intent_owner == owner
+    )));
 }
 
 #[tokio::test]
@@ -345,18 +348,17 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot
-        .intents
-        .contains(&IngressEffectIntent::InboxProject {
-            owner: owner.clone(),
-            increment_unread: true,
-        }));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::InboxProject { owner: intent_owner, .. }
+            if *intent_owner == owner
+    )));
     assert!(
-        !snapshot
-            .intents
-            .contains(&IngressEffectIntent::NotificationActivityPreview {
-                owner: owner.clone()
-            }),
+        !snapshot.intents.iter().any(|intent| matches!(
+            intent,
+            IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
+                if *intent_owner == owner
+        )),
         "T0 policy suppression must leave no preview intent",
     );
 }
@@ -407,9 +409,11 @@ async fn offline_delivery_boundary_records_notification_preview_intent() {
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot
-        .intents
-        .contains(&IngressEffectIntent::NotificationActivityPreview { owner: recipient }));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::NotificationActivityPreview { owner, .. }
+            if *owner == recipient
+    )));
 }
 
 #[tokio::test]
@@ -442,11 +446,11 @@ async fn archive_direct_boundary_records_notification_activity_preview_intent() 
 
     let snapshot = capture_snapshot(&capture);
     assert!(
-        !snapshot
-            .intents
-            .contains(&IngressEffectIntent::NotificationActivityPreview {
-                owner: owner.clone()
-            }),
+        !snapshot.intents.iter().any(|intent| matches!(
+            intent,
+            IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
+                if *intent_owner == owner
+        )),
         "missing websocket state must leave no notification-activity preview intent",
     );
 }
@@ -481,9 +485,11 @@ async fn archive_direct_boundary_records_notification_activity_preview_after_pro
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot
-        .intents
-        .contains(&IngressEffectIntent::NotificationActivityPreview { owner }));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
+            if *intent_owner == owner
+    )));
 }
 
 #[tokio::test]

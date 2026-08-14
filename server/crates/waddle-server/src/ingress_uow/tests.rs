@@ -4,7 +4,7 @@ use chrono::{TimeZone, Utc};
 use sqlx::Connection;
 use uuid::Uuid;
 #[cfg(feature = "clustering")]
-use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ingress::{EffectMessageIdentity, InboxProjectionMutation, IngressEffectIntent};
 use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch, SemanticDigest, SmIngressId};
 #[cfg(feature = "clustering")]
 use waddle_xmpp::{
@@ -160,7 +160,10 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
             message_key,
             &[IngressEffectIntent::InboxProject {
                 owner: "romeo@example.com".parse().expect("valid fixture JID"),
-                increment_unread: true,
+                mutation: InboxProjectionMutation::Direct {
+                    peer: "juliet@example.com".parse().expect("valid fixture JID"),
+                    increment_unread: true,
+                },
             }],
         )
         .await
@@ -867,14 +870,19 @@ async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_ali
         IngressEffectIntent::RouteDirect {
             recipient: "juliet@example.com".parse().expect("valid recipient"),
             fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+            route_identity: EffectMessageIdentity::capture_ordinal(0),
         },
         IngressEffectIntent::InboxProject {
             owner: "romeo@example.com".parse().expect("valid owner"),
-            increment_unread: true,
+            mutation: InboxProjectionMutation::Direct {
+                peer: "juliet@example.com".parse().expect("valid recipient"),
+                increment_unread: true,
+            },
         },
         IngressEffectIntent::RouteDirect {
             recipient: "juliet@example.com".parse().expect("valid recipient"),
             fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+            route_identity: EffectMessageIdentity::capture_ordinal(0),
         },
     ];
     let mut transaction = fixture.begin().await;
@@ -922,6 +930,7 @@ async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_ali
     let differing = [IngressEffectIntent::RouteDirect {
         recipient: "juliet@example.com".parse().expect("valid recipient"),
         fanout: vec!["juliet@example.com/laptop".parse().expect("valid fanout")],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
     }];
     let mut existing_alias_divergence = fixture.begin().await;
     assert_eq!(
@@ -943,6 +952,7 @@ async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_ali
     let subset = [IngressEffectIntent::RouteDirect {
         recipient: "juliet@example.com".parse().expect("valid recipient"),
         fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
     }];
     let mut subset_divergence = fixture.begin().await;
     assert_eq!(

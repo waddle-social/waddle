@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use jid::BareJid;
 use waddle_xmpp::ingress::{
-    IngressEffectIntent, IngressEffectKey, RecipientSmAppendIdentity, RelayTargetIdentity,
+    EffectMessageIdentity, IngressEffectIntent, IngressEffectKey, RecipientSmAppendIdentity,
+    RelayTargetIdentity,
 };
 use waddle_xmpp::muc::RoomClaimFenceContext;
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
@@ -82,6 +83,7 @@ struct CaptureState {
     intent_keys: BTreeSet<IngressEffectKey>,
     markers: Vec<ShadowDecisionMarker>,
     next_append_identity: u64,
+    next_route_identity: u64,
     overflowed: bool,
 }
 
@@ -96,6 +98,7 @@ impl IngressEffectCapture {
                 intent_keys: BTreeSet::new(),
                 markers: Vec::new(),
                 next_append_identity: 0,
+                next_route_identity: 0,
                 overflowed: false,
             })),
         }
@@ -126,6 +129,19 @@ impl IngressEffectCapture {
                 state.intents.push(intent);
             }
         });
+    }
+
+    pub fn next_route_identity(&self) -> EffectMessageIdentity {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("capture mutex should not be poisoned");
+        let identity = EffectMessageIdentity::capture_ordinal(state.next_route_identity);
+        state.next_route_identity = state
+            .next_route_identity
+            .checked_add(1)
+            .expect("capture route identity should not overflow in tests or production");
+        identity
     }
 
     pub fn record_marker(&self, marker: ShadowDecisionMarker) {
@@ -205,6 +221,7 @@ mod tests {
             fanout: vec!["bob@example.com/phone"
                 .parse::<FullJid>()
                 .expect("full jid")],
+            route_identity: EffectMessageIdentity::capture_ordinal(0),
         };
         capture.record_intent(intent.clone());
         capture.record_intent(intent);

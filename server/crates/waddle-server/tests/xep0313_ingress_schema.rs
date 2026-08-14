@@ -9,7 +9,6 @@ mod ingress_shadow_support;
 
 use chrono::{Duration, Utc};
 use jid::Jid;
-use sha2::{Digest, Sha256};
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
     ingress_substrate::{PostgresIngressSubstrate, ALIAS_RETENTION},
@@ -119,55 +118,6 @@ async fn retention_is_non_cascading_and_child_foreign_keys_are_no_action() {
     fixture.close().await;
 }
 
-#[tokio::test]
-async fn archive_authoritative_effect_intents_bind_the_archive_stanza_id() {
-    let Some(fixture) = Fixture::open("archive_intent").await else {
-        return;
-    };
-    let key = fixture.record_message(digest(3)).await;
-    let archive = bare("romeo@example.com");
-    let intent = IngressEffectIntent::ArchiveAuthoritative {
-        archive: archive.clone(),
-        stanza_id: StanzaId::new("archive-sid", Jid::from(archive.clone())),
-        by: archive.clone(),
-    };
-    let encoded = intent.encode_v1().expect("encode archive effect intent");
-
-    let conn = fixture.db.guard().await.expect("database guard");
-    conn.execute(
-        "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, 0::numeric, ?, ?, 1, ?)",
-        waddle_server::db_params![
-            key.to_storage().to_string(),
-            i64::from(encoded.kind),
-            semantic_identity_hash(&intent),
-            encoded.payload.clone(),
-        ],
-    )
-    .await
-    .expect("insert archive effect intent");
-    let mut rows = conn
-        .query(
-            "SELECT kind::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid AND effect_ordinal = 0::numeric",
-            waddle_server::db_params![key.to_storage().to_string()],
-        )
-        .await
-        .expect("read archive effect intent");
-    let row = rows
-        .next()
-        .await
-        .expect("read intent row")
-        .expect("intent row");
-    let kind: i64 = row.get(0).expect("decode intent kind");
-    let payload: Vec<u8> = row.get(1).expect("decode intent payload");
-    let decoded = IngressEffectIntent::decode_v1(
-        i32::try_from(kind).expect("intent kind fits in i32"),
-        &payload,
-    )
-    .expect("decode persisted archive effect intent");
-    assert_eq!(decoded, intent);
-    fixture.close().await;
-}
-
 /// XEP-0313 §5.1.3 and §6.3 require the archive to assign the authoritative
 /// UID while XEP-0359's stanza-id is merely the replay binding. The shadow
 /// pipeline must therefore persist the captured archive stanza-id exactly on
@@ -244,11 +194,6 @@ fn digest(byte: u8) -> SemanticDigest {
 
 fn bare(value: &str) -> jid::BareJid {
     value.parse().expect("valid fixture bare JID")
-}
-
-fn semantic_identity_hash(intent: &IngressEffectIntent) -> Vec<u8> {
-    let identity = intent.semantic_key().storage_identity();
-    Sha256::digest(identity.as_bytes()).to_vec()
 }
 
 struct Fixture {

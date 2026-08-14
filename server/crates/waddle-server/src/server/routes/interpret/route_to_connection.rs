@@ -94,10 +94,21 @@ fn capture_route_direct_intent(
     }
     fanout.sort_by_key(ToString::to_string);
     fanout.dedup();
+    let Some(ref capture) = deps.ingress_effect_capture else {
+        return;
+    };
     deps.capture_intent(IngressEffectIntent::RouteDirect {
         recipient: recipient.clone(),
         fanout,
+        route_identity: capture.next_route_identity(),
     });
+}
+
+fn is_definitive_route_capture_outcome(outcome: FullJidDeliveryOutcome) -> bool {
+    matches!(
+        outcome,
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+    )
 }
 
 pub(crate) async fn route_to_connection(
@@ -363,7 +374,12 @@ async fn route_dm_to_full_jid(
             // Confirmed offline on the owning node → §8.5.3.2.1
             // fallback below.
         }
-        Some(_) => return Vec::new(),
+        Some(outcome) => {
+            if is_definitive_route_capture_outcome(outcome) {
+                capture_route_direct_intent(deps, &full.to_bare(), vec![full.clone()]);
+            }
+            return Vec::new();
+        }
         None => {
             // Registered-remote-resource path (clustering): same
             // outcome contract as the ordered relay.
@@ -376,7 +392,12 @@ async fn route_dm_to_full_jid(
             .await
             {
                 Some(FullJidDeliveryOutcome::Unavailable) => {}
-                Some(_) => return Vec::new(),
+                Some(outcome) => {
+                    if is_definitive_route_capture_outcome(outcome) {
+                        capture_route_direct_intent(deps, &full.to_bare(), vec![full.clone()]);
+                    }
+                    return Vec::new();
+                }
                 None => {
                     // Local live-channel attempt with the detached
                     // fallback SUPPRESSED: a detached hit must go
@@ -395,6 +416,9 @@ async fn route_dm_to_full_jid(
                     let live_outcome =
                         deliver_peer_to_live_only(deps.user_registry, &full, stanza.as_ref()).await;
                     if live_outcome != FullJidDeliveryOutcome::Unavailable {
+                        if is_definitive_route_capture_outcome(live_outcome) {
+                            capture_route_direct_intent(deps, &full.to_bare(), vec![full.clone()]);
+                        }
                         return Vec::new();
                     }
                 }
@@ -439,7 +463,7 @@ async fn route_dm_to_full_jid(
                 side_routes,
             } => {
                 if let Some(processed) = processed {
-                    let (_queued_for_replay, not_queued) = queue_processed_for_detached(
+                    let (queued_for_replay, not_queued) = queue_processed_for_detached(
                         deps.sm_session_registry,
                         deps.ingress_effect_capture.as_ref(),
                         vec![full.clone()],
@@ -447,8 +471,11 @@ async fn route_dm_to_full_jid(
                         &processed,
                     )
                     .await;
-                    let _retried_live =
+                    let mut captured_fanout = queued_for_replay;
+                    let retried_live =
                         retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
+                    captured_fanout.extend(retried_live);
+                    capture_route_direct_intent(deps, &bare, captured_fanout);
                 } else {
                     debug!(
                         jid = %full,
@@ -482,7 +509,7 @@ async fn route_dm_to_full_jid(
                 // fixtures): fall back to the legacy verbatim queueing
                 // so the message is not lost while resumable. Keep the
                 // successful replay append observable with its own identity.
-                let _ = queue_processed_for_detached(
+                let (queued_for_replay, not_queued) = queue_processed_for_detached(
                     deps.sm_session_registry,
                     deps.ingress_effect_capture.as_ref(),
                     vec![full],
@@ -490,6 +517,11 @@ async fn route_dm_to_full_jid(
                     stanza.as_ref(),
                 )
                 .await;
+                let mut captured_fanout = queued_for_replay;
+                let retried_live =
+                    retry_unqueued_detached_as_live(deps, not_queued, stanza.as_ref()).await;
+                captured_fanout.extend(retried_live);
+                capture_route_direct_intent(deps, &bare, captured_fanout);
                 return Vec::new();
             }
         }
@@ -708,7 +740,7 @@ async fn route_to_bare_jid(
                                     deps, full, &processed,
                                 )
                                 .await;
-                                if outcome.suppresses_fallback() {
+                                if is_definitive_route_capture_outcome(outcome) {
                                     captured_fanout.push(full.clone());
                                 }
                             }
@@ -785,7 +817,7 @@ async fn route_to_bare_jid(
                     deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
                 if disposition.suppresses_fallback() {
                     any_landed = true;
-                    if !is_dm_message {
+                    if !is_dm_message && is_definitive_route_capture_outcome(disposition) {
                         captured_fanout.push(full);
                     }
                 }

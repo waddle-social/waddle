@@ -453,16 +453,20 @@ impl EffectIntentRepository {
         let mut ordered = intents
             .iter()
             .map(|intent| {
-                let encoded = intent.encode_v1()?;
-                Ok((
-                    intent.semantic_key(),
-                    CanonicalEffectIntentRow {
-                        kind: encoded.kind,
-                        semantic_identity_hash: semantic_identity_hash(intent),
-                        effect_ordinal: 0,
-                        payload: encoded.payload,
-                    },
-                ))
+                let semantic_key = intent.semantic_key();
+                intent
+                    .with_encoded_v1(|kind, payload| {
+                        (
+                            semantic_key,
+                            CanonicalEffectIntentRow {
+                                kind,
+                                semantic_identity_hash: semantic_identity_hash(intent),
+                                effect_ordinal: 0,
+                                payload: payload.to_vec(),
+                            },
+                        )
+                    })
+                    .map_err(IngressUowError::from)
             })
             .collect::<Result<Vec<_>, IngressUowError>>()?;
         ordered.sort_by(|left, right| left.0.cmp(&right.0));

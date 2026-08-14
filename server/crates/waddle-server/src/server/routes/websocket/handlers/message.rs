@@ -85,6 +85,9 @@ pub async fn handle_message(
     };
 
     strip_client_authored_delay(&mut incoming);
+    if let Some(capture) = ingress_effect_capture.as_ref() {
+        capture.record_sanitized_message(&incoming);
+    }
     consume_link_preview_request(
         &mut incoming,
         &bound_jid,
@@ -93,9 +96,6 @@ pub async fn handle_message(
         state.deps.auth_state.base_url.as_str(),
         &state.deps.link_preview,
     );
-    if let Some(capture) = ingress_effect_capture.as_ref() {
-        capture.record_sanitized_message(&incoming);
-    }
 
     if let Some(frames) = handle_group_dm_mediated_invite(
         &incoming,
@@ -219,7 +219,11 @@ pub(super) fn record_route_direct_intent(
     };
     fanout.sort_by_key(ToString::to_string);
     fanout.dedup();
-    capture.record_intent(IngressEffectIntent::RouteDirect { recipient, fanout });
+    capture.record_intent(IngressEffectIntent::RouteDirect {
+        recipient,
+        fanout,
+        route_identity: capture.next_route_identity(),
+    });
 }
 
 fn record_jmi_signal(message: &xmpp_parsers::message::Message, user: &jid::BareJid) {
@@ -420,5 +424,72 @@ mod tests {
             }]
         );
         assert_eq!(frames.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sanitized_snapshot_keeps_pre_enrichment_link_preview_request() {
+        let state = create_test_websocket_state().await;
+        let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let phase = ConnectionPhase::ready(bound.clone(), false);
+        let capture = IngressEffectCapture::new(None);
+        let mut sm = XmppStateMachine::new("example.com", Default::default());
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: bound.to_bare(),
+            scope_jid: "bob@example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://the.link.example.com/what-was-linked-to")
+                .expect("url"),
+            normalized_url: url::Url::parse(
+                "https://example.com/canonical-url/for/what-was-linked-to",
+            )
+            .expect("url"),
+            title: Some("The Best Webpage".to_string()),
+            description: Some("This is a great webpage and you will really like it".to_string()),
+            image: None,
+            video: None,
+            player: None,
+            native_video: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(
+            &preview,
+            state.deps.occupant_id_secret.key(),
+        );
+        let mut incoming = Message::new(Some("bob@example.com".parse::<jid::Jid>().expect("jid")));
+        incoming.type_ = MessageType::Chat;
+        incoming.from = Some(jid::Jid::from(bound));
+        incoming.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://the.link.example.com/what-was-linked-to".to_string(),
+        );
+        incoming
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        let _ = handle_message(
+            incoming,
+            state.as_ref(),
+            &phase,
+            Some(&mut sm),
+            None,
+            None,
+            Some(capture.clone()),
+        )
+        .await;
+
+        let snapshot = capture.snapshot();
+        let sanitized = snapshot
+            .sanitized_message
+            .expect("capture should keep a sanitized message snapshot");
+        assert!(
+            waddle_xmpp::xep::extract_link_preview_request_from_message(&sanitized).is_some(),
+            "the shadow snapshot must retain the pre-enrichment request token"
+        );
+        assert!(
+            sanitized.payloads.iter().all(|payload| {
+                !waddle_xmpp::xep::xep0511::is_link_metadata_element(payload)
+                    && !waddle_xmpp::xep::xep0447::is_file_sharing_element(payload)
+            }),
+            "the shadow snapshot must not include server-stamped link preview metadata"
+        );
     }
 }

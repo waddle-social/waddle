@@ -20,10 +20,12 @@ pub const MAX_ORIGIN_ID_BYTES: usize = 1024;
 pub use alias::{resolve_alias, AliasConflict, AliasOutcome, AliasResolution, StoredAlias};
 pub use digest::{DigestContext, DigestInput, DigestInputError, DigestVersion, SemanticDigest};
 pub use effect_intent::{
-    EffectIntentCodecError, EncodedEffectIntent, FrozenStanzaError, FrozenStanzaErrorAddress,
-    FrozenStanzaErrorConditionPayload, FrozenStanzaErrorText, FrozenStanzaErrorTexts,
-    FrozenStanzaErrorType, IngressEffectIntent, IngressEffectKey, RecipientSmAppendIdentity,
-    RelayNodeEpoch, RelayNodeId, RelayTargetIdentity, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
+    DmPinMutationAction, EffectIntentCodecError, EffectMessageIdentity, FrozenStanzaError,
+    FrozenStanzaErrorAddress, FrozenStanzaErrorConditionPayload, FrozenStanzaErrorText,
+    FrozenStanzaErrorTexts, FrozenStanzaErrorType, GroupDmMembershipGrant, InboxProjectionMutation,
+    IngressEffectIntent, IngressEffectKey, NotificationActivityMutation,
+    NotificationCandidateOutcome, PinAction, RecipientSmAppendIdentity, RelayNodeEpoch,
+    RelayNodeId, RelayTargetIdentity, RetractionTombstoneMutation, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
 };
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;

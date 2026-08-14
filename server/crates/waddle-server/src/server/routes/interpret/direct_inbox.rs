@@ -35,7 +35,10 @@ pub(super) async fn project_direct_inbox(
     } else {
         deps.capture_intent(IngressEffectIntent::InboxProject {
             owner: owner.clone(),
-            increment_unread,
+            mutation: waddle_xmpp::ingress::InboxProjectionMutation::Direct {
+                peer: peer.clone(),
+                increment_unread,
+            },
         });
         debug!(
             owner = %owner,

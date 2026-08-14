@@ -443,22 +443,6 @@ pub(super) async fn dispatch_to_room(
         return outcome;
     }
 
-    // Notification activity ingest (slice 2b): a XEP-0085 chat-state on
-    // an inbound MUC stanza represents the sender being currently
-    // active in the room. Record `(sender_bare, room)` only AFTER the
-    // occupancy / managed-room gate has admitted the sender — otherwise
-    // a non-occupant or managed-room-forbidden sender whose stanza is
-    // rejected could still bump their activity projection and appear
-    // "recently active" for the XEP-0513 `<active/>` filter (Codex
-    // review on PR #731).
-    super::notification_activity_ingest::record_chat_state_activity(
-        deps,
-        &sender_full.to_bare(),
-        &room_jid,
-        &incoming,
-    )
-    .await;
-
     if message_has_framework_envelope(&prototype) {
         let mut sanitized = incoming.clone();
         remove_framework_envelopes(&mut sanitized);
@@ -475,6 +459,21 @@ pub(super) async fn dispatch_to_room(
         });
         return outcome;
     }
+
+    // Notification activity ingest (slice 2b): a XEP-0085 chat-state on
+    // an inbound MUC stanza represents the sender being currently
+    // active in the room. Record `(sender_bare, room)` only AFTER the
+    // occupancy / managed-room gate AND the client-authored framework
+    // envelope rejection have both admitted the sender, otherwise a
+    // rejected stanza could still commit activity that shadow later
+    // discards as rowless.
+    super::notification_activity_ingest::record_chat_state_activity(
+        deps,
+        &sender_full.to_bare(),
+        &room_jid,
+        &incoming,
+    )
+    .await;
 
     // 5. Enrich the message before the post-gate chain sees it. The legacy
     //    bridge enriched on the prototype before

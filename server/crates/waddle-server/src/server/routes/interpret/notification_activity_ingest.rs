@@ -34,7 +34,7 @@ use xmpp_parsers::message::Message;
 
 use crate::notification_activity::{NotificationChatState, NotificationPresenceShow};
 use crate::server::routes::websocket::WebSocketState;
-use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ingress::{IngressEffectIntent, NotificationActivityMutation};
 use waddle_xmpp::xep::xep0085::{ChatState, ChatStateCarrier};
 use waddle_xmpp::xep::xep0203::has_delay;
 
@@ -49,6 +49,17 @@ fn activity_store<'a>(
 ) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
     deps.web_socket_state
         .map(|state: &WebSocketState| state.deps.protocol.notification_activity.as_ref())
+}
+
+fn capture_notification_activity(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    mutation: NotificationActivityMutation,
+) {
+    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+        owner: owner.clone(),
+        mutation,
+    });
 }
 
 /// XEP-0085: when the typed `chat_state` is present on a routed
@@ -120,9 +131,13 @@ pub(super) async fn record_chat_state_activity(
                 projection write skipped (XMPP routing unaffected)",
             );
         } else {
-            deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-                owner: sender.clone(),
-            });
+            capture_notification_activity(
+                deps,
+                sender,
+                NotificationActivityMutation::ChatStateGone {
+                    conversation: conversation.clone(),
+                },
+            );
         }
         return;
     }
@@ -140,9 +155,13 @@ pub(super) async fn record_chat_state_activity(
              projection write skipped (XMPP routing unaffected)",
         );
     } else {
-        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-            owner: sender.clone(),
-        });
+        capture_notification_activity(
+            deps,
+            sender,
+            NotificationActivityMutation::ChatState {
+                conversation: conversation.clone(),
+            },
+        );
     }
 }
 
@@ -166,9 +185,13 @@ pub(super) async fn record_read_marker_activity(
              projection write skipped (XMPP routing unaffected)",
         );
     } else {
-        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-            owner: owner.clone(),
-        });
+        capture_notification_activity(
+            deps,
+            owner,
+            NotificationActivityMutation::ReadMarker {
+                conversation: conversation.clone(),
+            },
+        );
     }
 }
 
@@ -219,9 +242,13 @@ pub(super) async fn record_outbound_message_activity(
              projection write skipped (XMPP routing unaffected)",
         );
     } else {
-        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-            owner: sender.clone(),
-        });
+        capture_notification_activity(
+            deps,
+            sender,
+            NotificationActivityMutation::OutboundMessage {
+                conversation: conversation.clone(),
+            },
+        );
     }
 }
 

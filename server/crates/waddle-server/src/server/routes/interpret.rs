@@ -724,6 +724,7 @@ async fn interpret_with_depth(
                         set_at,
                     },
                 };
+                let sender_for_error = sender.clone();
                 match persist_room_subject_event(
                     deps,
                     PersistRoomSubjectRequest {
@@ -743,8 +744,20 @@ async fn interpret_with_depth(
                         deps.capture_intent(subject_intent);
                     }
                     PersistRoomSubjectEventOutcome::BounceAndHalt(bounce) => {
+                        let bounce_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(
+                            &resource_constraint_error(
+                                "The room subject could not be saved; please retry.",
+                            ),
+                        )
+                        .expect("server-built stanza error should freeze");
                         match Stanza::Message(*bounce).to_element_string() {
-                            Ok(xml) => outcome.frames.push(xml),
+                            Ok(xml) => {
+                                deps.capture_intent(IngressEffectIntent::ErrorReply {
+                                    recipient: sender_for_error,
+                                    error: bounce_error,
+                                });
+                                outcome.frames.push(xml);
+                            }
                             Err(error) => warn!(
                                 %error,
                                 "PersistRoomSubject: failed to serialize retryable bounce reply"

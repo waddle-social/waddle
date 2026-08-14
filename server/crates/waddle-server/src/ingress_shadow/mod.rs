@@ -14,6 +14,8 @@ use crate::config::IngressShadowConfig;
 use crate::config::LineageConfig;
 use crate::db::{Database, DatabaseDriver};
 #[cfg(feature = "clustering")]
+use crate::ingress_substrate::PostgresIngressSubstrate;
+#[cfg(feature = "clustering")]
 use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, ClaimRepository, EffectIntentRepository,
     EffectIntentWriteOutcome, IngressUowError, PostgresIngressUnitOfWork, PrincipalAssertion,
@@ -115,8 +117,10 @@ enum IngressShadowInner {
     Worker {
         tx: IngressShadowTx,
         enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+        retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
         submission_capacity: Arc<Semaphore>,
         enrollment_capacity: Arc<Semaphore>,
+        retirement_capacity: usize,
         shutdown: Arc<IngressShadowShutdown>,
     },
 }
@@ -255,28 +259,44 @@ impl IngressShadowHandle {
             let database = Database::from_config("ingress-shadow", &shadow_database_config)
                 .await
                 .map_err(IngressShadowStartupError::DedicatedPoolOpen)?;
+            let tx = Arc::new(std::sync::Mutex::new(None));
+            let enqueued_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
+            let retiring_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
             let worker = IngressShadowProcessor {
                 database,
                 lineage,
                 node_identity,
                 retry_attempts: config.retry_attempts,
-                enqueued_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                tx: tx.clone(),
+                enqueued_streams: enqueued_streams.clone(),
+                retiring_streams: retiring_streams.clone(),
                 #[cfg(test)]
                 forced_alias_serialization_failures: Arc::new(std::sync::atomic::AtomicUsize::new(
                     0,
                 )),
+                #[cfg(test)]
+                forced_retirement_retryable_failures: Arc::new(
+                    std::sync::atomic::AtomicUsize::new(0),
+                ),
             };
-            Ok(Self::spawn_worker_with_enqueued_streams(
+            let recovery_database = worker.database.clone();
+            let handle = Self::spawn_worker_with_enqueued_streams(
                 config.queue_capacity,
                 ingress_shadow_max_concurrency(config.queue_capacity, config.pool_size),
-                worker.enqueued_streams.clone(),
+                tx,
+                enqueued_streams,
+                retiring_streams,
                 Arc::new(move |task| {
                     let worker = worker.clone();
                     Box::pin(async move {
                         worker.execute(task).await;
                     })
                 }),
-            ))
+            );
+            handle
+                .recover_orphaned_retirements(&recovery_database)
+                .await;
+            Ok(handle)
         }
     }
 
@@ -303,6 +323,23 @@ impl IngressShadowHandle {
         let _ = self.try_send(IngressShadowTask::Retire {
             stream_id: stream_id.clone(),
         });
+    }
+
+    #[cfg(feature = "clustering")]
+    async fn recover_orphaned_retirements(&self, database: &Database) {
+        let IngressShadowInner::Worker { .. } = self.inner.as_ref() else {
+            return;
+        };
+        let orphaned = match orphaned_shadow_streams(database).await {
+            Ok(orphaned) => orphaned,
+            Err(error) => {
+                tracing::warn!(%error, "ingress shadow orphan retirement recovery failed");
+                return;
+            }
+        };
+        for stream_id in orphaned {
+            let _ = self.try_send(IngressShadowTask::Retire { stream_id });
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -353,14 +390,18 @@ impl IngressShadowHandle {
             IngressShadowInner::Worker {
                 tx,
                 enqueued_streams,
+                retiring_streams,
                 submission_capacity,
                 enrollment_capacity,
+                retirement_capacity,
                 ..
             } => try_send_worker_task(
                 tx,
                 enqueued_streams,
+                retiring_streams,
                 submission_capacity,
                 enrollment_capacity,
+                *retirement_capacity,
                 task,
             ),
         };
@@ -376,6 +417,8 @@ impl IngressShadowHandle {
         Self::spawn_worker_with_enqueued_streams(
             queue_capacity,
             max_concurrency,
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
             Arc::new(std::sync::Mutex::new(HashSet::new())),
             execute,
         )
@@ -410,11 +453,14 @@ impl IngressShadowHandle {
     fn spawn_worker_with_enqueued_streams(
         queue_capacity: usize,
         max_concurrency: usize,
+        tx: IngressShadowTx,
         enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+        retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
         execute: IngressShadowExecutor,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+        let (sender, rx) = mpsc::unbounded_channel();
+        *tx.lock()
+            .expect("shadow worker sender mutex must not be poisoned") = Some(sender);
         let submission_capacity = Arc::new(Semaphore::new(queue_capacity));
         let enrollment_capacity = Arc::new(Semaphore::new(queue_capacity));
         let shutdown = Arc::new(IngressShadowShutdown::default());
@@ -430,8 +476,10 @@ impl IngressShadowHandle {
             inner: Arc::new(IngressShadowInner::Worker {
                 tx,
                 enqueued_streams,
+                retiring_streams,
                 submission_capacity,
                 enrollment_capacity,
+                retirement_capacity: queue_capacity,
                 shutdown,
             }),
         }
@@ -450,8 +498,10 @@ impl IngressShadowHandle {
 fn try_send_worker_task(
     tx: &IngressShadowTx,
     enqueued_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    retiring_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
     submission_capacity: &Arc<Semaphore>,
     enrollment_capacity: &Arc<Semaphore>,
+    retirement_capacity: usize,
     task: IngressShadowTask,
 ) -> IngressShadowDisposition {
     match task {
@@ -488,7 +538,8 @@ fn try_send_worker_task(
             }
         }
         IngressShadowTask::Retire { stream_id } => {
-            let disposition = send_retirement_task(tx, stream_id.clone());
+            let disposition =
+                send_retirement_task(tx, retiring_streams, retirement_capacity, stream_id.clone());
             if !matches!(disposition, IngressShadowDisposition::Enqueued) {
                 // A closed worker cannot run the ordered retirement task; do
                 // not retain the process-lifetime enrollment gate in that case.
@@ -572,7 +623,42 @@ fn ensure_stream_enrollment_task(
 }
 
 #[cfg(feature = "clustering")]
-fn send_retirement_task(tx: &IngressShadowTx, stream_id: SmSessionId) -> IngressShadowDisposition {
+fn send_retirement_task(
+    tx: &IngressShadowTx,
+    retiring_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    retirement_capacity: usize,
+    stream_id: SmSessionId,
+) -> IngressShadowDisposition {
+    let mut retiring = retiring_streams
+        .lock()
+        .expect("retiring stream mutex must not be poisoned");
+    if retiring.contains(&stream_id) {
+        return IngressShadowDisposition::Enqueued;
+    }
+    if retiring.len() >= retirement_capacity {
+        return IngressShadowDisposition::QueueFull;
+    }
+    retiring.insert(stream_id.clone());
+    match send_worker_task(
+        tx,
+        QueuedIngressShadowTask {
+            task: IngressShadowTask::Retire { stream_id },
+            permit: None,
+        },
+    ) {
+        Ok(()) => IngressShadowDisposition::Enqueued,
+        Err(task) => {
+            retiring.remove(task.task.stream_id());
+            IngressShadowDisposition::Closed
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn reschedule_retirement_task(
+    tx: &IngressShadowTx,
+    stream_id: SmSessionId,
+) -> IngressShadowDisposition {
     match send_worker_task(
         tx,
         QueuedIngressShadowTask {
@@ -667,13 +753,17 @@ struct IngressShadowProcessor {
     lineage: LineageConfig,
     node_identity: SharedNodeIdentity,
     retry_attempts: usize,
+    tx: IngressShadowTx,
     enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
     /// Test-only deterministic fault point inside the transaction, after
     /// fences and digest evaluation but before alias persistence.  PostgreSQL
     /// serialization failures are otherwise difficult to force reliably at
     /// the processor's READ COMMITTED boundary.
     #[cfg(test)]
     forced_alias_serialization_failures: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    forced_retirement_retryable_failures: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(feature = "clustering")]
@@ -693,6 +783,56 @@ fn forget_enqueued_stream(
         .lock()
         .expect("enqueued stream mutex must not be poisoned")
         .remove(stream_id);
+}
+
+#[cfg(feature = "clustering")]
+fn forget_retiring_stream(
+    retiring_streams: &Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    stream_id: &SmSessionId,
+) {
+    retiring_streams
+        .lock()
+        .expect("retiring stream mutex must not be poisoned")
+        .remove(stream_id);
+}
+
+#[cfg(feature = "clustering")]
+fn observe_retry_sequence(attempts: usize, exhausted: bool) {
+    if attempts <= 1 {
+        return;
+    }
+    let outcome = if exhausted {
+        waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Exhausted
+    } else {
+        waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Retried
+    };
+    waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(outcome);
+}
+
+#[cfg(feature = "clustering")]
+async fn orphaned_shadow_streams(
+    database: &Database,
+) -> Result<Vec<SmSessionId>, crate::db::DatabaseError> {
+    let conn = database.guard().await?;
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT s.stream_id
+            FROM ingress_sm_streams s
+            LEFT JOIN clustering_claims c
+                ON c.entity = ('sm_session:' || s.stream_id)
+               AND c.entity_type = 'sm_session'
+            WHERE c.entity IS NULL
+            "#,
+            (),
+        )
+        .await?;
+    let mut stream_ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let stream_id: String = row.get(0)?;
+        stream_ids.push(SmSessionId::new(stream_id));
+    }
+    Ok(stream_ids)
 }
 
 #[cfg(feature = "clustering")]
@@ -726,11 +866,7 @@ impl IngressShadowProcessor {
                 .await;
                 match timed {
                     Ok(Ok(commit_kind)) => {
-                        if attempts > 1 {
-                            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(
-                                waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Retried,
-                            );
-                        }
+                        observe_retry_sequence(attempts, false);
                         observe(IngressShadowObservation::Committed {
                             stream_id,
                             claim_epoch,
@@ -739,6 +875,7 @@ impl IngressShadowProcessor {
                         });
                     }
                     Ok(Err(_)) | Err(_) => {
+                        observe_retry_sequence(attempts, true);
                         clear_failed_enrollment(&self.enqueued_streams, &enroll_stream);
                         observe(IngressShadowObservation::Failed {
                             kind,
@@ -761,11 +898,7 @@ impl IngressShadowProcessor {
                 .await;
                 match timed {
                     Ok(Ok(outcome)) => {
-                        if attempts > 1 {
-                            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(
-                                waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Retried,
-                            );
-                        }
+                        observe_retry_sequence(attempts, false);
                         if let Some(kind) = outcome.commit_kind {
                             observe(IngressShadowObservation::Committed {
                                 stream_id: stream_id.clone(),
@@ -783,17 +916,7 @@ impl IngressShadowProcessor {
                         });
                     }
                     Ok(Err(exhausted)) => {
-                        if exhausted.attempts >= self.retry_attempts
-                            && matches!(
-                                exhausted.last_error.retry_class(),
-                                crate::ingress_uow::DbRetryClass::SerializationFailure
-                                    | crate::ingress_uow::DbRetryClass::Deadlock
-                            )
-                        {
-                            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(
-                                waddle_xmpp::telemetry::attributes::IngressRetryOutcome::Exhausted,
-                            );
-                        }
+                        observe_retry_sequence(exhausted.attempts, true);
                         let class = match exhausted.last_error.retry_class() {
                             crate::ingress_uow::DbRetryClass::SerializationFailure
                             | crate::ingress_uow::DbRetryClass::Deadlock => {
@@ -811,30 +934,48 @@ impl IngressShadowProcessor {
                             alias: IngressShadowAliasOutcome::None,
                         });
                     }
-                    Err(_) => observe(IngressShadowObservation::Decision {
-                        stream_id,
-                        claim_epoch,
-                        handled_ordinal,
-                        class: IngressShadowDecisionClass::Storage,
-                        alias: IngressShadowAliasOutcome::None,
-                    }),
+                    Err(_) => {
+                        observe_retry_sequence(attempts, true);
+                        observe(IngressShadowObservation::Decision {
+                            stream_id,
+                            claim_epoch,
+                            handled_ordinal,
+                            class: IngressShadowDecisionClass::Storage,
+                            alias: IngressShadowAliasOutcome::None,
+                        });
+                    }
                 }
             }
             IngressShadowTask::Retire {
                 stream_id: retire_stream,
             } => {
+                let mut attempts = 0_usize;
                 let timed = tokio::time::timeout(
                     DEFAULT_TX_DEADLINE,
                     run_with_retry(self.retry_attempts, || {
+                        attempts += 1;
                         self.execute_retirement(&retire_stream)
                     }),
                 )
                 .await;
-                if matches!(timed, Ok(Err(_)) | Err(_)) {
-                    tracing::warn!(
-                        stream_id = %retire_stream,
-                        "ingress shadow stream retirement failed"
-                    );
+                match timed {
+                    Ok(Ok(())) => {
+                        observe_retry_sequence(attempts, false);
+                        forget_retiring_stream(&self.retiring_streams, &retire_stream);
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        observe_retry_sequence(attempts, true);
+                        let disposition =
+                            reschedule_retirement_task(&self.tx, retire_stream.clone());
+                        if !matches!(disposition, IngressShadowDisposition::Enqueued) {
+                            forget_retiring_stream(&self.retiring_streams, &retire_stream);
+                        }
+                        tracing::warn!(
+                            stream_id = %retire_stream,
+                            ?disposition,
+                            "ingress shadow stream retirement failed"
+                        );
+                    }
                 }
             }
         }
@@ -899,17 +1040,17 @@ impl IngressShadowProcessor {
             Err(error) => return Err(error),
         };
 
-        let Some((sm_ingress_id, _frontier)) =
-            SmIngressStreamRepository::lock(&mut transaction, &fence, &submission.stream_id)
+        let (sm_ingress_id, _frontier) =
+            match SmIngressStreamRepository::lock(&mut transaction, &fence, &submission.stream_id)
                 .await?
-        else {
-            transaction.commit().await?;
-            return Ok(ShadowSubmissionOutcome::committed(
-                IngressShadowCommitKind::SkippedUnenrolled,
-                IngressShadowDecisionClass::SkippedUnenrolled,
-                IngressShadowAliasOutcome::None,
-            ));
-        };
+            {
+                Some(locked) => locked,
+                None => (
+                    SmIngressStreamRepository::mint(&mut transaction, &submission.stream_id)
+                        .await?,
+                    0,
+                ),
+            };
 
         if let Some(room_fence) = submission.room_claim_target() {
             match ClaimRepository::assert_room_claim(
@@ -1010,8 +1151,15 @@ impl IngressShadowProcessor {
                 retry_class: crate::ingress_uow::DbRetryClass::SerializationFailure,
             });
         }
-        let (message_key, decision, alias) =
-            record_shadow_message(&mut transaction, submission, &digest_input, &digest).await?;
+        let (message_key, decision, alias) = record_shadow_message(
+            &mut transaction,
+            sm_ingress_id,
+            submission.handled_ordinal,
+            submission,
+            &digest_input,
+            &digest,
+        )
+        .await?;
 
         if matches!(decision, IngressShadowDecisionClass::AliasConflict) {
             let commit_kind = advance_shadow_frontier(
@@ -1076,6 +1224,7 @@ impl IngressShadowProcessor {
         let _ = CanonicalMessageRepository::terminalize(&mut transaction, message_key, Utc::now())
             .await?;
         transaction.commit().await?;
+        self.run_retention_gc().await;
         Ok(ShadowSubmissionOutcome::committed(
             commit_kind,
             decision,
@@ -1084,6 +1233,20 @@ impl IngressShadowProcessor {
     }
 
     async fn execute_retirement(&self, stream_id: &SmSessionId) -> Result<(), IngressUowError> {
+        #[cfg(test)]
+        if self
+            .forced_retirement_retryable_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(IngressUowError::Database {
+                retry_class: crate::ingress_uow::DbRetryClass::SerializationFailure,
+            });
+        }
         let uow = PostgresIngressUnitOfWork::open_with_node_identity(
             self.database.clone(),
             self.lineage.clone(),
@@ -1109,7 +1272,32 @@ impl IngressShadowProcessor {
         let _ = SmIngressRepository::delete_for_stream(&mut transaction, sm_ingress_id).await?;
         let _ = SmIngressStreamRepository::delete_unclaimed(&mut transaction, stream_id).await?;
         transaction.commit().await?;
+        self.run_retention_gc().await;
         Ok(())
+    }
+
+    async fn run_retention_gc(&self) {
+        let substrate = match PostgresIngressSubstrate::open(self.database.clone()) {
+            Ok(substrate) => substrate,
+            Err(error) => {
+                tracing::warn!(%error, "ingress shadow retention GC setup failed");
+                return;
+            }
+        };
+        match tokio::time::timeout(
+            DEFAULT_TX_DEADLINE,
+            substrate.gc_expired_aliases(Utc::now()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "ingress shadow retention GC failed");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "ingress shadow retention GC timed out");
+            }
+        }
     }
 }
 
@@ -1265,6 +1453,8 @@ impl ShadowSubmissionOutcome {
 #[cfg(feature = "clustering")]
 async fn record_shadow_message(
     transaction: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    sm_ingress_id: waddle_xmpp::ingress::SmIngressId,
+    handled_ordinal: IngressOrdinal,
     submission: &IngressShadowSubmission,
     digest_input: &DigestInput,
     digest: &waddle_xmpp::ingress::SemanticDigest,
@@ -1291,8 +1481,16 @@ async fn record_shadow_message(
             .await?
         }
         None => {
-            let key = minted();
-            CanonicalMessageRepository::record(transaction, key, digest).await?;
+            let key = match SmIngressRepository::lookup(transaction, sm_ingress_id, handled_ordinal)
+                .await?
+            {
+                Some(existing) => existing,
+                None => {
+                    let key = minted();
+                    CanonicalMessageRepository::record(transaction, key, digest).await?;
+                    key
+                }
+            };
             AliasResolution::NoOrigin(key)
         }
     };
@@ -1369,12 +1567,8 @@ fn capture_payload_overflow(
     intents: &[waddle_xmpp::ingress::IngressEffectIntent],
 ) -> Result<bool, IngressUowError> {
     for intent in intents {
-        match intent.encode_v1() {
-            Ok(_) => {}
-            Err(waddle_xmpp::ingress::EffectIntentCodecError::PayloadTooLarge) => {
-                return Ok(true);
-            }
-            Err(error) => return Err(error.into()),
+        if format!("{intent:?}").len() > waddle_xmpp::ingress::MAX_EFFECT_INTENT_PAYLOAD_BYTES {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -1604,8 +1798,11 @@ mod tests {
                 lineage,
                 node_identity,
                 retry_attempts: 5,
+                tx: Arc::new(std::sync::Mutex::new(None)),
                 enqueued_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
+                forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
             };
             let fixture = Self {
                 db,
@@ -1695,16 +1892,20 @@ mod tests {
             }
         }
 
-        fn submission_with_inbox_intent(
+        fn submission_with_archive_intent(
             &self,
             ordinal: u64,
             origin: Option<&str>,
         ) -> IngressShadowSubmission {
             let mut submission = self.submission(ordinal, origin);
             submission.capture.intents.push(
-                waddle_xmpp::ingress::IngressEffectIntent::InboxProject {
-                    owner: self.principal.bare_jid().clone(),
-                    increment_unread: true,
+                waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
+                    archive: self.principal.bare_jid().clone(),
+                    stanza_id: StanzaId::new(
+                        "archive-intent",
+                        Jid::from(self.principal.bare_jid().clone()),
+                    ),
+                    by: self.principal.bare_jid().clone(),
                 },
             );
             submission
@@ -2190,7 +2391,7 @@ mod tests {
             return;
         };
 
-        let accepted = fixture.submission_with_inbox_intent(1, Some("intent-origin"));
+        let accepted = fixture.submission_with_archive_intent(1, Some("intent-origin"));
         assert!(matches!(
             fixture.processor.execute_submission(&accepted).await,
             Ok(ShadowSubmissionOutcome {
@@ -2214,11 +2415,17 @@ mod tests {
         assert_eq!(fixture.frontier().await, 2);
         fixture.assert_rows(1, 1, 2, 1).await;
 
-        let mut payload_churn = fixture.submission_with_inbox_intent(3, Some("intent-origin"));
+        let mut payload_churn = fixture.submission_with_archive_intent(3, Some("intent-origin"));
         payload_churn.capture.intents[0] =
-            waddle_xmpp::ingress::IngressEffectIntent::InboxProject {
-                owner: fixture.principal.bare_jid().clone(),
-                increment_unread: false,
+            waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
+                archive: fixture.principal.bare_jid().clone(),
+                stanza_id: StanzaId::new(
+                    "archive-intent",
+                    Jid::from(fixture.principal.bare_jid().clone()),
+                ),
+                by: "juliet@example.com"
+                    .parse()
+                    .expect("fixture target bare JID"),
             };
         assert!(matches!(
             fixture.processor.execute_submission(&payload_churn).await,
@@ -2279,7 +2486,7 @@ mod tests {
             .expect("poison shadow effect table");
         assert!(fixture
             .processor
-            .execute_submission(&fixture.submission_with_inbox_intent(1, None))
+            .execute_submission(&fixture.submission_with_archive_intent(1, None))
             .await
             .is_err());
         assert_eq!(fixture.frontier().await, 0);
@@ -2459,6 +2666,168 @@ mod tests {
         ));
         assert_eq!(fixture.frontier().await, 0);
         fixture.assert_rows(0, 0, 0, 0).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn mixed_retry_sequence_still_counts_as_exhausted() {
+        let guard = waddle_xmpp::telemetry::test_support::acquire().await;
+        let Some(fixture) = ShadowFixture::open("mixed_retry_metrics").await else {
+            return;
+        };
+        fixture
+            .execute("DROP TABLE ingress_effect_intents", ())
+            .await
+            .expect("poison shadow effect table after the first retryable attempt");
+        fixture
+            .processor
+            .forced_alias_serialization_failures
+            .store(1, Ordering::SeqCst);
+        // Counters are process-global and cumulative; assert the DELTA this
+        // execution produces so sibling tests cannot skew the baseline.
+        let before = guard
+            .counter_sum("ingress.shadow.tx.retries", &[("outcome", "exhausted")])
+            .unwrap_or(0);
+
+        fixture
+            .processor
+            .execute(IngressShadowTask::Submit(Box::new(
+                fixture.submission_with_archive_intent(1, Some("mixed-retry-origin")),
+            )))
+            .await;
+
+        let after = guard
+            .counter_sum("ingress.shadow.tx.retries", &[("outcome", "exhausted")])
+            .unwrap_or(0);
+        assert_eq!(
+            after - before,
+            1,
+            "attempt history, not only the terminal error class, must count exhausted retry sequences"
+        );
+        assert_eq!(fixture.frontier().await, 0);
+        // The poisoned ingress_effect_intents table no longer exists; the
+        // surviving tables plus the unmoved frontier carry the rollback proof.
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
+        assert_eq!(fixture.count("ingress_sm_refs").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn missing_stream_row_is_reenrolled_before_submission_runs() {
+        let Some(fixture) = ShadowFixture::open("reenroll_missing_stream").await else {
+            return;
+        };
+        fixture
+            .execute(
+                "DELETE FROM ingress_sm_streams WHERE stream_id = ?",
+                crate::db_params![fixture.stream_id.as_str().to_string()],
+            )
+            .await
+            .expect("remove enrolled stream row");
+
+        assert!(matches!(
+            fixture
+                .processor
+                .execute_submission(&fixture.submission(1, Some("reenroll-origin")))
+                .await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::Accepted,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::Inserted,
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 1);
+        fixture.assert_rows(1, 1, 1, 0).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn no_origin_retransmit_reuses_the_existing_ordinal_binding() {
+        let Some(fixture) = ShadowFixture::open("no_origin_retransmit").await else {
+            return;
+        };
+        let first = fixture.submission(1, None);
+        assert!(matches!(
+            fixture.processor.execute_submission(&first).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::Accepted,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::None,
+            })
+        ));
+        let original_key = fixture
+            .message_key_for_ordinal(1)
+            .await
+            .expect("first no-origin submit should bind ordinal 1");
+
+        assert!(matches!(
+            fixture.processor.execute_submission(&first).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::Accepted,
+                commit_kind: Some(IngressShadowCommitKind::Idempotent),
+                alias: IngressShadowAliasOutcome::None,
+            })
+        ));
+        assert_eq!(
+            fixture.message_key_for_ordinal(1).await,
+            Some(original_key),
+            "the retransmit must reuse the canonical message already bound to the handled ordinal"
+        );
+        fixture.assert_rows(1, 0, 1, 0).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn successful_submission_runs_production_retention_gc() {
+        let Some(fixture) = ShadowFixture::open("production_retention_gc").await else {
+            return;
+        };
+        let stale = fixture.submission(1, None);
+        assert!(matches!(
+            fixture.processor.execute_submission(&stale).await,
+            Ok(ShadowSubmissionOutcome {
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                ..
+            })
+        ));
+        let stale_key = fixture
+            .message_key_for_ordinal(1)
+            .await
+            .expect("seed submission should create a canonical row");
+        fixture
+            .execute(
+                "DELETE FROM ingress_sm_refs WHERE message_key = ?::uuid",
+                crate::db_params![stale_key.to_storage().to_string()],
+            )
+            .await
+            .expect("orphan the terminalized message so GC can reclaim it");
+        fixture
+            .execute(
+                "UPDATE ingress_messages SET terminal_at = ?::timestamptz WHERE message_key = ?::uuid",
+                crate::db_params![
+                    (Utc::now()
+                        - crate::ingress_substrate::ALIAS_RETENTION
+                        - ChronoDuration::seconds(1))
+                    .to_rfc3339(),
+                    stale_key.to_storage().to_string(),
+                ],
+            )
+            .await
+            .expect("age the terminal row beyond retention");
+
+        assert!(matches!(
+            fixture
+                .processor
+                .execute_submission(&fixture.submission(2, Some("gc-trigger-origin")))
+                .await,
+            Ok(ShadowSubmissionOutcome {
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                ..
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 2);
+        fixture.assert_rows(1, 1, 1, 0).await;
         fixture.close().await;
     }
 
@@ -2845,6 +3214,78 @@ mod tests {
             .expect("second task should start after the first completes")
             .expect("second start order recorded");
         assert_eq!(second_started, 1);
+    }
+
+    #[tokio::test]
+    async fn retirement_admission_is_bounded_by_unique_streams() {
+        let release_retirements = Arc::new(Notify::new());
+        let handle = test_handle(2, 1, {
+            let release_retirements = release_retirements.clone();
+            move |task| {
+                let release_retirements = release_retirements.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Retire { .. }) {
+                        release_retirements.notified().await;
+                    }
+                })
+            }
+        });
+
+        assert_eq!(
+            handle.try_send(IngressShadowTask::Retire {
+                stream_id: SmSessionId::new("retire-a"),
+            }),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            handle.try_send(IngressShadowTask::Retire {
+                stream_id: SmSessionId::new("retire-b"),
+            }),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            handle.try_send(IngressShadowTask::Retire {
+                stream_id: SmSessionId::new("retire-c"),
+            }),
+            IngressShadowDisposition::QueueFull,
+            "terminal stream cleanup must obey the same bounded admission surface as other shadow work"
+        );
+
+        release_retirements.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn failed_retirement_is_requeued_for_a_later_attempt() {
+        let Some(fixture) = ShadowFixture::open("retirement_requeue").await else {
+            return;
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+        let processor = IngressShadowProcessor {
+            tx,
+            forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(5)),
+            ..fixture.processor.clone()
+        };
+        processor
+            .retiring_streams
+            .lock()
+            .expect("retiring stream mutex")
+            .insert(fixture.stream_id.clone());
+
+        processor
+            .execute(IngressShadowTask::Retire {
+                stream_id: fixture.stream_id.clone(),
+            })
+            .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(QueuedIngressShadowTask {
+                task: IngressShadowTask::Retire { stream_id },
+                ..
+            }) if stream_id == fixture.stream_id
+        ));
+        fixture.close().await;
     }
 
     #[tokio::test]

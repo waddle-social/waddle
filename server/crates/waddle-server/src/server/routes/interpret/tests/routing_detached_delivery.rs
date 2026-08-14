@@ -194,6 +194,10 @@ async fn detached_dm_append_records_the_actual_sm_stream() {
                 if stream.as_str() == "captured-dm-stream"
         )
     }));
+    assert!(
+        capture.snapshot().intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "bob@example.com".parse::<jid::BareJid>().expect("bare") && *fanout == vec!["bob@example.com/phone".parse::<jid::FullJid>().expect("full")])),
+        "detached full-JID DM must also record the accepted direct-route target"
+    );
 }
 
 #[tokio::test]

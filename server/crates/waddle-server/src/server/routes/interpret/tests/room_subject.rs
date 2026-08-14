@@ -592,6 +592,51 @@ async fn xep_0045_rejected_room_subject_does_not_record_subject_mutation_intent(
 }
 
 #[tokio::test]
+async fn xep_0045_rejected_room_subject_records_error_reply_intent() {
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
+    let registry = ConnectionRegistry::new();
+    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let mut deps = Deps::registry_only(&registry);
+    deps.ingress_effect_capture = Some(capture.clone());
+
+    let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+    let _outcome = interpret(
+        vec![OutboundEvent::PersistRoomSubject {
+            room: room_jid.clone(),
+            claim_fence: None,
+            texts: waddle_xmpp::muc::RoomSubjectTexts::from_iter([(
+                String::new(),
+                "ignored".to_string(),
+            )]),
+            setter: sender.to_bare(),
+            sender: sender.clone(),
+            message: Box::new(subject_change_message(&room_jid, &sender, "ignored")),
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        }],
+        &deps,
+    )
+    .await;
+
+    let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::ResourceConstraint,
+        "en",
+        "The room subject could not be saved; please retry.",
+    ))
+    .expect("server-built stanza error should freeze");
+    assert!(capture.snapshot().intents.iter().any(|intent| {
+        matches!(
+            intent,
+            waddle_xmpp::ingress::IngressEffectIntent::ErrorReply { recipient, error }
+                if recipient == &sender && error == &expected_error
+        )
+    }));
+}
+
+#[tokio::test]
 async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
     use waddle_xmpp::muc::room_actor::GetSnapshot;
     use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DemoteRoomIfExactActor};

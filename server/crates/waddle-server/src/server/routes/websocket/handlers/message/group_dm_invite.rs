@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use tracing::warn;
 use waddle_xmpp::{
+    ingress::{FrozenStanzaError, IngressEffectIntent},
     muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
@@ -57,6 +58,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::ItemNotFound,
             "Requested room not found.",
         )]);
@@ -70,6 +72,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::InternalServerError,
             "Internal server error.",
         )]);
@@ -78,6 +81,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::Forbidden,
             "Only group-DM members may invite people.",
         )]);
@@ -112,6 +116,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::NotAuthorized,
             "Authentication required.",
         )]);
@@ -123,7 +128,12 @@ pub(super) async fn handle_group_dm_mediated_invite(
     )
     .await
     {
-        return Some(vec![xmpp_error_reply(incoming, bound_jid, error)]);
+        return Some(vec![xmpp_error_reply(
+            incoming,
+            bound_jid,
+            ingress_effect_capture,
+            error,
+        )]);
     }
     let Ok(invitee_context) = room_actor
         .ask(GetAdminContext {
@@ -137,6 +147,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::InternalServerError,
             "Internal server error.",
         )]);
@@ -145,6 +156,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::Conflict,
             "Invitee is already a group-DM member.",
         )]);
@@ -179,6 +191,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::InternalServerError,
             "Internal server error.",
         )]);
@@ -195,6 +208,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::InternalServerError,
             "Internal server error.",
         )]);
@@ -217,6 +231,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::InternalServerError,
             "Internal server error.",
         )]);
@@ -250,6 +265,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             GroupDmInviteError::InternalServerError,
             "Internal server error.",
         )]);
@@ -299,6 +315,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
             return Some(vec![error_reply(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 GroupDmInviteError::InternalServerError,
                 "Internal server error.",
             )]);
@@ -347,6 +364,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         return Some(vec![error_reply(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             error_kind,
             "Internal server error.",
         )]);
@@ -432,6 +450,7 @@ mod tests {
     use super::*;
     use kameo::actor::Spawn;
     use waddle_xmpp::muc::room_actor::{GetRoomSnapshot, HydrateDurableRecipients, RoomActor};
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::muc::{MucRoom, RoomConfig};
 
     async fn durable_recipients(
@@ -518,6 +537,92 @@ mod tests {
             "a rolled-back invitee must not remain a durable inbox \
              recipient (tuple delete must precede ChangeAffiliation(None))"
         );
+    }
+
+    #[tokio::test]
+    async fn non_member_group_dm_invite_records_error_reply_intent() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let room_jid: jid::BareJid = "group-dm-invite@muc.example.com".parse().expect("room jid");
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        crate::server::xmpp_channels::upsert_xmpp_channel(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &crate::server::xmpp_channels::XmppChannelUpsert {
+                id: "group-dm-invite".to_string(),
+                name: "Invite Test".to_string(),
+                description: None,
+                channel_type: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                position: 0,
+                is_default: false,
+                pin_permission: Default::default(),
+                members_only: true,
+                public_room: false,
+            },
+        )
+        .await
+        .expect("seed group-DM channel row");
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                channel_id: "group-dm-invite".to_string(),
+                config: RoomConfig {
+                    group_dm: true,
+                    persistent: true,
+                    members_only: true,
+                    public_room: false,
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create room");
+
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+        message.type_ = xmpp_parsers::message::MessageType::Normal;
+        message.from = Some(jid::Jid::from(sender.clone()));
+        message.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .attr(
+                            minidom::rxml::xml_ncname!("to").to_owned(),
+                            "bob@example.com",
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+
+        let frames = handle_group_dm_mediated_invite(
+            &message,
+            state.as_ref(),
+            &sender,
+            None,
+            Some(&capture),
+        )
+        .await
+        .expect("handler should reply");
+
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("forbidden"));
+        let expected_error = FrozenStanzaError::from_xmpp(&StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "en",
+            "Only group-DM members may invite people.",
+        ))
+        .expect("server-built stanza error should freeze");
+        assert!(capture
+            .snapshot()
+            .intents
+            .contains(&IngressEffectIntent::ErrorReply {
+                recipient: sender,
+                error: expected_error,
+            }));
     }
 }
 
@@ -622,17 +727,33 @@ impl GroupDmInviteError {
 fn error_reply(
     incoming: &xmpp_parsers::message::Message,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
     kind: GroupDmInviteError,
     text: &str,
 ) -> String {
+    let stanza_error = kind.stanza_error(text);
+    let frozen_error = FrozenStanzaError::from_xmpp(&stanza_error)
+        .expect("server-built stanza error should freeze");
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-    stanza_to_string(message_error_reply(&stamped, kind.stanza_error(text))).unwrap_or_default()
+    match stanza_to_string(message_error_reply(&stamped, stanza_error)) {
+        Ok(xml) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::ErrorReply {
+                    recipient: bound_jid.clone(),
+                    error: frozen_error,
+                });
+            }
+            xml
+        }
+        Err(_) => String::new(),
+    }
 }
 
 fn xmpp_error_reply(
     incoming: &xmpp_parsers::message::Message,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
     error: waddle_xmpp::XmppError,
 ) -> String {
     let stanza_error = match error {
@@ -653,9 +774,22 @@ fn xmpp_error_reply(
             )
         }
     };
+    let frozen_error = FrozenStanzaError::from_xmpp(&stanza_error)
+        .expect("server-built stanza error should freeze");
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-    stanza_to_string(message_error_reply(&stamped, stanza_error)).unwrap_or_default()
+    match stanza_to_string(message_error_reply(&stamped, stanza_error)) {
+        Ok(xml) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::ErrorReply {
+                    recipient: bound_jid.clone(),
+                    error: frozen_error,
+                });
+            }
+            xml
+        }
+        Err(_) => String::new(),
+    }
 }
 
 fn stanza_error_from_waddle_parts(

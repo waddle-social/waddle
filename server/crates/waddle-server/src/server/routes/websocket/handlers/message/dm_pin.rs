@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 
 use tracing::{debug, warn};
 use waddle_xmpp::{
-    ingress::IngressEffectIntent,
+    ingress::{FrozenStanzaError, IngressEffectIntent},
     parser::stanza_to_string,
-    protocol::handlers::errors::{bad_request_reply, message_error_reply},
+    protocol::handlers::errors::message_error_reply,
+    registry::BroadcastOutcome,
     Stanza,
 };
 use waddle_xmpp_core::xep0359::StanzaId;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::ingress_shadow::{
     IngressEffectCapture, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
@@ -37,10 +39,18 @@ pub(super) async fn handle_dm_pin_message(
                         reason: ShadowSemanticRejectedReason::MalformedPayload,
                     });
                 }
-                let mut stamped = incoming.clone();
-                stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-                let reply = bad_request_reply(&stamped, "Malformed DM pin marker.");
-                return stanza_to_string(reply).ok().map(|frame| vec![frame]);
+                return dm_pin_error_frame(
+                    incoming,
+                    bound_jid,
+                    ingress_effect_capture,
+                    StanzaError::new(
+                        ErrorType::Modify,
+                        DefinedCondition::BadRequest,
+                        "en",
+                        "Malformed DM pin marker.",
+                    ),
+                )
+                .map(|frame| vec![frame]);
             }
             return None;
         }
@@ -52,10 +62,18 @@ pub(super) async fn handle_dm_pin_message(
                 reason: ShadowSemanticRejectedReason::MalformedPayload,
             });
         }
-        let mut stamped = incoming.clone();
-        stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-        let reply = bad_request_reply(&stamped, "DM pin marker requires a local peer JID.");
-        return stanza_to_string(reply).ok().map(|frame| vec![frame]);
+        return dm_pin_error_frame(
+            incoming,
+            bound_jid,
+            ingress_effect_capture,
+            StanzaError::new(
+                ErrorType::Modify,
+                DefinedCondition::BadRequest,
+                "en",
+                "DM pin marker requires a local peer JID.",
+            ),
+        )
+        .map(|frame| vec![frame]);
     };
     if peer.domain() != bound_jid.domain() {
         if let Some(capture) = ingress_effect_capture {
@@ -63,18 +81,18 @@ pub(super) async fn handle_dm_pin_message(
                 reason: ShadowAuthorizationDeniedReason::Forbidden,
             });
         }
-        let mut stamped = incoming.clone();
-        stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-        let reply = message_error_reply(
-            &stamped,
+        return dm_pin_error_frame(
+            incoming,
+            bound_jid,
+            ingress_effect_capture,
             xmpp_parsers::stanza_error::StanzaError::new(
                 xmpp_parsers::stanza_error::ErrorType::Auth,
                 xmpp_parsers::stanza_error::DefinedCondition::Forbidden,
                 "en",
                 "DM pins are only supported for local peers.",
             ),
-        );
-        return stanza_to_string(reply).ok().map(|frame| vec![frame]);
+        )
+        .map(|frame| vec![frame]);
     }
 
     let sender = bound_jid.to_bare();
@@ -115,18 +133,18 @@ pub(super) async fn handle_dm_pin_message(
     {
         Some(found) => found,
         None => {
-            let mut stamped = incoming.clone();
-            stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-            let reply = message_error_reply(
-                &stamped,
+            return dm_pin_error_frame(
+                incoming,
+                bound_jid,
+                ingress_effect_capture,
                 xmpp_parsers::stanza_error::StanzaError::new(
                     xmpp_parsers::stanza_error::ErrorType::Cancel,
                     xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
                     "en",
                     "Pinned DM target was not found.",
                 ),
-            );
-            return stanza_to_string(reply).ok().map(|frame| vec![frame]);
+            )
+            .map(|frame| vec![frame]);
         }
     };
     let body = target.archived.body.as_deref().unwrap_or("");
@@ -349,14 +367,19 @@ async fn fanout_dm_pin_event(
         }
         deliverable_resources.push(resource.clone());
     }
-    capture_dm_pin_routes(ingress_effect_capture, &deliverable_resources);
+    let mut accepted_resources = Vec::new();
     for resource in deliverable_resources {
-        let _ = state
+        if state
             .deps
             .protocol
             .connection_registry
-            .try_send_to(&resource, Stanza::Message(event.clone()));
+            .try_send_to(&resource, Stanza::Message(event.clone()))
+            == BroadcastOutcome::Delivered
+        {
+            accepted_resources.push(resource);
+        }
     }
+    capture_dm_pin_routes(ingress_effect_capture, &accepted_resources);
 }
 
 async fn dm_pin_delivery_blocked(
@@ -508,7 +531,36 @@ fn capture_dm_pin_routes(
     for (recipient, mut fanout) in fanout_by_recipient {
         fanout.sort_by_key(ToString::to_string);
         fanout.dedup();
-        capture.record_intent(IngressEffectIntent::RouteDirect { recipient, fanout });
+        capture.record_intent(IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            route_identity: capture.next_route_identity(),
+        });
+    }
+}
+
+fn dm_pin_error_frame(
+    incoming: &xmpp_parsers::message::Message,
+    bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
+    error: StanzaError,
+) -> Option<String> {
+    let frozen_error =
+        FrozenStanzaError::from_xmpp(&error).expect("server-built stanza error should freeze");
+    let mut stamped = incoming.clone();
+    stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+    let reply = message_error_reply(&stamped, error);
+    match stanza_to_string(reply) {
+        Ok(frame) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::ErrorReply {
+                    recipient: bound_jid.clone(),
+                    error: frozen_error,
+                });
+            }
+            Some(frame)
+        }
+        Err(_) => None,
     }
 }
 
@@ -518,6 +570,7 @@ mod tests {
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state, register_test_connection,
     };
+    use waddle_xmpp::xep::build_pinned_message_element;
 
     #[tokio::test]
     async fn fanout_dm_pin_event_records_direct_routes_per_participant() {
@@ -558,17 +611,94 @@ mod tests {
         .await;
 
         let snapshot = capture.snapshot();
-        assert!(snapshot
+        assert!(snapshot.intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "alice@example.com".parse::<jid::BareJid>().expect("alice bare") && *fanout == vec![alice_laptop.clone(), alice_phone.clone()])));
+        assert!(snapshot.intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "bob@example.com".parse::<jid::BareJid>().expect("bob bare") && *fanout == vec![bob_phone.clone()])));
+    }
+
+    #[tokio::test]
+    async fn fanout_dm_pin_event_ignores_closed_resources_in_route_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("alice phone");
+        let alice_laptop: jid::FullJid = "alice@example.com/laptop".parse().expect("alice laptop");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let (alice_phone_tx, _alice_phone_rx) = tokio::sync::mpsc::channel(4);
+        let (alice_laptop_tx, alice_laptop_rx) = tokio::sync::mpsc::channel(4);
+        let (bob_phone_tx, _bob_phone_rx) = tokio::sync::mpsc::channel(4);
+        drop(alice_laptop_rx);
+        register_test_connection(state.as_ref(), &alice_phone, alice_phone_tx).await;
+        register_test_connection(state.as_ref(), &alice_laptop, alice_laptop_tx).await;
+        register_test_connection(state.as_ref(), &bob_phone, bob_phone_tx).await;
+
+        let event = build_dm_pin_event_message(
+            &"alice@example.com".parse().expect("sender"),
+            &"bob@example.com".parse().expect("peer"),
+            DmPinAction::Pinned,
+            &StanzaId::new(
+                "pin-1",
+                jid::Jid::from("alice@example.com".parse::<jid::BareJid>().expect("bare")),
+            ),
+            &"alice@example.com".parse().expect("by"),
+            None,
+        );
+
+        fanout_dm_pin_event(
+            state.as_ref(),
+            &"alice@example.com".parse().expect("sender"),
+            &[
+                "alice@example.com".parse().expect("alice"),
+                "bob@example.com".parse().expect("bob"),
+            ],
+            event,
+            Some(&capture),
+        )
+        .await;
+
+        let snapshot = capture.snapshot();
+        assert!(snapshot.intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "alice@example.com".parse::<jid::BareJid>().expect("alice bare") && *fanout == vec![alice_phone.clone()])));
+        assert!(!snapshot.intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "alice@example.com".parse::<jid::BareJid>().expect("alice bare") && *fanout == vec![alice_laptop.clone()])));
+    }
+
+    #[tokio::test]
+    async fn missing_dm_pin_target_records_error_reply_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let mut message = xmpp_parsers::message::Message::new(Some(
+            "bob@example.com".parse::<jid::Jid>().expect("peer jid"),
+        ));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message.from = Some(jid::Jid::from(sender.clone()));
+        message
+            .payloads
+            .push(build_pinned_message_element(&StanzaId::new(
+                "missing-target",
+                jid::Jid::from(
+                    "alice@example.com"
+                        .parse::<jid::BareJid>()
+                        .expect("bare jid"),
+                ),
+            )));
+
+        let frames = handle_dm_pin_message(&message, state.as_ref(), &sender, Some(&capture))
+            .await
+            .expect("handler should reply");
+
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("item-not-found"));
+        let expected_error = FrozenStanzaError::from_xmpp(&StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::ItemNotFound,
+            "en",
+            "Pinned DM target was not found.",
+        ))
+        .expect("server-built stanza error should freeze");
+        assert!(capture
+            .snapshot()
             .intents
-            .contains(&IngressEffectIntent::RouteDirect {
-                recipient: "alice@example.com".parse().expect("alice bare"),
-                fanout: vec![alice_laptop, alice_phone],
-            }));
-        assert!(snapshot
-            .intents
-            .contains(&IngressEffectIntent::RouteDirect {
-                recipient: "bob@example.com".parse().expect("bob bare"),
-                fanout: vec![bob_phone],
+            .contains(&IngressEffectIntent::ErrorReply {
+                recipient: sender,
+                error: expected_error,
             }));
     }
 }

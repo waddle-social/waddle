@@ -259,28 +259,19 @@ async fn handle_muc_private_message(
     // clustered remote-resource relay for occupant sessions whose
     // socket lives on another node.
     let mut any_session_handled = false;
-    let mut handled_recipients = Vec::new();
+    let mut definitive_recipients = Vec::new();
     for recipient in &recipient_sessions {
         let mut routed = relayed.clone();
         routed.to = Some(jid::Jid::from(recipient.clone()));
         let stanza = Stanza::Message(routed);
         let outcome = deliver_pm_to_session(state, &deps, recipient, &stanza).await;
-        // Explicit success set (codex review on PR #1277): Delivered /
-        // QueuedDetached are real deliveries; a clustered MaybeCommitted
-        // may have reached the target, so bouncing would risk a
-        // duplicate-visible error. Unavailable/Dropped never count.
-        let session_handled = match outcome {
-            crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-            | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => true,
-            #[cfg(feature = "clustering")]
-            crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => true,
-            crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
-            | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => false,
-        };
-        if session_handled {
+        let capture = pm_delivery_capture(outcome);
+        if capture.any_session_handled {
             any_session_handled = true;
-            handled_recipients.push(recipient.clone());
-        } else {
+        }
+        if capture.record_definitive_route {
+            definitive_recipients.push(recipient.clone());
+        } else if !capture.any_session_handled {
             warn!(
                 room = %room_jid,
                 recipient = %recipient,
@@ -289,7 +280,11 @@ async fn handle_muc_private_message(
             );
         }
     }
-    capture_muc_private_routes(ingress_effect_capture, &from_room_jid, handled_recipients);
+    capture_muc_private_routes(
+        ingress_effect_capture,
+        &from_room_jid,
+        definitive_recipients,
+    );
     // XEP-0045 §7.5: the service is responsible for delivering the PM.
     // An ARCHIVED PM that reached no live/detached session is still
     // durable — the occupant sees it via MAM — so only an unarchivable
@@ -316,6 +311,38 @@ async fn handle_muc_private_message(
     }
 
     Some(nested.frames)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PmDeliveryCapture {
+    any_session_handled: bool,
+    record_definitive_route: bool,
+}
+
+fn pm_delivery_capture(
+    outcome: crate::server::routes::interpret::FullJidDeliveryOutcome,
+) -> PmDeliveryCapture {
+    match outcome {
+        crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
+        | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => {
+            PmDeliveryCapture {
+                any_session_handled: true,
+                record_definitive_route: true,
+            }
+        }
+        #[cfg(feature = "clustering")]
+        crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
+            PmDeliveryCapture {
+                any_session_handled: true,
+                record_definitive_route: false,
+            }
+        }
+        crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
+        | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => PmDeliveryCapture {
+            any_session_handled: false,
+            record_definitive_route: false,
+        },
+    }
 }
 
 /// Deliver one MUC private-message wire copy to one occupant session
@@ -860,6 +887,17 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn maybe_committed_pm_delivery_is_not_a_definitive_route() {
+        let capture = pm_delivery_capture(
+            crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted,
+        );
+
+        assert!(capture.any_session_handled);
+        assert!(!capture.record_definitive_route);
     }
 
     #[tokio::test]

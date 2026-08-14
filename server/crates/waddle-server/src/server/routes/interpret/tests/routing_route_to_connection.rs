@@ -1,4 +1,5 @@
 use super::*;
+use crate::ingress_shadow::IngressEffectCapture;
 
 // #229 PR12 — RouteToConnection delivers as PeerStanza
 // -----------------------------------------------------------------
@@ -41,6 +42,36 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
          loop runs the recipient pass; got {:?}",
         queued[0].kind
     );
+}
+
+#[tokio::test]
+async fn route_to_connection_full_jid_live_dm_records_route_direct_intent() {
+    use waddle_xmpp::registry::UserRegistryActor;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
+
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::registry_with_user_registry(&registry, &user_registry)
+        .with_ingress_effect_capture(Some(capture.clone()));
+
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(bob.clone()),
+            stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
+        }],
+        &deps,
+    )
+    .await;
+
+    let queued = drain_inbound(&mut bob_rx);
+    assert_eq!(queued.len(), 1, "delivered to bob's queue exactly once");
+    assert!(capture.snapshot().intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "bob@example.com".parse::<jid::BareJid>().expect("bare") && *fanout == vec![bob.clone()])));
 }
 
 #[tokio::test]

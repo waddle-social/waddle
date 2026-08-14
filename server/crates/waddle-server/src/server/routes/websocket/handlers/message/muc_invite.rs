@@ -464,8 +464,8 @@ pub(super) async fn deliver_muc_user_message(
         recipient,
     )
     .await;
-    super::record_route_direct_intent(ingress_effect_capture, recipient.clone(), resources.clone());
     let mut delivered = false;
+    let mut accepted_resources = Vec::new();
     for resource in &resources {
         if state
             .deps
@@ -476,16 +476,24 @@ pub(super) async fn deliver_muc_user_message(
             .is_sent()
         {
             delivered = true;
+            accepted_resources.push(resource.clone());
         }
     }
     if delivered {
+        super::record_route_direct_intent(
+            ingress_effect_capture,
+            recipient.clone(),
+            accepted_resources,
+        );
         return Ok(());
     }
     // Offline — or every registered session refused the write (a
     // half-closed socket is indistinguishable from offline here):
     // fall back to the durable queue rather than reporting success
     // for a message nobody received.
-    queue_offline_muc_user_message(state, recipient, &message).await
+    queue_offline_muc_user_message(state, recipient, &message).await?;
+    super::record_route_direct_intent(ingress_effect_capture, recipient.clone(), Vec::new());
+    Ok(())
 }
 
 /// Queue a room-authored invite/decline for an offline recipient in
@@ -601,13 +609,16 @@ mod tests {
             .await
             .expect("delivery succeeds");
 
-        assert!(capture
-            .snapshot()
-            .intents
-            .contains(&IngressEffectIntent::RouteDirect {
-                recipient,
-                fanout: vec![bob_phone],
-            }));
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    recipient: captured_recipient,
+                    fanout,
+                    ..
+                } if captured_recipient == &recipient && fanout == &vec![bob_phone.clone()]
+            )
+        }));
     }
 
     #[tokio::test]
@@ -622,13 +633,48 @@ mod tests {
             .await
             .expect("offline queue succeeds");
 
-        assert!(capture
-            .snapshot()
-            .intents
-            .contains(&IngressEffectIntent::RouteDirect {
-                recipient,
-                fanout: Vec::new(),
-            }));
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    recipient: captured_recipient,
+                    fanout,
+                    ..
+                } if captured_recipient == &recipient && fanout.is_empty()
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn deliver_muc_user_message_excludes_rejected_live_resources_from_route_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let bob_laptop: jid::FullJid = "bob@example.com/laptop".parse().expect("bob laptop");
+        let (bob_phone_tx, _bob_phone_rx) = tokio::sync::mpsc::channel(4);
+        let (bob_laptop_tx, bob_laptop_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &bob_phone, bob_phone_tx).await;
+        register_test_connection(state.as_ref(), &bob_laptop, bob_laptop_tx).await;
+        drop(bob_laptop_rx);
+
+        let mut message = Message::new(Some(jid::Jid::from(recipient.clone())));
+        message.type_ = MessageType::Normal;
+
+        deliver_muc_user_message(state.as_ref(), &recipient, message, Some(&capture))
+            .await
+            .expect("delivery succeeds");
+
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    recipient: captured_recipient,
+                    fanout,
+                    ..
+                } if captured_recipient == &recipient && fanout == &vec![bob_phone.clone()]
+            )
+        }));
     }
 
     #[tokio::test]

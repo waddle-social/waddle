@@ -59,10 +59,10 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         notification_recovery,
     })
     .await;
-    if outcome.channel_committed || outcome.thread_committed {
+    if let Some(mutation) = groupchat_inbox_mutation(&room, &thread, is_recipient, outcome) {
         deps.capture_intent(IngressEffectIntent::InboxProject {
             owner: owner.clone(),
-            increment_unread: is_recipient,
+            mutation,
         });
     }
     maybe_enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
@@ -126,6 +126,40 @@ fn groupchat_notification_recovery_item(
 enum GroupchatNotificationCandidateQueueOutcome {
     Completed,
     RetryLater,
+}
+
+fn groupchat_inbox_mutation(
+    room: &BareJid,
+    thread: &Option<GroupchatThreadProjection>,
+    is_recipient: bool,
+    outcome: GroupchatInboxProjectionOutcome,
+) -> Option<waddle_xmpp::ingress::InboxProjectionMutation> {
+    match (
+        outcome.channel_committed,
+        outcome.thread_committed,
+        thread.as_ref(),
+    ) {
+        (true, true, Some(thread)) => Some(
+            waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannelAndThread {
+                room: room.clone(),
+                thread_id: thread.thread_id.clone(),
+                increment_unread: is_recipient,
+            },
+        ),
+        (true, false, _) => Some(
+            waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannel {
+                room: room.clone(),
+                increment_unread: is_recipient,
+            },
+        ),
+        (false, true, Some(thread)) => Some(
+            waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThread {
+                room: room.clone(),
+                thread_id: thread.thread_id.clone(),
+            },
+        ),
+        _ => None,
+    }
 }
 
 async fn maybe_enqueue_groupchat_notification_candidate(
@@ -365,7 +399,7 @@ async fn insert_groupchat_notification_candidate(
         room.clone(),
         sender_jid,
         thread_id,
-        archive_stanza_id,
+        archive_stanza_id.clone(),
         class,
         hints,
     ) {
@@ -501,6 +535,12 @@ async fn insert_groupchat_notification_candidate(
             if let Some(deps) = deps {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),
+                    mutation:
+                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                            conversation: room.clone(),
+                            archive_stanza_id: archive_stanza_id.clone(),
+                            outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+                        },
                 });
             }
             debug!(
@@ -515,6 +555,12 @@ async fn insert_groupchat_notification_candidate(
             if let Some(deps) = deps {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),
+                    mutation:
+                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                            conversation: room.clone(),
+                            archive_stanza_id: archive_stanza_id.clone(),
+                            outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Duplicate,
+                        },
                 });
             }
             debug!(

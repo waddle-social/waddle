@@ -43,6 +43,12 @@ pub(super) async fn queue_offline_delivery(
             if notification_archive_stanza_id.is_some() {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: recipient.clone(),
+                    mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {
+                        conversation: recipient.clone(),
+                        archive_stanza_id: notification_archive_stanza_id
+                            .clone()
+                            .expect("checked above"),
+                    },
                 });
             }
             let outcome = enqueue_xep0357_notification_candidate(
