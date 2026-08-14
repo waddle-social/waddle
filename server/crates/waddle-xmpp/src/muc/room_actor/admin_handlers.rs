@@ -6,6 +6,7 @@ use xmpp_parsers::presence::Presence;
 
 use super::{AdminApplyError, AdminContext, RoomActor};
 use crate::muc::admin::{is_role_change_query, AdminItem};
+use crate::muc::durable::{AffiliationEntry as DurableAffiliationEntry, RoomDurableMutation};
 use crate::muc::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
     build_membership_removal_presence, build_role_change_presence, MucPresenceStatus, MucRoom,
@@ -38,6 +39,16 @@ fn occupants_for_bare(room: &MucRoom, target_jid: &BareJid) -> Vec<Occupant> {
         .filter(|occupant| occupant.real_jid.to_bare() == *target_jid)
         .cloned()
         .collect()
+}
+
+fn durable_affiliation_entry(jid: BareJid, affiliation: Affiliation) -> DurableAffiliationEntry {
+    DurableAffiliationEntry::new(
+        jid,
+        match affiliation {
+            Affiliation::None => None,
+            affiliation => Some(affiliation),
+        },
+    )
 }
 
 fn removal_presence_updates(
@@ -261,7 +272,7 @@ fn changed_session_voices(
 /// Leaving them connected would let a non-occupant keep publishing into
 /// — and listening in on — a room they can no longer enter. Same
 /// reasoning as the 307/301/321 paths.
-fn enforce_members_only(
+pub fn enforce_members_only_from_room(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
 ) -> AdminItemsApplied {
@@ -438,11 +449,6 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         msg: ApplyAdminItems,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): verify
-        // ownership BEFORE any of this batch's role/affiliation changes
-        // are applied — a `NotOwner` here means NONE of this ask's items
-        // were applied (the gate runs before the first mutation below).
-        self.gate_mutation().await?;
         if msg.items.iter().any(|item| {
             item.affiliation.is_some()
                 && item
@@ -452,21 +458,12 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         }) {
             return Err(AdminApplyError::InviteRollbackPending);
         }
-        let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
-        let mut removed_by_moderation: Vec<FullJid> = Vec::new();
-        let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
-        // FIX 2: a persist failure partway through this batch must not
-        // abort the loop early — earlier items in the same batch have
-        // already mutated `self.room` (bans/kicks remove occupants), so
-        // aborting mid-loop would silently drop the presence
-        // notifications describing changes that already committed
-        // in-memory. Collect the first failure and keep applying the
-        // rest of the batch; surface it as a typed error only after the
-        // full batch (and its presence updates) has been computed.
-        let mut persist_failure: Option<super::DurablePersistError> = None;
-        let mut occupants_to_kick: Vec<String> = Vec::new();
-        let mut needs_rehydration = false;
         if is_role_change_query(&msg.items) {
+            self.gate_mutation().await?;
+            let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
+            let mut removed_by_moderation: Vec<FullJid> = Vec::new();
+            let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
+            let mut occupants_to_kick: Vec<String> = Vec::new();
             for item in &msg.items {
                 let Some(target_nick) = item.nick.as_ref() else {
                     continue;
@@ -572,158 +569,174 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     }
                 }
             }
-        } else {
-            let mut final_affiliations: BTreeMap<BareJid, Affiliation> = self
-                .room
-                .get_all_affiliations()
-                .into_iter()
-                .map(|entry| (entry.jid, entry.affiliation))
-                .collect();
-            let current_owner_count = self.room.get_jids_by_affiliation(Affiliation::Owner).len();
-            // Pre-validation simulates the mutation loop step by step
-            // against an evolving affiliation map. It must reject
-            // every set the loop below would reject — the loop
-            // mutates the room (bans remove occupants) as it goes, so
-            // a mid-loop error would leave a partially-applied batch
-            // whose removals and 301 presences are silently dropped
-            // (#935 review). Erroring here keeps the set atomic.
-            for item in &msg.items {
-                let Some(target_jid) = item.jid.as_ref() else {
-                    continue;
-                };
-                let Some(new_affiliation) = item.affiliation else {
-                    continue;
-                };
-                let target_current_affiliation = final_affiliations
-                    .get(target_jid)
+            for nick in occupants_to_kick {
+                self.room.remove_occupant(&nick);
+            }
+            return Ok(AdminItemsApplied {
+                presence_updates,
+                removed_by_moderation,
+                voice_changes,
+            });
+        }
+
+        let current_affiliations: BTreeMap<BareJid, Affiliation> = self
+            .room
+            .get_all_affiliations()
+            .into_iter()
+            .map(|entry| (entry.jid, entry.affiliation))
+            .collect();
+        let mut final_affiliations = current_affiliations.clone();
+        let mut touched_jids = Vec::new();
+        let current_owner_count = self.room.get_jids_by_affiliation(Affiliation::Owner).len();
+        // Pre-validation simulates the mutation loop step by step
+        // against an evolving affiliation map. It must reject
+        // every set the loop below would reject — the loop
+        // mutates the room (bans remove occupants) as it goes, so
+        // a mid-loop error would leave a partially-applied batch
+        // whose removals and 301 presences are silently dropped
+        // (#935 review). Erroring here keeps the set atomic.
+        for item in &msg.items {
+            let Some(target_jid) = item.jid.as_ref() else {
+                continue;
+            };
+            let Some(new_affiliation) = item.affiliation else {
+                continue;
+            };
+            if !touched_jids.contains(target_jid) {
+                touched_jids.push(target_jid.clone());
+            }
+            let target_current_affiliation = final_affiliations
+                .get(target_jid)
+                .copied()
+                .unwrap_or(Affiliation::None);
+            let can_modify = match new_affiliation {
+                Affiliation::Owner | Affiliation::Admin => {
+                    msg.sender_affiliation == Affiliation::Owner
+                }
+                Affiliation::Member | Affiliation::None | Affiliation::Outcast
+                    if target_current_affiliation == Affiliation::Admin =>
+                {
+                    msg.sender_affiliation == Affiliation::Owner
+                }
+                Affiliation::Member | Affiliation::None | Affiliation::Outcast => matches!(
+                    msg.sender_affiliation,
+                    Affiliation::Owner | Affiliation::Admin
+                ),
+            };
+            if !can_modify {
+                return Err(AdminApplyError::PermissionDenied(format!(
+                    "You don't have permission to set {} affiliation",
+                    crate::muc::admin::affiliation_to_str(new_affiliation)
+                )));
+            }
+            if msg.sender_affiliation == Affiliation::Admin
+                && target_current_affiliation == Affiliation::Owner
+                && new_affiliation != Affiliation::Owner
+            {
+                return Err(AdminApplyError::CannotAdminModifyOwner);
+            }
+            if new_affiliation != Affiliation::Owner
+                && target_current_affiliation == Affiliation::Owner
+            {
+                let sole_owner = final_affiliations
+                    .iter()
+                    .filter(|(_, affiliation)| **affiliation == Affiliation::Owner)
+                    .all(|(jid, _)| jid == target_jid);
+                if sole_owner {
+                    return Err(AdminApplyError::CannotRemoveLastOwner);
+                }
+            }
+            if new_affiliation == Affiliation::None {
+                final_affiliations.remove(target_jid);
+            } else {
+                final_affiliations.insert(target_jid.clone(), new_affiliation);
+            }
+        }
+        if current_owner_count > 0
+            && !final_affiliations
+                .values()
+                .any(|affiliation| *affiliation == Affiliation::Owner)
+        {
+            return Err(AdminApplyError::CannotRemoveLastOwner);
+        }
+
+        let durable_delta: Vec<DurableAffiliationEntry> = touched_jids
+            .iter()
+            .filter_map(|jid| {
+                let current = current_affiliations
+                    .get(jid)
                     .copied()
                     .unwrap_or(Affiliation::None);
-                let can_modify = match new_affiliation {
-                    Affiliation::Owner | Affiliation::Admin => {
-                        msg.sender_affiliation == Affiliation::Owner
-                    }
-                    Affiliation::Member | Affiliation::None | Affiliation::Outcast
-                        if target_current_affiliation == Affiliation::Admin =>
-                    {
-                        msg.sender_affiliation == Affiliation::Owner
-                    }
-                    Affiliation::Member | Affiliation::None | Affiliation::Outcast => matches!(
-                        msg.sender_affiliation,
-                        Affiliation::Owner | Affiliation::Admin
-                    ),
-                };
-                if !can_modify {
-                    return Err(AdminApplyError::PermissionDenied(format!(
-                        "You don't have permission to set {} affiliation",
-                        crate::muc::admin::affiliation_to_str(new_affiliation)
-                    )));
-                }
-                if msg.sender_affiliation == Affiliation::Admin
-                    && target_current_affiliation == Affiliation::Owner
-                    && new_affiliation != Affiliation::Owner
-                {
-                    return Err(AdminApplyError::CannotAdminModifyOwner);
-                }
-                // Mirror of apply_affiliation_change's per-step
-                // last-owner guard: demoting the sole owner at this
-                // point in the sequence would fail mid-loop.
-                if new_affiliation != Affiliation::Owner
-                    && target_current_affiliation == Affiliation::Owner
-                {
-                    let sole_owner = final_affiliations
-                        .iter()
-                        .filter(|(_, affiliation)| **affiliation == Affiliation::Owner)
-                        .all(|(jid, _)| jid == target_jid);
-                    if sole_owner {
-                        return Err(AdminApplyError::CannotRemoveLastOwner);
-                    }
-                }
-                if new_affiliation == Affiliation::None {
-                    final_affiliations.remove(target_jid);
-                } else {
-                    final_affiliations.insert(target_jid.clone(), new_affiliation);
-                }
-            }
-            if current_owner_count > 0
-                && !final_affiliations
-                    .values()
-                    .any(|affiliation| *affiliation == Affiliation::Owner)
-            {
-                return Err(AdminApplyError::CannotRemoveLastOwner);
-            }
-            for item in &msg.items {
-                let Some(target_jid) = item.jid.clone() else {
-                    continue;
-                };
-                let Some(new_affiliation) = item.affiliation else {
-                    continue;
-                };
-                let target_current_affiliation = self.room.get_affiliation(&target_jid);
-                let can_modify = match new_affiliation {
-                    Affiliation::Owner | Affiliation::Admin => {
-                        msg.sender_affiliation == Affiliation::Owner
-                    }
-                    Affiliation::Member | Affiliation::None | Affiliation::Outcast
-                        if target_current_affiliation == Affiliation::Admin =>
-                    {
-                        msg.sender_affiliation == Affiliation::Owner
-                    }
-                    Affiliation::Member | Affiliation::None | Affiliation::Outcast => matches!(
-                        msg.sender_affiliation,
-                        Affiliation::Owner | Affiliation::Admin
-                    ),
-                };
-                if !can_modify {
-                    return Err(AdminApplyError::PermissionDenied(format!(
-                        "You don't have permission to set {} affiliation",
-                        crate::muc::admin::affiliation_to_str(new_affiliation)
-                    )));
-                }
-                if msg.sender_affiliation == Affiliation::Admin
-                    && target_current_affiliation == Affiliation::Owner
-                    && new_affiliation != Affiliation::Owner
-                {
-                    return Err(AdminApplyError::CannotAdminModifyOwner);
-                }
-                self.invalidate_invite_grant(&target_jid);
-                let actor = msg.sender_jid.to_bare();
-                let applied = apply_affiliation_change(
-                    &mut self.room,
-                    &self.occupant_id_secret,
-                    target_jid.clone(),
-                    new_affiliation,
-                    Some(&actor),
-                    item.reason.as_deref(),
-                )?;
-                needs_rehydration |=
-                    self.prune_durable_recipient_if_removed(&target_jid, new_affiliation);
-                if target_current_affiliation != new_affiliation {
-                    self.advance_member_admission_revision(&target_jid);
-                    if let Err(error) = self.persist_affiliation(&target_jid, new_affiliation).await
-                    {
-                        persist_failure.get_or_insert(error);
-                    }
-                }
-                presence_updates.extend(applied.presence_updates);
-                removed_by_moderation.extend(applied.removed_by_moderation);
-                // An affiliation change can re-derive the occupant's
-                // role and thus take voice away; those sessions must
-                // reach the caller so live SFU grants converge.
-                voice_changes.extend(applied.voice_changes);
-            }
+                let final_affiliation = final_affiliations
+                    .get(jid)
+                    .copied()
+                    .unwrap_or(Affiliation::None);
+                (current != final_affiliation)
+                    .then(|| durable_affiliation_entry(jid.clone(), final_affiliation))
+            })
+            .collect();
+
+        if durable_delta.is_empty() {
+            self.gate_pre_mutation_ownership()
+                .await
+                .map_err(super::RoomMutationError::from)?;
+        } else {
+            let _ = self
+                .commit_durable(RoomDurableMutation::AffiliationBatch(durable_delta))
+                .await?;
         }
-        for nick in occupants_to_kick {
-            self.room.remove_occupant(&nick);
+
+        let mut staged_room = self.room.clone();
+        let actor = msg.sender_jid.to_bare();
+        let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
+        let mut removed_by_moderation: Vec<FullJid> = Vec::new();
+        let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
+        let mut invalidated_jids = Vec::new();
+        let mut changed_affiliations = Vec::new();
+        let mut requested_affiliations = Vec::new();
+        for item in &msg.items {
+            let Some(target_jid) = item.jid.clone() else {
+                continue;
+            };
+            let Some(new_affiliation) = item.affiliation else {
+                continue;
+            };
+            invalidated_jids.push(target_jid.clone());
+            requested_affiliations.push((target_jid.clone(), new_affiliation));
+            let target_current_affiliation = staged_room.get_affiliation(&target_jid);
+            let applied = apply_affiliation_change(
+                &mut staged_room,
+                &self.occupant_id_secret,
+                target_jid.clone(),
+                new_affiliation,
+                Some(&actor),
+                item.reason.as_deref(),
+            )?;
+            if target_current_affiliation != new_affiliation {
+                changed_affiliations.push((target_jid.clone(), new_affiliation));
+            }
+            presence_updates.extend(applied.presence_updates);
+            removed_by_moderation.extend(applied.removed_by_moderation);
+            voice_changes.extend(applied.voice_changes);
         }
+
+        let mut needs_rehydration = false;
+        for jid in invalidated_jids {
+            self.invalidate_invite_grant(&jid);
+        }
+        for (jid, affiliation) in requested_affiliations {
+            needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
+        }
+        for (jid, _) in changed_affiliations {
+            self.advance_member_admission_revision(&jid);
+        }
+        self.room = staged_room;
         if needs_rehydration {
             // R1: converge the durable-recipient mirror to the durable
             // channel∪space truth after any removal to `None` — a
             // space-entitled member must not lose fan-out (see
             // `RoomActor::refresh_durable_recipients_from_source`).
             self.refresh_durable_recipients_from_source().await;
-        }
-        if let Some(error) = persist_failure {
-            return Err(error.into());
         }
         Ok(AdminItemsApplied {
             presence_updates,
@@ -747,26 +760,37 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         msg: ApplyAffiliationChange,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
-        self.gate_mutation().await?;
         if self.invite_rollback_pending(&msg.jid) {
             return Err(AdminApplyError::InviteRollbackPending);
         }
         let previous_affiliation = self.room.get_affiliation(&msg.jid);
-        self.invalidate_invite_grant(&msg.jid);
+        let mut staged_room = self.room.clone();
         let updates = apply_affiliation_change(
-            &mut self.room,
+            &mut staged_room,
             &self.occupant_id_secret,
             msg.jid.clone(),
             msg.affiliation,
             msg.actor.as_ref(),
             None,
         )?;
+        if previous_affiliation != msg.affiliation {
+            let _ = self
+                .commit_durable(RoomDurableMutation::Affiliation(durable_affiliation_entry(
+                    msg.jid.clone(),
+                    msg.affiliation,
+                )))
+                .await?;
+        } else {
+            self.gate_pre_mutation_ownership()
+                .await
+                .map_err(super::RoomMutationError::from)?;
+        }
+        self.invalidate_invite_grant(&msg.jid);
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if previous_affiliation != msg.affiliation {
             self.advance_member_admission_revision(&msg.jid);
-            self.persist_affiliation(&msg.jid, msg.affiliation).await?;
         }
+        self.room = staged_room;
         if needs_rehydration {
             self.refresh_durable_recipients_from_source().await;
         }
@@ -777,14 +801,17 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
 pub struct EnforceMembersOnly;
 
 impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
-    type Reply = Result<AdminItemsApplied, Infallible>;
+    type Reply = Result<AdminItemsApplied, super::RoomMutationError>;
 
     async fn handle(
         &mut self,
         _msg: EnforceMembersOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        Ok(enforce_members_only(
+        if !self.effectful_work_is_permitted().await {
+            return Err(super::RoomMutationError::OwnershipUnavailable);
+        }
+        Ok(enforce_members_only_from_room(
             &mut self.room,
             &self.occupant_id_secret,
         ))
@@ -803,9 +830,6 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         msg: EnforceMembersOnlyAffiliations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating
-        // any affiliation in this batch.
-        self.gate_mutation().await?;
         let affiliations: BTreeMap<BareJid, Affiliation> = msg.affiliations.into_iter().collect();
         let occupied_jids: Vec<BareJid> = self
             .room
@@ -819,12 +843,6 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         {
             return Err(super::AffiliationMutationError::InviteRollbackPending);
         }
-        let mut needs_rehydration = false;
-        // FIX 2: same batch-persist-failure handling as `ApplyAdminItems`
-        // — don't abort mid-loop (earlier iterations already mutated
-        // `self.room`), collect the first failure and surface it typed
-        // only after the full batch has run.
-        let mut persist_failure: Option<super::DurablePersistError> = None;
         // These `set_affiliation` calls re-derive occupant roles, so an
         // occupant who is NOT ejected below can still silently lose
         // voice. Snapshot before the loop so the caller can converge
@@ -833,42 +851,57 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .iter()
             .flat_map(|jid| session_voices(&self.room, jid))
             .collect();
-        for jid in occupied_jids {
-            let affiliation = affiliations.get(&jid).copied().unwrap_or(Affiliation::None);
-            self.invalidate_invite_grant(&jid);
-            needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
-            if self
-                .room
+        let mut staged_room = self.room.clone();
+        let mut changed_affiliations = Vec::new();
+        let mut requested_affiliations = Vec::new();
+        let mut durable_delta = Vec::new();
+        for jid in &occupied_jids {
+            let affiliation = affiliations.get(jid).copied().unwrap_or(Affiliation::None);
+            requested_affiliations.push((jid.clone(), affiliation));
+            if staged_room
                 .set_affiliation(jid.clone(), affiliation)
                 .is_some()
             {
-                self.advance_member_admission_revision(&jid);
-                if let Err(error) = self.persist_affiliation(&jid, affiliation).await {
-                    persist_failure.get_or_insert(error);
-                }
+                changed_affiliations.push((jid.clone(), affiliation));
+                durable_delta.push(durable_affiliation_entry(jid.clone(), affiliation));
             }
         }
-        if needs_rehydration {
-            // R1: see `RoomActor::refresh_durable_recipients_from_source`.
-            self.refresh_durable_recipients_from_source().await;
+        if durable_delta.is_empty() {
+            self.gate_pre_mutation_ownership()
+                .await
+                .map_err(super::RoomMutationError::from)?;
+        } else {
+            let _ = self
+                .commit_durable(RoomDurableMutation::MembersOnlyEnforcement {
+                    config: self.room.config.clone(),
+                    affiliations: durable_delta,
+                })
+                .await?;
         }
-        if let Some(error) = persist_failure {
-            return Err(error.into());
+        let mut needs_rehydration = false;
+        for jid in &occupied_jids {
+            self.invalidate_invite_grant(jid);
         }
-        let mut applied = enforce_members_only(&mut self.room, &self.occupant_id_secret);
+        for (jid, affiliation) in requested_affiliations {
+            needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
+        }
+        for (jid, _) in changed_affiliations {
+            self.advance_member_admission_revision(&jid);
+        }
+        let mut applied =
+            enforce_members_only_from_room(&mut staged_room, &self.occupant_id_secret);
         // Report voice losses for occupants who survived the
         // members-only sweep; ejected sessions are carried by
         // `removed_by_moderation` and must not be double-reported.
         // Expand per occupant (not per bare JID) so a bare seated under
         // two nicks is not counted twice.
-        let moderation = self.room.moderation();
-        let voices_after: Vec<(FullJid, Voice)> = self
-            .room
+        let moderation = staged_room.moderation();
+        let voices_after: Vec<(FullJid, Voice)> = staged_room
             .occupants
             .values()
             .flat_map(|occupant| {
                 let voice = occupant.role.voice(moderation);
-                self.room
+                staged_room
                     .get_occupant_sessions(&occupant.nick)
                     .into_iter()
                     .map(move |session| (session, voice))
@@ -878,6 +911,11 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .into_iter()
             .filter(|(session, _)| !applied.removed_by_moderation.contains(session))
             .collect();
+        self.room = staged_room;
+        if needs_rehydration {
+            // R1: see `RoomActor::refresh_durable_recipients_from_source`.
+            self.refresh_durable_recipients_from_source().await;
+        }
         Ok(applied)
     }
 }

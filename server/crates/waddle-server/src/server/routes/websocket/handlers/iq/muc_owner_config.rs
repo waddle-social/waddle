@@ -72,13 +72,60 @@ pub(super) async fn managed_channel_type_for_room(
         })
 }
 
+async fn recover_exact_room_after_ambiguous_config_commit(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    recovery_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+) -> Result<
+    (
+        kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        waddle_xmpp::muc::room_actor::RoomSnapshot,
+    ),
+    String,
+> {
+    let _ = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(
+            waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                room_jid: room_jid.clone(),
+                actor_ref: stale_actor.clone(),
+            },
+        )
+        .await;
+    let recovered = waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .get_or_create_room(
+            room_jid.clone(),
+            recovery_snapshot.room.waddle_id.clone(),
+            recovery_snapshot.room.channel_id.clone(),
+            recovery_snapshot.room.config.clone(),
+        )
+        .await
+        .map_err(|error| format!("config outcome recovery failed: {error:?}"))?;
+    recovered
+        .actor_ref
+        .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
+            room: recovery_snapshot.room.clone(),
+        })
+        .await
+        .map_err(|error| format!("recovered roster restore failed: {error:?}"))?;
+    let recovered_snapshot = recovered
+        .actor_ref
+        .ask(GetSnapshot)
+        .await
+        .map_err(|error| format!("recovered config snapshot failed: {error:?}"))?;
+    Ok((recovered.actor_ref, recovered_snapshot))
+}
+
 pub(super) async fn apply_muc_owner_config(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
     session: Option<&Session>,
 ) -> Result<(), String> {
-    let room_actor = get_room_actor(state, room_jid)
+    let mut room_actor = get_room_actor(state, room_jid)
         .await
         .ok_or_else(|| "room actor not found".to_string())?;
     let _config_guard = acquire_room_config_lock(room_jid).await;
@@ -201,12 +248,64 @@ pub(super) async fn apply_muc_owner_config(
         None
     };
 
-    let expected_revision = room_actor
+    config = config.normalized();
+    let mut recovered_broadcast_room = None;
+    let mut recovered_voice_roster = None;
+    let expected_revision = match room_actor
         .ask(UpdateConfig {
             config: config.clone(),
         })
         .await
-        .map_err(|error| format!("config update failed: {error:?}"))?;
+    {
+        Ok(revision) => revision,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::CommitOutcomeUnknown,
+        )) => {
+            let (recovered_actor, recovered_snapshot) =
+                recover_exact_room_after_ambiguous_config_commit(
+                    state,
+                    room_jid,
+                    &room_actor,
+                    &snapshot,
+                )
+                .await?;
+            if recovered_snapshot.room.config != config {
+                return Err("config update outcome is being reconciled; please retry".to_string());
+            }
+            let mut room_with_reconciled_config = snapshot.room.clone();
+            room_with_reconciled_config.config = config.clone();
+            if let Some(affiliations) = &managed_enforcement_affiliations {
+                for (jid, affiliation) in affiliations {
+                    room_with_reconciled_config.set_affiliation(jid.clone(), *affiliation);
+                }
+            } else {
+                for affiliation in recovered_snapshot.room.get_all_affiliations() {
+                    room_with_reconciled_config
+                        .set_affiliation(affiliation.jid, affiliation.affiliation);
+                }
+            }
+            if !previous_members_only && config.members_only {
+                // Drop evicted non-members from the reconciled broadcast
+                // roster; the applied removal effects come from the live
+                // actor's EnforceMembersOnlyAffiliations ask below, so the
+                // in-memory effects are discarded here.
+                let _ = waddle_xmpp::muc::room_actor::enforce_members_only_from_room(
+                    &mut room_with_reconciled_config,
+                    &state.deps.occupant_id_secret,
+                );
+            }
+            recovered_voice_roster = Some(
+                super::super::super::muc_call_sfu::derive_room_voice_from_snapshot(
+                    &room_with_reconciled_config,
+                    &config,
+                ),
+            );
+            recovered_broadcast_room = Some(room_with_reconciled_config);
+            room_actor = recovered_actor;
+            recovered_snapshot.config_revision
+        }
+        Err(error) => return Err(format!("config update failed: {error:?}")),
+    };
     let config_status_codes =
         waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
 
@@ -229,7 +328,15 @@ pub(super) async fn apply_muc_owner_config(
                     .try_send_to(&recipient, Stanza::Presence(presence));
             }
         }
-        converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
+        converge_flip(
+            state,
+            room_jid,
+            &room_actor,
+            &previous_config,
+            &config,
+            recovered_voice_roster.as_deref(),
+        )
+        .await;
         let post_update_snapshot = room_actor
             .ask(GetSnapshot)
             .await
@@ -237,7 +344,9 @@ pub(super) async fn apply_muc_owner_config(
         broadcast_muc_config_change(
             state,
             room_jid,
-            &post_update_snapshot.room,
+            recovered_broadcast_room
+                .as_ref()
+                .unwrap_or(&post_update_snapshot.room),
             &config_status_codes,
         );
         return Ok(());
@@ -321,7 +430,15 @@ pub(super) async fn apply_muc_owner_config(
         }
     }
 
-    converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
+    converge_flip(
+        state,
+        room_jid,
+        &room_actor,
+        &previous_config,
+        &config,
+        recovered_voice_roster.as_deref(),
+    )
+    .await;
 
     let post_update_snapshot = room_actor
         .ask(GetSnapshot)
@@ -330,7 +447,9 @@ pub(super) async fn apply_muc_owner_config(
     broadcast_muc_config_change(
         state,
         room_jid,
-        &post_update_snapshot.room,
+        recovered_broadcast_room
+            .as_ref()
+            .unwrap_or(&post_update_snapshot.room),
         &config_status_codes,
     );
 
@@ -371,6 +490,7 @@ async fn converge_flip(
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     previous: &waddle_xmpp::muc::RoomConfig,
     updated: &waddle_xmpp::muc::RoomConfig,
+    voices_from_recovered_snapshot: Option<&[(FullJid, waddle_xmpp_core::types::Voice)]>,
 ) {
     if previous.moderated == updated.moderated {
         return;
@@ -379,6 +499,7 @@ async fn converge_flip(
         state.deps.protocol.sfu.as_ref(),
         room_actor,
         room_jid,
+        voices_from_recovered_snapshot,
     )
     .await;
 }

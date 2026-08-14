@@ -22,9 +22,28 @@ use waddle_sfu::{
     CallId, Identity, MediaCapabilities, ObservedCallSids, SidObservationDisposition,
     TeardownDisposition,
 };
-use waddle_xmpp_core::types::Voice;
+use waddle_xmpp_core::types::{Moderation, Voice};
 
 use super::state::WebSocketState;
+
+pub(crate) fn derive_room_voice_from_snapshot(
+    room: &waddle_xmpp::muc::MucRoom,
+    config: &waddle_xmpp::muc::RoomConfig,
+) -> Vec<(FullJid, Voice)> {
+    let moderation = Moderation::from_moderated_flag(config.moderated);
+    let mut voices: Vec<(FullJid, Voice)> = room
+        .occupants
+        .values()
+        .flat_map(|occupant| {
+            let voice = occupant.role.voice(moderation);
+            room.get_occupant_sessions(&occupant.nick)
+                .into_iter()
+                .map(move |session| (session, voice))
+        })
+        .collect();
+    voices.sort_by_key(|voice| voice.0.to_string());
+    voices
+}
 
 /// Tear down `jid`'s SFU participant in `room_jid`, if a SFU is
 /// configured for this deployment.
@@ -306,10 +325,17 @@ pub(crate) async fn converge_room_voice_after_moderation_flip(
     sfu: Option<&std::sync::Arc<dyn waddle_sfu::SfuService>>,
     actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     room_jid: &BareJid,
+    voices_from_recovered_snapshot: Option<&[(FullJid, Voice)]>,
 ) {
     let Some(sfu) = sfu else {
         return;
     };
+    if let Some(voices) = voices_from_recovered_snapshot {
+        for (session, voice) in voices {
+            apply_voice_grants_via_sfu(sfu, room_jid, session, *voice);
+        }
+        return;
+    }
     let voices = match actor
         .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
         // Bounded: a wedged room actor must not park the config-change
@@ -438,6 +464,7 @@ mod tests {
         create_test_websocket_state, create_test_websocket_state_with_sfu, RecordingSfu,
     };
     use std::sync::Arc;
+    use waddle_xmpp::{muc::Occupant, Affiliation, Role};
 
     #[tokio::test]
     async fn unregister_is_no_op_when_no_sfu_is_configured() {
@@ -487,5 +514,54 @@ mod tests {
         let recorded = recorder.snapshot();
         assert_eq!(recorded.len(), 2, "both teardown calls reach the SFU");
         assert_eq!(recorded[0], recorded[1]);
+    }
+
+    #[test]
+    fn derive_room_voice_from_snapshot_reflects_current_moderation_setting() {
+        let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle-id".to_string(),
+            "channel-id".to_string(),
+            waddle_xmpp::muc::RoomConfig::default(),
+        );
+        room.add_occupant(Occupant {
+            real_jid: "alice@example.com/web".parse().unwrap(),
+            nick: "alice".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+        room.add_occupant(Occupant {
+            real_jid: "bob@example.com/phone".parse().unwrap(),
+            nick: "bob".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+
+        let moderate = waddle_xmpp::muc::RoomConfig {
+            moderated: true,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+        let voices = derive_room_voice_from_snapshot(&room, &moderate);
+
+        assert_eq!(voices.len(), 2);
+        assert_eq!(
+            voices[0],
+            (
+                "alice@example.com/web".parse().unwrap(),
+                Role::Participant.voice(Moderation::from_moderated_flag(true))
+            )
+        );
+        assert_eq!(
+            voices[1],
+            (
+                "bob@example.com/phone".parse().unwrap(),
+                Role::Participant.voice(Moderation::from_moderated_flag(true))
+            )
+        );
     }
 }

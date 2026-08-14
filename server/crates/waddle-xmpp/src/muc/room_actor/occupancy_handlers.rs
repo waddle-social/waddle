@@ -7,7 +7,10 @@ use super::{
     affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
     LeaveOutcome, PresenceUpdateOutcome, RoomActor, RoomActorError,
 };
-use crate::muc::RoomConfig;
+use crate::muc::{
+    durable::{ChannelId, RoomDurableMutation, WaddleId},
+    RoomConfig,
+};
 use crate::types::Affiliation;
 
 /// The affiliation a join request carries into the room, typed by
@@ -68,6 +71,8 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         match msg.affiliation_grant {
             JoinAffiliationGrant::Unaffiliated => {}
             JoinAffiliationGrant::Resolver(affiliation) => {
+                // Resolver-derived affiliations are reconstructible from the
+                // channel/space graph, so they intentionally remain memory-only.
                 // Applied unconditionally, including `Affiliation::None`:
                 // a resolver revocation must clear any stale
                 // resolver-derived Member/Admin entry so the revoked
@@ -101,6 +106,23 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 // creatorship, the actor's serialized mailbox makes
                 // exactly one of them the owner.
                 if !self.room.has_owner() {
+                    self.commit_durable(RoomDurableMutation::Affiliation(
+                        crate::muc::durable::AffiliationEntry::new(
+                            msg.sender_jid.to_bare(),
+                            Some(Affiliation::Owner),
+                        ),
+                    ))
+                    .await
+                    .map_err(|error| match error {
+                        super::DurablePersistError::NotOwner
+                        | super::DurablePersistError::CommitOutcomeUnknown => {
+                            RoomActorError::RoomSealed
+                        }
+                        super::DurablePersistError::OwnershipUnavailable
+                        | super::DurablePersistError::PersistFailed => {
+                            RoomActorError::OwnershipUnavailable
+                        }
+                    })?;
                     self.room
                         .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
                     self.invalidate_invite_grant(&msg.sender_jid.to_bare());
@@ -241,6 +263,15 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // A terminal destroy may still fail its durable commit and reopen
+        // this exact actor.  Record a queued departure in that narrow state
+        // so reopening cannot resurrect a dead session, but continue to
+        // suppress the LeaveOutcome: callers must not fan it out while the
+        // terminal result is unresolved.
+        let suppress_effects = matches!(self.seal_state, super::RoomSealState::Destroying { .. });
+        if !suppress_effects && !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
         // the join path refuses a second nick for the same full JID, so
         // this is normally a single entry — but pre-existing ghost
@@ -327,7 +358,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         );
         let is_persistent = self.room.config.persistent;
         let occupancy_revision = self.occupancy_revision;
-        Ok(Some(LeaveOutcome {
+        let outcome = LeaveOutcome {
             nick,
             affiliation,
             role,
@@ -341,7 +372,13 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             occupant_count,
             is_persistent,
             occupancy_revision,
-        }))
+        };
+
+        if suppress_effects {
+            Ok(None)
+        } else {
+            Ok(Some(outcome))
+        }
     }
 }
 
@@ -357,6 +394,9 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
         msg: PresenceUpdateData,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -434,6 +474,9 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
         msg: UpsertMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -480,6 +523,9 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
         msg: ClearMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -564,6 +610,9 @@ impl kameo::message::Message<UpsertInCallState> for RoomActor {
         msg: UpsertInCallState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -618,8 +667,8 @@ impl kameo::message::Message<PingSelfCheck> for RoomActor {
 
 pub struct ReconcileChannelBackedRoom {
     pub room_jid: BareJid,
-    pub waddle_id: String,
-    pub channel_id: String,
+    pub waddle_id: WaddleId,
+    pub channel_id: ChannelId,
     pub desired_config: RoomConfig,
 }
 
@@ -631,22 +680,34 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         msg: ReconcileChannelBackedRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let ReconcileChannelBackedRoom {
+            room_jid,
+            waddle_id,
+            channel_id,
+            desired_config,
+        } = msg;
         // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
         self.gate_mutation().await?;
-        let instant_name = msg.room_jid.node().map(|node| node.to_string());
-        let mut desired_config = msg.desired_config;
+        let instant_name = room_jid.node().map(|node| node.to_string());
+        let mut desired_config = desired_config;
         desired_config.description = self.room.config.description.clone();
         if !self.room.config.name.is_empty()
             && instant_name.as_deref() != Some(self.room.config.name.as_str())
         {
             desired_config.name = self.room.config.name.clone();
         }
-        self.room.waddle_id = msg.waddle_id;
-        self.room.channel_id = msg.channel_id;
+        let desired_config = desired_config.normalized();
+        self.commit_durable(RoomDurableMutation::Config {
+            config: desired_config.clone(),
+            waddle_id: waddle_id.clone(),
+            channel_id: channel_id.clone(),
+        })
+        .await?;
+        self.room.waddle_id = waddle_id.into_string();
+        self.room.channel_id = channel_id.into_string();
         self.replace_config(desired_config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
-        self.persist_config().await?;
         Ok(())
     }
 }

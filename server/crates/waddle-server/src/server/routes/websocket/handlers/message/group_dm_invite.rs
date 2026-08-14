@@ -5,7 +5,7 @@ use waddle_xmpp::{
     ingress::{
         FrozenStanzaError, GroupDmHistoryVisibility, GroupDmMembershipGrant, IngressEffectIntent,
     },
-    muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
+    muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig, GetSnapshot},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
     protocol::handlers::errors::message_error_reply,
@@ -46,7 +46,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
     if channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
         return None;
     }
-    let Some(room_actor) = state
+    let Some(mut room_actor) = state
         .deps
         .protocol
         .room_registry
@@ -166,6 +166,15 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Invitee is already a group-DM member.",
         )]);
     }
+    let Ok(pre_grant_snapshot) = room_actor.ask(GetSnapshot).await else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            ingress_effect_capture,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    };
 
     let requested_access =
         waddle_xmpp::xep::xep_waddle_group_dm::history_access_from_mediated_invite(&inbound_invite)
@@ -218,28 +227,98 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Internal server error.",
         )]);
     }
-    if room_actor
+    match room_actor
         .ask(ChangeAffiliation {
             jid: invitee.clone(),
             affiliation: waddle_xmpp::Affiliation::Member,
         })
         .await
-        .is_err()
     {
-        let _ = delete_group_dm_archive_boundary(state, &room_jid, &invitee).await;
-        crate::admin::channels::rollback_group_dm_member_tuple(
-            &state.deps.app_state,
-            &channel_id,
-            &invitee,
-        )
-        .await;
-        return Some(vec![error_reply(
-            incoming,
-            bound_jid,
-            ingress_effect_capture,
-            GroupDmInviteError::InternalServerError,
-            "Internal server error.",
-        )]);
+        Ok(()) => {}
+        Err(error) => {
+            if matches!(
+                error,
+                kameo::error::SendError::HandlerError(
+                    waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown
+                )
+            ) {
+                let Some(recovered_actor) =
+                    super::muc_invite::recover_actor_after_ambiguous_invite_grant(
+                        state,
+                        &room_jid,
+                        &room_actor,
+                        &pre_grant_snapshot,
+                    )
+                    .await
+                else {
+                    warn!(
+                        room = %room_jid,
+                        invitee = %invitee,
+                        "group-DM invite grant remains inconclusive; retaining coupled effects for reconciliation"
+                    );
+                    return Some(vec![error_reply(
+                        incoming,
+                        bound_jid,
+                        ingress_effect_capture,
+                        GroupDmInviteError::InternalServerError,
+                        "Internal server error.",
+                    )]);
+                };
+                let committed = recovered_actor
+                    .ask(GetSnapshot)
+                    .await
+                    .is_ok_and(|snapshot| {
+                        snapshot.room.get_affiliation(&invitee) >= waddle_xmpp::Affiliation::Member
+                    });
+                if !committed {
+                    rollback_group_dm_invite_grant(
+                        state,
+                        recovered_actor,
+                        &channel_id,
+                        &room_jid,
+                        &invitee,
+                        &bound_jid.to_bare(),
+                    )
+                    .await;
+                    return Some(vec![error_reply(
+                        incoming,
+                        bound_jid,
+                        ingress_effect_capture,
+                        GroupDmInviteError::InternalServerError,
+                        "Internal server error.",
+                    )]);
+                }
+                room_actor = recovered_actor;
+                warn!(
+                    room = %room_jid,
+                    invitee = %invitee,
+                    "reconciled committed group-DM invite grant after ambiguous outcome"
+                );
+            } else if super::muc_invite::should_compensate_failed_affiliation_grant(&error) {
+                let _ = delete_group_dm_archive_boundary(state, &room_jid, &invitee).await;
+                crate::admin::channels::rollback_group_dm_member_tuple(
+                    &state.deps.app_state,
+                    &channel_id,
+                    &invitee,
+                )
+                .await;
+                return Some(vec![error_reply(
+                    incoming,
+                    bound_jid,
+                    ingress_effect_capture,
+                    GroupDmInviteError::InternalServerError,
+                    "Internal server error.",
+                )]);
+            } else {
+                return Some(vec![error_reply(
+                    incoming,
+                    bound_jid,
+                    ingress_effect_capture,
+                    GroupDmInviteError::InternalServerError,
+                    "Internal server error.",
+                )]);
+            }
+        }
     }
     let room_name = match room_actor.ask(GetConfig).await {
         Ok(config) => config.name,

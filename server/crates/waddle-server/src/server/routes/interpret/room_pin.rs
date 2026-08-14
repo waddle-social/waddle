@@ -124,17 +124,23 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
         preview: preview.clone(),
     };
 
-    if let Err(error) = room_actor
+    let applied = match room_actor
         .ask(ApplyPin {
             change: PinStateChange::Pin(entry.clone()),
         })
         .await
     {
-        warn!(
-            room = %room,
-            error = ?error,
-            "ApplyPinChange::Pin: ApplyPin ask failed; pin not stored or broadcast"
-        );
+        Err(error) => {
+            warn!(
+                room = %room,
+                error = ?error,
+                "ApplyPinChange::Pin: pin was not stored; not broadcasting"
+            );
+            false
+        }
+        Ok(()) => true,
+    };
+    if !applied {
         return;
     }
     deps.capture_intent(IngressEffectIntent::Pin {
@@ -178,7 +184,7 @@ async fn apply_unpin(
         return;
     };
 
-    if let Err(error) = room_actor
+    let applied = match room_actor
         .ask(ApplyPin {
             change: PinStateChange::Unpin {
                 target_stanza_id: target_stanza_id.clone(),
@@ -186,11 +192,17 @@ async fn apply_unpin(
         })
         .await
     {
-        warn!(
-            room = %room,
-            error = ?error,
-            "ApplyPinChange::Unpin: ApplyPin ask failed; pin still in list, no broadcast"
-        );
+        Err(error) => {
+            warn!(
+                room = %room,
+                error = ?error,
+                "ApplyPinChange::Unpin: pin was not removed; not broadcasting"
+            );
+            false
+        }
+        Ok(()) => true,
+    };
+    if !applied {
         return;
     }
     deps.capture_intent(IngressEffectIntent::Pin {

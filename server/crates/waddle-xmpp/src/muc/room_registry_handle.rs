@@ -33,19 +33,23 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use super::affiliation::DurableMembershipSource;
-use super::durable::MucDurableStore;
+use super::durable::{ChannelId, MucDurableStore, WaddleId};
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
-    DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
-    DrainRoomOwnershipForShutdown, GetOrCreateRoom, GetPendingReclaimedRoomBacklog,
+    AbortDestroyRoomAttempt, AckDestroyCompletion, CancelDestroyCompletion,
+    CancelDestroyCompletionAttempt, CancelPendingReclaimedRoomReservation, CreateInstantRoom,
+    CreateRoom, DemoteRoomIfOwner, DestroyCompletion, DestroyRoom, DestroyRoomIfInactive,
+    DestroyRoomOutcome, DestroyRoomReason, DestroyRoomWithAttempt, DrainRoomOwnershipForShutdown,
+    GetOrCreateRoom, GetOrCreateRoomWithInitialAffiliations, GetPendingReclaimedRoomBacklog,
     GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
     IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
     ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
     PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome,
-    ReconcileReclaimedRoom, RememberPendingReclaimedRoom, ReservePendingReclaimedRoom,
-    RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome,
-    RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
+    ReconcileReclaimedRoom, RegisterDestroyCompletion, RememberPendingReclaimedRoom,
+    RequeueDestroyCompletion, ReservePendingReclaimedRoom, RetryPendingRoomReleases,
+    RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome, RoomRegistryActor,
+    RoomRegistryError, SealRoomForDestroySnapshot, TakeDestroyCompletionAttempt,
+    TakeDestroyCompletions, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -298,14 +302,6 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        drain_room_ownership_for_shutdown(
-            pending_handoffs: Vec<PendingReclaimedRoom>
-        ) -> RoomOwnershipDrainOutcome,
-        "drain_room_ownership_for_shutdown",
-        DrainRoomOwnershipForShutdown { pending_handoffs }
-    );
-
-    registry_method!(
         pending_room_release_backlog() -> PendingRoomReleaseBacklog,
         "pending_room_release_backlog",
         GetPendingRoomReleaseBacklog
@@ -362,6 +358,26 @@ impl RoomRegistry {
     );
 
     registry_method!(
+        /// Get or create a room whose initial affiliations must be committed
+        /// before the actor is exposed to any waiter.
+        get_or_create_room_with_initial_affiliations(
+            room_jid: BareJid,
+            waddle_id: WaddleId,
+            channel_id: ChannelId,
+            config: RoomConfig,
+            initial_affiliations: Vec<super::durable::AffiliationEntry>
+        ) -> RoomAcquisition,
+        "get_or_create_room_with_initial_affiliations",
+        GetOrCreateRoomWithInitialAffiliations {
+            room_jid,
+            waddle_id,
+            channel_id,
+            config,
+            initial_affiliations
+        }
+    );
+
+    registry_method!(
         /// Create a room, failing if one with the same JID already exists.
         create_room(
             room_jid: BareJid,
@@ -386,15 +402,105 @@ impl RoomRegistry {
         /// Destroy a room, returning the typed outcome. The handler
         /// removes the registry entry and wipes the room's clustering
         /// durable rows (config/subject/affiliations incl. bans) under
-        /// one claim fence, restoring the entry and reporting
-        /// [`DestroyRoomOutcome::DurableWipeFailed`] if the durable delete
-        /// fails — the destroy is therefore all-or-nothing (#1261, #1276).
+        /// one claim fence, reporting [`DestroyRoomOutcome::DurableWipeFailed`]
+        /// if the durable delete does not commit. A deposed local actor is
+        /// evicted without acknowledging the destroy, so callers never run
+        /// application-level cleanup for a room that remains live elsewhere.
         destroy_room(room_jid: BareJid) -> DestroyRoomOutcome,
         "destroy_room",
         DestroyRoom {
             room_jid,
             reason: DestroyRoomReason::Destroy
         }
+    );
+
+    registry_method!(
+        /// Seal a room and capture its recipient snapshot at the same actor
+        /// mailbox boundary. The attempt must be aborted if the caller cannot
+        /// persist its completion before issuing the terminal destroy.
+        seal_room_for_destroy_snapshot(
+            room_jid: BareJid,
+            attempt: super::DestroyAttemptId
+        ) -> super::MucRoom,
+        "seal_room_for_destroy_snapshot",
+        SealRoomForDestroySnapshot { room_jid, attempt }
+    );
+
+    registry_method!(
+        /// Reopen a matching pre-seal when its owner-IQ completion was not
+        /// persisted and no terminal destroy was issued.
+        abort_destroy_room_attempt(
+            room_jid: BareJid,
+            attempt: super::DestroyAttemptId
+        ) -> bool,
+        "abort_destroy_room_attempt",
+        AbortDestroyRoomAttempt { room_jid, attempt }
+    );
+
+    registry_method!(
+        /// Retain typed owner-IQ cleanup before issuing its destroy. A later
+        /// reconciliation can then hand the same work back to the server.
+        register_destroy_completion(completion: DestroyCompletion) -> (),
+        "register_destroy_completion",
+        RegisterDestroyCompletion { completion }
+    );
+
+    registry_method!(
+        /// Destroy a room using the exact owner-IQ attempt that registered its
+        /// completion snapshot.
+        destroy_room_with_attempt(
+            room_jid: BareJid,
+            attempt: super::DestroyAttemptId
+        ) -> DestroyRoomOutcome,
+        "destroy_room_with_attempt",
+        DestroyRoomWithAttempt {
+            room_jid,
+            reason: DestroyRoomReason::Destroy,
+            attempt
+        }
+    );
+
+    registry_method!(
+        cancel_destroy_completion(room_jid: BareJid) -> (),
+        "cancel_destroy_completion",
+        CancelDestroyCompletion { room_jid }
+    );
+
+    registry_method!(
+        cancel_destroy_completion_attempt(attempt: super::DestroyAttemptId) -> (),
+        "cancel_destroy_completion_attempt",
+        CancelDestroyCompletionAttempt { attempt }
+    );
+
+    registry_method!(
+        /// Lease owner-IQ destroy work completed by the registry, including
+        /// destroys reconciled after their original reply was lost. Callers
+        /// must explicitly ack or requeue each leased attempt.
+        take_destroy_completions() -> Vec<DestroyCompletion>,
+        "take_destroy_completions",
+        TakeDestroyCompletions
+    );
+
+    registry_method!(
+        /// Lease only the exact owner-IQ destroy attempt that just completed,
+        /// leaving unrelated queued cleanup for the janitor path.
+        take_destroy_completion_attempt(
+            attempt: super::DestroyAttemptId
+        ) -> Option<DestroyCompletion>,
+        "take_destroy_completion_attempt",
+        TakeDestroyCompletionAttempt { attempt }
+    );
+
+    registry_method!(
+        ack_destroy_completion(attempt: super::DestroyAttemptId) -> bool,
+        "ack_destroy_completion",
+        AckDestroyCompletion { attempt }
+    );
+
+    registry_method!(
+        requeue_destroy_completion(attempt: super::DestroyAttemptId) -> bool,
+        "requeue_destroy_completion",
+        RequeueDestroyCompletion { attempt }
     );
 
     registry_method!(
@@ -537,6 +643,40 @@ impl RoomRegistry {
         {
             warn!(%error, "failed to wire clustering claims into the room registry");
         }
+    }
+
+    pub async fn drain_room_ownership_for_shutdown(
+        &self,
+        pending_handoffs: Vec<PendingReclaimedRoom>,
+    ) -> Result<RoomOwnershipDrainOutcome, RoomRegistryError> {
+        self.drain_room_ownership_for_shutdown_with_timeout(
+            pending_handoffs,
+            ROOM_REGISTRY_REPLY_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Shutdown may need longer than the ordinary per-request timeout to walk
+    /// retained unpublished-destroy state before process exit. Callers supply
+    /// the graceful-drain budget explicitly so only the terminal path outlives
+    /// the normal fast-fail ask window.
+    pub async fn drain_room_ownership_for_shutdown_with_timeout(
+        &self,
+        pending_handoffs: Vec<PendingReclaimedRoom>,
+        timeout: Duration,
+    ) -> Result<RoomOwnershipDrainOutcome, RoomRegistryError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .ask(DrainRoomOwnershipForShutdown { pending_handoffs })
+            .mailbox_timeout(timeout)
+            .reply_timeout(timeout)
+            .await;
+        Self::classify(
+            "drain_room_ownership_for_shutdown",
+            started.elapsed(),
+            result,
+        )
     }
 
     /// Test-only: route a never-returning message through the same instrumented

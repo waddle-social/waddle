@@ -12,12 +12,14 @@ enum SubjectMutationStoreMode {
     OwnershipUnavailable = 2,
     PersistFailed = 3,
     OwnershipLostDuringPersist = 4,
+    CommitOutcomeUnknown = 5,
 }
 
 pub(super) struct SubjectMutationStore {
     mode: std::sync::atomic::AtomicU8,
     claim_store: Arc<waddle_xmpp::ownership::InProcessClaimStore>,
     durable_parent_rows: std::sync::atomic::AtomicUsize,
+    stored_state: std::sync::Mutex<Option<waddle_xmpp::muc::DurableRoomState>>,
     fanout_owned: std::sync::atomic::AtomicBool,
     fanout_check_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
@@ -28,6 +30,7 @@ impl SubjectMutationStore {
             mode: std::sync::atomic::AtomicU8::new(SubjectMutationStoreMode::Succeed as u8),
             claim_store,
             durable_parent_rows: std::sync::atomic::AtomicUsize::new(1),
+            stored_state: std::sync::Mutex::new(None),
             fanout_owned: std::sync::atomic::AtomicBool::new(true),
             fanout_check_barrier: std::sync::Mutex::new(None),
         }
@@ -59,6 +62,12 @@ impl SubjectMutationStore {
         barrier
     }
 
+    /// Simulate the durable destruction of the current room era so an
+    /// exclusive same-JID create can mint a fresh successor.
+    fn clear_stored_room_state(&self) {
+        *self.stored_state.lock().expect("stored state lock") = None;
+    }
+
     fn set_mode(&self, mode: SubjectMutationStoreMode) {
         self.mode
             .store(mode as u8, std::sync::atomic::Ordering::SeqCst);
@@ -80,6 +89,9 @@ impl SubjectMutationStore {
             }
             value if value == SubjectMutationStoreMode::OwnershipLostDuringPersist as u8 => {
                 SubjectMutationStoreMode::OwnershipLostDuringPersist
+            }
+            value if value == SubjectMutationStoreMode::CommitOutcomeUnknown as u8 => {
+                SubjectMutationStoreMode::CommitOutcomeUnknown
             }
             value => panic!("invalid subject mutation store mode: {value}"),
         }
@@ -127,9 +139,10 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
         room_jid: &'a jid::BareJid,
         fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
     ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>> {
+        let stored_state = self.stored_state.lock().expect("stored state lock").clone();
         Box::pin(async move {
             if self.exact_fence_matches(room_jid, fence).await? {
-                Ok(None)
+                Ok(stored_state)
             } else {
                 Err(waddle_xmpp::XmppError::OwnershipLost {
                     entity: fence.entity.clone(),
@@ -138,94 +151,57 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
         })
     }
 
-    fn save_config_fenced<'a>(
+    fn commit_room_mutation<'a>(
         &'a self,
         room_jid: &'a jid::BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a waddle_xmpp::muc::RoomConfig,
         fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-        Box::pin(async move {
-            if self.exact_fence_matches(room_jid, fence).await? {
-                self.durable_parent_rows
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            } else {
-                Err(waddle_xmpp::XmppError::OwnershipLost {
-                    entity: fence.entity.clone(),
-                })
-            }
-        })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a jid::BareJid,
-        _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
-        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        intent: waddle_xmpp::muc::RoomDurableMutation,
+    ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
         let mode = self.mode();
+        let stored_state = &self.stored_state;
         Box::pin(async move {
-            if !self.exact_fence_matches(room_jid, fence).await? {
-                return Err(waddle_xmpp::XmppError::OwnershipLost {
-                    entity: fence.entity.clone(),
-                });
+            if !self
+                .exact_fence_matches(room_jid, fence)
+                .await
+                .map_err(|_| waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable)?
+            {
+                return Err(waddle_xmpp::muc::RoomCommitError::NotOwner);
             }
-            if self.durable_parent_row_count() == 0 {
-                return Err(waddle_xmpp::XmppError::DurableRoomStateMissing {
-                    entity: fence.entity.clone(),
-                });
+            if !matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Create { .. })
+                && self.durable_parent_row_count() == 0
+            {
+                return Err(waddle_xmpp::muc::RoomCommitError::StateMissing);
             }
             match mode {
-                SubjectMutationStoreMode::PersistFailed => Err(waddle_xmpp::XmppError::internal(
-                    "subject persist failed in interpreter test",
-                )),
+                SubjectMutationStoreMode::PersistFailed => {
+                    Err(waddle_xmpp::muc::RoomCommitError::Database(
+                        waddle_xmpp::muc::RoomCommitDatabaseError::sanitized(),
+                    ))
+                }
                 SubjectMutationStoreMode::OwnershipLostDuringPersist => {
                     use waddle_xmpp::ownership::ClaimStore;
 
                     self.claim_store
                         .release_exact(&fence.entity, &fence.owner, fence.epoch)
                         .await
-                        .map_err(|error| waddle_xmpp::XmppError::internal(error.to_string()))?;
-                    Err(waddle_xmpp::XmppError::OwnershipLost {
-                        entity: fence.entity.clone(),
+                        .map_err(|_| waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable)?;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                }
+                SubjectMutationStoreMode::CommitOutcomeUnknown => {
+                    // One-shot ambiguity: the commit itself landed but its
+                    // outcome was lost. The store is healthy again by the
+                    // time reconciliation re-prepares the room.
+                    self.set_mode(SubjectMutationStoreMode::Succeed);
+                    persist_subject_store_intent(stored_state, intent);
+                    Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown)
+                }
+                _ => {
+                    persist_subject_store_intent(stored_state, intent);
+                    Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
                     })
                 }
-                _ => Ok(()),
-            }
-        })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a jid::BareJid,
-        _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
-        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-        Box::pin(async move {
-            if self.exact_fence_matches(room_jid, fence).await? {
-                Ok(())
-            } else {
-                Err(waddle_xmpp::XmppError::OwnershipLost {
-                    entity: fence.entity.clone(),
-                })
-            }
-        })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a jid::BareJid,
-        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-        Box::pin(async move {
-            if self.exact_fence_matches(room_jid, fence).await? {
-                Ok(())
-            } else {
-                Err(waddle_xmpp::XmppError::OwnershipLost {
-                    entity: fence.entity.clone(),
-                })
             }
         })
     }
@@ -240,7 +216,8 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
             match mode {
                 SubjectMutationStoreMode::Succeed
                 | SubjectMutationStoreMode::PersistFailed
-                | SubjectMutationStoreMode::OwnershipLostDuringPersist => {
+                | SubjectMutationStoreMode::OwnershipLostDuringPersist
+                | SubjectMutationStoreMode::CommitOutcomeUnknown => {
                     self.exact_fence_matches(room_jid, fence).await
                 }
                 SubjectMutationStoreMode::NotOwner => Ok(false),
@@ -249,6 +226,45 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
                 ),
             }
         })
+    }
+}
+
+fn persist_subject_store_intent(
+    stored_state: &std::sync::Mutex<Option<waddle_xmpp::muc::DurableRoomState>>,
+    intent: waddle_xmpp::muc::RoomDurableMutation,
+) {
+    match intent {
+        waddle_xmpp::muc::RoomDurableMutation::Create {
+            waddle_id,
+            channel_id,
+            config,
+            initial_affiliations,
+        } => {
+            *stored_state.lock().expect("stored state lock") =
+                Some(waddle_xmpp::muc::DurableRoomState {
+                    waddle_id: waddle_id.into_string(),
+                    channel_id: channel_id.into_string(),
+                    config,
+                    subject: None,
+                    affiliations: initial_affiliations
+                        .into_iter()
+                        .filter_map(|entry| {
+                            entry.affiliation.map(|affiliation| {
+                                waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+                                    entry.jid,
+                                    affiliation,
+                                )
+                            })
+                        })
+                        .collect(),
+                });
+        }
+        waddle_xmpp::muc::RoomDurableMutation::Subject(subject) => {
+            if let Some(state) = stored_state.lock().expect("stored state lock").as_mut() {
+                state.subject = subject;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -642,7 +658,7 @@ async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
     use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DemoteRoomIfExactActor};
     use waddle_xmpp::ownership::{ClaimStore, ExactReleaseOutcome};
 
-    let (room_registry, original_actor, room_jid, claim_store, original_fence, _store) =
+    let (room_registry, original_actor, room_jid, claim_store, original_fence, store) =
         spawn_subject_mutation_test_room().await;
 
     assert_eq!(
@@ -663,6 +679,7 @@ async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
         })
         .await
         .expect("remove original actor"));
+    store.clear_stored_room_state();
     let successor_actor = room_registry
         .ask(CreateRoom {
             room_jid: room_jid.clone(),
@@ -1053,5 +1070,57 @@ async fn xep_0045_subject_persist_failure_bounces_before_apply_and_halts_batch()
     assert!(
         snapshot.room.subject.is_none(),
         "failed durable persistence must leave in-memory subject unchanged"
+    );
+}
+
+#[tokio::test]
+async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast() {
+    use waddle_xmpp::muc::room_actor::GetSnapshot;
+
+    let (room_registry, room_actor, room_jid, _claim_store, claim_fence, store) =
+        spawn_subject_mutation_test_room().await;
+    store.set_mode(SubjectMutationStoreMode::CommitOutcomeUnknown);
+    let connection_registry = ConnectionRegistry::new();
+    let mut deps = Deps::registry_only(&connection_registry);
+    deps.room_registry = Some(&room_registry);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+
+    let outcome = interpret(
+        vec![
+            persist_subject_event(&room_jid, &sender, "ambiguous subject", claim_fence),
+            OutboundEvent::CloseTransport,
+        ],
+        &deps,
+    )
+    .await;
+
+    assert!(
+        outcome.frames.is_empty(),
+        "a reconciled subject commit must not bounce the sender: {:?}",
+        outcome.frames
+    );
+    let current_actor = room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("lookup after reconciliation")
+        .expect("room remains registered");
+    assert_ne!(
+        current_actor.id(),
+        room_actor.id(),
+        "the stale actor must be demoted before exact subject reconciliation"
+    );
+    let snapshot = current_actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert_eq!(
+        snapshot
+            .room
+            .subject
+            .expect("reconciled successor restored subject")
+            .texts,
+        waddle_xmpp::muc::RoomSubjectTexts::from_iter([(
+            String::new(),
+            "ambiguous subject".to_string()
+        )])
     );
 }

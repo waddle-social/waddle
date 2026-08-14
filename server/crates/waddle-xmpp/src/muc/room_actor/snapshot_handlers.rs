@@ -1,5 +1,3 @@
-use std::convert::Infallible;
-
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use xmpp_parsers::message::Message;
@@ -90,13 +88,14 @@ pub struct GetRoomSnapshot {
 }
 
 impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
-    type Reply = Result<RoomChainSnapshot, Infallible>;
+    type Reply = Result<RoomChainSnapshot, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: GetRoomSnapshot,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.reject_sealed_effects().await?;
         let occupants: Vec<RoomChainOccupant> = self
             .room
             .occupants
@@ -174,6 +173,7 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
         msg: BuildGroupchatBroadcast,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.reject_sealed_effects().await?;
         let sender_occupant = self
             .room
             .find_occupant_by_real_jid(&msg.sender_jid)

@@ -2046,47 +2046,27 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             })
         }
 
-        fn save_config_fenced<'a>(
+        fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a jid::BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a RoomConfig,
             fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = self.validate_fence(room_jid, fence) {
-                return Box::pin(async move { Err(error) });
+                return Box::pin(async move {
+                    let _ = error;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                });
             }
-            Box::pin(pending()) as Pin<Box<_>>
-        }
-
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a jid::BareJid,
-            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = self.validate_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a jid::BareJid,
-            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = self.validate_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn delete_room_state_fenced<'a>(
-            &'a self,
-            room_jid: &'a jid::BareJid,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = self.validate_fence(room_jid, fence);
-            Box::pin(async move { validation })
+            if matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Config { .. }) {
+                return Box::pin(pending()) as Pin<Box<_>>;
+            }
+            Box::pin(async move {
+                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                })
+            })
         }
 
         fn check_exact_claim_fence<'a>(

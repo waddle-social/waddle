@@ -13,8 +13,8 @@ use crate::server::routes::websocket::{
 };
 use crate::server::session_janitors::{
     spawn_auth_state_janitor, spawn_call_teardown_outbox_janitor,
-    spawn_critical_registry_supervisor, spawn_graceful_shutdown_drain,
-    spawn_notification_outbox_janitor, spawn_orphan_reaper_janitor,
+    spawn_critical_registry_supervisor, spawn_destroy_completion_janitor,
+    spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor, spawn_orphan_reaper_janitor,
     spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
     spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
 };
@@ -1105,6 +1105,7 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_call_teardown_outbox_janitor(websocket_state);
     spawn_push_service_publish_job_janitor(websocket_state);
     spawn_auth_state_janitor(websocket_state);
+    spawn_destroy_completion_janitor(websocket_state);
     spawn_room_dormancy_janitor(websocket_state);
     spawn_user_actor_reaper(websocket_state);
     #[cfg(feature = "clustering")]

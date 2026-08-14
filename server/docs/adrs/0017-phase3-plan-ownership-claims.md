@@ -3300,8 +3300,7 @@ record the retained work.
     ONE additional representative site
     (`admin/channels.rs::group_dm_rename_update_error`, the
     `UpdateGroupDmConfigByMember` rename path) is fully wired end-to-end:
-    `NotOwner` and `OwnershipLostAfterApply` exact-demote the actor; the
-    latter does not claim the mutation was never applied. The remaining
+    `NotOwner` exact-demotes the actor. The remaining
     call sites (including those for `ChangeAffiliation`
     across `admin/channels.rs`, `session_janitors.rs`,
     `group_dm_invite.rs`, `muc_admin.rs`; the `UpdateConfig`/

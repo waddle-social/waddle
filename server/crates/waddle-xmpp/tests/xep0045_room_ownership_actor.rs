@@ -4,15 +4,18 @@
 //! admit an occupant or apply resolver-derived affiliation state. Otherwise
 //! two owners could independently authorize the same XEP-0045 room.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use jid::BareJid;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use waddle_xmpp::muc::affiliation::AffiliationEntry;
 use waddle_xmpp::muc::durable::{
-    DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomCommitError,
+    RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation, RoomLifecycleId, RoomRevision,
 };
 use waddle_xmpp::muc::room_actor::{
     DurableRestoreReadiness, GetAffiliation, GetConfig, GetDurableRestoreReadiness,
@@ -24,7 +27,7 @@ use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, GetOrCreateRoom, RoomCreation, RoomRegistryActor, RoomRegistryError,
     WireClusteringClaims,
 };
-use waddle_xmpp::muc::{MucRoom, RoomConfig, SubjectState};
+use waddle_xmpp::muc::{MucRoom, RoomConfig};
 use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
     SharedNodeIdentity,
@@ -42,6 +45,9 @@ struct OwnershipStore {
     expected_owner: NodeIdentity,
     expected_epoch: ClaimEpoch,
     observed_loads: AtomicUsize,
+    established_fences: Mutex<HashMap<BareJid, RoomClaimFenceContext>>,
+    lifecycle: std::sync::OnceLock<RoomLifecycleId>,
+    next_revision: AtomicUsize,
 }
 
 impl OwnershipStore {
@@ -64,6 +70,9 @@ impl OwnershipStore {
             expected_owner,
             expected_epoch,
             observed_loads: AtomicUsize::new(0),
+            established_fences: Mutex::new(HashMap::new()),
+            lifecycle: std::sync::OnceLock::new(),
+            next_revision: AtomicUsize::new(0),
         }
     }
 
@@ -91,9 +100,43 @@ impl OwnershipStore {
         }
         Ok(())
     }
+
+    fn next_commit_coordinates(&self) -> RoomCommittedCoordinates {
+        let lifecycle = *self.lifecycle.get_or_init(RoomLifecycleId::generate);
+        let revision = self.next_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        RoomCommittedCoordinates {
+            lifecycle,
+            revision: RoomRevision::from_stored(revision as i64).expect("positive revision"),
+        }
+    }
 }
 
 impl MucDurableStore for OwnershipStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        _intent: RoomDurableMutation,
+    ) -> RoomCommitFuture<'a> {
+        let validation = self.validate_fence(room_jid, fence);
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
+        let state = self.state.load(Ordering::SeqCst);
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            validation.map_err(|_| RoomCommitError::NotOwner)?;
+            if !established {
+                return Err(RoomCommitError::OwnershipUnavailable);
+            }
+            match state {
+                OWNED => Ok(coordinates),
+                DEPOSED => Err(RoomCommitError::NotOwner),
+                UNCERTAIN => Err(RoomCommitError::OwnershipUnavailable),
+                _ => unreachable!("test ownership state"),
+            }
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -115,45 +158,11 @@ impl MucDurableStore for OwnershipStore {
         })
     }
 
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _entry: &'a AffiliationEntry,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()> {
-        let validation = self.validate_fence(room_jid, fence);
-        Box::pin(async move { validation })
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
     }
 
     fn check_exact_claim_fence<'a>(
@@ -205,6 +214,10 @@ async fn spawn_unrestored_fenced_room() -> (
 
 async fn spawn_fenced_room() -> (ActorRef<RoomActor>, Arc<OwnershipStore>) {
     let (actor, store, claim_fence) = spawn_unrestored_fenced_room().await;
+    store.establish_claim_fence(
+        &"ownership@muc.example.com".parse().expect("valid room JID"),
+        claim_fence.clone(),
+    );
     actor
         .ask(RestoreDurableRoomState {
             store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
@@ -598,16 +611,20 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
         "the successor store must not receive a load from the old actor incarnation"
     );
     assert_eq!(original_store.take_observed_load_count(), 0);
-    assert_eq!(
-        actor
-            .ask(GetRoomSnapshot {
-                sender_jid: snapshot_sender,
-            })
-            .await
-            .expect("snapshot after transplant attempt")
-            .claim_fence,
-        Some(original_fence.clone()),
-        "a rejected successor restore must not replace the fence carried by old snapshots",
+    // The rejected transplant seals the actor, and sealed actors refuse
+    // dispatch snapshots outright — stronger than the earlier contract of
+    // serving the original fence: the successor's fence can never be
+    // observed through this actor at all.
+    assert!(
+        matches!(
+            actor
+                .ask(GetRoomSnapshot {
+                    sender_jid: snapshot_sender,
+                })
+                .await,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ),
+        "a sealed actor must fail dispatch snapshots closed after a rejected successor restore",
     );
 
     let mut attempted = original_config.clone();

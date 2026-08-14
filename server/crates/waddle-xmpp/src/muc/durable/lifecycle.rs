@@ -15,6 +15,83 @@ use std::fmt;
 
 use super::RoomClaimFenceContext;
 
+mod commit {
+    use super::{RoomClaimFenceContext, RoomCommittedCoordinates, RoomLifecycleId, RoomRevision};
+
+    /// Proof returned by the durable commit path before any in-memory apply.
+    /// Only this submodule can construct it directly.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RoomMutationCommit {
+        fence: RoomClaimFenceContext,
+        lifecycle: RoomLifecycleId,
+        revision: RoomRevision,
+    }
+
+    impl RoomMutationCommit {
+        pub fn fence(&self) -> &RoomClaimFenceContext {
+            &self.fence
+        }
+
+        pub fn lifecycle(&self) -> RoomLifecycleId {
+            self.lifecycle
+        }
+
+        pub fn revision(&self) -> RoomRevision {
+            self.revision
+        }
+    }
+
+    /// A transient, one-use capability authorizing an ephemeral projection
+    /// after a durable commit.
+    #[must_use = "the authorization must be consumed to project its durable commit"]
+    #[derive(Debug)]
+    pub struct EphemeralProjectionAuthorization {
+        commit: RoomMutationCommit,
+    }
+
+    impl EphemeralProjectionAuthorization {
+        /// Consume this one-use capability and recover the durable-commit
+        /// proof that authorizes the ephemeral projection.
+        pub fn consume(self) -> RoomMutationCommit {
+            self.commit
+        }
+    }
+
+    /// The sole public mint path for a room durable-commit proof.
+    pub(super) fn mint_room_mutation_commit(
+        fence: RoomClaimFenceContext,
+        coordinates: RoomCommittedCoordinates,
+    ) -> RoomMutationCommit {
+        RoomMutationCommit {
+            fence,
+            lifecycle: coordinates.lifecycle,
+            revision: coordinates.revision,
+        }
+    }
+
+    /// Mint the one-use authorization paired with a durable commit proof.
+    pub(super) fn authorize_ephemeral_projection(
+        commit: RoomMutationCommit,
+    ) -> EphemeralProjectionAuthorization {
+        EphemeralProjectionAuthorization { commit }
+    }
+}
+
+pub use commit::{EphemeralProjectionAuthorization, RoomMutationCommit};
+
+pub(crate) fn mint_room_mutation_commit(
+    fence: RoomClaimFenceContext,
+    coordinates: RoomCommittedCoordinates,
+) -> RoomMutationCommit {
+    commit::mint_room_mutation_commit(fence, coordinates)
+}
+
+pub(crate) fn authorize_ephemeral_projection(
+    commit: RoomMutationCommit,
+) -> EphemeralProjectionAuthorization {
+    commit::authorize_ephemeral_projection(commit)
+}
+
 /// Identifies one room incarnation, from durable creation until the room is
 /// destroyed or tombstoned. The #1645 durable create path mints this value so
 /// a later room recreated at the same JID cannot be confused with its former
@@ -113,51 +190,59 @@ impl RoomEffectOrdinal {
 /// slice free of persistence encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoomLifecycleState {
+    /// A durable Create has committed, but the registry has not yet made the
+    /// actor observable. A restart must recover this state by exact-fenced
+    /// terminal cleanup rather than restoring it as a serving room.
+    Preparing,
     Active,
     Dormant,
     Tombstoned,
 }
 
-/// Proof returned by #1645's durable-commit path before any in-memory apply.
-/// It records that this room's authoritative state committed at one
-/// `(lifecycle, revision)` under this exact claim fence, so subsequent work
-/// cannot accidentally treat an unfenced or stale mutation as authoritative.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoomMutationCommit {
-    fence: RoomClaimFenceContext,
-    lifecycle: RoomLifecycleId,
-    revision: RoomRevision,
-}
-
-impl RoomMutationCommit {
-    /// Assemble a commit proof. `pub` because the durable writer lives across
-    /// the crate seam in waddle-server; nothing in this dark slice constructs
-    /// one outside tests. When #1645 wires the real commit path it owns
-    /// narrowing construction to that path (the `ownership::resume`
-    /// sole-constructor-submodule pattern), so a fabricated proof cannot
-    /// impersonate a durable commit.
-    pub fn new(
-        fence: RoomClaimFenceContext,
-        lifecycle: RoomLifecycleId,
-        revision: RoomRevision,
-    ) -> Self {
-        Self {
-            fence,
-            lifecycle,
-            revision,
+impl RoomLifecycleState {
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            RoomLifecycleState::Preparing => "preparing",
+            RoomLifecycleState::Active => "active",
+            RoomLifecycleState::Dormant => "dormant",
+            RoomLifecycleState::Tombstoned => "tombstoned",
         }
     }
 
-    pub fn fence(&self) -> &RoomClaimFenceContext {
-        &self.fence
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "preparing" => Some(RoomLifecycleState::Preparing),
+            "active" => Some(RoomLifecycleState::Active),
+            "dormant" => Some(RoomLifecycleState::Dormant),
+            "tombstoned" => Some(RoomLifecycleState::Tombstoned),
+            _ => None,
+        }
+    }
+}
+
+/// Plain committed lifecycle/revision coordinate returned by the durable
+/// commit path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomCommittedCoordinates {
+    pub lifecycle: RoomLifecycleId,
+    pub revision: RoomRevision,
+}
+
+/// Typed destroy-attempt identity for the registry pre-seal protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DestroyAttemptId(uuid::Uuid);
+
+impl DestroyAttemptId {
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn lifecycle(&self) -> RoomLifecycleId {
-        self.lifecycle
+    pub const fn from_uuid(id: uuid::Uuid) -> Self {
+        Self(id)
     }
 
-    pub fn revision(&self) -> RoomRevision {
-        self.revision
+    pub const fn as_uuid(self) -> uuid::Uuid {
+        self.0
     }
 }
 
@@ -208,37 +293,6 @@ impl<E> RoomEffectIntent<E> {
 
     pub fn into_effect(self) -> E {
         self.effect
-    }
-}
-
-/// A transient, one-use capability authorizing an ephemeral projection after
-/// a durable commit (#1647). Only the post-durable-commit path mints it; #1645
-/// wires that real minting site. On a crash or claim loss this capability is
-/// simply dropped and #1647 resynchronizes the projection.
-///
-/// It is deliberately neither `Clone` nor `Copy` and is never serialized:
-/// safe Rust's compile-time linearity enforces one use because [`Self::consume`]
-/// takes ownership, making a second consumption unrepresentable.
-#[must_use = "the authorization must be consumed to project its durable commit"]
-#[derive(Debug)]
-pub struct EphemeralProjectionAuthorization {
-    commit: RoomMutationCommit,
-}
-
-impl EphemeralProjectionAuthorization {
-    /// Mint an authorization only after the supplied durable commit has
-    /// succeeded. `pub` because the minting site lives across the crate seam
-    /// in waddle-server; #1645 owns wiring that production site and narrowing
-    /// construction alongside [`RoomMutationCommit::new`] so a cloned or
-    /// fabricated commit proof cannot mint a second capability.
-    pub fn new(commit: RoomMutationCommit) -> Self {
-        Self { commit }
-    }
-
-    /// Consume this one-use capability and recover the durable-commit proof
-    /// that authorizes the ephemeral projection.
-    pub fn consume(self) -> RoomMutationCommit {
-        self.commit
     }
 }
 
@@ -308,7 +362,13 @@ mod tests {
         let fence = claim_fence();
         let lifecycle = RoomLifecycleId::generate();
         let revision = RoomRevision::initial();
-        let commit = RoomMutationCommit::new(fence.clone(), lifecycle, revision);
+        let commit = mint_room_mutation_commit(
+            fence.clone(),
+            RoomCommittedCoordinates {
+                lifecycle,
+                revision,
+            },
+        );
 
         assert_eq!(commit.fence(), &fence);
         assert_eq!(commit.lifecycle(), lifecycle);
@@ -331,16 +391,39 @@ mod tests {
 
     #[test]
     fn authorization_consumes_the_exact_commit() {
-        let commit = RoomMutationCommit::new(
+        let commit = mint_room_mutation_commit(
             claim_fence(),
-            RoomLifecycleId::generate(),
-            RoomRevision::initial(),
+            RoomCommittedCoordinates {
+                lifecycle: RoomLifecycleId::generate(),
+                revision: RoomRevision::initial(),
+            },
         );
         let expected = commit.clone();
 
-        assert_eq!(
-            EphemeralProjectionAuthorization::new(commit).consume(),
-            expected
-        );
+        assert_eq!(authorize_ephemeral_projection(commit).consume(), expected);
+    }
+
+    #[test]
+    fn lifecycle_state_db_strings_round_trip() {
+        for state in [
+            RoomLifecycleState::Active,
+            RoomLifecycleState::Dormant,
+            RoomLifecycleState::Tombstoned,
+        ] {
+            assert_eq!(
+                RoomLifecycleState::from_db_str(state.as_db_str()),
+                Some(state)
+            );
+        }
+        assert_eq!(RoomLifecycleState::from_db_str("unknown"), None);
+    }
+
+    #[test]
+    fn destroy_attempt_id_round_trips_and_displays_as_a_uuid() {
+        let attempt = DestroyAttemptId::generate();
+        let known = uuid::Uuid::now_v7();
+
+        assert_eq!(DestroyAttemptId::from_uuid(known).as_uuid(), known);
+        assert_ne!(attempt.as_uuid(), known);
     }
 }
