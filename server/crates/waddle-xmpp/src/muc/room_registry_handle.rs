@@ -36,16 +36,18 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
-    DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
-    DrainRoomOwnershipForShutdown, GetOrCreateRoom, GetOrCreateRoomWithInitialAffiliations,
-    GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom,
-    IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease, IsMucJid,
-    IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
-    ListRoomsOwnedBy, PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog,
-    ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
+    CancelDestroyCompletion, CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom,
+    DemoteRoomIfOwner, DestroyCompletion, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome,
+    DestroyRoomReason, DrainRoomOwnershipForShutdown, GetOrCreateRoom,
+    GetOrCreateRoomWithInitialAffiliations, GetPendingReclaimedRoomBacklog,
+    GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
+    IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
+    ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
+    PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome,
+    ReconcileReclaimedRoom, RegisterDestroyCompletion, RememberPendingReclaimedRoom,
     ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
-    RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
+    RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, TakeDestroyCompletions,
+    WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -416,6 +418,28 @@ impl RoomRegistry {
             room_jid,
             reason: DestroyRoomReason::Destroy
         }
+    );
+
+    registry_method!(
+        /// Retain typed owner-IQ cleanup before issuing its destroy. A later
+        /// reconciliation can then hand the same work back to the server.
+        register_destroy_completion(completion: DestroyCompletion) -> (),
+        "register_destroy_completion",
+        RegisterDestroyCompletion { completion }
+    );
+
+    registry_method!(
+        cancel_destroy_completion(room_jid: BareJid) -> (),
+        "cancel_destroy_completion",
+        CancelDestroyCompletion { room_jid }
+    );
+
+    registry_method!(
+        /// Drain owner-IQ destroy work completed by the registry, including
+        /// destroys reconciled after their original reply was lost.
+        take_destroy_completions() -> Vec<DestroyCompletion>,
+        "take_destroy_completions",
+        TakeDestroyCompletions
     );
 
     registry_method!(

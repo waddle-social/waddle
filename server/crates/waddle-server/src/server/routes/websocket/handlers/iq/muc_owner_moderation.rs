@@ -1,6 +1,10 @@
 use super::*;
 use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, NS_MUC_OWNER};
 
+use crate::server::routes::websocket::cleanup::{
+    cancel_destroy_completion, drain_destroy_completions, register_destroy_completion,
+};
+
 /// Extract the optional alternate venue, reason, and password from a
 /// `<destroy xmlns='muc#owner'/>` child of the owner-config IQ. All
 /// fields are optional per XEP-0045 §10.9, so a malformed or empty
@@ -173,6 +177,66 @@ async fn wipe_destroyed_room_durable_state(
     Ok(())
 }
 
+/// Execute the server-owned half of a committed owner-IQ destroy. The
+/// registry retains this typed completion across lost replies, then hands it
+/// back to this layer once the durable destroy has committed.
+pub(crate) async fn complete_destroy_post_commit(
+    state: &WebSocketState,
+    completion: waddle_xmpp::muc::room_registry_actor::DestroyCompletion,
+    inline_session: Option<&FullJid>,
+) -> Vec<String> {
+    let room_jid = completion.room_jid;
+    if wipe_destroyed_room_durable_state(state, &room_jid, &completion.room)
+        .await
+        .is_err()
+    {
+        warn!(
+            room = %room_jid,
+            "Destroy committed but the app-level durable wipe (catalog row / \
+             group-DM tuples / boundaries / invite ledger) did not fully \
+             stick; leftover rows are idempotently re-cleanable and cannot \
+             resurrect the room's ban/affiliation state"
+        );
+    }
+
+    let mut frames = Vec::new();
+    for occupant in completion.room.occupants.values() {
+        for session_jid in completion.room.get_occupant_sessions(&occupant.nick) {
+            let is_inline_session = inline_session.is_some_and(|session| session_jid == *session);
+            let occupant_bare = session_jid.to_bare();
+            let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                bare_jid: &occupant_bare,
+                real_jid: Some(&session_jid),
+                secret: &state.deps.occupant_id_secret,
+            };
+            let presence = build_destroy_notification(
+                &room_jid,
+                &occupant.nick,
+                &session_jid,
+                &completion.request,
+                is_inline_session,
+                &identity,
+            );
+            if is_inline_session {
+                frames.push(stanza_to_xml(&Stanza::Presence(presence)));
+            } else {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_to(&session_jid, Stanza::Presence(presence));
+            }
+            super::super::super::muc_call_sfu::unregister_participant_from_room(
+                state,
+                &room_jid,
+                &session_jid,
+            );
+        }
+    }
+    debug!(room = %room_jid, "Completed committed MUC room destroy");
+    frames
+}
+
 pub(super) async fn handle_muc_owner_and_moderation_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
@@ -292,6 +356,20 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     internal_server_error_iq_error("Internal server error."),
                 )];
             };
+            let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
+                room_jid: room_jid.clone(),
+                room: snapshot.room,
+                request: destroy_request,
+            };
+            if let Err(error) = register_destroy_completion(state, completion.clone()).await {
+                warn!(room = %room_jid, %error, "Failed to retain MUC destroy completion");
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
             // Single atomic commit point (#1261, #1276 Greptile P1s).
             // `destroy_room_actor` (the registry `DestroyRoom` handler)
             // removes the in-memory entry AND wipes the clustering durable
@@ -311,9 +389,19 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 // atomically restored the room — nothing was torn down, so
                 // answer retryable, never a false success.
                 Ok(
-                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed
-                    | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
+                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed,
                 ) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+                Ok(
+                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
+                ) => {
+                    cancel_destroy_completion(state, &room_jid).await;
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,
@@ -324,6 +412,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 // A concurrent destroy already removed the room between the
                 // `get_room_actor` lookup above and here — genuinely gone.
                 Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered) => {
+                    cancel_destroy_completion(state, &room_jid).await;
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,
@@ -348,81 +437,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     )];
                 }
             }
-            // COMMITTED: the registry entry and the clustering ban/
-            // affiliation state are both gone, so the room can never
-            // resurrect with its old grants. Tear down the irreversible
-            // app-level rows (#1261) post-commit: the managed-channel
-            // catalog row, group-DM member tuples/bookmarks, archive
-            // boundaries, and the outstanding mediated-invite ledger.
-            // These are idempotent deletes; a post-commit failure leaves
-            // only benign app-level orphans (re-run by a retried destroy
-            // or a sweeper), never a live room — so it is logged, not
-            // surfaced as an error that would falsely claim the destroy
-            // did not happen.
-            if wipe_destroyed_room_durable_state(state, &room_jid, &snapshot.room)
-                .await
-                .is_err()
-            {
-                warn!(
-                    room = %room_jid,
-                    "Destroy committed but the app-level durable wipe (catalog row / \
-                     group-DM tuples / boundaries / invite ledger) did not fully \
-                     stick; leftover rows are idempotently re-cleanable and cannot \
-                     resurrect the room's ban/affiliation state"
-                );
-            }
-            debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
-
-            let mut frames = Vec::new();
-            for occupant in snapshot.room.occupants.values() {
-                // XEP-0045 §10.9 (#1261): the service sends one
-                // unavailable presence with `<destroy/>` to EACH
-                // occupant session — every device sharing this
-                // nick, not just the roster's single `real_jid`.
-                // Sibling sessions that were skipped kept a live
-                // room locally after the destroy.
-                for session_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
-                    let is_self_session = session_jid == *sender_jid;
-                    // XEP-0421: the destroy notification is the
-                    // occupant's final unavailable presence from
-                    // the room and MUST carry their occupant-id
-                    // (#1268).
-                    let occupant_bare = session_jid.to_bare();
-                    let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                        bare_jid: &occupant_bare,
-                        real_jid: Some(&session_jid),
-                        secret: &state.deps.occupant_id_secret,
-                    };
-                    let presence = build_destroy_notification(
-                        &room_jid,
-                        &occupant.nick,
-                        &session_jid,
-                        &destroy_request,
-                        is_self_session,
-                        &identity,
-                    );
-                    if is_self_session {
-                        frames.push(stanza_to_xml(&Stanza::Presence(presence)));
-                    } else {
-                        let _ = state
-                            .deps
-                            .protocol
-                            .connection_registry
-                            .try_send_to(&session_jid, Stanza::Presence(presence));
-                    }
-                    // XEP-0045 §10.9 destroy ends every occupant's
-                    // session in the room — their LiveKit
-                    // participant must end with it. Without this
-                    // the SFU keeps the room populated until its
-                    // own timeout even though the XMPP room is
-                    // gone. Idempotent for non-call participants.
-                    super::super::super::muc_call_sfu::unregister_participant_from_room(
-                        state,
-                        &room_jid,
-                        &session_jid,
-                    );
-                }
-            }
+            let mut frames = drain_destroy_completions(state, Some(sender_jid)).await;
             let room_jid_string = room_jid.to_string();
             frames.push(build_iq_result_xml(
                 id,

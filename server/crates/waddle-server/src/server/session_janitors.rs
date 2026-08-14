@@ -66,6 +66,11 @@ const AUTH_JANITOR_INTERVAL: Duration = Duration::from_secs(60);
 /// Default interval for the persistent-room dormancy janitor.
 const ROOM_DORMANCY_JANITOR_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Owner-IQ destroy completions are normally drained inline. This short
+/// backstop also covers reconciliation completed by a reaper after the
+/// original request lost its registry reply.
+const DESTROY_COMPLETION_JANITOR_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Default interval for the empty-`UserActor` reaper (ADR-0017 Phase 1
 /// Slice 2). Matches the room dormancy cadence: orphaned empty actors are
 /// harmless between sweeps (they route to `NotConnected`/detached), so a
@@ -6592,6 +6597,24 @@ pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>)
                 break;
             };
             run_room_dormancy_sweep(&state).await;
+        }
+    });
+}
+
+/// Drain typed owner-IQ destroy work that a registry reconciliation completed
+/// outside the original WebSocket request. This is intentionally separate
+/// from the five-minute dormancy sweep so app-level resurrection cleanup and
+/// XEP-0045 §10.9 notifications do not wait for unrelated room churn.
+pub(crate) fn spawn_destroy_completion_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(DESTROY_COMPLETION_JANITOR_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            let _ = crate::server::routes::websocket::drain_destroy_completions(&state, None).await;
         }
     });
 }

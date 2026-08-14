@@ -576,6 +576,10 @@ impl PostgresMucRoomStore {
         if is_retryable_tx_error(&error) {
             RoomCommitError::RetryExhausted
         } else {
+            tracing::warn!(
+                error = ?error,
+                "MUC durable commit failed with a non-retryable database error; returning sanitized RoomCommitError"
+            );
             commit_database_error()
         }
     }
@@ -1270,6 +1274,7 @@ mod tests {
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
     use crate::db::{DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use kameo::{actor::Spawn, error::SendError};
+    use std::io;
     use std::sync::Arc;
     use waddle_xmpp::muc::room_actor::{
         GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject, SetSubjectError,
@@ -1308,6 +1313,33 @@ mod tests {
         format!("{prefix}-{}@muc.example.com", uuid::Uuid::new_v4())
             .parse()
             .expect("valid test room JID")
+    }
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture buffer lock").extend(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn captured_logs(buffer: &Arc<std::sync::Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+            .expect("captured logs are valid UTF-8")
     }
 
     async fn wait_for_lock_waiter(db: &Database, query_fragment: &str) {
@@ -1360,6 +1392,40 @@ mod tests {
                 "database uncertainty must remain typed for the exact fence entity"
             );
         }
+    }
+
+    #[test]
+    fn non_retryable_commit_errors_are_logged_before_sanitizing() {
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = CaptureWriter(Arc::clone(&buffer));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(writer)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let result = PostgresMucRoomStore::commit_error(DatabaseError::ConnectionFailed(
+            "main pool unavailable".to_string(),
+        ));
+
+        assert!(
+            matches!(result, RoomCommitError::Database(_)),
+            "expected commit_error to keep returning the sanitized database marker"
+        );
+        let logs = captured_logs(&buffer);
+        assert!(
+            logs.contains(
+                "MUC durable commit failed with a non-retryable database error; returning sanitized RoomCommitError"
+            ),
+            "expected the non-retryable commit warning in logs, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("error=ConnectionFailed(\"main pool unavailable\")"),
+            "expected the structured DatabaseError in logs, got:\n{logs}"
+        );
     }
 
     #[derive(Debug)]

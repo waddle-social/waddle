@@ -244,8 +244,17 @@ pub struct RoomRegistryActor {
     pending_room_preparations: HashMap<BareJid, PendingRoomPreparation>,
     /// Attempt identities whose pre-seal reply was lost or whose durable
     /// destroy commit still needs reconciliation. A retry must reuse the
-    /// same token; a new token cannot reopen the actor-local seal.
-    destroy_attempts: HashMap<BareJid, super::DestroyAttemptId>,
+    /// same token; a new token cannot reopen the actor-local seal. Owner-IQ
+    /// destroys additionally retain their typed post-commit work so a lost
+    /// registry reply cannot bypass app cleanup or XEP-0045 notifications.
+    destroy_attempts: HashMap<BareJid, RetainedDestroyAttempt>,
+    /// Owner-IQ destroy work made durable by either the original request or
+    /// a later reconciliation. The server drains this typed hand-off because
+    /// application storage and connection effects live above this crate.
+    pending_destroy_completions: VecDeque<DestroyCompletion>,
+    /// Owner-IQ completion data registered immediately before an explicit
+    /// destroy. It moves into the retained attempt as that destroy begins.
+    destroy_completions_waiting: HashMap<BareJid, DestroyCompletion>,
     ready_room_publications: VecDeque<ReadyRoomPublication>,
     ready_room_publication_scheduled: bool,
     next_room_preparation_generation: u64,
@@ -289,6 +298,22 @@ pub struct RoomRegistryActor {
     /// every existing test — correct, since there is only ever one
     /// generation to place. Wired by [`WireClusteringClaims`].
     rollout_backoff: Option<Arc<dyn RolloutBackoff>>,
+}
+
+#[derive(Clone)]
+struct RetainedDestroyAttempt {
+    attempt: super::DestroyAttemptId,
+    completion: Option<DestroyCompletion>,
+}
+
+/// Typed post-commit work for an owner-IQ room destroy. This is retained
+/// across ambiguous registry replies and consumed by `waddle-server`, which
+/// owns the application database and session-routing effects.
+#[derive(Clone)]
+pub struct DestroyCompletion {
+    pub room_jid: BareJid,
+    pub room: MucRoom,
+    pub request: super::DestroyRequest,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -341,6 +366,8 @@ impl RoomRegistryActor {
             pending_room_acquisitions: HashMap::new(),
             pending_room_preparations: HashMap::new(),
             destroy_attempts: HashMap::new(),
+            pending_destroy_completions: VecDeque::new(),
+            destroy_completions_waiting: HashMap::new(),
             ready_room_publications: VecDeque::new(),
             ready_room_publication_scheduled: false,
             next_room_preparation_generation: 0,
@@ -1990,9 +2017,10 @@ impl RoomRegistryActor {
     /// This runs on ordinary lookup and reaper touches, not only on another
     /// explicit destroy request, so an ambiguous reply cannot wedge a room.
     async fn reconcile_destroy_attempt(&mut self, room_jid: &BareJid) {
-        let Some(attempt) = self.destroy_attempts.get(room_jid).copied() else {
+        let Some(retained) = self.destroy_attempts.get(room_jid).cloned() else {
             return;
         };
+        let attempt = retained.attempt;
         let Some(entry) = self.rooms.get(room_jid).cloned() else {
             self.destroy_attempts.remove(room_jid);
             return;
@@ -2035,9 +2063,24 @@ impl RoomRegistryActor {
         };
         match commit {
             Ok(_) => {
+                // The durable destroy has committed, but exact claim release
+                // can still fail. Reserve its retry slot before removing the
+                // sole fence-bearing entry; otherwise a saturated backlog
+                // would strand this still-owned generation until node expiry.
+                if !self.remember_pending_room_release(room_jid.clone(), entry.claim_fence.clone())
+                {
+                    warn!(
+                        room = %room_jid,
+                        "release backlog saturated; retaining room entry and destroy attempt for a later reconciliation"
+                    );
+                    return;
+                }
                 self.rooms.remove(room_jid);
                 self.publish_room_count();
                 self.poisoned_rooms.remove(room_jid);
+                if let Some(completion) = retained.completion {
+                    self.pending_destroy_completions.push_back(completion);
+                }
                 self.destroy_attempts.remove(room_jid);
                 self.release_room_claim(room_jid, &entry.claim_fence).await;
                 info!(room = %room_jid, "completed a previously ambiguous room destroy");
@@ -2068,6 +2111,9 @@ impl RoomRegistryActor {
                 self.rooms.remove(room_jid);
                 self.publish_room_count();
                 self.poisoned_rooms.remove(room_jid);
+                if let Some(completion) = retained.completion {
+                    self.pending_destroy_completions.push_back(completion);
+                }
                 self.destroy_attempts.remove(room_jid);
                 entry.actor_ref.kill();
                 self.release_room_claim(room_jid, &entry.claim_fence).await;
@@ -3870,6 +3916,67 @@ pub enum DestroyRoomOutcome {
     ReleaseBacklogFull,
 }
 
+/// Attach typed owner-IQ post-commit work to the next destroy for this room.
+/// If a destroy is already retained after a lost reply, it is attached to that
+/// same attempt instead of creating a new actor-local seal generation.
+pub struct RegisterDestroyCompletion {
+    pub completion: DestroyCompletion,
+}
+
+impl kameo::message::Message<RegisterDestroyCompletion> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RegisterDestroyCompletion,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let room_jid = msg.completion.room_jid.clone();
+        if let Some(retained) = self.destroy_attempts.get_mut(&room_jid) {
+            if retained.completion.is_none() {
+                retained.completion = Some(msg.completion);
+            }
+            return;
+        }
+        self.destroy_completions_waiting
+            .insert(room_jid, msg.completion);
+    }
+}
+
+/// Discard owner-IQ work when a destroy was conclusively refused before it
+/// began. Retained attempts are intentionally left alone because their
+/// terminal durable status is still ambiguous.
+pub struct CancelDestroyCompletion {
+    pub room_jid: BareJid,
+}
+
+impl kameo::message::Message<CancelDestroyCompletion> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: CancelDestroyCompletion,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.destroy_completions_waiting.remove(&msg.room_jid);
+    }
+}
+
+/// Take completed owner-IQ destroys for execution by the server layer.
+pub struct TakeDestroyCompletions;
+
+impl kameo::message::Message<TakeDestroyCompletions> for RoomRegistryActor {
+    type Reply = Vec<DestroyCompletion>;
+
+    async fn handle(
+        &mut self,
+        _msg: TakeDestroyCompletions,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.pending_destroy_completions.drain(..).collect()
+    }
+}
+
 /// Destroy a room, removing it from the registry.
 pub struct DestroyRoom {
     pub room_jid: BareJid,
@@ -3906,10 +4013,18 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                 .get(&msg.room_jid)
                 .map(|pending| pending.claim_fence.clone());
             if let Some(entry) = self.rooms.get(&msg.room_jid).cloned() {
-                let attempt = *self
+                let completion = self.destroy_completions_waiting.remove(&msg.room_jid);
+                let retained = self
                     .destroy_attempts
                     .entry(msg.room_jid.clone())
-                    .or_insert_with(super::DestroyAttemptId::generate);
+                    .or_insert_with(|| RetainedDestroyAttempt {
+                        attempt: super::DestroyAttemptId::generate(),
+                        completion: None,
+                    });
+                if retained.completion.is_none() {
+                    retained.completion = completion;
+                }
+                let attempt = retained.attempt;
                 let seal = entry
                     .actor_ref
                     .ask(SealForDestroy { attempt })
@@ -3953,8 +4068,8 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                                 // The durable mutation fenced this exact claim
                                 // before observing the missing state, so it may
                                 // still be ours. Kill the sealed actor, then
-                                // fall through to the normal exact-release path.
-                                self.destroy_attempts.remove(&msg.room_jid);
+                                // fall through to the normal exact-release and
+                                // post-commit completion paths.
                                 entry.actor_ref.kill();
                             }
                             error => {
@@ -4007,7 +4122,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
             }
         }
         let removed_entry = self.rooms.remove(&msg.room_jid);
-        self.destroy_attempts.remove(&msg.room_jid);
+        let completed_attempt = self.destroy_attempts.remove(&msg.room_jid);
         let removed_room = removed_entry.is_some();
         let removed_preparation = self.pending_room_preparations.remove(&msg.room_jid);
         let removed_pending_room = removed_preparation.is_some();
@@ -4051,7 +4166,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                     .await;
             }
         }
-        if let Some(outcome) = terminal_outcome {
+        let outcome = if let Some(outcome) = terminal_outcome {
             outcome
         } else if removed_room || removed_pending_room || removed_poison {
             info!(room = %msg.room_jid, "Destroyed room");
@@ -4059,7 +4174,19 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         } else {
             warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
             DestroyRoomOutcome::NotRegistered
+        };
+        if outcome == DestroyRoomOutcome::Destroyed {
+            if let Some(RetainedDestroyAttempt {
+                completion: Some(completion),
+                ..
+            }) = completed_attempt
+            {
+                self.pending_destroy_completions.push_back(completion);
+            }
+        } else {
+            self.destroy_completions_waiting.remove(&msg.room_jid);
         }
+        outcome
     }
 }
 

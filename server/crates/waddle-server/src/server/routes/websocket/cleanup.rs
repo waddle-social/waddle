@@ -2285,9 +2285,65 @@ pub(crate) async fn get_room_actor_result(
     state: &WebSocketState,
     room_jid: &BareJid,
 ) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
+    let registry = RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
+    let result = registry.get_room(room_jid.clone()).await;
+    drain_destroy_completions(state, None).await;
+    result
+}
+
+/// Register owner-IQ cleanup before starting its destroy. If the registry
+/// reply is lost after the durable commit, reconciliation carries this same
+/// typed snapshot into [`drain_destroy_completions`].
+pub(crate) async fn register_destroy_completion(
+    state: &WebSocketState,
+    completion: waddle_xmpp::muc::room_registry_actor::DestroyCompletion,
+) -> Result<(), RoomRegistryError> {
     RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .get_room(room_jid.clone())
+        .register_destroy_completion(completion)
         .await
+}
+
+/// Forget owner-IQ work after a destroy was conclusively refused before the
+/// registry could attach it to a retained attempt.
+pub(crate) async fn cancel_destroy_completion(state: &WebSocketState, room_jid: &BareJid) {
+    if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .cancel_destroy_completion(room_jid.clone())
+        .await
+    {
+        warn!(room = %room_jid, %error, "Failed to discard refused MUC destroy completion");
+    }
+}
+
+/// Run every registry-completed owner destroy at the server boundary. A
+/// normal owner IQ supplies its own session so its final presence can be
+/// returned inline; reconciliation sends all presence through the connection
+/// registry because the original frame already received a retryable error.
+pub(crate) async fn drain_destroy_completions(
+    state: &WebSocketState,
+    inline_session: Option<&FullJid>,
+) -> Vec<String> {
+    let completions = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .take_destroy_completions()
+        .await
+    {
+        Ok(completions) => completions,
+        Err(error) => {
+            warn!(error = %error, "Failed to drain completed MUC destroy work");
+            return Vec::new();
+        }
+    };
+    let mut frames = Vec::new();
+    for completion in completions {
+        frames.extend(
+            super::handlers::iq::muc_owner_moderation::complete_destroy_post_commit(
+                state,
+                completion,
+                inline_session,
+            )
+            .await,
+        );
+    }
+    frames
 }
 
 /// Get or create the room via the registry. The returned

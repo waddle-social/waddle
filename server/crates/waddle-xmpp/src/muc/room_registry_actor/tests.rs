@@ -57,7 +57,14 @@ impl kameo::message::Message<RememberDestroyAttemptForTest> for RoomRegistryActo
         msg: RememberDestroyAttemptForTest,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.destroy_attempts.insert(msg.room_jid, msg.attempt);
+        let completion = self.destroy_completions_waiting.remove(&msg.room_jid);
+        self.destroy_attempts.insert(
+            msg.room_jid,
+            RetainedDestroyAttempt {
+                attempt: msg.attempt,
+                completion,
+            },
+        );
     }
 }
 
@@ -1310,6 +1317,65 @@ mod ownership_claims_tests {
         );
     }
 
+    #[tokio::test]
+    async fn direct_state_missing_destroy_queues_registered_owner_post_commit_work() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            destroy_state_missing: true,
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            claim_store,
+            SharedNodeIdentity::new(this_identity()),
+            durable_store,
+        )
+        .await;
+
+        let jid = test_room_jid("direct-state-missing-destroy-completion");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let snapshot = actor
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot");
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    room_jid: jid.clone(),
+                    room: snapshot.room,
+                    request: crate::muc::DestroyRequest::default(),
+                },
+            })
+            .await
+            .expect("register destroy completion");
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        let completions = registry
+            .ask(TakeDestroyCompletions)
+            .await
+            .expect("take completed destroy work");
+        assert_eq!(
+            completions.len(),
+            1,
+            "state-missing destroy must retain cleanup work"
+        );
+        assert_eq!(completions[0].room_jid, jid);
+    }
+
     /// A destroy whose durable delete fails must FAIL (returning
     /// `false` and keeping the room registered) — acknowledging it
     /// would leave rows behind that resurrect the "destroyed" room on
@@ -1416,6 +1482,63 @@ mod ownership_claims_tests {
             None,
             "a later lookup must finish the same destroy attempt rather than remain pending"
         );
+    }
+
+    #[tokio::test]
+    async fn reconciled_destroy_queues_registered_owner_post_commit_work() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("reconcile-destroy-completion");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let snapshot = actor
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot");
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    room_jid: jid.clone(),
+                    room: snapshot.room,
+                    request: crate::muc::DestroyRequest::default(),
+                },
+            })
+            .await
+            .expect("register destroy completion");
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        actor
+            .ask(crate::muc::room_actor::SealForDestroy { attempt })
+            .await
+            .expect("seal before reconciliation");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("record lost reply attempt");
+
+        assert_eq!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone()
+                })
+                .await
+                .expect("reconcile lookup"),
+            None,
+        );
+        let completions = registry
+            .ask(TakeDestroyCompletions)
+            .await
+            .expect("take completed destroy work");
+        assert_eq!(
+            completions.len(),
+            1,
+            "reconciliation must retain cleanup work"
+        );
+        assert_eq!(completions[0].room_jid, jid);
     }
 
     #[tokio::test]
@@ -1544,6 +1667,82 @@ mod ownership_claims_tests {
                 })
                 .await
                 .expect("reconcile on lookup after drain"),
+            None,
+        );
+        assert!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("authoritative claim lookup")
+                .is_none(),
+            "reconciliation after drain must release the exact claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn saturated_release_backlog_retains_committed_destroy_reconciliation() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store),
+            SharedNodeIdentity::new(this_identity()),
+            durable_store,
+        )
+        .await;
+
+        let jid = test_room_jid("reconcile-committed-saturated-backlog");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        actor
+            .ask(crate::muc::room_actor::SealForDestroy { attempt })
+            .await
+            .expect("seal before reconciliation");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("record retained attempt");
+        registry
+            .ask(FillPendingRoomReleasesForTest {
+                count: crate::muc::room_registry_actor::MAX_PENDING_ROOM_RELEASES,
+            })
+            .await
+            .expect("fill backlog");
+
+        let _ = registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await;
+        assert!(
+            claim_store
+                .current_claim(&entity)
+                .await
+                .expect("authoritative claim lookup")
+                .is_some(),
+            "a saturated reconciled success must retain its exact claim responsibility"
+        );
+
+        registry
+            .ask(FillPendingRoomReleasesForTest { count: 0 })
+            .await
+            .expect("drain backlog");
+        assert_eq!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("reconcile after drain"),
             None,
         );
         assert!(
