@@ -13,8 +13,8 @@ use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
 use super::durable::{
-    authorize_ephemeral_projection, mint_room_mutation_commit, RoomCommitError,
-    RoomDurableMutation, RoomMutationCommit,
+    authorize_ephemeral_projection, mint_room_mutation_commit, ChannelId, RoomCommitError,
+    RoomDurableMutation, RoomMutationCommit, WaddleId,
 };
 use super::pin::{PinStateChange, PinnedEntry};
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
@@ -841,6 +841,21 @@ impl RoomActor {
 
     fn classify_durable_persist_error(&mut self, error: RoomCommitError) -> DurablePersistError {
         match error {
+            // A lost COMMIT acknowledgement is not a rollback proof: the
+            // durable mutation may have advanced while this actor still has
+            // its pre-commit memory.  Reuse the terminal, registry-retire
+            // compatible NotOwner contract rather than allowing this stale
+            // incarnation to answer another request.  The caller demotes
+            // this exact actor and a fresh incarnation restores durable
+            // state before serving again.
+            RoomCommitError::CommitOutcomeUnknown => {
+                self.seal_state = RoomSealState::OwnershipLost;
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    "durable mutation commit outcome is unknown; sealing stale actor for retirement"
+                );
+                DurablePersistError::NotOwner
+            }
             RoomCommitError::NotOwner => {
                 self.seal_state = RoomSealState::OwnershipLost;
                 tracing::warn!(
@@ -1405,8 +1420,8 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         let config = msg.config.normalized();
         self.commit_durable(RoomDurableMutation::Config {
             config: config.clone(),
-            waddle_id: self.room.waddle_id.clone(),
-            channel_id: self.room.channel_id.clone(),
+            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+            channel_id: ChannelId::new(self.room.channel_id.clone()),
         })
         .await?;
         self.replace_config(config);
@@ -1438,8 +1453,8 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
         let config = msg.config.normalized();
         self.commit_durable(RoomDurableMutation::Config {
             config: config.clone(),
-            waddle_id: self.room.waddle_id.clone(),
-            channel_id: self.room.channel_id.clone(),
+            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+            channel_id: ChannelId::new(self.room.channel_id.clone()),
         })
         .await?;
         self.replace_config(config);
@@ -1529,8 +1544,8 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         let config = config.normalized();
         self.commit_durable(RoomDurableMutation::Config {
             config: config.clone(),
-            waddle_id: self.room.waddle_id.clone(),
-            channel_id: self.room.channel_id.clone(),
+            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+            channel_id: ChannelId::new(self.room.channel_id.clone()),
         })
         .await?;
         self.replace_config(config);
@@ -1931,6 +1946,15 @@ impl kameo::message::Message<SealForDestroy> for RoomActor {
     ) -> Self::Reply {
         match self.seal_state {
             RoomSealState::Open => {
+                self.seal_state = RoomSealState::Destroying {
+                    attempt: msg.attempt,
+                };
+                self.seal_state
+            }
+            // An inactivity seal already excludes every admission. Upgrade it
+            // in the same mailbox turn so an explicit terminal destroy can
+            // reconcile the exact attempt instead of retaining it forever.
+            RoomSealState::Inactive => {
                 self.seal_state = RoomSealState::Destroying {
                     attempt: msg.attempt,
                 };

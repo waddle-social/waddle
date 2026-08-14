@@ -27,8 +27,9 @@
 //!   `EntityType::as_db_str`/`from_db_str`'s exact convention, rather than a
 //!   JSON blob for a five-variant closed enum.
 //! - `clustering_muc_room_lifecycles` — one row per room incarnation. Its
-//!   closed `state` vocabulary is `active` | `dormant` | `tombstoned`; the
-//!   partial unique index permits at most one live (`active` or `dormant`)
+//!   closed `state` vocabulary is `preparing` | `active` | `dormant` |
+//!   `tombstoned`; the partial unique index permits at most one live
+//!   (`preparing`, `active`, or `dormant`)
 //!   incarnation per room while retaining tombstones for #1646's effect drain.
 //!   The nullable `clustering_muc_rooms.lifecycle_id`/`revision` snapshot
 //!   back-link is deliberately nullable forever: `NULL` is a legitimate
@@ -56,8 +57,8 @@ use waddle_xmpp::muc::durable::{
     RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
 };
 use waddle_xmpp::muc::{
-    DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomConfig,
-    RoomLifecycleId, RoomLifecycleState, RoomRevision, SubjectState,
+    DestroyAttemptId, DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    RoomConfig, RoomLifecycleId, RoomLifecycleState, RoomRevision, SubjectState,
 };
 use waddle_xmpp::ownership::{
     ClaimEpoch, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
@@ -76,6 +77,13 @@ use crate::db::{Database, DatabaseError, Transaction};
 /// invariant and should not serialize unrelated startup work.
 const MUC_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_994;
 const ROOM_COMMIT_RETRY_ATTEMPTS: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitReconciliation {
+    Committed,
+    NotCommitted,
+    Unknown,
+}
 
 fn is_retryable_tx_error(error: &DatabaseError) -> bool {
     matches!(
@@ -285,10 +293,35 @@ impl PostgresMucRoomStore {
                 lifecycle_id TEXT PRIMARY KEY,
                 room_jid     TEXT NOT NULL,
                 revision     BIGINT NOT NULL CONSTRAINT clustering_muc_room_lifecycles_revision_min CHECK (revision >= 1),
-                state        TEXT NOT NULL CONSTRAINT clustering_muc_room_lifecycles_state_closed CHECK (state IN ('active','dormant','tombstoned')),
+                state        TEXT NOT NULL CONSTRAINT clustering_muc_room_lifecycles_state_closed CHECK (state IN ('preparing','active','dormant','tombstoned')),
                 created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
             )
+            "#,
+            (),
+        )
+        .await?;
+        // Upgrade the closed state vocabulary only when this deployment
+        // predates the durable preparing phase. The catalog probe avoids an
+        // ACCESS EXCLUSIVE lock on every steady-state startup.
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'clustering_muc_room_lifecycles_state_closed'
+                      AND conrelid = 'clustering_muc_room_lifecycles'::regclass
+                      AND pg_get_constraintdef(oid) NOT LIKE '%preparing%'
+                ) THEN
+                    ALTER TABLE clustering_muc_room_lifecycles
+                        DROP CONSTRAINT clustering_muc_room_lifecycles_state_closed;
+                    ALTER TABLE clustering_muc_room_lifecycles
+                        ADD CONSTRAINT clustering_muc_room_lifecycles_state_closed
+                        CHECK (state IN ('preparing','active','dormant','tombstoned'));
+                END IF;
+            END $$
             "#,
             (),
         )
@@ -297,6 +330,16 @@ impl PostgresMucRoomStore {
             r#"
             DO $$
             BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_index i
+                    JOIN pg_class c ON c.oid = i.indexrelid
+                    WHERE i.indrelid = 'clustering_muc_room_lifecycles'::regclass
+                      AND c.relname = 'clustering_muc_room_lifecycles_live_room_idx'
+                      AND pg_get_indexdef(i.indexrelid) NOT LIKE '%preparing%'
+                ) THEN
+                    DROP INDEX clustering_muc_room_lifecycles_live_room_idx;
+                END IF;
                 IF NOT EXISTS (
                     SELECT 1
                     FROM pg_index i
@@ -305,7 +348,7 @@ impl PostgresMucRoomStore {
                       AND c.relname = 'clustering_muc_room_lifecycles_live_room_idx'
                 ) THEN
                     CREATE UNIQUE INDEX clustering_muc_room_lifecycles_live_room_idx
-                        ON clustering_muc_room_lifecycles (room_jid) WHERE state IN ('active','dormant');
+                        ON clustering_muc_room_lifecycles (room_jid) WHERE state IN ('preparing','active','dormant');
                 END IF;
             END $$
             "#,
@@ -522,8 +565,12 @@ impl PostgresMucRoomStore {
             return Err(RoomCommitError::NotOwner);
         }
         let query = match lock_mode {
-            "FOR UPDATE" => "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR UPDATE",
-            _ => "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+            "FOR UPDATE" => {
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR UPDATE"
+            }
+            _ => {
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE"
+            }
         };
         let mut rows = tx
             .query(
@@ -593,8 +640,176 @@ impl PostgresMucRoomStore {
         if is_retryable_tx_error(&error) {
             RoomCommitError::RetryExhausted
         } else {
+            tracing::warn!(
+                error = ?error,
+                "MUC durable ownership fence query failed with a non-retryable database error; returning OwnershipUnavailable"
+            );
             RoomCommitError::OwnershipUnavailable
         }
+    }
+
+    async fn reconcile_ambiguous_commit(
+        &self,
+        room_jid: &BareJid,
+        _fence: &RoomClaimFenceContext,
+        intent: &RoomDurableMutation,
+        coordinates: RoomCommittedCoordinates,
+    ) -> Result<CommitReconciliation, RoomCommitError> {
+        let conn = self.db.guard().await.map_err(Self::commit_error)?;
+        let mut lifecycle_rows = conn
+            .query(
+                "SELECT state FROM clustering_muc_room_lifecycles WHERE room_jid = ? AND lifecycle_id = ? AND revision = ?",
+                crate::db_params![
+                    room_jid.to_string(),
+                    coordinates.lifecycle.to_string(),
+                    coordinates.revision.as_i64(),
+                ],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        let lifecycle_state = lifecycle_rows
+            .next()
+            .await
+            .map_err(Self::commit_error)?
+            .map(|row| row.get::<String>(0).map_err(Self::commit_error))
+            .transpose()?;
+        drop(lifecycle_rows);
+
+        let mut room_rows = conn
+            .query(
+                "SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ? AND lifecycle_id = ? AND revision = ?",
+                crate::db_params![
+                    room_jid.to_string(),
+                    coordinates.lifecycle.to_string(),
+                    coordinates.revision.as_i64(),
+                ],
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        let room_matches = room_rows
+            .next()
+            .await
+            .map_err(Self::commit_error)?
+            .is_some();
+        drop(room_rows);
+
+        match intent {
+            RoomDurableMutation::Destroy { .. } => Ok(
+                if lifecycle_state.as_deref() == Some(RoomLifecycleState::Tombstoned.as_db_str())
+                    && !room_matches
+                {
+                    CommitReconciliation::Committed
+                } else {
+                    CommitReconciliation::NotCommitted
+                },
+            ),
+            RoomDurableMutation::DestroyAndReleaseClaim { .. } => {
+                if lifecycle_state.as_deref() == Some(RoomLifecycleState::Tombstoned.as_db_str())
+                    && !room_matches
+                {
+                    return Ok(CommitReconciliation::Committed);
+                }
+
+                // Coordinate-less unpublished cleanup only releases a
+                // claim, leaving no durable lifecycle record to reconcile.
+                // A missing original claim is ambiguous: it may mean this
+                // transaction committed, or that a foreign owner replaced
+                // it. Never let a stale owner turn that ambiguity into a
+                // successful cleanup acknowledgement.
+                Ok(CommitReconciliation::Unknown)
+            }
+            _ => Ok(if lifecycle_state.is_some() && room_matches {
+                CommitReconciliation::Committed
+            } else {
+                CommitReconciliation::NotCommitted
+            }),
+        }
+    }
+
+    async fn commit_or_reconcile(
+        &self,
+        tx: Transaction<'_>,
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+        intent: &RoomDurableMutation,
+        coordinates: RoomCommittedCoordinates,
+    ) -> Result<RoomCommittedCoordinates, RoomCommitError> {
+        match tx.commit().await {
+            Ok(()) => Ok(coordinates),
+            Err(error) => {
+                if is_retryable_tx_error(&error) {
+                    return Err(Self::commit_error(error));
+                }
+                let commit_error = Self::commit_error(error);
+                match self
+                    .reconcile_ambiguous_commit(room_jid, fence, intent, coordinates)
+                    .await
+                {
+                    Ok(CommitReconciliation::Committed) => {
+                        tracing::warn!(
+                            room = %room_jid,
+                            lifecycle = %coordinates.lifecycle,
+                            revision = coordinates.revision.as_i64(),
+                            "MUC durable commit acknowledgement was lost after durable coordinates committed"
+                        );
+                        Ok(coordinates)
+                    }
+                    Ok(CommitReconciliation::NotCommitted) => Err(commit_error),
+                    Ok(CommitReconciliation::Unknown) => {
+                        tracing::warn!(
+                            room = %room_jid,
+                            lifecycle = %coordinates.lifecycle,
+                            revision = coordinates.revision.as_i64(),
+                            "MUC coordinate-less destroy cleanup has no durable commit acknowledgement proof"
+                        );
+                        Err(RoomCommitError::CommitOutcomeUnknown)
+                    }
+                    Err(reconciliation_error) => {
+                        tracing::warn!(
+                            room = %room_jid,
+                            lifecycle = %coordinates.lifecycle,
+                            revision = coordinates.revision.as_i64(),
+                            error = ?reconciliation_error,
+                            "MUC durable commit outcome is unknown because acknowledgement reconciliation failed"
+                        );
+                        Err(RoomCommitError::CommitOutcomeUnknown)
+                    }
+                }
+            }
+        }
+    }
+
+    async fn destroy_completion_blocks_create_in_tx(
+        tx: &mut Transaction<'_>,
+        room_jid: &BareJid,
+    ) -> Result<bool, RoomCommitError> {
+        let room_jid = room_jid.to_string();
+        let mut rows = tx
+            .query(
+                "SELECT payload_json, available_at_ms FROM clustering_muc_destroy_outbox",
+                (),
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        while let Some(row) = rows.next().await.map_err(Self::commit_error)? {
+            let payload: String = row.get(0).map_err(Self::commit_error)?;
+            let available_at_ms: i64 = row.get(1).map_err(Self::commit_error)?;
+            // `i64::MAX` is an inert, pre-commit reservation. It has no
+            // durable proof that its destroy completed, so treating it as a
+            // recreation fence would strand a newly-creatable room after a
+            // creator crash. Only a durably armed completion can block.
+            if available_at_ms == i64::MAX {
+                continue;
+            }
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload).map_err(|_| commit_database_error())?;
+            if payload.get("room_jid").and_then(serde_json::Value::as_str)
+                == Some(room_jid.as_str())
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn write_commit_affiliation(
@@ -636,11 +851,11 @@ impl PostgresMucRoomStore {
         fence: &RoomClaimFenceContext,
         intent: &RoomDurableMutation,
     ) -> Result<RoomCommittedCoordinates, RoomCommitError> {
-        if self.node_identity.current() != fence.owner {
+        let Some(_identity_guard) = self.node_identity.guard_if_current(&fence.owner).await else {
             remove_room_claim_fence_if(&self.exact_claim_fences, room_jid, fence);
             remove_room_claim_fence_if(&self.published_claim_fences, room_jid, fence);
             return Err(RoomCommitError::NotOwner);
-        }
+        };
         let mut tx = self
             .db
             .begin()
@@ -649,9 +864,10 @@ impl PostgresMucRoomStore {
         let exclusive_claim = matches!(
             intent,
             RoomDurableMutation::Destroy { .. }
-                | RoomDurableMutation::DestroyAndReleaseClaim
+                | RoomDurableMutation::DestroyAndReleaseClaim { .. }
                 | RoomDurableMutation::Dormancy
                 | RoomDurableMutation::Activate
+                | RoomDurableMutation::MarkUnpublishedCleanup
         );
         if exclusive_claim {
             self.assert_fenced_for_update(&mut tx, room_jid, fence)
@@ -660,10 +876,20 @@ impl PostgresMucRoomStore {
             self.assert_commit_fenced(&mut tx, room_jid, fence, "FOR SHARE")
                 .await?;
         }
+        // The claim lock serializes this predicate with a destroy's
+        // exclusive fenced transaction: once this create has proved no
+        // completion exists, a matching destroy cannot commit its tombstone
+        // and arm its completion until this transaction either commits or
+        // rejects. This closes the actor-side pre-check TOCTOU window.
+        if matches!(intent, RoomDurableMutation::Create { .. })
+            && Self::destroy_completion_blocks_create_in_tx(&mut tx, room_jid).await?
+        {
+            return Err(RoomCommitError::RecreationBlocked);
+        }
 
         let mut rows = tx
             .query(
-                "SELECT lifecycle_id, revision, state FROM clustering_muc_room_lifecycles WHERE room_jid = ? AND state IN ('active', 'dormant') FOR UPDATE",
+                "SELECT lifecycle_id, revision, state FROM clustering_muc_room_lifecycles WHERE room_jid = ? AND state IN ('preparing', 'active', 'dormant') FOR UPDATE",
                 crate::db_params![room_jid.to_string()],
             )
             .await
@@ -689,11 +915,11 @@ impl PostgresMucRoomStore {
             match tx
                 .execute(
                     "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
-                    crate::db_params![lifecycle.to_string(), room_jid.to_string(), revision.as_i64(), RoomLifecycleState::Active.as_db_str()],
+                    crate::db_params![lifecycle.to_string(), room_jid.to_string(), revision.as_i64(), RoomLifecycleState::Preparing.as_db_str()],
                 )
                 .await
             {
-                Ok(_) => (lifecycle, revision, RoomLifecycleState::Active),
+                Ok(_) => (lifecycle, revision, RoomLifecycleState::Preparing),
                 Err(error) => return Err(Self::commit_error(error)),
             }
         } else if matches!(intent, RoomDurableMutation::Activate) {
@@ -733,7 +959,7 @@ impl PostgresMucRoomStore {
             .await
             .map_err(Self::commit_error)?;
             (lifecycle, revision, RoomLifecycleState::Active)
-        } else if matches!(intent, RoomDurableMutation::DestroyAndReleaseClaim) {
+        } else if matches!(intent, RoomDurableMutation::DestroyAndReleaseClaim { .. }) {
             let mut room_rows = tx
                 .query(
                     "SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ?",
@@ -749,11 +975,38 @@ impl PostgresMucRoomStore {
             {
                 drop(room_rows);
                 self.release_claim_in_tx(&mut tx, room_jid, fence).await?;
-                tx.commit().await.map_err(Self::commit_error)?;
-                return Ok(RoomCommittedCoordinates {
-                    lifecycle: RoomLifecycleId::generate(),
-                    revision: RoomRevision::initial(),
-                });
+                if let RoomDurableMutation::DestroyAndReleaseClaim {
+                    completion_attempt: Some(attempt),
+                } = intent
+                {
+                    let armed = tx
+                        .execute(
+                            "UPDATE clustering_muc_destroy_outbox \
+                             SET available_at_ms = ?, lease_token = NULL, leased_at_ms = NULL \
+                             WHERE attempt_id = ?",
+                            crate::db_params![
+                                crate::time::now_ms(),
+                                attempt.as_uuid().to_string(),
+                            ],
+                        )
+                        .await
+                        .map_err(Self::commit_error)?;
+                    if armed != 1 {
+                        return Err(commit_database_error());
+                    }
+                }
+                return self
+                    .commit_or_reconcile(
+                        tx,
+                        room_jid,
+                        fence,
+                        intent,
+                        RoomCommittedCoordinates {
+                            lifecycle: RoomLifecycleId::generate(),
+                            revision: RoomRevision::initial(),
+                        },
+                    )
+                    .await;
             }
             drop(room_rows);
             let lifecycle = RoomLifecycleId::generate();
@@ -821,12 +1074,18 @@ impl PostgresMucRoomStore {
             let stored_waddle: String = room_row.get(0).map_err(Self::commit_error)?;
             let stored_channel: String = room_row.get(1).map_err(Self::commit_error)?;
             drop(room_rows);
-            return if &stored_waddle == waddle_id && &stored_channel == channel_id {
-                tx.commit().await.map_err(Self::commit_error)?;
-                Ok(RoomCommittedCoordinates {
-                    lifecycle,
-                    revision,
-                })
+            return if stored_waddle == waddle_id.as_str() && stored_channel == channel_id.as_str() {
+                self.commit_or_reconcile(
+                    tx,
+                    room_jid,
+                    fence,
+                    intent,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision,
+                    },
+                )
+                .await
             } else {
                 Err(RoomCommitError::CreateConflict)
             };
@@ -836,7 +1095,7 @@ impl PostgresMucRoomStore {
                 intent,
                 RoomDurableMutation::Activate
                     | RoomDurableMutation::Destroy { .. }
-                    | RoomDurableMutation::DestroyAndReleaseClaim
+                    | RoomDurableMutation::DestroyAndReleaseClaim { .. }
                     | RoomDurableMutation::Dormancy
             )
         {
@@ -847,21 +1106,70 @@ impl PostgresMucRoomStore {
             // transition, so it keeps its coordinates and bumps nothing. A
             // missing lifecycle stays a hard `StateMissing` above — callers
             // must not conflate the two.
-            tx.commit().await.map_err(Self::commit_error)?;
-            return Ok(RoomCommittedCoordinates {
-                lifecycle,
-                revision,
-            });
+            return self
+                .commit_or_reconcile(
+                    tx,
+                    room_jid,
+                    fence,
+                    intent,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision,
+                    },
+                )
+                .await;
         }
         if matches!(intent, RoomDurableMutation::Dormancy) && state == RoomLifecycleState::Dormant {
             // An acknowledgement can be lost after the dormancy transaction
             // commits. Repeating the same terminal transition must converge
             // without bumping the durable coordinates.
-            tx.commit().await.map_err(Self::commit_error)?;
-            return Ok(RoomCommittedCoordinates {
-                lifecycle,
-                revision,
-            });
+            return self
+                .commit_or_reconcile(
+                    tx,
+                    room_jid,
+                    fence,
+                    intent,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision,
+                    },
+                )
+                .await;
+        }
+        if matches!(intent, RoomDurableMutation::Publish) && state == RoomLifecycleState::Active {
+            // Publishing is idempotent after an acknowledgement loss: once
+            // the durable lifecycle is active, retrying must not advance it.
+            return self
+                .commit_or_reconcile(
+                    tx,
+                    room_jid,
+                    fence,
+                    intent,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision,
+                    },
+                )
+                .await;
+        }
+        if matches!(intent, RoomDurableMutation::MarkUnpublishedCleanup)
+            && state == RoomLifecycleState::Preparing
+        {
+            // The handoff cleanup marker is itself acknowledgement-safe: a
+            // retry after an ambiguous commit keeps the same coordinates and
+            // leaves restart recovery able to find the room.
+            return self
+                .commit_or_reconcile(
+                    tx,
+                    room_jid,
+                    fence,
+                    intent,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision,
+                    },
+                )
+                .await;
         }
 
         let next_revision = if matches!(intent, RoomDurableMutation::Create { .. }) {
@@ -880,7 +1188,7 @@ impl PostgresMucRoomStore {
                     serde_json::to_string(config).map_err(|_| commit_database_error())?;
                 tx.execute(
                     "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, ?, ?, ?, ?, ?)",
-                    crate::db_params![room_jid.to_string(), waddle_id.clone(), channel_id.clone(), config_json, lifecycle.to_string(), next_revision.as_i64()],
+                    crate::db_params![room_jid.to_string(), waddle_id.as_str().to_string(), channel_id.as_str().to_string(), config_json, lifecycle.to_string(), next_revision.as_i64()],
                 ).await.map_err(Self::commit_error)?;
                 for entry in initial_affiliations {
                     Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
@@ -895,7 +1203,7 @@ impl PostgresMucRoomStore {
                     serde_json::to_string(config).map_err(|_| commit_database_error())?;
                 let affected = tx.execute(
                     "UPDATE clustering_muc_rooms SET waddle_id = ?, channel_id = ?, config_json = ?, lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?",
-                    crate::db_params![waddle_id.clone(), channel_id.clone(), config_json, lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()],
+                    crate::db_params![waddle_id.as_str().to_string(), channel_id.as_str().to_string(), config_json, lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()],
                 ).await.map_err(Self::commit_error)?;
                 if affected == 0 {
                     return Err(RoomCommitError::StateMissing);
@@ -935,14 +1243,15 @@ impl PostgresMucRoomStore {
                     Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
                 }
             }
-            RoomDurableMutation::Destroy { .. } | RoomDurableMutation::DestroyAndReleaseClaim => {
+            RoomDurableMutation::Destroy { .. }
+            | RoomDurableMutation::DestroyAndReleaseClaim { .. } => {
                 tx.execute(
                     "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ?",
                     crate::db_params![room_jid.to_string()],
                 )
                 .await
                 .map_err(Self::commit_error)?;
-                if matches!(intent, RoomDurableMutation::DestroyAndReleaseClaim) {
+                if matches!(intent, RoomDurableMutation::DestroyAndReleaseClaim { .. }) {
                     self.release_claim_in_tx(&mut tx, room_jid, fence).await?;
                 }
                 tx.execute(
@@ -952,7 +1261,10 @@ impl PostgresMucRoomStore {
                 .await
                 .map_err(Self::commit_error)?;
             }
-            RoomDurableMutation::Dormancy | RoomDurableMutation::Activate => {
+            RoomDurableMutation::Dormancy
+            | RoomDurableMutation::Activate
+            | RoomDurableMutation::Publish
+            | RoomDurableMutation::MarkUnpublishedCleanup => {
                 let affected = tx
                     .execute(
                         "UPDATE clustering_muc_rooms SET lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?",
@@ -969,10 +1281,15 @@ impl PostgresMucRoomStore {
                 }
             }
         }
-        if let RoomDurableMutation::Destroy {
-            completion_attempt: Some(attempt),
-        } = intent
-        {
+        if let Some(attempt) = match intent {
+            RoomDurableMutation::Destroy {
+                completion_attempt: Some(attempt),
+            }
+            | RoomDurableMutation::DestroyAndReleaseClaim {
+                completion_attempt: Some(attempt),
+            } => Some(attempt),
+            _ => None,
+        } {
             let armed = tx
                 .execute(
                     "UPDATE clustering_muc_destroy_outbox \
@@ -991,22 +1308,30 @@ impl PostgresMucRoomStore {
             }
         }
         let final_state = match intent {
-            RoomDurableMutation::Destroy { .. } | RoomDurableMutation::DestroyAndReleaseClaim => {
-                RoomLifecycleState::Tombstoned
-            }
+            RoomDurableMutation::Destroy { .. }
+            | RoomDurableMutation::DestroyAndReleaseClaim { .. } => RoomLifecycleState::Tombstoned,
             RoomDurableMutation::Dormancy => RoomLifecycleState::Dormant,
-            RoomDurableMutation::Activate => RoomLifecycleState::Active,
+            RoomDurableMutation::Activate | RoomDurableMutation::Publish => {
+                RoomLifecycleState::Active
+            }
+            RoomDurableMutation::MarkUnpublishedCleanup => RoomLifecycleState::Preparing,
             _ => state,
         };
         tx.execute(
             "UPDATE clustering_muc_room_lifecycles SET revision = ?, state = ?, updated_at = now() WHERE lifecycle_id = ?",
             crate::db_params![next_revision.as_i64(), final_state.as_db_str(), lifecycle.to_string()],
         ).await.map_err(Self::commit_error)?;
-        tx.commit().await.map_err(Self::commit_error)?;
-        Ok(RoomCommittedCoordinates {
-            lifecycle,
-            revision: next_revision,
-        })
+        self.commit_or_reconcile(
+            tx,
+            room_jid,
+            fence,
+            intent,
+            RoomCommittedCoordinates {
+                lifecycle,
+                revision: next_revision,
+            },
+        )
+        .await
     }
 
     async fn exact_claim_is_held(
@@ -1171,6 +1496,118 @@ impl MucDurableStore for PostgresMucRoomStore {
         })
     }
 
+    fn destroy_completion_blocks_recreation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, bool> {
+        Box::pin(async move {
+            let room_jid = room_jid.to_string();
+            let conn = self.db.guard().await.map_err(db_err)?;
+            let mut rows = conn
+                .query(
+                    "SELECT payload_json, available_at_ms FROM clustering_muc_destroy_outbox",
+                    (),
+                )
+                .await
+                .map_err(db_err)?;
+            while let Some(row) = rows.next().await.map_err(db_err)? {
+                let payload: String = row.get(0).map_err(db_err)?;
+                let available_at_ms: i64 = row.get(1).map_err(db_err)?;
+                if available_at_ms == i64::MAX {
+                    continue;
+                }
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload).map_err(|error| {
+                        XmppError::internal(format!(
+                            "durable destroy completion payload decode failed: {error}"
+                        ))
+                    })?;
+                if payload.get("room_jid").and_then(serde_json::Value::as_str)
+                    == Some(room_jid.as_str())
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    }
+
+    fn recover_inert_destroy_completion<'a>(
+        &'a self,
+        attempt: &'a DestroyAttemptId,
+    ) -> MucDurableFuture<'a, bool> {
+        Box::pin(async move {
+            let conn = self.db.guard().await.map_err(db_err)?;
+            let mut rows = conn
+                .query(
+                    "SELECT EXISTS ( \
+                     SELECT 1 \
+                     FROM clustering_muc_destroy_outbox AS outbox \
+                     JOIN clustering_muc_room_lifecycles AS lifecycle \
+                       ON lifecycle.lifecycle_id = outbox.lifecycle_id \
+                     WHERE outbox.attempt_id = ? \
+                       AND outbox.available_at_ms = ? \
+                       AND lifecycle.state = ? \
+                       AND NOT EXISTS ( \
+                         SELECT 1 \
+                         FROM clustering_muc_rooms AS room \
+                         WHERE room.room_jid = lifecycle.room_jid \
+                       ) \
+                     )",
+                    crate::db_params![
+                        attempt.as_uuid().to_string(),
+                        i64::MAX,
+                        RoomLifecycleState::Tombstoned.as_db_str(),
+                    ],
+                )
+                .await
+                .map_err(db_err)?;
+            let row = rows.next().await.map_err(db_err)?.ok_or_else(|| {
+                XmppError::internal("durable inert completion recovery returned no result")
+            })?;
+            row.get(0).map_err(db_err)
+        })
+    }
+
+    fn find_preparing_room<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, Option<RoomCommittedCoordinates>> {
+        Box::pin(async move {
+            let conn = self.db.guard().await.map_err(db_err)?;
+            let mut rows = conn
+                .query(
+                    "SELECT lifecycle_id, revision FROM clustering_muc_room_lifecycles \
+                     WHERE room_jid = ? AND state = ?",
+                    crate::db_params![
+                        room_jid.to_string(),
+                        RoomLifecycleState::Preparing.as_db_str(),
+                    ],
+                )
+                .await
+                .map_err(db_err)?;
+            let Some(row) = rows.next().await.map_err(db_err)? else {
+                return Ok(None);
+            };
+            let lifecycle: String = row.get(0).map_err(db_err)?;
+            let revision: i64 = row.get(1).map_err(db_err)?;
+            let lifecycle = uuid::Uuid::parse_str(&lifecycle)
+                .map(RoomLifecycleId::from_uuid)
+                .map_err(|error| {
+                    XmppError::internal(format!(
+                        "durable preparing room lifecycle decode failed: {error}"
+                    ))
+                })?;
+            let revision = RoomRevision::from_stored(revision).ok_or_else(|| {
+                XmppError::internal("durable preparing room revision is outside its valid range")
+            })?;
+            Ok(Some(RoomCommittedCoordinates {
+                lifecycle,
+                revision,
+            }))
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -1302,6 +1739,7 @@ mod tests {
     use kameo::{actor::Spawn, error::SendError};
     use std::io;
     use std::sync::Arc;
+    use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
     use waddle_xmpp::muc::room_actor::{
         GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject, SetSubjectError,
     };
@@ -1339,6 +1777,14 @@ mod tests {
         format!("{prefix}-{}@muc.example.com", uuid::Uuid::new_v4())
             .parse()
             .expect("valid test room JID")
+    }
+
+    fn waddle_id(value: &str) -> WaddleId {
+        WaddleId::new(value.to_string())
+    }
+
+    fn channel_id(value: &str) -> ChannelId {
+        ChannelId::new(value.to_string())
     }
 
     #[derive(Clone, Default)]
@@ -1454,6 +1900,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn non_retryable_fence_query_errors_are_logged_before_sanitizing() {
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = CaptureWriter(Arc::clone(&buffer));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(writer)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let result = PostgresMucRoomStore::commit_fence_error(DatabaseError::ConnectionFailed(
+            "main pool unavailable".to_string(),
+        ));
+
+        assert!(
+            matches!(result, RoomCommitError::OwnershipUnavailable),
+            "expected fence failures to retain their typed unavailable outcome"
+        );
+        let logs = captured_logs(&buffer);
+        assert!(
+            logs.contains(
+                "MUC durable ownership fence query failed with a non-retryable database error; returning OwnershipUnavailable"
+            ),
+            "expected the non-retryable fence-query warning in logs, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("error=ConnectionFailed(\"main pool unavailable\")"),
+            "expected the structured DatabaseError in logs, got:\n{logs}"
+        );
+    }
+
     #[derive(Debug)]
     struct RetryablePgError {
         code: &'static str,
@@ -1561,8 +2041,8 @@ mod tests {
                     &jid,
                     &fence,
                     RoomDurableMutation::Create {
-                        waddle_id: "waddle".to_string(),
-                        channel_id: "channel".to_string(),
+                        waddle_id: waddle_id("waddle"),
+                        channel_id: channel_id("channel"),
                         config: config.clone(),
                         initial_affiliations: Vec::new(),
                     },
@@ -1817,8 +2297,8 @@ mod tests {
                 &room_jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle-first".to_string(),
-                    channel_id: "channel-first".to_string(),
+                    waddle_id: waddle_id("waddle-first"),
+                    channel_id: channel_id("channel-first"),
                     config: config.clone(),
                     initial_affiliations: vec![waddle_xmpp::muc::durable::AffiliationEntry::new(
                         owner.clone(),
@@ -1849,7 +2329,7 @@ mod tests {
         let state: String = lifecycle_row.get(2).expect("lifecycle state");
         assert_eq!(coords.lifecycle.to_string(), lifecycle_id);
         assert_eq!(revision, RoomRevision::initial().as_i64());
-        assert_eq!(state, "active");
+        assert_eq!(state, "preparing");
 
         let mut room_rows = conn
             .query(
@@ -1888,6 +2368,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_stays_preparing_until_exact_fenced_publish_commits() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("durable-preparing-publish");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let prepared = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-preparing"),
+                    channel_id: channel_id("channel-preparing"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("create durable preparing room");
+        assert_eq!(
+            store
+                .find_preparing_room(&room_jid)
+                .await
+                .expect("find preparing room"),
+            Some(prepared)
+        );
+
+        // A Publish acknowledgement can be lost before any transition was
+        // committed. Cleanup must converge on the still-preparing durable
+        // state so its exact-fenced terminal destroy remains restart-safe.
+        assert_eq!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::MarkUnpublishedCleanup,
+                )
+                .await
+                .expect("mark cleanup after an uncommitted publish"),
+            prepared
+        );
+
+        let published = store
+            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Publish)
+            .await
+            .expect("publish preparing room");
+        assert_eq!(published.lifecycle, prepared.lifecycle);
+        assert_eq!(published.revision.as_i64(), prepared.revision.as_i64() + 1);
+        assert!(store
+            .find_preparing_room(&room_jid)
+            .await
+            .expect("published room no longer preparing")
+            .is_none());
+        assert_eq!(
+            store
+                .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Publish)
+                .await
+                .expect("publish acknowledgement retry converges"),
+            published
+        );
+
+        let cleanup_marked = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::MarkUnpublishedCleanup,
+            )
+            .await
+            .expect("mark handoff cancellation before terminal cleanup");
+        assert_eq!(cleanup_marked.lifecycle, published.lifecycle);
+        assert_eq!(
+            cleanup_marked.revision.as_i64(),
+            published.revision.as_i64() + 1
+        );
+        assert_eq!(
+            store
+                .find_preparing_room(&room_jid)
+                .await
+                .expect("marked cleanup remains recoverable after restart"),
+            Some(cleanup_marked)
+        );
+        assert_eq!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::MarkUnpublishedCleanup,
+                )
+                .await
+                .expect("cleanup marker acknowledgement retry converges"),
+            cleanup_marked
+        );
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::DestroyAndReleaseClaim {
+                    completion_attempt: None,
+                },
+            )
+            .await
+            .expect("terminal cleanup consumes the durable marker and claim");
+        assert!(store
+            .find_preparing_room(&room_jid)
+            .await
+            .expect("terminal cleanup removes preparing recovery marker")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn destroy_commit_arms_its_completion_outbox_atomically() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, db, me)) = clean_store().await else {
@@ -1908,8 +2505,8 @@ mod tests {
                 &room_jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle".to_string(),
-                    channel_id: "channel".to_string(),
+                    waddle_id: waddle_id("waddle"),
+                    channel_id: channel_id("channel"),
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
@@ -1994,6 +2591,32 @@ mod tests {
             created.lifecycle.to_string(),
             "the completion must be fenced to the lifecycle its destroy tombstoned"
         );
+        drop(outbox_rows);
+
+        conn.execute(
+            "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? WHERE attempt_id = ?",
+            crate::db_params![i64::MAX, attempt.as_uuid().to_string()],
+        )
+        .await
+        .expect("restore inert completion after simulated crash");
+        assert!(store
+            .recover_inert_destroy_completion(&attempt)
+            .await
+            .expect("proven terminal destroy can re-arm its inert completion"));
+
+        let unproven_attempt = DestroyAttemptId::generate();
+        conn.execute(
+            "INSERT INTO clustering_muc_destroy_outbox \
+             (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+             VALUES (?, '{}', ?, NULL, NULL)",
+            crate::db_params![unproven_attempt.as_uuid().to_string(), i64::MAX],
+        )
+        .await
+        .expect("persist unproven inert completion");
+        assert!(!store
+            .recover_inert_destroy_completion(&unproven_attempt)
+            .await
+            .expect("unproven inert completion cannot be armed"));
     }
 
     #[tokio::test]
@@ -2014,8 +2637,8 @@ mod tests {
         for intent in [
             RoomDurableMutation::Config {
                 config: RoomConfig::default(),
-                waddle_id: "waddle".to_string(),
-                channel_id: "channel".to_string(),
+                waddle_id: waddle_id("waddle"),
+                channel_id: channel_id("channel"),
             },
             RoomDurableMutation::Subject(Some(SubjectState {
                 texts: RoomSubjectTexts::from_iter([(String::new(), "subject".to_string())]),
@@ -2072,8 +2695,8 @@ mod tests {
                 &room_jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle".to_string(),
-                    channel_id: "channel".to_string(),
+                    waddle_id: waddle_id("waddle"),
+                    channel_id: channel_id("channel"),
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
@@ -2093,8 +2716,8 @@ mod tests {
                         &fence,
                         RoomDurableMutation::Config {
                             config: RoomConfig::default(),
-                            waddle_id: "waddle".to_string(),
-                            channel_id: "channel".to_string(),
+                            waddle_id: waddle_id("waddle"),
+                            channel_id: channel_id("channel"),
                         },
                     )
                     .await,
@@ -2123,7 +2746,9 @@ mod tests {
             .commit_room_mutation(
                 &room_jid,
                 &fence,
-                RoomDurableMutation::DestroyAndReleaseClaim,
+                RoomDurableMutation::DestroyAndReleaseClaim {
+                    completion_attempt: None,
+                },
             )
             .await
             .expect("pending destroy atomically consumes its claim");
@@ -2138,8 +2763,8 @@ mod tests {
                     &room_jid,
                     &fence,
                     RoomDurableMutation::Create {
-                        waddle_id: "waddle-late-create".to_string(),
-                        channel_id: "channel-late-create".to_string(),
+                        waddle_id: waddle_id("waddle-late-create"),
+                        channel_id: channel_id("channel-late-create"),
                         config: RoomConfig::default(),
                         initial_affiliations: vec![],
                     },
@@ -2189,8 +2814,8 @@ mod tests {
                 &room_jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle-activate".to_string(),
-                    channel_id: "channel-activate".to_string(),
+                    waddle_id: waddle_id("waddle-activate"),
+                    channel_id: channel_id("channel-activate"),
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
@@ -2498,6 +3123,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinate_less_destroy_reconciliation_does_not_accept_a_foreign_claim_takeover() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("pending-destroy-foreign-takeover");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me, epoch);
+
+        // Model the lost-ack window: the old claim is absent, but a foreign
+        // owner now holds the room. This must not be accepted as evidence
+        // that the old coordinate-less release committed.
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "UPDATE clustering_claims \
+                 SET node_id = ?, node_epoch = ?, claim_epoch = claim_epoch + 1 \
+                 WHERE entity = ?",
+                crate::db_params![
+                    NodeId::generate().to_string(),
+                    NodeId::generate().to_string(),
+                    room_entity_key(&room_jid),
+                ],
+            )
+            .await
+            .expect("replace claim with foreign owner");
+
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &RoomDurableMutation::DestroyAndReleaseClaim {
+                        completion_attempt: None,
+                    },
+                    RoomCommittedCoordinates {
+                        lifecycle: RoomLifecycleId::generate(),
+                        revision: RoomRevision::initial(),
+                    },
+                )
+                .await
+                .expect("reconcile foreign takeover"),
+            CommitReconciliation::Unknown,
+            "an absent original fence has no durable proof that coordinate-less cleanup committed"
+        );
+    }
+
+    #[tokio::test]
     async fn concurrent_create_is_idempotent_for_matching_life_identity_and_conflicts_on_different_ids(
     ) {
         let _guard = clustering_control_plane_table_lock().lock().await;
@@ -2514,8 +3192,8 @@ mod tests {
         let store = Arc::new(store);
         store.record_claim_fence(&room_jid, fence.clone());
         let intent = RoomDurableMutation::Create {
-            waddle_id: "waddle-concurrent".to_string(),
-            channel_id: "channel-concurrent".to_string(),
+            waddle_id: waddle_id("waddle-concurrent"),
+            channel_id: channel_id("channel-concurrent"),
             config: RoomConfig::default(),
             initial_affiliations: vec![],
         };
@@ -2603,8 +3281,8 @@ mod tests {
                     &room_jid,
                     &fence,
                     RoomDurableMutation::Create {
-                        waddle_id: "waddle-mismatch".to_string(),
-                        channel_id: "channel-mismatch".to_string(),
+                        waddle_id: waddle_id("waddle-mismatch"),
+                        channel_id: channel_id("channel-mismatch"),
                         config: RoomConfig::default(),
                         initial_affiliations: vec![],
                     },
@@ -2628,8 +3306,8 @@ mod tests {
                     &room_jid,
                     &fence,
                     RoomDurableMutation::Create {
-                        waddle_id: "waddle-mismatch".to_string(),
-                        channel_id: "channel-mismatch".to_string(),
+                        waddle_id: waddle_id("waddle-mismatch"),
+                        channel_id: channel_id("channel-mismatch"),
                         config: RoomConfig::default(),
                         initial_affiliations: vec![],
                     },
@@ -2689,8 +3367,8 @@ mod tests {
                                 name: "updated".to_string(),
                                 ..RoomConfig::default()
                             },
-                            waddle_id: "waddle-overflow".to_string(),
-                            channel_id: "channel-overflow".to_string(),
+                            waddle_id: waddle_id("waddle-overflow"),
+                            channel_id: channel_id("channel-overflow"),
                         },
                     )
                     .await,
@@ -2760,8 +3438,8 @@ mod tests {
                 &room_jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle-lock".to_string(),
-                    channel_id: "channel-lock".to_string(),
+                    waddle_id: waddle_id("waddle-lock"),
+                    channel_id: channel_id("channel-lock"),
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
@@ -2812,8 +3490,8 @@ mod tests {
                                 name: "blocked".to_string(),
                                 ..RoomConfig::default()
                             },
-                            waddle_id: "waddle-lock".to_string(),
-                            channel_id: "channel-lock".to_string(),
+                            waddle_id: waddle_id("waddle-lock"),
+                            channel_id: channel_id("channel-lock"),
                         },
                     )
                     .await
@@ -2930,8 +3608,8 @@ mod tests {
                 &serialized_jid,
                 &serialized_fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle-serialized".to_string(),
-                    channel_id: "channel-serialized".to_string(),
+                    waddle_id: waddle_id("waddle-serialized"),
+                    channel_id: channel_id("channel-serialized"),
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
@@ -2961,8 +3639,8 @@ mod tests {
                                     name: "first".to_string(),
                                     ..RoomConfig::default()
                                 },
-                                waddle_id: "waddle-serialized".to_string(),
-                                channel_id: "channel-serialized".to_string(),
+                                waddle_id: waddle_id("waddle-serialized"),
+                                channel_id: channel_id("channel-serialized"),
                             },
                         )
                         .await
@@ -2981,8 +3659,8 @@ mod tests {
                                     name: "second".to_string(),
                                     ..RoomConfig::default()
                                 },
-                                waddle_id: "waddle-serialized".to_string(),
-                                channel_id: "channel-serialized".to_string(),
+                                waddle_id: waddle_id("waddle-serialized"),
+                                channel_id: channel_id("channel-serialized"),
                             },
                         )
                         .await
@@ -3037,8 +3715,8 @@ mod tests {
                         &room_jid,
                         &fence,
                         RoomDurableMutation::Create {
-                            waddle_id: "waddle-lost".to_string(),
-                            channel_id: "channel-lost".to_string(),
+                            waddle_id: waddle_id("waddle-lost"),
+                            channel_id: channel_id("channel-lost"),
                             config: RoomConfig::default(),
                             initial_affiliations: vec![],
                         },
@@ -3107,8 +3785,8 @@ mod tests {
                 &room_jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle-mono".to_string(),
-                    channel_id: "channel-mono".to_string(),
+                    waddle_id: waddle_id("waddle-mono"),
+                    channel_id: channel_id("channel-mono"),
                     config: RoomConfig {
                         name: "first".to_string(),
                         ..RoomConfig::default()
@@ -3128,8 +3806,8 @@ mod tests {
                         name: "second".to_string(),
                         ..RoomConfig::default()
                     },
-                    waddle_id: "waddle-mono".to_string(),
-                    channel_id: "channel-mono".to_string(),
+                    waddle_id: waddle_id("waddle-mono"),
+                    channel_id: channel_id("channel-mono"),
                 },
             )
             .await
@@ -3351,7 +4029,11 @@ mod tests {
         )
         .await
         .expect("insert first active lifecycle");
-        for (lifecycle_id, state) in [("second-active", "active"), ("second-dormant", "dormant")] {
+        for (lifecycle_id, state) in [
+            ("second-preparing", "preparing"),
+            ("second-active", "active"),
+            ("second-dormant", "dormant"),
+        ] {
             assert!(conn
                 .execute(
                     "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
@@ -3361,21 +4043,25 @@ mod tests {
                 .is_err(), "a second {state} lifecycle must be rejected");
         }
 
-        // Prove the state CHECK actually admits 'dormant' on its own: the
+        // Prove the state CHECK actually admits each live state on its own: the
         // rejections above would also fire from the live-room unique index,
         // so without this insert a vocabulary typo in the constraint would
         // pass the suite while breaking #1646's dormancy snapshot.
-        conn.execute(
-            "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
-            crate::db_params![
-                "fresh-dormant",
-                "dormant-only@muc.example.com",
-                1_i64,
-                "dormant"
-            ],
-        )
-        .await
-        .expect("a dormant lifecycle on a fresh room must satisfy the state vocabulary");
+        for (lifecycle_id, room_jid, state) in [
+            (
+                "fresh-preparing",
+                "preparing-only@muc.example.com",
+                "preparing",
+            ),
+            ("fresh-dormant", "dormant-only@muc.example.com", "dormant"),
+        ] {
+            conn.execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params![lifecycle_id, room_jid, 1_i64, state],
+            )
+            .await
+            .expect("a live lifecycle on a fresh room must satisfy the state vocabulary");
+        }
 
         for (lifecycle_id, room_jid, revision, state) in [
             (
@@ -3442,6 +4128,7 @@ mod tests {
         };
         let conn = db.guard().await.expect("guard");
         for (index, state) in [
+            RoomLifecycleState::Preparing,
             RoomLifecycleState::Active,
             RoomLifecycleState::Dormant,
             RoomLifecycleState::Tombstoned,
@@ -3561,6 +4248,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_commit_holds_identity_guard_while_waiting_for_the_claim_lock() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("commit-identity-guard");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-identity-guard"),
+                    channel_id: channel_id("channel-identity-guard"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("seed room");
+
+        let mut blocker = db.begin().await.expect("begin claim-row blocker");
+        let mut rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? FOR UPDATE",
+                crate::db_params![room_entity_key(&room_jid)],
+            )
+            .await
+            .expect("lock claim row");
+        assert!(rows.next().await.expect("read locked claim row").is_some());
+        drop(rows);
+
+        let store = Arc::new(store);
+        let commit = tokio::spawn({
+            let store = Arc::clone(&store);
+            let room_jid = room_jid.clone();
+            let fence = fence.clone();
+            async move {
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Config {
+                            config: RoomConfig {
+                                name: "committed-under-original-incarnation".to_string(),
+                                ..RoomConfig::default()
+                            },
+                            waddle_id: waddle_id("waddle-identity-guard"),
+                            channel_id: channel_id("channel-identity-guard"),
+                        },
+                    )
+                    .await
+            }
+        });
+        wait_for_lock_waiter(&db, "FOR SHARE").await;
+
+        let shared_identity = store.node_identity.clone();
+        let rotation = tokio::spawn(async move { shared_identity.rotate(node_identity()).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !rotation.is_finished(),
+            "identity rotation must wait until the durable transaction commits"
+        );
+
+        blocker.commit().await.expect("release claim-row blocker");
+        assert_eq!(
+            commit
+                .await
+                .expect("commit task")
+                .expect("commit succeeds before rotation")
+                .revision
+                .as_i64(),
+            2
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), rotation)
+            .await
+            .expect("identity rotation completes after commit")
+            .expect("identity rotation task");
+    }
+
+    #[tokio::test]
+    async fn persisted_destroy_completion_blocks_recreation_for_its_room_only() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, _claim_store, db, _me)) = clean_store().await else {
+            return;
+        };
+        let blocked_room = unique_room_jid("destroy-completion-blocked");
+        let other_room = unique_room_jid("destroy-completion-other");
+        assert!(!store
+            .destroy_completion_blocks_recreation(&blocked_room)
+            .await
+            .expect("empty outbox does not block recreation"));
+
+        let payload = serde_json::json!({ "room_jid": blocked_room.to_string() }).to_string();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_destroy_outbox \
+                 (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+                 VALUES (?, ?, ?, NULL, NULL)",
+                crate::db_params![attempt_id.clone(), payload, i64::MAX],
+            )
+            .await
+            .expect("persist inert destroy completion");
+
+        assert!(!store
+            .destroy_completion_blocks_recreation(&blocked_room)
+            .await
+            .expect("inert completion reservation does not block recreation"));
+
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? WHERE attempt_id = ?",
+                crate::db_params![crate::time::now_ms(), attempt_id],
+            )
+            .await
+            .expect("durably arm destroy completion");
+
+        assert!(store
+            .destroy_completion_blocks_recreation(&blocked_room)
+            .await
+            .expect("matching persisted completion blocks recreation"));
+        assert!(!store
+            .destroy_completion_blocks_recreation(&other_room)
+            .await
+            .expect("a different room's completion does not block recreation"));
+    }
+
+    #[tokio::test]
     async fn save_and_load_round_trips_config_subject_and_affiliations() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, _db, me)) = clean_store().await else {
@@ -3585,8 +4411,8 @@ mod tests {
                 &jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle-1".to_string(),
-                    channel_id: "chan-1".to_string(),
+                    waddle_id: waddle_id("waddle-1"),
+                    channel_id: channel_id("chan-1"),
                     config: config.clone(),
                     initial_affiliations: Vec::new(),
                 },
@@ -3659,8 +4485,8 @@ mod tests {
                 &jid,
                 &fence,
                 RoomDurableMutation::Create {
-                    waddle_id: "waddle-1".to_string(),
-                    channel_id: "chan-1".to_string(),
+                    waddle_id: waddle_id("waddle-1"),
+                    channel_id: channel_id("chan-1"),
                     config: RoomConfig::default(),
                     initial_affiliations: Vec::new(),
                 },
@@ -3728,10 +4554,7 @@ mod tests {
             .commit_room_mutation(&jid, &fence, RoomDurableMutation::Subject(Some(subject)))
             .await;
         assert!(
-            matches!(
-                &result,
-                Err(RoomCommitError::StateMissing)
-            ),
+            matches!(&result, Err(RoomCommitError::StateMissing)),
             "a subject commit must fail typed rather than acknowledge non-durable state: {result:?}"
         );
         assert!(
@@ -3742,6 +4565,113 @@ mod tests {
                 .is_none(),
             "the rejected subject write must not create a partial durable room state"
         );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_pending_destroy_completion_inside_its_fenced_transaction() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("create-pending-destroy-completion");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let payload = serde_json::json!({ "room_jid": room_jid.to_string() }).to_string();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_destroy_outbox \
+                 (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+                 VALUES (?, ?, ?, NULL, NULL)",
+                crate::db_params![
+                    uuid::Uuid::new_v4().to_string(),
+                    payload,
+                    crate::time::now_ms()
+                ],
+            )
+            .await
+            .expect("persist armed destroy completion");
+
+        assert!(
+            matches!(
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Create {
+                            waddle_id: waddle_id("waddle-recreation-blocked"),
+                            channel_id: channel_id("channel-recreation-blocked"),
+                            config: RoomConfig::default(),
+                            initial_affiliations: vec![],
+                        },
+                    )
+                    .await,
+                Err(RoomCommitError::RecreationBlocked)
+            ),
+            "a pending destroy completion must reject create in the durable fenced transaction"
+        );
+        let mut rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("query room row");
+        assert!(
+            rows.next().await.expect("read room row").is_none(),
+            "the rejected create must not write room state"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_ignores_an_inert_destroy_completion_inside_its_fenced_transaction() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("create-inert-destroy-completion");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let payload = serde_json::json!({ "room_jid": room_jid.to_string() }).to_string();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_destroy_outbox \
+                 (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
+                 VALUES (?, ?, ?, NULL, NULL)",
+                crate::db_params![uuid::Uuid::new_v4().to_string(), payload, i64::MAX],
+            )
+            .await
+            .expect("persist inert destroy completion reservation");
+
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-recreation-inert"),
+                    channel_id: channel_id("channel-recreation-inert"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+            )
+            .await
+            .expect("an inert completion reservation does not reject create");
     }
 
     #[tokio::test]

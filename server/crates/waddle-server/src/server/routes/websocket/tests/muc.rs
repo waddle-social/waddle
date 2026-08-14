@@ -7989,7 +7989,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
             if matches!(
                 intent,
                 waddle_xmpp::muc::RoomDurableMutation::Destroy { .. }
-                    | waddle_xmpp::muc::RoomDurableMutation::DestroyAndReleaseClaim
+                    | waddle_xmpp::muc::RoomDurableMutation::DestroyAndReleaseClaim { .. }
             ) {
                 return Box::pin(async {
                     Err(waddle_xmpp::muc::RoomCommitError::Database(

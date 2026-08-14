@@ -49,6 +49,7 @@ impl MucDestroyCompletionOutboxStore {
                 attempt_id      TEXT PRIMARY KEY,
                 payload_json    TEXT NOT NULL,
                 lifecycle_id    TEXT,
+                origin_instance_id TEXT,
                 available_at_ms BIGINT NOT NULL,
                 lease_token     TEXT,
                 leased_at_ms    BIGINT
@@ -58,7 +59,43 @@ impl MucDestroyCompletionOutboxStore {
         )
         .await?;
         tx.execute(
-            "ALTER TABLE clustering_muc_destroy_outbox ADD COLUMN IF NOT EXISTS lifecycle_id TEXT",
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_attribute
+                    WHERE attrelid = 'clustering_muc_destroy_outbox'::regclass
+                      AND attname = 'origin_instance_id'
+                      AND NOT attisdropped
+                ) THEN
+                    ALTER TABLE clustering_muc_destroy_outbox ADD COLUMN origin_instance_id TEXT;
+                END IF;
+            END $$
+            "#,
+            (),
+        )
+        .await?;
+        // `ADD COLUMN IF NOT EXISTS` still takes ACCESS EXCLUSIVE before
+        // PostgreSQL checks the catalog. Probe pg_attribute first so normal
+        // rolling starts do not queue every destroy behind an unnecessary
+        // table lock; the bootstrap that actually adds the column remains
+        // serialized by the advisory lock above.
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_attribute
+                    WHERE attrelid = 'clustering_muc_destroy_outbox'::regclass
+                      AND attname = 'lifecycle_id'
+                      AND NOT attisdropped
+                ) THEN
+                    ALTER TABLE clustering_muc_destroy_outbox ADD COLUMN lifecycle_id TEXT;
+                END IF;
+            END $$
+            "#,
             (),
         )
         .await?;
@@ -95,6 +132,7 @@ impl MucDestroyCompletionOutboxStore {
                 attempt_id      TEXT PRIMARY KEY,
                 payload_json    TEXT NOT NULL,
                 lifecycle_id    TEXT,
+                origin_instance_id TEXT,
                 available_at_ms INTEGER NOT NULL,
                     lease_token     TEXT,
                     leased_at_ms    INTEGER
@@ -106,6 +144,18 @@ impl MucDestroyCompletionOutboxStore {
         if let Err(error) = connection
             .execute(
                 "ALTER TABLE clustering_muc_destroy_outbox ADD COLUMN lifecycle_id TEXT",
+                (),
+            )
+            .await
+        {
+            let message = error.to_string().to_lowercase();
+            if !message.contains("duplicate column") && !message.contains("already exists") {
+                return Err(error);
+            }
+        }
+        if let Err(error) = connection
+            .execute(
+                "ALTER TABLE clustering_muc_destroy_outbox ADD COLUMN origin_instance_id TEXT",
                 (),
             )
             .await
@@ -164,11 +214,17 @@ mod tests {
         MucDestroyCompletionOutboxStore::new(db.clone())
             .await
             .expect("initialize MUC destroy completion outbox");
+        // A normal restart observes the catalog and skips the ALTER rather
+        // than taking an unnecessary table lock.
+        MucDestroyCompletionOutboxStore::new(db.clone())
+            .await
+            .expect("reinitialize MUC destroy completion outbox");
 
         for (column, nullable) in [
             ("attempt_id", "NO"),
             ("payload_json", "NO"),
             ("lifecycle_id", "YES"),
+            ("origin_instance_id", "YES"),
             ("available_at_ms", "NO"),
             ("lease_token", "YES"),
             ("leased_at_ms", "YES"),

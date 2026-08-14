@@ -190,6 +190,10 @@ impl RoomEffectOrdinal {
 /// slice free of persistence encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoomLifecycleState {
+    /// A durable Create has committed, but the registry has not yet made the
+    /// actor observable. A restart must recover this state by exact-fenced
+    /// terminal cleanup rather than restoring it as a serving room.
+    Preparing,
     Active,
     Dormant,
     Tombstoned,
@@ -198,6 +202,7 @@ pub enum RoomLifecycleState {
 impl RoomLifecycleState {
     pub const fn as_db_str(self) -> &'static str {
         match self {
+            RoomLifecycleState::Preparing => "preparing",
             RoomLifecycleState::Active => "active",
             RoomLifecycleState::Dormant => "dormant",
             RoomLifecycleState::Tombstoned => "tombstoned",
@@ -206,6 +211,7 @@ impl RoomLifecycleState {
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
+            "preparing" => Some(RoomLifecycleState::Preparing),
             "active" => Some(RoomLifecycleState::Active),
             "dormant" => Some(RoomLifecycleState::Dormant),
             "tombstoned" => Some(RoomLifecycleState::Tombstoned),

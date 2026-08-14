@@ -3519,8 +3519,10 @@ async fn health_check_replies_when_the_room_actor_is_idle() {
 /// test, so ownership handling can be exercised without a real Postgres
 /// backend. `save_*` calls always succeed (or, when `fail_persist` is set,
 /// always fail, or when `lose_config_persist_ownership` is set, return exact
-/// ownership loss). The concrete Postgres fencing SQL itself is covered by
-/// `waddle-server::muc_durable`'s own Postgres-gated test suite.
+/// ownership loss). `commit_outcome_unknown` simulates a lost COMMIT
+/// acknowledgement after durable state may have advanced. The concrete
+/// Postgres fencing SQL itself is covered by `waddle-server::muc_durable`'s
+/// own Postgres-gated test suite.
 #[derive(Default)]
 struct FakeDurableStore {
     /// Ownership result for both direct zero-delta probes and durable commits:
@@ -3528,6 +3530,7 @@ struct FakeDurableStore {
     /// backend error (fails closed).
     fenced: std::sync::Mutex<Option<bool>>,
     fail_persist: bool,
+    commit_outcome_unknown: bool,
     lose_config_persist_ownership: bool,
     lose_restore_ownership: bool,
     load_calls: std::sync::atomic::AtomicUsize,
@@ -3578,6 +3581,14 @@ impl FakeDurableStore {
             lose_config_persist_ownership: false,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
             saved_affiliations: std::sync::Mutex::new(Vec::new()),
+            ..Default::default()
+        }))
+    }
+
+    fn owned_but_commit_outcome_is_unknown() -> std::sync::Arc<Self> {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            commit_outcome_unknown: true,
             ..Default::default()
         }))
     }
@@ -3668,6 +3679,7 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         let saved_affiliations = &self.saved_affiliations;
         let committed_room = room_jid.clone();
         let fail = self.fail_persist;
+        let commit_outcome_unknown = self.commit_outcome_unknown;
         let coordinates = self.next_commit_coordinates();
         Box::pin(async move {
             if !established {
@@ -3678,6 +3690,8 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                 Err(crate::muc::RoomCommitError::OwnershipUnavailable)
             } else if lose_ownership {
                 Err(crate::muc::RoomCommitError::NotOwner)
+            } else if commit_outcome_unknown {
+                Err(crate::muc::RoomCommitError::CommitOutcomeUnknown)
             } else if fail {
                 Err(crate::muc::RoomCommitError::Database(
                     crate::muc::durable::RoomCommitDatabaseError::sanitized(),
@@ -4385,7 +4399,7 @@ async fn destroy_seal_blocks_members_only_enforcement() {
 }
 
 #[tokio::test]
-async fn destroy_seal_blocks_leave_by_real_jid_effects() {
+async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store).await;
     let alice = test_full_jid("alice");
@@ -4400,7 +4414,11 @@ async fn destroy_seal_blocks_leave_by_real_jid_effects() {
         .await
         .expect("join before seal");
 
-    seal_for_destroy(&actor).await;
+    let attempt = crate::muc::DestroyAttemptId::generate();
+    actor
+        .ask(SealForDestroy { attempt })
+        .await
+        .expect("pre-seal for destroy");
 
     assert!(
         actor
@@ -4412,8 +4430,17 @@ async fn destroy_seal_blocks_leave_by_real_jid_effects() {
     );
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
-        1,
-        "sealed leave handling must not mutate occupancy"
+        0,
+        "a destroy that reopens must not restore a session that departed while sealed"
+    );
+    assert!(actor
+        .ask(UnsealDestroy { attempt })
+        .await
+        .expect("matching unseal reply"));
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        0,
+        "unsealing a failed destroy retains the departure reconciliation"
     );
 }
 
@@ -4721,11 +4748,7 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
 
     let mut changed = original.clone();
     changed.members_only = !changed.members_only;
-    let result = actor
-        .ask(UpdateConfig {
-            config: changed.clone(),
-        })
-        .await;
+    let result = actor.ask(UpdateConfig { config: changed }).await;
     assert!(
         matches!(
             result,
@@ -4760,6 +4783,68 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
         store.save_call_count(),
         1,
         "later rejected mutation work must not attempt another durable write"
+    );
+}
+
+#[tokio::test]
+async fn unknown_durable_commit_outcome_seals_actor_before_it_can_serve_stale_memory() {
+    let store = FakeDurableStore::owned_but_commit_outcome_is_unknown();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let original = actor.ask(GetConfig).await.expect("original config");
+
+    let mut changed = original.clone();
+    changed.members_only = !changed.members_only;
+    let result = actor
+        .ask(UpdateConfig {
+            config: changed.clone(),
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+        ),
+        "an ambiguous durable commit must retire the stale actor: {result:?}"
+    );
+    assert_eq!(
+        store.save_call_count(),
+        1,
+        "the ambiguous commit was attempted"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must become non-serving until the registry retires it"
+    );
+
+    let later = actor.ask(UpdateConfig { config: original }).await;
+    assert!(
+        matches!(
+            later,
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+        ),
+        "the sealed actor must never attempt a follow-up durable mutation: {later:?}"
+    );
+    assert_eq!(
+        store.save_call_count(),
+        1,
+        "a sealed actor must not write a possibly stale follow-up mutation"
+    );
+
+    let join = actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await;
+    assert!(
+        matches!(
+            join,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ),
+        "the stale actor must refuse admissions until a fresh actor restores durable state: {join:?}"
     );
 }
 

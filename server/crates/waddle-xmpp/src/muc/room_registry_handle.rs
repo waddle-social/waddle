@@ -36,11 +36,11 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    AckDestroyCompletion, CancelDestroyCompletion, CancelDestroyCompletionAttempt,
-    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
-    DestroyCompletion, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
-    DestroyRoomWithAttempt, DrainRoomOwnershipForShutdown, GetOrCreateRoom,
-    GetOrCreateRoomWithInitialAffiliations, GetPendingReclaimedRoomBacklog,
+    AbortDestroyRoomAttempt, AckDestroyCompletion, CancelDestroyCompletion,
+    CancelDestroyCompletionAttempt, CancelPendingReclaimedRoomReservation, CreateInstantRoom,
+    CreateRoom, DemoteRoomIfOwner, DestroyCompletion, DestroyRoom, DestroyRoomIfInactive,
+    DestroyRoomOutcome, DestroyRoomReason, DestroyRoomWithAttempt, DrainRoomOwnershipForShutdown,
+    GetOrCreateRoom, GetOrCreateRoomWithInitialAffiliations, GetPendingReclaimedRoomBacklog,
     GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
     IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
     ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
@@ -48,7 +48,7 @@ use super::room_registry_actor::{
     ReconcileReclaimedRoom, RegisterDestroyCompletion, RememberPendingReclaimedRoom,
     RequeueDestroyCompletion, ReservePendingReclaimedRoom, RetryPendingRoomReleases,
     RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome, RoomRegistryActor,
-    RoomRegistryError, TakeDestroyCompletions, WireClusteringClaims,
+    RoomRegistryError, SealRoomForDestroySnapshot, TakeDestroyCompletions, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -419,6 +419,29 @@ impl RoomRegistry {
             room_jid,
             reason: DestroyRoomReason::Destroy
         }
+    );
+
+    registry_method!(
+        /// Seal a room and capture its recipient snapshot at the same actor
+        /// mailbox boundary. The attempt must be aborted if the caller cannot
+        /// persist its completion before issuing the terminal destroy.
+        seal_room_for_destroy_snapshot(
+            room_jid: BareJid,
+            attempt: super::DestroyAttemptId
+        ) -> super::MucRoom,
+        "seal_room_for_destroy_snapshot",
+        SealRoomForDestroySnapshot { room_jid, attempt }
+    );
+
+    registry_method!(
+        /// Reopen a matching pre-seal when its owner-IQ completion was not
+        /// persisted and no terminal destroy was issued.
+        abort_destroy_room_attempt(
+            room_jid: BareJid,
+            attempt: super::DestroyAttemptId
+        ) -> bool,
+        "abort_destroy_room_attempt",
+        AbortDestroyRoomAttempt { room_jid, attempt }
     );
 
     registry_method!(

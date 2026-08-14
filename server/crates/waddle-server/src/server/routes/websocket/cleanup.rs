@@ -2336,17 +2336,62 @@ pub(crate) async fn drain_destroy_completions(
     let mut frames = Vec::new();
     for completion in completions {
         let attempt = completion.attempt;
+        #[cfg(feature = "clustering")]
+        let clustered = state
+            .deps
+            .app_state
+            .clustering_claims
+            .muc_durable_store
+            .is_some();
+        #[cfg(not(feature = "clustering"))]
+        let clustered = false;
+        // A local completion is proof that the non-clustered registry
+        // committed its destroy. Do not let the persisted janitor infer that
+        // proof from an inert row: it cannot distinguish a committed destroy
+        // from an in-flight or refused intent.
+        if !clustered
+            && !super::handlers::iq::muc_owner_moderation::arm_destroy_completion_recovery(
+                state, attempt,
+            )
+            .await
+        {
+            if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .requeue_destroy_completion(attempt)
+                .await
+            {
+                warn!(%error, "Failed to retain MUC destroy completion after non-clustered arming failure");
+            }
+            continue;
+        }
         let Some(lease) =
             super::handlers::iq::muc_owner_moderation::claim_persisted_destroy_completion(
                 state, attempt,
             )
             .await
         else {
-            if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-                .requeue_destroy_completion(attempt)
-                .await
+            match super::handlers::iq::muc_owner_moderation::persisted_destroy_completion_exists(
+                state, attempt,
+            )
+            .await
             {
-                warn!(%error, "Failed to retain MUC destroy completion without a durable lease");
+                Some(false) => {
+                    if let Err(error) =
+                        RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                            .ack_destroy_completion(attempt)
+                            .await
+                    {
+                        warn!(%error, "Failed to acknowledge MUC destroy completion already finalized by another node");
+                    }
+                }
+                Some(true) | None => {
+                    if let Err(error) =
+                        RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                            .requeue_destroy_completion(attempt)
+                            .await
+                    {
+                        warn!(%error, "Failed to retain MUC destroy completion without a durable lease");
+                    }
+                }
             }
             continue;
         };

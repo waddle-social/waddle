@@ -131,6 +131,19 @@ async fn rollback_admin_affiliations(
     }
 }
 
+/// A snapshot queued after an `ApplyAdminItems` ask is ordered after that
+/// mutation in the room actor's mailbox. It can therefore distinguish a
+/// delivered-and-applied affiliation set from a failed delivery before the
+/// optimistic managed-channel projection is rolled back.
+fn affiliation_updates_match_room(
+    room: &waddle_xmpp::muc::MucRoom,
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> bool {
+    affiliation_updates
+        .iter()
+        .all(|(jid, affiliation)| room.get_affiliation(jid) == *affiliation)
+}
+
 pub(super) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
@@ -620,6 +633,27 @@ pub(super) async fn handle_muc_admin_iq(
                 internal_server_error_iq_error("Internal server error."),
             )];
         }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::InviteRollbackPending,
+        )) => {
+            // This is an explicit wait state, not a permission denial. The
+            // actor did not apply the mutation, so restoring the optimistic
+            // managed-channel projection is safe.
+            rollback_admin_affiliations(
+                state,
+                managed_channel_id.as_deref(),
+                &durable_previous_affiliations,
+            )
+            .await;
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error(
+                    "This room's invitation state is being reconciled; please retry.",
+                ),
+            )];
+        }
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
             rollback_admin_affiliations(
@@ -635,19 +669,70 @@ pub(super) async fn handle_muc_admin_iq(
                 forbidden_iq_error("Operation not permitted."),
             )];
         }
-        Err(error) => {
-            warn!(room = %room_jid, error = ?error, "Failed to apply MUC admin IQ");
+        Err(
+            error @ (kameo::error::SendError::ActorNotRunning(_)
+            | kameo::error::SendError::MailboxFull(_)
+            | kameo::error::SendError::Timeout(Some(_))),
+        ) => {
+            // Kameo returns the original message for these variants, proving
+            // it never reached the actor. The optimistic tuple write can be
+            // safely restored without an actor-state reconciliation.
             rollback_admin_affiliations(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
             )
             .await;
+            warn!(room = %room_jid, error = ?error, "MUC admin mutation was not delivered to the actor");
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
                 response_to,
-                internal_server_error_iq_error("Internal server error."),
+                resource_constraint_iq_error("This room is temporarily unavailable; please retry."),
+            )];
+        }
+        Err(error) => {
+            // A non-handler failure is ambiguous: `ApplyAdminItems` may
+            // already have durably committed and assigned `self.room` before
+            // its reply was delayed by durable-recipient rehydration. Query a
+            // mailbox-ordered snapshot before restoring the optimistic
+            // managed-channel tuples, or their authorization projection could
+            // diverge from the committed room state.
+            let rollback_required = match room_actor
+                .ask(GetSnapshot)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+            {
+                Ok(snapshot) => {
+                    !affiliation_updates_match_room(&snapshot.room, &affiliation_updates)
+                }
+                Err(snapshot_error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = ?snapshot_error,
+                        "Could not reconcile ambiguous MUC admin actor failure"
+                    );
+                    // Fail closed against restoring stale permissions when
+                    // the committed actor state cannot be observed.
+                    false
+                }
+            };
+            if rollback_required {
+                rollback_admin_affiliations(
+                    state,
+                    managed_channel_id.as_deref(),
+                    &durable_previous_affiliations,
+                )
+                .await;
+            }
+            warn!(room = %room_jid, error = ?error, rollback_required, "MUC admin actor result was ambiguous");
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                resource_constraint_iq_error(
+                    "This room's update outcome is being reconciled; please retry.",
+                ),
             )];
         }
     };
@@ -720,4 +805,35 @@ pub(super) async fn handle_muc_admin_iq(
     )));
     frames.extend(moderator_frames);
     frames
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn affiliation_reconciliation_requires_every_update_in_the_actor_snapshot() {
+        let room_jid: BareJid = "admin-reconciliation@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            waddle_xmpp::muc::RoomConfig::default(),
+        );
+        let updates = vec![(target.clone(), Affiliation::Member)];
+
+        assert!(
+            !affiliation_updates_match_room(&room, &updates),
+            "an unchanged actor snapshot proves the optimistic tuple must be restored"
+        );
+
+        room.set_affiliation(target, Affiliation::Member);
+        assert!(
+            affiliation_updates_match_room(&room, &updates),
+            "a mailbox-ordered snapshot preserves a projection that the actor committed"
+        );
+    }
 }

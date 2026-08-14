@@ -7,7 +7,10 @@ use super::{
     affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
     LeaveOutcome, PresenceUpdateOutcome, RoomActor, RoomActorError,
 };
-use crate::muc::{durable::RoomDurableMutation, RoomConfig};
+use crate::muc::{
+    durable::{ChannelId, RoomDurableMutation, WaddleId},
+    RoomConfig,
+};
 use crate::types::Affiliation;
 
 /// The affiliation a join request carries into the room, typed by
@@ -257,7 +260,13 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if !self.effectful_work_is_permitted().await {
+        // A terminal destroy may still fail its durable commit and reopen
+        // this exact actor.  Record a queued departure in that narrow state
+        // so reopening cannot resurrect a dead session, but continue to
+        // suppress the LeaveOutcome: callers must not fan it out while the
+        // terminal result is unresolved.
+        let suppress_effects = matches!(self.seal_state, super::RoomSealState::Destroying { .. });
+        if !suppress_effects && !self.effectful_work_is_permitted().await {
             return Ok(None);
         }
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
@@ -346,7 +355,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         );
         let is_persistent = self.room.config.persistent;
         let occupancy_revision = self.occupancy_revision;
-        Ok(Some(LeaveOutcome {
+        let outcome = LeaveOutcome {
             nick,
             affiliation,
             role,
@@ -360,7 +369,13 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             occupant_count,
             is_persistent,
             occupancy_revision,
-        }))
+        };
+
+        if suppress_effects {
+            Ok(None)
+        } else {
+            Ok(Some(outcome))
+        }
     }
 }
 
@@ -675,8 +690,8 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         let desired_config = desired_config.normalized();
         self.commit_durable(RoomDurableMutation::Config {
             config: desired_config.clone(),
-            waddle_id: msg.waddle_id.clone(),
-            channel_id: msg.channel_id.clone(),
+            waddle_id: WaddleId::new(msg.waddle_id.clone()),
+            channel_id: ChannelId::new(msg.channel_id.clone()),
         })
         .await?;
         self.room.waddle_id = msg.waddle_id;

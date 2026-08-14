@@ -76,6 +76,46 @@ pub struct AffiliationEntry {
     pub affiliation: Option<Affiliation>,
 }
 
+/// The application scope that owns a channel-backed MUC room.
+///
+/// Kept distinct from [`ChannelId`] at the durable mutation boundary so an
+/// authoritative persistence request cannot accidentally swap the two
+/// identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WaddleId(String);
+
+impl WaddleId {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// The channel backing a MUC room within a [`WaddleId`] scope.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelId(String);
+
+impl ChannelId {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 impl AffiliationEntry {
     pub fn new(jid: BareJid, affiliation: Option<Affiliation>) -> Self {
         Self { jid, affiliation }
@@ -85,16 +125,27 @@ impl AffiliationEntry {
 /// Closed durable mutation vocabulary for authoritative room-state commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomDurableMutation {
+    /// Create the snapshot in a non-serving `preparing` lifecycle. The
+    /// registry must commit [`Self::Publish`] immediately before exposing
+    /// the matching actor; stranded preparation is recoverable after restart.
     Create {
-        waddle_id: String,
-        channel_id: String,
+        waddle_id: WaddleId,
+        channel_id: ChannelId,
         config: RoomConfig,
         initial_affiliations: Vec<AffiliationEntry>,
     },
+    /// Promote this exact `preparing` room lifecycle to serving `active`
+    /// immediately before registry publication.
+    Publish,
+    /// Return an already-published room to the non-serving `preparing`
+    /// lifecycle once its creator handoff is definitively known to have
+    /// failed. This durable marker survives process loss and is consumed by
+    /// exact-fenced destroy recovery.
+    MarkUnpublishedCleanup,
     Config {
         config: RoomConfig,
-        waddle_id: String,
-        channel_id: String,
+        waddle_id: WaddleId,
+        channel_id: ChannelId,
     },
     Subject(Option<SubjectState>),
     Affiliation(AffiliationEntry),
@@ -115,7 +166,11 @@ pub enum RoomDurableMutation {
     /// Terminally destroy an unpublished room and release its exact claim in
     /// the same durable transaction. This prevents a preparation that was
     /// already in flight from committing `Create` after the destroy returns.
-    DestroyAndReleaseClaim,
+    DestroyAndReleaseClaim {
+        /// The owner-IQ completion that must be armed atomically with this
+        /// unpublished-room terminal transition.
+        completion_attempt: Option<DestroyAttemptId>,
+    },
     Dormancy,
     Activate,
 }
@@ -142,6 +197,15 @@ pub enum RoomCommitError {
     OwnershipUnavailable,
     #[error("room mutation commit retried until the budget was exhausted")]
     RetryExhausted,
+    /// `COMMIT` lost its acknowledgement and the durable coordinates could
+    /// not be read back. The mutation may already be visible, so callers
+    /// must retain any terminal seal and reconcile rather than compensate.
+    #[error("room mutation transaction outcome could not be reconciled")]
+    CommitOutcomeUnknown,
+    /// A prior committed destroy completion still owns this room's durable
+    /// lifecycle. A fresh create must wait for that cleanup to finish.
+    #[error("room recreation is blocked by pending durable destroy completion")]
+    RecreationBlocked,
     #[error("room lifecycle revision overflowed")]
     RevisionOverflow,
     #[error("room lifecycle state is missing for this mutation")]
@@ -253,6 +317,51 @@ pub trait MucDurableStore: Send + Sync {
         fence: &'a RoomClaimFenceContext,
         intent: RoomDurableMutation,
     ) -> RoomCommitFuture<'a>;
+
+    /// Whether a committed destroy's server-owned completion is still
+    /// present.  Demand-side creation must wait while it is, even after a
+    /// process restart has discarded the registry's local completion queue.
+    ///
+    /// Implementations must fail closed: an error means recreation remains
+    /// blocked until a later retry can prove the completion absent.
+    fn destroy_completion_blocks_recreation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, bool> {
+        let _ = room_jid;
+        Box::pin(async { Ok(false) })
+    }
+
+    /// Prove whether an inert destroy-completion row belongs to a terminal
+    /// durable room lifecycle. Startup recovery may arm only a row with this
+    /// proof; an unproven intent is discarded rather than allowed to block
+    /// recreation or emit cleanup effects after a crash.
+    fn recover_inert_destroy_completion<'a>(
+        &'a self,
+        attempt: &'a DestroyAttemptId,
+    ) -> MucDurableFuture<'a, bool> {
+        let _ = attempt;
+        Box::pin(async { Ok(false) })
+    }
+
+    /// Return the durable coordinates of a room whose Create committed but
+    /// whose actor was never published. The result is deliberately not a
+    /// mutation authorization: callers must acquire an exact current claim
+    /// and use it for terminal cleanup.
+    ///
+    /// Implementations must fail closed. A lookup error leaves demand-side
+    /// creation blocked rather than restoring an ambiguous room as active.
+    /// The default answers `Ok(None)`: a store that never commits a durable
+    /// `Create` (fakes, single-node stores) cannot strand a preparing row,
+    /// so "no preparing room" is the truthful answer, matching the other
+    /// no-durable-state defaults above.
+    fn find_preparing_room<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, Option<RoomCommittedCoordinates>> {
+        let _ = room_jid;
+        Box::pin(async { Ok(None) })
+    }
 
     /// Establish the exact claim fence for forthcoming actor-owned durable
     /// work before the room is published. This is separate from

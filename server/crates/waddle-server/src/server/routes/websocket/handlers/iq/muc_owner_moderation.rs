@@ -468,6 +468,15 @@ async fn complete_destroy_snapshot(
 }
 
 const DESTROY_COMPLETION_LEASE_TIMEOUT_MS: i64 = 30_000;
+const DESTROY_COMPLETION_LEASE_RENEWAL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+fn destroy_completion_origin_instance_id() -> &'static str {
+    static INSTANCE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE_ID
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
 
 /// Persist first, before the registry is allowed to commit the terminal room
 /// mutation. The row is inert until the registry reports a committed destroy;
@@ -486,12 +495,13 @@ pub(crate) async fn persist_destroy_completion(
         .global_actor()
         .ask(crate::db::actor::DbExecute {
             sql: "INSERT INTO clustering_muc_destroy_outbox \
-                  (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
-                  VALUES (?, ?, ?, NULL, NULL) ON CONFLICT (attempt_id) DO NOTHING"
+                  (attempt_id, payload_json, origin_instance_id, available_at_ms, lease_token, leased_at_ms) \
+                  VALUES (?, ?, ?, ?, NULL, NULL) ON CONFLICT (attempt_id) DO NOTHING"
                 .to_string(),
             params: crate::db_params![
                 completion.attempt.as_uuid().to_string(),
                 payload,
+                destroy_completion_origin_instance_id(),
                 i64::MAX,
             ],
         })
@@ -518,9 +528,15 @@ pub(crate) async fn arm_destroy_completion_recovery(
             .global_actor()
             .ask(crate::db::actor::DbExecute {
                 sql: "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? \
-                      WHERE attempt_id = ?"
+                      WHERE attempt_id = ? AND lifecycle_id IS NULL AND \
+                      (available_at_ms = ? OR available_at_ms <= ?)"
                     .to_string(),
-                params: crate::db_params![crate::time::now_ms(), attempt.as_uuid().to_string()],
+                params: crate::db_params![
+                    crate::time::now_ms(),
+                    attempt.as_uuid().to_string(),
+                    i64::MAX,
+                    crate::time::now_ms(),
+                ],
             })
             .await
         {
@@ -534,6 +550,39 @@ pub(crate) async fn arm_destroy_completion_recovery(
         }
     }
     false
+}
+
+async fn arm_recovered_inert_destroy_completion(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+) -> bool {
+    match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? \
+                  WHERE attempt_id = ? AND available_at_ms = ?"
+                .to_string(),
+            params: crate::db_params![
+                crate::time::now_ms(),
+                attempt.as_uuid().to_string(),
+                i64::MAX,
+            ],
+        })
+        .await
+    {
+        Ok(1) => true,
+        Ok(count) => {
+            warn!(attempt = %attempt.as_uuid(), %count, "Recovered inert MUC destroy completion changed before it could be armed");
+            false
+        }
+        Err(error) => {
+            warn!(attempt = %attempt.as_uuid(), %error, "Failed to arm proven terminal MUC destroy completion");
+            false
+        }
+    }
 }
 
 pub(crate) async fn discard_persisted_destroy_completion(
@@ -660,12 +709,94 @@ pub(crate) async fn claim_persisted_destroy_completion(
     })
 }
 
+/// Return whether the exact outbox row still exists after a local completion
+/// could not acquire a lease. A missing row means another node already
+/// finalized the shared work, whereas a present row may merely be actively
+/// leased and must remain queued locally.
+pub(crate) async fn persisted_destroy_completion_exists(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+) -> Option<bool> {
+    use crate::db::{row_value, Value};
+
+    let rows = match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbQuery {
+            sql: "SELECT EXISTS (SELECT 1 FROM clustering_muc_destroy_outbox WHERE attempt_id = ?)"
+                .to_string(),
+            params: crate::db_params![attempt.as_uuid().to_string()],
+        })
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(attempt = %attempt.as_uuid(), %error, "Failed to check persisted MUC destroy completion");
+            return None;
+        }
+    };
+    rows.first()
+        .and_then(|row| row_value(row, 0).ok())
+        .and_then(|value| match value {
+            Value::Integer(value) => Some(*value != 0),
+            _ => None,
+        })
+}
+
+/// Extend an exact executor's conditional lease. Cleanup can revoke an
+/// arbitrary number of group-DM tuples and must not let another node take
+/// over while those side effects are in progress.
+async fn renew_persisted_destroy_completion_lease(
+    state: &WebSocketState,
+    completion: &LeasedDestroyCompletion,
+) -> Result<(), ()> {
+    match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "UPDATE clustering_muc_destroy_outbox SET leased_at_ms = ? \
+                  WHERE attempt_id = ? AND lease_token = ?"
+                .to_string(),
+            params: crate::db_params![
+                crate::time::now_ms(),
+                completion.attempt.as_uuid().to_string(),
+                completion.lease_token.clone(),
+            ],
+        })
+        .await
+    {
+        Ok(1) => Ok(()),
+        Ok(count) => {
+            warn!(attempt = %completion.attempt.as_uuid(), %count, "MUC destroy completion lease was lost during cleanup");
+            Err(())
+        }
+        Err(error) => {
+            warn!(attempt = %completion.attempt.as_uuid(), %error, "Failed to renew MUC destroy completion lease");
+            Err(())
+        }
+    }
+}
+
 pub(crate) async fn complete_leased_destroy_completion(
     state: &WebSocketState,
     completion: &LeasedDestroyCompletion,
     inline_session: Option<&FullJid>,
 ) -> Result<Vec<String>, ()> {
-    complete_destroy_snapshot(state, completion.snapshot.clone(), inline_session).await
+    renew_persisted_destroy_completion_lease(state, completion).await?;
+    let cleanup = complete_destroy_snapshot(state, completion.snapshot.clone(), inline_session);
+    tokio::pin!(cleanup);
+    loop {
+        tokio::select! {
+            result = &mut cleanup => return result,
+            () = tokio::time::sleep(DESTROY_COMPLETION_LEASE_RENEWAL_INTERVAL) => {
+                renew_persisted_destroy_completion_lease(state, completion).await?;
+            }
+        }
+    }
 }
 
 pub(crate) async fn finalize_persisted_destroy_completion(
@@ -724,11 +855,10 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
         .global_actor()
         .ask(crate::db::actor::DbQuery {
             sql: "SELECT attempt_id FROM clustering_muc_destroy_outbox \
-                  WHERE (available_at_ms <= ? OR \
-                         (available_at_ms = ? AND lifecycle_id IS NULL)) AND \
+                  WHERE available_at_ms <= ? AND \
                   (lease_token IS NULL OR leased_at_ms < ?) LIMIT 32"
                 .to_string(),
-            params: crate::db_params![now, i64::MAX, now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS],
+            params: crate::db_params![now, now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS],
         })
         .await
     {
@@ -748,13 +878,6 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
             continue;
         };
         let attempt = waddle_xmpp::muc::DestroyAttemptId::from_uuid(attempt_id);
-        // A non-clustered destroy has no room-store transaction to arm its
-        // inert row. If the owner IQ exhausted its immediate retries, the
-        // janitor keeps retrying this exact transition until recovery is
-        // durably eligible instead of leaving the committed destroy wedged.
-        if !arm_destroy_completion_recovery(state, attempt).await {
-            continue;
-        }
         let Some(completion) = claim_persisted_destroy_completion(state, attempt).await else {
             continue;
         };
@@ -762,6 +885,80 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
             .await
             .is_ok();
         let _ = finalize_persisted_destroy_completion(state, &completion, completed).await;
+    }
+    reconcile_foreign_inert_destroy_completions(state).await;
+}
+
+/// Recover only inert rows created by an earlier process. Current-process
+/// rows may still be between completion persistence and the registry's
+/// terminal commit, so a janitor must never infer their outcome. After a
+/// restart, a durable tombstone proves a commit and may be armed; every other
+/// inert intent is retained: it may belong to a live peer that has not yet
+/// committed. Inert rows do not block recreation, so retaining uncertain work
+/// is fail-closed without making stale intents durable demand-side locks.
+async fn reconcile_foreign_inert_destroy_completions(state: &WebSocketState) {
+    use crate::db::{row_value, ValueExt};
+
+    let rows = match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbQuery {
+            sql: "SELECT attempt_id, origin_instance_id FROM clustering_muc_destroy_outbox \
+                  WHERE available_at_ms = ? AND lease_token IS NULL"
+                .to_string(),
+            params: crate::db_params![i64::MAX],
+        })
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%error, "Failed to list inert MUC destroy completions for restart recovery");
+            return;
+        }
+    };
+    for row in rows {
+        let Ok(attempt_id) = row_value(&row, 0).and_then(ValueExt::as_string) else {
+            warn!("Invalid inert MUC destroy attempt id");
+            continue;
+        };
+        let Ok(attempt_uuid) = uuid::Uuid::parse_str(&attempt_id) else {
+            warn!(attempt = %attempt_id, "Invalid inert MUC destroy attempt id");
+            continue;
+        };
+        let Ok(origin) = row_value(&row, 1).and_then(ValueExt::as_optional_string) else {
+            warn!(attempt = %attempt_id, "Invalid inert MUC destroy origin instance id");
+            continue;
+        };
+        if origin.as_deref() == Some(destroy_completion_origin_instance_id()) {
+            continue;
+        }
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::from_uuid(attempt_uuid);
+        #[cfg(feature = "clustering")]
+        let committed = match &state.deps.app_state.clustering_claims.muc_durable_store {
+            Some(store) => match store.recover_inert_destroy_completion(&attempt).await {
+                Ok(committed) => committed,
+                Err(error) => {
+                    warn!(attempt = %attempt.as_uuid(), %error, "Failed to prove inert MUC destroy completion's terminal lifecycle");
+                    continue;
+                }
+            },
+            // Single-node deployments have no durable room lifecycle to
+            // prove a completed intent after a process crash. Retain the
+            // inert row rather than risk stealing a live process's work;
+            // without a durable store it cannot block recreation.
+            None => false,
+        };
+        // Builds without the `clustering` feature have no durable store at
+        // all, so an inert row can never be proven committed. Retain it.
+        #[cfg(not(feature = "clustering"))]
+        let committed = false;
+        if committed {
+            let _ = arm_recovered_inert_destroy_completion(state, attempt).await;
+        } else {
+            debug!(attempt = %attempt.as_uuid(), "Retaining unproven inert MUC destroy completion");
+        }
     }
 }
 
@@ -849,25 +1046,33 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
 
         if has_destroy {
             // XEP-0045 §10.9: parse the optional alternate venue and
-            // reason out of the `<destroy/>` payload, snapshot the
-            // current occupants from the room actor, then broadcast a
-            // typed destroy presence to each session before tearing
-            // the actor down. The sender's frame is returned inline
-            // alongside the IQ result so it lands on the same socket;
-            // others are routed via the connection registry.
+            // reason out of the `<destroy/>` payload. Admission is then
+            // sealed before capturing the recipient snapshot, so every
+            // occupant the terminal destroy removes is notified.
             let destroy_request = parse_destroy_request(iq).unwrap_or_default();
-            let room_actor = match get_room_actor_result(state, &room_jid).await {
-                Ok(Some(room_actor)) => room_actor,
-                Ok(None) => {
-                    return vec![build_iq_error_xml_typed(
-                        id,
-                        response_from,
-                        response_to,
-                        item_not_found_iq_error("Requested item not found."),
-                    )];
-                }
+            let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+            let room = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .seal_room_for_destroy_snapshot(room_jid.clone(), attempt)
+                .await
+            {
+                Ok(room) => room,
                 Err(error) => {
-                    warn!(room = %room_jid, %error, "MUC destroy room lookup failed");
+                    // A snapshot reply can be lost after the registry has
+                    // sealed and retained this exact pre-seal. Ask it to
+                    // reopen now; if that acknowledgement is lost too, the
+                    // retained SnapshotPreseal phase reconciles itself on a
+                    // later registry touch and never commits a destroy
+                    // without a persisted completion.
+                    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                        .abort_destroy_room_attempt(room_jid.clone(), attempt)
+                        .await
+                    {
+                        Ok(true) | Ok(false) => {}
+                        Err(abort_error) => {
+                            warn!(room = %room_jid, %abort_error, "Failed to request reconciliation of an ambiguous MUC destroy snapshot pre-seal");
+                        }
+                    }
+                    warn!(room = %room_jid, %error, "MUC destroy seal-and-snapshot failed");
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,
@@ -876,25 +1081,26 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     )];
                 }
             };
-            let Ok(snapshot) = room_actor.ask(GetSnapshot).await else {
-                return vec![build_iq_error_xml_typed(
-                    id,
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )];
-            };
-            let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
             let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
                 attempt,
                 room_jid: room_jid.clone(),
-                room: snapshot.room,
+                room,
                 request: destroy_request,
             };
             if persist_destroy_completion(state, &completion)
                 .await
                 .is_err()
             {
+                match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                    .abort_destroy_room_attempt(room_jid.clone(), attempt)
+                    .await
+                {
+                    Ok(true) => discard_persisted_destroy_completion(state, attempt).await,
+                    Ok(false) => {}
+                    Err(error) => {
+                        warn!(room = %room_jid, %error, "Failed to reopen MUC room after destroy completion persistence failure");
+                    }
+                }
                 return vec![build_iq_error_xml_typed(
                     id,
                     response_from,
@@ -906,6 +1112,12 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 warn!(room = %room_jid, %error, "Failed to retain MUC destroy completion");
                 cancel_destroy_completion_attempt(state, attempt).await;
                 discard_persisted_destroy_completion(state, attempt).await;
+                if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                    .abort_destroy_room_attempt(room_jid.clone(), attempt)
+                    .await
+                {
+                    warn!(room = %room_jid, %error, "Failed to reopen MUC room after destroy completion registration failure");
+                }
                 return vec![build_iq_error_xml_typed(
                     id,
                     response_from,
@@ -991,18 +1203,42 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         item_not_found_iq_error("Requested item not found."),
                     )];
                 }
-                // A transport-level ask failure: the atomic handler either
-                // fully applied or not at all, so there is no split state.
-                // Answer retryable, never `item-not-found` (#1276 P1-B).
+                // `Unavailable` means the terminal message never entered the
+                // registry. Its registered completion must be cancelled and
+                // the exact pre-seal reopened; leaving it would otherwise
+                // let a later reconciliation destroy a room after this
+                // request definitively failed to reach the handler.
+                Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Unavailable) => {
+                    cancel_destroy_completion_attempt(state, attempt).await;
+                    discard_persisted_destroy_completion(state, attempt).await;
+                    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                        .abort_destroy_room_attempt(room_jid.clone(), attempt)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(room = %room_jid, "Confirmed-undelivered MUC destroy could not reopen its registered pre-seal");
+                        }
+                        Err(error) => {
+                            warn!(room = %room_jid, %error, "Failed to reopen confirmed-undelivered MUC destroy");
+                        }
+                    }
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+                // A reply timeout may have lost the acknowledgement after
+                // the terminal handler entered. Retain its exact completion
+                // for registry reconciliation, never cancel or unseal it.
                 Err(error) => {
                     warn!(
                         room = %room_jid,
                         error = %error,
                         "Destroy ask failed; returning a retryable error"
                     );
-                    // The actor may have committed before the reply was
-                    // lost, so retain the inert row. Reconciliation can arm
-                    // it only once it proves the matching destroy committed.
                     return vec![build_iq_error_xml_typed(
                         id,
                         response_from,
