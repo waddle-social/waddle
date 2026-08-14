@@ -38,8 +38,8 @@ mod snapshot_handlers;
 mod tests;
 
 pub use admin_handlers::{
-    AdminItemsApplied, ApplyAdminItems, ApplyAffiliationChange, EnforceMembersOnly,
-    EnforceMembersOnlyAffiliations, GetAdminContext, IsOwner,
+    enforce_members_only_from_room, AdminItemsApplied, ApplyAdminItems, ApplyAffiliationChange,
+    EnforceMembersOnly, EnforceMembersOnlyAffiliations, GetAdminContext, IsOwner,
 };
 use mediated_invites::MediatedInviteOperationRecord;
 pub use mediated_invites::{
@@ -203,6 +203,7 @@ impl From<RoomMutationError> for AdminApplyError {
             RoomMutationError::NotOwner => AdminApplyError::NotOwner,
             RoomMutationError::OwnershipUnavailable => AdminApplyError::OwnershipUnavailable,
             RoomMutationError::PersistFailed => AdminApplyError::PersistFailed,
+            RoomMutationError::CommitOutcomeUnknown => AdminApplyError::CommitOutcomeUnknown,
         }
     }
 }
@@ -228,6 +229,8 @@ pub enum RoomMutationError {
     OwnershipUnavailable,
     #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
+    #[error("durable room mutation commit outcome could not be reconciled")]
+    CommitOutcomeUnknown,
 }
 
 /// The ownership result of the pre-mutation gate. This phase cannot report
@@ -271,6 +274,7 @@ impl From<RoomMutationError> for AffiliationMutationError {
             RoomMutationError::NotOwner => Self::NotOwner,
             RoomMutationError::OwnershipUnavailable => Self::OwnershipUnavailable,
             RoomMutationError::PersistFailed => Self::PersistFailed,
+            RoomMutationError::CommitOutcomeUnknown => Self::CommitOutcomeUnknown,
         }
     }
 }
@@ -306,7 +310,7 @@ impl From<DurablePersistError> for RoomMutationError {
             DurablePersistError::NotOwner => RoomMutationError::NotOwner,
             DurablePersistError::OwnershipUnavailable => RoomMutationError::OwnershipUnavailable,
             DurablePersistError::PersistFailed => RoomMutationError::PersistFailed,
-            DurablePersistError::CommitOutcomeUnknown => RoomMutationError::NotOwner,
+            DurablePersistError::CommitOutcomeUnknown => RoomMutationError::CommitOutcomeUnknown,
         }
     }
 }
@@ -1496,6 +1500,8 @@ pub enum UpdateGroupDmConfigByMemberError {
     OwnershipUnavailable,
     #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
+    #[error("durable room mutation commit outcome could not be reconciled")]
+    CommitOutcomeUnknown,
 }
 
 impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
@@ -1506,6 +1512,9 @@ impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
                 UpdateGroupDmConfigByMemberError::OwnershipUnavailable
             }
             RoomMutationError::PersistFailed => UpdateGroupDmConfigByMemberError::PersistFailed,
+            RoomMutationError::CommitOutcomeUnknown => {
+                UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown
+            }
         }
     }
 }
@@ -1518,7 +1527,9 @@ impl From<DurablePersistError> for UpdateGroupDmConfigByMemberError {
                 UpdateGroupDmConfigByMemberError::OwnershipUnavailable
             }
             DurablePersistError::PersistFailed => UpdateGroupDmConfigByMemberError::PersistFailed,
-            DurablePersistError::CommitOutcomeUnknown => UpdateGroupDmConfigByMemberError::NotOwner,
+            DurablePersistError::CommitOutcomeUnknown => {
+                UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown
+            }
         }
     }
 }
@@ -1590,6 +1601,8 @@ pub enum SetSubjectError {
     OwnershipUnavailable,
     #[error("durable subject persist failed before the in-memory mutation")]
     PersistFailedBeforeApply,
+    #[error("durable subject commit outcome could not be reconciled")]
+    CommitOutcomeUnknown,
 }
 
 impl From<PreMutationOwnershipError> for SetSubjectError {
@@ -1607,7 +1620,7 @@ impl From<DurablePersistError> for SetSubjectError {
             DurablePersistError::NotOwner => Self::NotOwner,
             DurablePersistError::OwnershipUnavailable => Self::OwnershipUnavailable,
             DurablePersistError::PersistFailed => Self::PersistFailedBeforeApply,
-            DurablePersistError::CommitOutcomeUnknown => Self::NotOwner,
+            DurablePersistError::CommitOutcomeUnknown => Self::CommitOutcomeUnknown,
         }
     }
 }

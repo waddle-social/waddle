@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, RoomRegistry, NS_MUC_OWNER};
 
 use crate::server::routes::websocket::cleanup::{
-    cancel_destroy_completion_attempt, drain_destroy_completions, register_destroy_completion,
+    cancel_destroy_completion_attempt, drain_destroy_completion_attempt,
+    register_destroy_completion,
 };
 
 /// Extract the optional alternate venue, reason, and password from a
@@ -561,6 +562,36 @@ async fn arm_recovered_inert_destroy_completion(
     }
 }
 
+async fn reclaim_foreign_inert_destroy_completion(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+) -> bool {
+    match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "DELETE FROM clustering_muc_destroy_outbox \
+                  WHERE attempt_id = ? AND available_at_ms = ? AND lease_token IS NULL AND lifecycle_id IS NULL"
+                .to_string(),
+            params: crate::db_params![attempt.as_uuid().to_string(), i64::MAX],
+        })
+        .await
+    {
+        Ok(1) => true,
+        Ok(0) => false,
+        Ok(count) => {
+            warn!(attempt = %attempt.as_uuid(), %count, "Foreign inert MUC destroy completion changed before reclamation");
+            false
+        }
+        Err(error) => {
+            warn!(attempt = %attempt.as_uuid(), %error, "Failed to reclaim foreign inert MUC destroy completion");
+            false
+        }
+    }
+}
+
 pub(crate) async fn discard_persisted_destroy_completion(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
@@ -775,6 +806,37 @@ pub(crate) async fn complete_leased_destroy_completion(
     }
 }
 
+async fn finalize_persisted_destroy_completion_with_future<F>(
+    state: &WebSocketState,
+    completion: &LeasedDestroyCompletion,
+    renewal_interval: std::time::Duration,
+    finalization: F,
+) -> bool
+where
+    F: std::future::Future<Output = Result<u64, ()>>,
+{
+    let mut finalization = std::pin::pin!(finalization);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut finalization => {
+                return match result {
+                    Ok(count) => count == 1,
+                    Err(()) => false,
+                };
+            }
+            () = tokio::time::sleep(renewal_interval) => {
+                if renew_persisted_destroy_completion_lease(state, completion)
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn finalize_persisted_destroy_completion(
     state: &WebSocketState,
     completion: &LeasedDestroyCompletion,
@@ -800,23 +862,27 @@ pub(crate) async fn finalize_persisted_destroy_completion(
             ],
         )
     };
-    match state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .ask(crate::db::actor::DbExecute {
-            sql: sql.to_string(),
-            params,
-        })
-        .await
-    {
-        Ok(count) => count == 1,
-        Err(error) => {
-            warn!(attempt = %completion.attempt.as_uuid(), %error, "Failed to finalize persisted MUC destroy completion");
-            false
-        }
-    }
+    finalize_persisted_destroy_completion_with_future(
+        state,
+        completion,
+        DESTROY_COMPLETION_LEASE_RENEWAL_INTERVAL,
+        async move {
+            state
+                .deps
+                .app_state
+                .db_pool
+                .global_actor()
+                .ask(crate::db::actor::DbExecute {
+                    sql: sql.to_string(),
+                    params,
+                })
+                .await
+                .map_err(|error| {
+                    warn!(attempt = %completion.attempt.as_uuid(), %error, "Failed to finalize persisted MUC destroy completion");
+                })
+        },
+    )
+    .await
 }
 
 async fn list_due_destroy_completion_attempts(
@@ -893,7 +959,7 @@ async fn reconcile_foreign_inert_destroy_completions(state: &WebSocketState) {
         .db_pool
         .global_actor()
         .ask(crate::db::actor::DbQuery {
-            sql: "SELECT attempt_id, origin_instance_id FROM clustering_muc_destroy_outbox \
+            sql: "SELECT attempt_id, origin_instance_id, lifecycle_id FROM clustering_muc_destroy_outbox \
                   WHERE available_at_ms = ? AND lease_token IS NULL"
                 .to_string(),
             params: crate::db_params![i64::MAX],
@@ -923,6 +989,27 @@ async fn reconcile_foreign_inert_destroy_completions(state: &WebSocketState) {
             continue;
         }
         let attempt = waddle_xmpp::muc::DestroyAttemptId::from_uuid(attempt_uuid);
+        let Ok(lifecycle_id) = row_value(&row, 2).and_then(ValueExt::as_optional_string) else {
+            warn!(attempt = %attempt_id, "Invalid inert MUC destroy lifecycle id");
+            continue;
+        };
+        if lifecycle_id.is_none() {
+            #[cfg(feature = "clustering")]
+            if state
+                .deps
+                .app_state
+                .clustering_claims
+                .muc_durable_store
+                .is_some()
+            {
+                debug!(attempt = %attempt.as_uuid(), "Skipping foreign inert MUC destroy completion without terminal lifecycle proof");
+                continue;
+            }
+            if reclaim_foreign_inert_destroy_completion(state, attempt).await {
+                debug!(attempt = %attempt.as_uuid(), "Reclaimed foreign inert MUC destroy completion without terminal lifecycle proof");
+            }
+            continue;
+        }
         #[cfg(feature = "clustering")]
         let committed = match &state.deps.app_state.clustering_claims.muc_durable_store {
             Some(store) => match store.recover_inert_destroy_completion(&attempt).await {
@@ -932,14 +1019,13 @@ async fn reconcile_foreign_inert_destroy_completions(state: &WebSocketState) {
                     continue;
                 }
             },
-            // Single-node deployments have no durable room lifecycle to
-            // prove a completed intent after a process crash. Retain the
-            // inert row rather than risk stealing a live process's work;
-            // without a durable store it cannot block recreation.
+            // Lifecycle-less foreign rows were already reclaimed above; any
+            // remaining foreign inert row in single-node mode cannot be
+            // proven committed and must remain inert.
             None => false,
         };
-        // Builds without the `clustering` feature have no durable store at
-        // all, so an inert row can never be proven committed. Retain it.
+        // Builds without the `clustering` feature reclaim lifecycle-less
+        // foreign rows above and have no durable proof path for anything else.
         #[cfg(not(feature = "clustering"))]
         let committed = false;
         if committed {
@@ -1235,7 +1321,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     )];
                 }
             }
-            let mut frames = drain_destroy_completions(state, Some(sender_jid)).await;
+            let mut frames =
+                drain_destroy_completion_attempt(state, attempt, Some(sender_jid)).await;
             let room_jid_string = room_jid.to_string();
             frames.push(build_iq_result_xml(
                 id,
@@ -1757,6 +1844,17 @@ mod destroy_completion_tests {
         snapshot: &DestroyCompletionSnapshot,
         available_at_ms: i64,
     ) {
+        insert_persisted_completion_with_metadata(state, snapshot, available_at_ms, None, None)
+            .await;
+    }
+
+    async fn insert_persisted_completion_with_metadata(
+        state: &WebSocketState,
+        snapshot: &DestroyCompletionSnapshot,
+        available_at_ms: i64,
+        origin_instance_id: Option<&str>,
+        lifecycle_id: Option<&str>,
+    ) {
         state
             .deps
             .app_state
@@ -1764,17 +1862,42 @@ mod destroy_completion_tests {
             .global_actor()
             .ask(DbExecute {
                 sql: "INSERT INTO clustering_muc_destroy_outbox \
-                      (attempt_id, payload_json, available_at_ms, lease_token, leased_at_ms) \
-                      VALUES (?, ?, ?, NULL, NULL)"
+                      (attempt_id, payload_json, origin_instance_id, lifecycle_id, available_at_ms, lease_token, leased_at_ms) \
+                      VALUES (?, ?, ?, ?, ?, NULL, NULL)"
                     .to_string(),
                 params: crate::db_params![
                     snapshot.attempt.as_uuid().to_string(),
                     persisted_snapshot_payload(snapshot),
+                    origin_instance_id.map(str::to_string),
+                    lifecycle_id.map(str::to_string),
                     available_at_ms,
                 ],
             })
             .await
             .expect("insert persisted destroy completion");
+    }
+
+    async fn leased_at_ms(
+        state: &WebSocketState,
+        attempt: waddle_xmpp::muc::DestroyAttemptId,
+    ) -> i64 {
+        let row = state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbQueryOne {
+                sql: "SELECT leased_at_ms FROM clustering_muc_destroy_outbox WHERE attempt_id = ?"
+                    .to_string(),
+                params: crate::db_params![attempt.as_uuid().to_string()],
+            })
+            .await
+            .expect("load leased_at_ms")
+            .expect("persisted destroy completion row");
+        match row_value(&row, 0).expect("leased_at_ms value") {
+            Value::Integer(value) => *value,
+            _ => panic!("leased_at_ms must be an integer"),
+        }
     }
 
     #[tokio::test]
@@ -1837,6 +1960,70 @@ mod destroy_completion_tests {
         assert!(
             !selected.contains(&failed_attempt),
             "a failed completion must yield one batch window to older due work after release"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_clustered_restart_reclaims_foreign_inert_destroy_completion_without_lifecycle() {
+        let state = create_test_websocket_state().await;
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let destroy_snapshot = snapshot(attempt);
+        insert_persisted_completion_with_metadata(
+            state.as_ref(),
+            &destroy_snapshot,
+            i64::MAX,
+            Some("foreign-process"),
+            None,
+        )
+        .await;
+
+        reconcile_foreign_inert_destroy_completions(state.as_ref()).await;
+
+        let exists = persisted_destroy_completion_exists(state.as_ref(), attempt)
+            .await
+            .expect("restart reclaim query succeeds");
+        assert!(
+            !exists,
+            "a foreign inert destroy completion without lifecycle proof must be reclaimed in non-clustered mode"
+        );
+        assert!(
+            claim_persisted_destroy_completion(state.as_ref(), attempt)
+                .await
+                .is_none(),
+            "reclaimed foreign inert destroy completion must not remain claimable"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalization_renews_the_completion_lease_until_the_db_ack_finishes() {
+        let state = create_test_websocket_state().await;
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let destroy_snapshot = snapshot(attempt);
+        insert_persisted_completion(&state, &destroy_snapshot, crate::time::now_ms() - 1).await;
+        let claimed = claim_persisted_destroy_completion(state.as_ref(), attempt)
+            .await
+            .expect("claim persisted destroy completion");
+        let leased_before = leased_at_ms(state.as_ref(), attempt).await;
+
+        let finalized = finalize_persisted_destroy_completion_with_future(
+            state.as_ref(),
+            &claimed,
+            std::time::Duration::from_millis(1),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Ok(0)
+            },
+        )
+        .await;
+
+        assert!(
+            !finalized,
+            "the helper test future intentionally does not acknowledge the outbox row"
+        );
+        let leased_after = leased_at_ms(state.as_ref(), attempt).await;
+        assert!(
+            leased_after > leased_before,
+            "lease renewal must continue while durable finalization is still outstanding"
         );
     }
 }

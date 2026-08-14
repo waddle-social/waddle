@@ -96,7 +96,7 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
             Err(RoomMutationError::OwnershipUnavailable) => {
                 return Err(MediatedInviteRollbackError::OwnershipUnavailable);
             }
-            Err(RoomMutationError::PersistFailed) => {
+            Err(RoomMutationError::PersistFailed | RoomMutationError::CommitOutcomeUnknown) => {
                 return Err(MediatedInviteRollbackError::OwnershipUnavailable);
             }
         }

@@ -2438,6 +2438,135 @@ pub(crate) async fn drain_destroy_completions(
     frames
 }
 
+pub(crate) async fn drain_destroy_completion_attempt(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+    inline_session: Option<&FullJid>,
+) -> Vec<String> {
+    let local_completion = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .take_destroy_completion_attempt(attempt)
+        .await
+    {
+        Ok(completion) => completion,
+        Err(error) => {
+            warn!(
+                attempt = %attempt.as_uuid(),
+                error = %error,
+                "Failed to lease exact completed MUC destroy work"
+            );
+            None
+        }
+    };
+    if local_completion.is_some() {
+        #[cfg(feature = "clustering")]
+        let clustered = state
+            .deps
+            .app_state
+            .clustering_claims
+            .muc_durable_store
+            .is_some();
+        #[cfg(not(feature = "clustering"))]
+        let clustered = false;
+        if !clustered
+            && !super::handlers::iq::muc_owner_moderation::arm_destroy_completion_recovery(
+                state, attempt,
+            )
+            .await
+        {
+            if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .requeue_destroy_completion(attempt)
+                .await
+            {
+                warn!(%error, "Failed to retain exact MUC destroy completion after non-clustered arming failure");
+            }
+            return Vec::new();
+        }
+    }
+    let Some(lease) =
+        super::handlers::iq::muc_owner_moderation::claim_persisted_destroy_completion(
+            state, attempt,
+        )
+        .await
+    else {
+        if local_completion.is_some() {
+            match super::handlers::iq::muc_owner_moderation::persisted_destroy_completion_exists(
+                state, attempt,
+            )
+            .await
+            {
+                Some(false) => {
+                    if let Err(error) =
+                        RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                            .ack_destroy_completion(attempt)
+                            .await
+                    {
+                        warn!(%error, "Failed to acknowledge exact MUC destroy completion already finalized by another node");
+                    }
+                }
+                Some(true) | None => {
+                    if let Err(error) =
+                        RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                            .requeue_destroy_completion(attempt)
+                            .await
+                    {
+                        warn!(%error, "Failed to retain exact MUC destroy completion without a durable lease");
+                    }
+                }
+            }
+        }
+        return Vec::new();
+    };
+    match super::handlers::iq::muc_owner_moderation::complete_leased_destroy_completion(
+        state,
+        &lease,
+        inline_session,
+    )
+    .await
+    {
+        Ok(frames) => {
+            let persisted_acknowledged =
+                super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(
+                    state, &lease, true,
+                )
+                .await;
+            if local_completion.is_some() {
+                if persisted_acknowledged {
+                    if let Err(error) =
+                        RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                            .ack_destroy_completion(attempt)
+                            .await
+                    {
+                        warn!(%error, "Failed to acknowledge exact completed MUC destroy cleanup");
+                    }
+                } else if let Err(error) =
+                    RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                        .requeue_destroy_completion(attempt)
+                        .await
+                {
+                    warn!(%error, "Failed to retain exact MUC destroy completion after durable acknowledgement failure");
+                }
+            }
+            frames
+        }
+        Err(()) => {
+            let _ =
+                super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(
+                    state, &lease, false,
+                )
+                .await;
+            if local_completion.is_some() {
+                if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                    .requeue_destroy_completion(attempt)
+                    .await
+                {
+                    warn!(%error, "Failed to requeue exact incomplete MUC destroy cleanup");
+                }
+            }
+            Vec::new()
+        }
+    }
+}
+
 /// Get or create the room via the registry. The returned
 /// [`RoomAcquisition`] carries the registry-authoritative created-bit
 /// (#1134): only the caller that observes `RoomCreation::Created`
@@ -2515,6 +2644,88 @@ pub(crate) async fn destroy_room_actor(
     RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .destroy_room(room_jid.clone())
         .await
+}
+
+#[cfg(test)]
+mod destroy_completion_tests {
+    use super::super::tests::create_test_websocket_state;
+    use super::*;
+    use waddle_xmpp::muc::{
+        room_actor::GetSnapshot,
+        room_registry_actor::{CreateInstantRoom, DestroyCompletion},
+        DestroyRequest,
+    };
+
+    fn room_jid(local: &str) -> BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("bare jid")
+    }
+
+    async fn queue_destroy_completion(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+    ) -> waddle_xmpp::muc::DestroyAttemptId {
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateInstantRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("create instant room")
+            .actor_ref;
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+        let completion = DestroyCompletion {
+            attempt,
+            room_jid: room_jid.clone(),
+            room: snapshot.room,
+            request: DestroyRequest::default(),
+        };
+        super::super::handlers::iq::muc_owner_moderation::persist_destroy_completion(
+            state,
+            &completion,
+        )
+        .await
+        .expect("persist destroy completion");
+        register_destroy_completion(state, completion)
+            .await
+            .expect("register destroy completion");
+        assert_eq!(
+            RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .destroy_room_with_attempt(room_jid.clone(), attempt)
+                .await
+                .expect("destroy with attempt"),
+            waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed,
+        );
+        attempt
+    }
+
+    #[tokio::test]
+    async fn exact_inline_destroy_drain_leaves_unrelated_completions_queued() {
+        let state = create_test_websocket_state().await;
+        let first_room = room_jid("inline-destroy-first");
+        let second_room = room_jid("inline-destroy-second");
+        let first_attempt = queue_destroy_completion(state.as_ref(), &first_room).await;
+        let second_attempt = queue_destroy_completion(state.as_ref(), &second_room).await;
+
+        let frames = drain_destroy_completion_attempt(state.as_ref(), first_attempt, None).await;
+        assert!(
+            frames.is_empty(),
+            "no occupant frames are expected for empty-room destroy cleanup"
+        );
+
+        let remaining = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+            .take_destroy_completion_attempt(second_attempt)
+            .await
+            .expect("lease exact remaining completion");
+        assert!(
+            remaining.is_some(),
+            "draining one attempt inline must leave unrelated queued cleanup untouched"
+        );
+    }
 }
 
 #[cfg(test)]

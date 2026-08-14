@@ -48,7 +48,8 @@ use super::room_registry_actor::{
     ReconcileReclaimedRoom, RegisterDestroyCompletion, RememberPendingReclaimedRoom,
     RequeueDestroyCompletion, ReservePendingReclaimedRoom, RetryPendingRoomReleases,
     RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome, RoomRegistryActor,
-    RoomRegistryError, SealRoomForDestroySnapshot, TakeDestroyCompletions, WireClusteringClaims,
+    RoomRegistryError, SealRoomForDestroySnapshot, TakeDestroyCompletionAttempt,
+    TakeDestroyCompletions, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -301,14 +302,6 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        drain_room_ownership_for_shutdown(
-            pending_handoffs: Vec<PendingReclaimedRoom>
-        ) -> RoomOwnershipDrainOutcome,
-        "drain_room_ownership_for_shutdown",
-        DrainRoomOwnershipForShutdown { pending_handoffs }
-    );
-
-    registry_method!(
         pending_room_release_backlog() -> PendingRoomReleaseBacklog,
         "pending_room_release_backlog",
         GetPendingRoomReleaseBacklog
@@ -489,6 +482,16 @@ impl RoomRegistry {
     );
 
     registry_method!(
+        /// Lease only the exact owner-IQ destroy attempt that just completed,
+        /// leaving unrelated queued cleanup for the janitor path.
+        take_destroy_completion_attempt(
+            attempt: super::DestroyAttemptId
+        ) -> Option<DestroyCompletion>,
+        "take_destroy_completion_attempt",
+        TakeDestroyCompletionAttempt { attempt }
+    );
+
+    registry_method!(
         ack_destroy_completion(attempt: super::DestroyAttemptId) -> bool,
         "ack_destroy_completion",
         AckDestroyCompletion { attempt }
@@ -640,6 +643,40 @@ impl RoomRegistry {
         {
             warn!(%error, "failed to wire clustering claims into the room registry");
         }
+    }
+
+    pub async fn drain_room_ownership_for_shutdown(
+        &self,
+        pending_handoffs: Vec<PendingReclaimedRoom>,
+    ) -> Result<RoomOwnershipDrainOutcome, RoomRegistryError> {
+        self.drain_room_ownership_for_shutdown_with_timeout(
+            pending_handoffs,
+            ROOM_REGISTRY_REPLY_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Shutdown may need longer than the ordinary per-request timeout to walk
+    /// retained unpublished-destroy state before process exit. Callers supply
+    /// the graceful-drain budget explicitly so only the terminal path outlives
+    /// the normal fast-fail ask window.
+    pub async fn drain_room_ownership_for_shutdown_with_timeout(
+        &self,
+        pending_handoffs: Vec<PendingReclaimedRoom>,
+        timeout: Duration,
+    ) -> Result<RoomOwnershipDrainOutcome, RoomRegistryError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .ask(DrainRoomOwnershipForShutdown { pending_handoffs })
+            .mailbox_timeout(timeout)
+            .reply_timeout(timeout)
+            .await;
+        Self::classify(
+            "drain_room_ownership_for_shutdown",
+            started.elapsed(),
+            result,
+        )
     }
 
     /// Test-only: route a never-returning message through the same instrumented

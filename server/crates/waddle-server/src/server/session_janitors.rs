@@ -876,6 +876,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
 ) {
     #[cfg(feature = "clustering")]
     {
+        let shutdown_drain_timeout = websocket_state.deps.shutdown.drain_timeout();
         let weak_state = Arc::downgrade(websocket_state);
         let registry = websocket_state.deps.protocol.sm_session_registry.clone();
         let Some(stop) = websocket_state
@@ -986,7 +987,10 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             // another ownership CAS while RoomRegistry cleanup is in flight.
             let pending_room_handoffs = supervisor.shutdown_terminal().await;
             match terminal_room_registry
-                .drain_room_ownership_for_shutdown(pending_room_handoffs)
+                .drain_room_ownership_for_shutdown_with_timeout(
+                    pending_room_handoffs,
+                    shutdown_drain_timeout,
+                )
                 .await
             {
                 Ok(outcome) if outcome.retained > 0 => {

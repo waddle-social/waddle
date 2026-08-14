@@ -272,7 +272,7 @@ fn changed_session_voices(
 /// Leaving them connected would let a non-occupant keep publishing into
 /// — and listening in on — a room they can no longer enter. Same
 /// reasoning as the 307/301/321 paths.
-fn enforce_members_only(
+pub fn enforce_members_only_from_room(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
 ) -> AdminItemsApplied {
@@ -811,7 +811,7 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
         if !self.effectful_work_is_permitted().await {
             return Ok(AdminItemsApplied::default());
         }
-        Ok(enforce_members_only(
+        Ok(enforce_members_only_from_room(
             &mut self.room,
             &self.occupant_id_secret,
         ))
@@ -888,7 +888,8 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         for (jid, _) in changed_affiliations {
             self.advance_member_admission_revision(&jid);
         }
-        let mut applied = enforce_members_only(&mut staged_room, &self.occupant_id_secret);
+        let mut applied =
+            enforce_members_only_from_room(&mut staged_room, &self.occupant_id_secret);
         // Report voice losses for occupants who survived the
         // members-only sweep; ejected sessions are carried by
         // `removed_by_moderation` and must not be double-reported.

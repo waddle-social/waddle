@@ -1058,7 +1058,12 @@ impl PostgresMucRoomStore {
         current_fingerprint: Option<&str>,
         intent_fingerprint: &str,
     ) -> Result<(), RoomCommitError> {
-        if current_fingerprint == Some(intent_fingerprint) {
+        // A lifecycle revision carries one durable proof.  An idempotent
+        // transition must never replace the proof left by the transition that
+        // created these coordinates: an older acknowledgement may still need
+        // to reconcile its exact intent.  Only legacy NULL rows need a
+        // backfill, which remains safe because they have no prior proof.
+        if current_fingerprint.is_some() {
             return Ok(());
         }
         tx.execute(
@@ -2718,7 +2723,7 @@ mod tests {
     #[tokio::test]
     async fn create_stays_preparing_until_exact_fenced_publish_commits() {
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Some((store, claim_store, _db, me)) = clean_store().await else {
+        let Some((store, claim_store, db, me)) = clean_store().await else {
             return;
         };
         let room_jid = unique_room_jid("durable-preparing-publish");
@@ -2782,6 +2787,51 @@ mod tests {
                 .await
                 .expect("publish acknowledgement retry converges"),
             published
+        );
+        assert_eq!(
+            store
+                .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Activate)
+                .await
+                .expect("an active room activation retry converges"),
+            published,
+            "a differently-shaped idempotent retry must keep the published coordinates"
+        );
+        let publish_fingerprint =
+            mutation_fingerprint(&RoomDurableMutation::Publish).expect("publish fingerprint");
+        let mut fingerprint_rows = db
+            .guard()
+            .await
+            .expect("guard")
+            .query(
+                "SELECT mutation_fingerprint FROM clustering_muc_room_lifecycles WHERE lifecycle_id = ?",
+                crate::db_params![published.lifecycle.to_string()],
+            )
+            .await
+            .expect("query published lifecycle fingerprint");
+        let fingerprint_row = fingerprint_rows
+            .next()
+            .await
+            .expect("published lifecycle fingerprint row")
+            .expect("published lifecycle exists");
+        assert_eq!(
+            fingerprint_row
+                .get::<Option<String>>(0)
+                .expect("published fingerprint"),
+            Some(publish_fingerprint),
+            "idempotent activation must preserve the prior publish proof"
+        );
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &RoomDurableMutation::Publish,
+                    published,
+                )
+                .await
+                .expect("reconcile original publish"),
+            CommitReconciliation::Committed,
+            "a lost publish acknowledgement must remain reconcilable after an idempotent activation"
         );
 
         let cleanup_marked = store

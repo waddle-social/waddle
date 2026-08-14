@@ -1767,6 +1767,103 @@ impl RoomRegistryActor {
         }
     }
 
+    async fn reconcile_reclaimed_preparing_room(
+        &mut self,
+        room_jid: &BareJid,
+        claim_fence: &super::RoomClaimFenceContext,
+        previous_owner: &NodeIdentity,
+        registry_ref: &ActorRef<Self>,
+    ) -> Option<ReclaimedRoomOutcome> {
+        let store = self.durable_store.clone()?;
+        let preparing = match tokio::time::timeout(
+            RECLAIMED_ROOM_STORE_TIMEOUT,
+            store.find_preparing_room(room_jid),
+        )
+        .await
+        {
+            Ok(Ok(preparing)) => preparing,
+            Ok(Err(error)) => {
+                debug!(
+                    room = %room_jid,
+                    %error,
+                    "failed to classify proactively reclaimed room lifecycle"
+                );
+                self.remember_pending_reclaimed_room(
+                    room_jid.clone(),
+                    claim_fence.clone(),
+                    previous_owner.clone(),
+                );
+                return Some(ReclaimedRoomOutcome::PendingRetry);
+            }
+            Err(_) => {
+                debug!(
+                    room = %room_jid,
+                    "timed out classifying proactively reclaimed room lifecycle"
+                );
+                self.remember_pending_reclaimed_room(
+                    room_jid.clone(),
+                    claim_fence.clone(),
+                    previous_owner.clone(),
+                );
+                return Some(ReclaimedRoomOutcome::PendingRetry);
+            }
+        };
+        let preparing_coordinates = preparing?;
+        info!(
+            room = %room_jid,
+            preparing_lifecycle = %preparing_coordinates.lifecycle,
+            "proactively reclaimed room still points at a stranded preparing lifecycle"
+        );
+        match store
+            .commit_room_mutation(
+                room_jid,
+                claim_fence,
+                RoomDurableMutation::DestroyAndReleaseClaim {
+                    completion_attempt: None,
+                },
+            )
+            .await
+        {
+            Ok(_) | Err(RoomCommitError::StateMissing) => {
+                self.clear_pending_reclaimed_room(room_jid, claim_fence);
+                self.poisoned_rooms.remove(room_jid);
+                self.release_room_claim(room_jid, claim_fence).await;
+                info!(
+                    room = %room_jid,
+                    "recovered proactively reclaimed stranded preparing room"
+                );
+                Some(ReclaimedRoomOutcome::Released)
+            }
+            Err(RoomCommitError::NotOwner) => {
+                store.forget_claim_fence(room_jid, claim_fence);
+                self.clear_pending_reclaimed_room(room_jid, claim_fence);
+                Some(ReclaimedRoomOutcome::LostRace)
+            }
+            Err(RoomCommitError::CommitOutcomeUnknown) => {
+                self.clear_pending_reclaimed_room(room_jid, claim_fence);
+                self.begin_preparing_destroy_recovery(
+                    room_jid.clone(),
+                    claim_fence.clone(),
+                    registry_ref.clone(),
+                );
+                Some(ReclaimedRoomOutcome::PendingRetry)
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "could not terminally recover proactively reclaimed preparing room"
+                );
+                self.remember_pending_reclaimed_room(
+                    room_jid.clone(),
+                    claim_fence.clone(),
+                    previous_owner.clone(),
+                );
+                Some(ReclaimedRoomOutcome::PendingRetry)
+            }
+        }
+    }
+
     /// Resolve the common demand-side state machine exactly once for every
     /// public creation API. Reply-shape differences stay in the message
     /// handlers; claim acquisition, live-room detection, preparation, and
@@ -4317,6 +4414,18 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             return ctx.reply(ReclaimedRoomOutcome::PendingRetry);
         }
 
+        if let Some(outcome) = self
+            .reconcile_reclaimed_preparing_room(
+                &msg.room_jid,
+                &claim_fence,
+                &msg.previous_owner,
+                ctx.actor_ref(),
+            )
+            .await
+        {
+            return ctx.reply(outcome);
+        }
+
         if !self.has_pending_preparation_capacity(&msg.room_jid, &claim_fence) {
             self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
             return ctx.reply(ReclaimedRoomOutcome::PendingRetry);
@@ -5282,6 +5391,10 @@ impl kameo::message::Message<CancelDestroyCompletionAttempt> for RoomRegistryAct
 /// Take completed owner-IQ destroys for execution by the server layer.
 pub struct TakeDestroyCompletions;
 
+pub struct TakeDestroyCompletionAttempt {
+    pub attempt: super::DestroyAttemptId,
+}
+
 impl kameo::message::Message<TakeDestroyCompletions> for RoomRegistryActor {
     type Reply = DelegatedReply<Vec<DestroyCompletion>>;
 
@@ -5305,6 +5418,25 @@ impl kameo::message::Message<TakeDestroyCompletions> for RoomRegistryActor {
             self.pending_destroy_completions.extend(completions);
         }
         delegated
+    }
+}
+
+impl kameo::message::Message<TakeDestroyCompletionAttempt> for RoomRegistryActor {
+    type Reply = Option<DestroyCompletion>;
+
+    async fn handle(
+        &mut self,
+        msg: TakeDestroyCompletionAttempt,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let index = self
+            .pending_destroy_completions
+            .iter()
+            .position(|completion| completion.attempt == msg.attempt)?;
+        let completion = self.pending_destroy_completions.remove(index)?;
+        self.leased_destroy_completions
+            .insert(completion.attempt, completion.clone());
+        Some(completion)
     }
 }
 

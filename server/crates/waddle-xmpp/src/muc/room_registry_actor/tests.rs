@@ -1925,6 +1925,79 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn take_destroy_completion_attempt_leases_only_the_requested_attempt() {
+        let registry = spawn_registry().await;
+        let first_room = test_room_jid("destroy-completion-exact-lease-first");
+        let second_room = test_room_jid("destroy-completion-exact-lease-second");
+        let first_attempt = crate::muc::DestroyAttemptId::generate();
+        let second_attempt = crate::muc::DestroyAttemptId::generate();
+        for (room_jid, attempt, reason) in [
+            (first_room.clone(), first_attempt, "first destroy"),
+            (second_room.clone(), second_attempt, "second destroy"),
+        ] {
+            let actor = registry
+                .ask(get_or_create(room_jid.clone()))
+                .await
+                .expect("create room")
+                .actor_ref;
+            let snapshot = actor
+                .ask(crate::muc::room_actor::GetSnapshot)
+                .await
+                .expect("snapshot");
+            registry
+                .ask(RegisterDestroyCompletion {
+                    completion: DestroyCompletion {
+                        attempt,
+                        room_jid: room_jid.clone(),
+                        room: snapshot.room,
+                        request: crate::muc::DestroyRequest {
+                            reason: Some(reason.to_string()),
+                            ..crate::muc::DestroyRequest::default()
+                        },
+                    },
+                })
+                .await
+                .expect("register destroy completion");
+            assert_eq!(
+                registry
+                    .ask(DestroyRoomWithAttempt {
+                        room_jid,
+                        reason: DestroyRoomReason::Destroy,
+                        attempt,
+                    })
+                    .await
+                    .expect("destroy"),
+                DestroyRoomOutcome::Destroyed,
+            );
+        }
+
+        let leased = registry
+            .ask(TakeDestroyCompletionAttempt {
+                attempt: second_attempt,
+            })
+            .await
+            .expect("lease exact destroy completion")
+            .expect("requested attempt queued");
+        assert_eq!(leased.attempt, second_attempt);
+        assert_eq!(leased.request.reason.as_deref(), Some("second destroy"));
+
+        let remaining = registry
+            .ask(TakeDestroyCompletions)
+            .await
+            .expect("lease remaining destroy completions");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only the unrelated attempt remains queued"
+        );
+        assert_eq!(remaining[0].attempt, first_attempt);
+        assert_eq!(
+            remaining[0].request.reason.as_deref(),
+            Some("first destroy")
+        );
+    }
+
+    #[tokio::test]
     async fn dropped_take_destroy_completions_request_does_not_lose_the_queue() {
         let registry = spawn_registry().await;
         let jid = test_room_jid("destroy-completion-lost-take-reply");
@@ -6931,6 +7004,74 @@ mod ownership_claims_tests {
             .expect("idempotent reconcile");
         assert_eq!(second, ReclaimedRoomOutcome::AlreadyLive);
         assert_eq!(registry.ask(RoomCount).await.expect("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn reclaimed_preparing_room_is_recovered_instead_of_activated() {
+        let registry = spawn_registry().await;
+        let epoch = ClaimEpoch(14);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(this_identity(), epoch));
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(this_identity()),
+            Arc::clone(&durable_store),
+        )
+        .await;
+
+        let jid = test_room_jid("proactive-preparing-recovery");
+        let claim_fence = room_claim_fence(&jid, epoch);
+        durable_store.establish_claim_fence(&jid, claim_fence.clone());
+        durable_store
+            .commit_room_mutation(
+                &jid,
+                &claim_fence,
+                RoomDurableMutation::Create {
+                    waddle_id: WaddleId::new("preparing-waddle".to_string()),
+                    channel_id: ChannelId::new("preparing-channel".to_string()),
+                    config: reclaimed_snapshot("must not activate").config,
+                    initial_affiliations: Vec::new(),
+                },
+            )
+            .await
+            .expect("seed durable preparing row");
+
+        let outcome = registry
+            .ask(ReconcileReclaimedRoom {
+                room_jid: jid.clone(),
+                claim_fence: claim_fence.clone(),
+                previous_owner: this_identity(),
+            })
+            .await
+            .expect("reconcile preparing row");
+        assert_eq!(outcome, ReclaimedRoomOutcome::Released);
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("lookup after preparing recovery")
+            .is_none());
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup after preparing recovery")
+            .is_none());
+        assert!(durable_store
+            .find_preparing_room(&jid)
+            .await
+            .expect("preparing marker after recovery")
+            .is_none());
+        assert_eq!(
+            durable_store
+                .deleted_rooms
+                .lock()
+                .expect("deleted rooms")
+                .as_slice(),
+            &[jid.to_string()],
+            "proactive reclaim must terminally delete orphaned preparing state instead of publishing it"
+        );
     }
 
     #[tokio::test]

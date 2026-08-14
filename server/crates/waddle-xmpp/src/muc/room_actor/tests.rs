@@ -3531,6 +3531,7 @@ struct FakeDurableStore {
     fenced: std::sync::Mutex<Option<bool>>,
     fail_persist: bool,
     commit_outcome_unknown: bool,
+    commit_config_outcome_unknown: bool,
     lose_config_persist_ownership: bool,
     lose_restore_ownership: bool,
     load_calls: std::sync::atomic::AtomicUsize,
@@ -3589,6 +3590,14 @@ impl FakeDurableStore {
         Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             commit_outcome_unknown: true,
+            ..Default::default()
+        }))
+    }
+
+    fn owned_but_config_commit_outcome_is_unknown() -> std::sync::Arc<Self> {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            commit_config_outcome_unknown: true,
             ..Default::default()
         }))
     }
@@ -3661,6 +3670,7 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         let fenced = *self.fenced.lock().expect("lock");
         let lose_ownership = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
             && self.lose_config_persist_ownership;
+        let config_commit = matches!(&intent, crate::muc::RoomDurableMutation::Config { .. });
         let committed_affiliations = match intent {
             crate::muc::RoomDurableMutation::Affiliation(entry)
             | crate::muc::RoomDurableMutation::MediatedInviteGrant(entry)
@@ -3679,7 +3689,8 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         let saved_affiliations = &self.saved_affiliations;
         let committed_room = room_jid.clone();
         let fail = self.fail_persist;
-        let commit_outcome_unknown = self.commit_outcome_unknown;
+        let commit_outcome_unknown =
+            self.commit_outcome_unknown || (self.commit_config_outcome_unknown && config_commit);
         let coordinates = self.next_commit_coordinates();
         Box::pin(async move {
             if !established {
@@ -3884,7 +3895,24 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
 async fn spawn_room_actor_with_store(
     store: std::sync::Arc<dyn crate::muc::durable::MucDurableStore>,
 ) -> ActorRef<RoomActor> {
-    let actor = spawn_room_actor().await;
+    spawn_room_actor_with_config_and_store(RoomConfig::default(), store).await
+}
+
+async fn spawn_room_actor_with_config_and_store(
+    mut config: RoomConfig,
+    store: std::sync::Arc<dyn crate::muc::durable::MucDurableStore>,
+) -> ActorRef<RoomActor> {
+    config.name = "Test Room".to_string();
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    let actor = RoomActor::spawn(RoomActor::new(
+        MucRoom::new(
+            room_jid,
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            config,
+        ),
+        test_secret(),
+    ));
     let room_jid = test_room().room_jid;
     let claim_fence = test_claim_fence(&room_jid);
     store.establish_claim_fence(&room_jid, claim_fence.clone());
@@ -4832,7 +4860,9 @@ async fn unknown_durable_commit_outcome_seals_actor_before_it_can_serve_stale_me
     assert!(
         matches!(
             result,
-            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+            Err(SendError::HandlerError(
+                RoomMutationError::CommitOutcomeUnknown
+            ))
         ),
         "an ambiguous durable commit must retire the stale actor: {result:?}"
     );
@@ -4986,6 +5016,54 @@ async fn apply_admin_items_surfaces_ambiguous_commit_outcome_without_compensatio
 }
 
 #[tokio::test]
+async fn update_group_dm_config_surfaces_ambiguous_commit_outcome_without_compensation_proof() {
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            group_dm: true,
+            members_only: true,
+            ..RoomConfig::default()
+        },
+        FakeDurableStore::owned_but_config_commit_outcome_is_unknown(),
+    )
+    .await;
+    let alice_bare: BareJid = "alice@example.com".parse().expect("valid jid");
+    let alice = test_full_jid("alice");
+    let config = actor.ask(GetConfig).await.expect("config");
+    actor
+        .ask(ChangeAffiliation {
+            jid: alice_bare,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("member grant");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+
+    let result = actor
+        .ask(UpdateGroupDmConfigByMember {
+            config,
+            sender_jid: alice,
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable group-DM rename must stay ambiguous instead of masquerading as a failed ownership check: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn no_op_affiliation_change_still_checks_ownership_when_deposed() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
     let jid: BareJid = "carol@example.com".parse().expect("valid jid");
@@ -5000,6 +5078,46 @@ async fn no_op_affiliation_change_still_checks_ownership_when_deposed() {
         result,
         Err(SendError::HandlerError(AffiliationMutationError::NotOwner))
     ));
+}
+
+#[tokio::test]
+async fn set_subject_surfaces_ambiguous_commit_outcome_without_mutating() {
+    let actor =
+        spawn_room_actor_with_store(FakeDurableStore::owned_but_commit_outcome_is_unknown()).await;
+    let setter: BareJid = "alice@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(SetSubject {
+            texts: RoomSubjectTexts::from_iter([(String::new(), "new subject".to_string())]),
+            setter,
+            setter_nick: "alice".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                SetSubjectError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable subject commit must stay ambiguous instead of masquerading as ownership loss: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must still retire after the ambiguous subject commit"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("subject query")
+            .room
+            .subject
+            .is_none(),
+        "the actor must not apply an in-memory subject after an ambiguous durable commit"
+    );
 }
 
 #[tokio::test]
