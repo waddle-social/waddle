@@ -811,12 +811,13 @@ impl PostgresMucRoomStore {
     ) -> Result<CommitReconciliation, RoomCommitError> {
         let expected_fingerprint = mutation_fingerprint(intent)?;
         let conn = self.db.guard().await.map_err(Self::commit_error)?;
-        let mut lifecycle_rows = conn
+        let mut reconcile_rows = conn
             .query(
-                "SELECT state, mutation_fingerprint \
-                 FROM clustering_muc_room_lifecycles \
-                 WHERE room_jid = ? AND lifecycle_id = ? AND revision = ?",
+                "SELECT lifecycles.state, lifecycles.mutation_fingerprint, CASE WHEN EXISTS(SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ? AND lifecycle_id = ? AND revision = ?) THEN 1 ELSE 0 END AS room_exists FROM clustering_muc_room_lifecycles lifecycles WHERE lifecycles.room_jid = ? AND lifecycles.lifecycle_id = ? AND lifecycles.revision = ?",
                 crate::db_params![
+                    room_jid.to_string(),
+                    coordinates.lifecycle.to_string(),
+                    coordinates.revision.as_i64(),
                     room_jid.to_string(),
                     coordinates.lifecycle.to_string(),
                     coordinates.revision.as_i64(),
@@ -824,36 +825,21 @@ impl PostgresMucRoomStore {
             )
             .await
             .map_err(Self::commit_error)?;
-        let lifecycle_state = lifecycle_rows
+        let (lifecycle_state, room_matches) = reconcile_rows
             .next()
             .await
             .map_err(Self::commit_error)?
             .map(|row| {
                 Ok::<_, RoomCommitError>((
-                    row.get::<String>(0).map_err(Self::commit_error)?,
-                    row.get::<Option<String>>(1).map_err(Self::commit_error)?,
+                    Some((
+                        row.get::<String>(0).map_err(Self::commit_error)?,
+                        row.get::<Option<String>>(1).map_err(Self::commit_error)?,
+                    )),
+                    row.get::<i64>(2).map_err(Self::commit_error)? != 0,
                 ))
             })
-            .transpose()?;
-        drop(lifecycle_rows);
-
-        let mut room_rows = conn
-            .query(
-                "SELECT 1 FROM clustering_muc_rooms WHERE room_jid = ? AND lifecycle_id = ? AND revision = ?",
-                crate::db_params![
-                    room_jid.to_string(),
-                    coordinates.lifecycle.to_string(),
-                    coordinates.revision.as_i64(),
-                ],
-            )
-            .await
-            .map_err(Self::commit_error)?;
-        let room_matches = room_rows
-            .next()
-            .await
-            .map_err(Self::commit_error)?
-            .is_some();
-        drop(room_rows);
+            .transpose()?
+            .unwrap_or((None, false));
         let destroy_attempt_proof = match intent {
             RoomDurableMutation::Destroy {
                 completion_attempt: Some(attempt),

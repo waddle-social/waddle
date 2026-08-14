@@ -23,7 +23,7 @@
 use tracing::warn;
 use waddle_xmpp::{
     muc::room_actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot},
-    muc::room_registry_actor::GetRoom,
+    muc::room_registry_actor::{DemoteRoomIfExactActor, GetOrCreateRoom, GetRoom},
     parser::stanza_to_string,
     pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
     protocol::handlers::errors::message_error_reply,
@@ -37,6 +37,36 @@ use crate::server::routes::websocket::muc_invites::{
     claim_invite, record_invite, OutstandingInvite, RecordOutcome,
 };
 use crate::server::routes::websocket::WebSocketState;
+
+async fn recover_actor_after_ambiguous_invite_grant(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+) -> Option<kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>> {
+    let _ = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(DemoteRoomIfExactActor {
+            room_jid: room_jid.clone(),
+            actor_ref: stale_actor.clone(),
+        })
+        .await;
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetOrCreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: snapshot.room.waddle_id.clone(),
+            channel_id: snapshot.room.channel_id.clone(),
+            config: snapshot.room.config.clone(),
+        })
+        .await
+        .ok()
+        .map(|acquisition| acquisition.actor_ref)
+}
 
 /// Handle a mediated invitation to a non-group-DM room. Returns `None`
 /// when the stanza is not a mediated invite for a room on the MUC
@@ -218,7 +248,56 @@ pub(super) async fn handle_muc_mediated_invite(
         {
             Ok(()) => {}
             Err(error) => {
-                if !should_compensate_failed_affiliation_grant(&error) {
+                if should_compensate_failed_affiliation_grant(&error) {
+                    warn!(
+                        room = %room_jid,
+                        invitee = %invitee,
+                        error = %error,
+                        "members-only invite grant had recoverable error; preparing rollback"
+                    );
+                } else if matches!(
+                    error,
+                    kameo::error::SendError::HandlerError(
+                        AffiliationMutationError::CommitOutcomeUnknown
+                    )
+                ) {
+                    if let Some(recovered_actor) = recover_actor_after_ambiguous_invite_grant(
+                        state,
+                        &room_jid,
+                        &room_actor,
+                        &snapshot,
+                    )
+                    .await
+                    {
+                        if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) {
+                            if let Ok(
+                                waddle_xmpp::Affiliation::Owner
+                                | waddle_xmpp::Affiliation::Admin
+                                | waddle_xmpp::Affiliation::Member,
+                            ) = recovered_actor
+                                .ask(GetSnapshot)
+                                .await
+                                .map(|snapshot| snapshot.room.get_affiliation(&invitee))
+                            {
+                                if let Err(error) =
+                                    super::super::iq::persist_managed_channel_affiliation(
+                                        state,
+                                        &channel_id,
+                                        &invitee,
+                                        waddle_xmpp::Affiliation::Member,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        room = %room_jid,
+                                        invitee = %invitee,
+                                        error = %error,
+                                        "failed to rebuild managed invite grant after ambiguous outcome"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     warn!(
                         room = %room_jid,
                         invitee = %invitee,
@@ -235,6 +314,14 @@ pub(super) async fn handle_muc_mediated_invite(
                 )]);
             }
         }
+    }
+    // An earlier ambiguous grant may have committed the MUC affiliation but
+    // lost its tuple-write reply. Reconcile the managed projection on every
+    // members-only re-invite of an already admitted user as well, so a
+    // healthy retry repairs that coupled state instead of skipping it.
+    if snapshot.room.config.members_only
+        && (granted_membership || previous_invitee_affiliation >= waddle_xmpp::Affiliation::Member)
+    {
         if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) {
             if let Err(error) = super::super::iq::persist_managed_channel_affiliation(
                 state,
@@ -248,10 +335,12 @@ pub(super) async fn handle_muc_mediated_invite(
                     room = %room_jid,
                     invitee = %invitee,
                     error = %error,
-                    "Failed to persist members-only invite grant; rolling back"
+                    "Failed to persist members-only invite grant"
                 );
-                rollback_membership_grant(&room_actor, &invitee, previous_invitee_affiliation)
-                    .await;
+                if granted_membership {
+                    rollback_membership_grant(&room_actor, &invitee, previous_invitee_affiliation)
+                        .await;
+                }
                 return Some(vec![error_frame(
                     incoming,
                     bound_jid,

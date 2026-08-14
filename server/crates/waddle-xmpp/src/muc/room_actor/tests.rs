@@ -4410,15 +4410,12 @@ async fn destroy_seal_blocks_members_only_enforcement() {
 
     seal_for_destroy(&actor).await;
 
-    let applied = actor
-        .ask(EnforceMembersOnly)
-        .await
-        .expect("sealed enforcement");
-    assert_eq!(
-        applied,
-        AdminItemsApplied::default(),
-        "a sealed actor must not eject occupants or synthesize 322 presences"
-    );
+    assert!(matches!(
+        actor.ask(EnforceMembersOnly).await,
+        Err(SendError::HandlerError(
+            RoomMutationError::OwnershipUnavailable
+        ))
+    ));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
         1,

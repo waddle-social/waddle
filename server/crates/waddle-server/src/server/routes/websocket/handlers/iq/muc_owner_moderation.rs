@@ -425,11 +425,34 @@ async fn complete_destroy_snapshot(
             if is_inline_session {
                 frames.push(stanza_to_xml(&Stanza::Presence(presence)));
             } else {
-                let _ = state
+                let frame = Stanza::Presence(presence);
+                let outcome = state
                     .deps
                     .protocol
                     .connection_registry
-                    .try_send_to(&session_jid, Stanza::Presence(presence));
+                    .try_send_to(&session_jid, frame.clone());
+                if outcome == waddle_xmpp::registry::BroadcastOutcome::Delivered {
+                    // No-op: local delivery succeeded.
+                } else if delivery_outcome_warrants_retry(&outcome) {
+                    #[cfg(feature = "clustering")]
+                    {
+                        if !try_deliver_registered_remote_destroy_notification(
+                            state,
+                            &session_jid,
+                            &frame,
+                        )
+                        .await
+                        {
+                            return Err(());
+                        }
+                    }
+                    #[cfg(not(feature = "clustering"))]
+                    {
+                        // Non-delivered local delivery is best-effort on
+                        // non-clustered nodes and must not block destroy
+                        // completion finalization.
+                    }
+                }
             }
             super::super::super::muc_call_sfu::unregister_participant_from_room(
                 state,
@@ -440,6 +463,35 @@ async fn complete_destroy_snapshot(
     }
     debug!(room = %room_jid, "Completed committed MUC room destroy");
     Ok(frames)
+}
+
+fn delivery_outcome_warrants_retry(outcome: &waddle_xmpp::registry::BroadcastOutcome) -> bool {
+    !matches!(outcome, waddle_xmpp::registry::BroadcastOutcome::Delivered,)
+}
+
+#[cfg(feature = "clustering")]
+async fn try_deliver_registered_remote_destroy_notification(
+    state: &WebSocketState,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> bool {
+    let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    else {
+        return true;
+    };
+    bridge
+        .try_deliver_registered_remote_resource(
+            target,
+            stanza,
+            waddle_xmpp::registry::DeliveryKind::DirectFrame,
+        )
+        .await
+        .is_some()
 }
 
 const DESTROY_COMPLETION_LEASE_TIMEOUT_MS: i64 = 30_000;
@@ -2025,5 +2077,21 @@ mod destroy_completion_tests {
             leased_after > leased_before,
             "lease renewal must continue while durable finalization is still outstanding"
         );
+    }
+
+    #[test]
+    fn non_delivered_destroy_presence_send_is_not_inlined_as_a_local_retry_target() {
+        assert!(!delivery_outcome_warrants_retry(
+            &waddle_xmpp::registry::BroadcastOutcome::Delivered
+        ));
+        assert!(delivery_outcome_warrants_retry(
+            &waddle_xmpp::registry::BroadcastOutcome::NotConnected
+        ));
+        assert!(delivery_outcome_warrants_retry(
+            &waddle_xmpp::registry::BroadcastOutcome::DroppedClosed
+        ));
+        assert!(delivery_outcome_warrants_retry(
+            &waddle_xmpp::registry::BroadcastOutcome::DroppedFull
+        ));
     }
 }

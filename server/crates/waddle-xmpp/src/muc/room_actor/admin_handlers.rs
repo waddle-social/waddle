@@ -801,7 +801,7 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
 pub struct EnforceMembersOnly;
 
 impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
-    type Reply = Result<AdminItemsApplied, Infallible>;
+    type Reply = Result<AdminItemsApplied, super::RoomMutationError>;
 
     async fn handle(
         &mut self,
@@ -809,7 +809,7 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if !self.effectful_work_is_permitted().await {
-            return Ok(AdminItemsApplied::default());
+            return Err(super::RoomMutationError::OwnershipUnavailable);
         }
         Ok(enforce_members_only_from_room(
             &mut self.room,

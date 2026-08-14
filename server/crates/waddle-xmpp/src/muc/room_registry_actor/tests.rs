@@ -669,6 +669,41 @@ async fn test_list_rooms() {
 }
 
 #[tokio::test]
+async fn list_rooms_omits_a_room_during_destroy_preseal() {
+    let registry = spawn_registry().await;
+    let stable_room = test_room_jid("list-stable-during-preseal");
+    let sealing_room = test_room_jid("list-sealed-during-preseal");
+    for room_jid in [stable_room.clone(), sealing_room.clone()] {
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid,
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+    }
+
+    registry
+        .ask(SealRoomForDestroySnapshot {
+            room_jid: sealing_room,
+            attempt: crate::muc::DestroyAttemptId::generate(),
+        })
+        .await
+        .expect("seal room for destroy snapshot");
+
+    assert_eq!(
+        registry
+            .ask(ListRooms)
+            .await
+            .expect("list remains available"),
+        vec![stable_room],
+        "a presealed room is omitted without hiding unrelated live rooms"
+    );
+}
+
+#[tokio::test]
 async fn list_rooms_owned_by_excludes_fresh_post_rotation_rooms() {
     let registry = spawn_registry().await;
     let old = NodeIdentity::new("room-node", "old-incarnation");
@@ -10549,6 +10584,64 @@ mod ownership_claims_tests {
             .is_none());
         assert!(durable_store.current_claim_fence(&room_jid).is_none());
     }
+}
+
+#[tokio::test]
+async fn dropped_exact_take_destroy_completion_request_does_not_lose_the_lease() {
+    let registry = spawn_registry().await;
+    let room_jid = test_room_jid("destroy-completion-lost-exact-take-reply");
+    let attempt = crate::muc::DestroyAttemptId::generate();
+    let actor = registry
+        .ask(GetOrCreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "test-waddle".to_string(),
+            channel_id: "test-channel".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room")
+        .actor_ref;
+    let snapshot = actor
+        .ask(crate::muc::room_actor::GetSnapshot)
+        .await
+        .expect("snapshot");
+    registry
+        .ask(RegisterDestroyCompletion {
+            completion: DestroyCompletion {
+                attempt,
+                room_jid: room_jid.clone(),
+                room: snapshot.room,
+                request: crate::muc::DestroyRequest::default(),
+            },
+        })
+        .await
+        .expect("register destroy completion");
+    registry
+        .ask(DestroyRoomWithAttempt {
+            room_jid,
+            reason: DestroyRoomReason::Destroy,
+            attempt,
+        })
+        .await
+        .expect("destroy room");
+
+    let pending = registry
+        .ask(TakeDestroyCompletionAttempt { attempt })
+        .enqueue()
+        .await
+        .expect("enqueue dropped exact take");
+    drop(pending);
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        registry
+            .ask(TakeDestroyCompletionAttempt { attempt })
+            .await
+            .expect("take after dropped requester")
+            .expect("completion requeued after dropped reply")
+            .attempt,
+        attempt
+    );
 }
 
 /// gpt-5.5 review follow-up to #1108: when the registry's seal ask

@@ -244,6 +244,7 @@ pub(super) async fn apply_muc_owner_config(
     config = config.normalized();
     let mut recovered_broadcast_room = None;
     let mut recovered_members_only_effects = None;
+    let mut recovered_voice_roster = None;
     let expected_revision = match room_actor
         .ask(UpdateConfig {
             config: config.clone(),
@@ -285,6 +286,12 @@ pub(super) async fn apply_muc_owner_config(
                     ),
                 );
             }
+            recovered_voice_roster = Some(
+                super::super::super::muc_call_sfu::derive_room_voice_from_snapshot(
+                    &room_with_reconciled_config,
+                    &config,
+                ),
+            );
             recovered_broadcast_room = Some(room_with_reconciled_config);
             room_actor = recovered_actor;
             recovered_snapshot.config_revision
@@ -313,7 +320,15 @@ pub(super) async fn apply_muc_owner_config(
                     .try_send_to(&recipient, Stanza::Presence(presence));
             }
         }
-        converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
+        converge_flip(
+            state,
+            room_jid,
+            &room_actor,
+            &previous_config,
+            &config,
+            recovered_voice_roster.as_deref(),
+        )
+        .await;
         let post_update_snapshot = room_actor
             .ask(GetSnapshot)
             .await
@@ -409,7 +424,15 @@ pub(super) async fn apply_muc_owner_config(
         }
     }
 
-    converge_flip(state, room_jid, &room_actor, &previous_config, &config).await;
+    converge_flip(
+        state,
+        room_jid,
+        &room_actor,
+        &previous_config,
+        &config,
+        recovered_voice_roster.as_deref(),
+    )
+    .await;
 
     let post_update_snapshot = room_actor
         .ask(GetSnapshot)
@@ -461,6 +484,7 @@ async fn converge_flip(
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     previous: &waddle_xmpp::muc::RoomConfig,
     updated: &waddle_xmpp::muc::RoomConfig,
+    voices_from_recovered_snapshot: Option<&[(FullJid, waddle_xmpp_core::types::Voice)]>,
 ) {
     if previous.moderated == updated.moderated {
         return;
@@ -469,6 +493,7 @@ async fn converge_flip(
         state.deps.protocol.sfu.as_ref(),
         room_actor,
         room_jid,
+        voices_from_recovered_snapshot,
     )
     .await;
 }

@@ -4756,8 +4756,8 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
 /// be visible in its first published durable snapshot.
 pub struct CreateRoomWithInitialAffiliations {
     pub room_jid: BareJid,
-    pub waddle_id: String,
-    pub channel_id: String,
+    pub waddle_id: WaddleId,
+    pub channel_id: ChannelId,
     pub config: RoomConfig,
     pub initial_affiliations: Vec<super::durable::AffiliationEntry>,
 }
@@ -4777,8 +4777,8 @@ impl kameo::message::Message<CreateRoomWithInitialAffiliations> for RoomRegistry
             )));
         }
         let creation_spec = Arc::new(RoomCreationSpec {
-            waddle_id: msg.waddle_id,
-            channel_id: msg.channel_id,
+            waddle_id: msg.waddle_id.into_string(),
+            channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: msg.initial_affiliations,
         });
@@ -5422,21 +5422,36 @@ impl kameo::message::Message<TakeDestroyCompletions> for RoomRegistryActor {
 }
 
 impl kameo::message::Message<TakeDestroyCompletionAttempt> for RoomRegistryActor {
-    type Reply = Option<DestroyCompletion>;
+    type Reply = DelegatedReply<Option<DestroyCompletion>>;
 
     async fn handle(
         &mut self,
         msg: TakeDestroyCompletionAttempt,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let index = self
+        let Some(index) = self
             .pending_destroy_completions
             .iter()
-            .position(|completion| completion.attempt == msg.attempt)?;
-        let completion = self.pending_destroy_completions.remove(index)?;
-        self.leased_destroy_completions
-            .insert(completion.attempt, completion.clone());
-        Some(completion)
+            .position(|completion| completion.attempt == msg.attempt)
+        else {
+            return ctx.reply(None);
+        };
+        let completion = self
+            .pending_destroy_completions
+            .remove(index)
+            .expect("completion index came from this queue");
+        let (delegated, reply) = ctx.reply_sender();
+        if let Some(reply) = reply {
+            if Self::try_send_reply(reply, Some(completion.clone())) {
+                self.leased_destroy_completions
+                    .insert(completion.attempt, completion);
+            } else {
+                self.pending_destroy_completions.insert(index, completion);
+            }
+        } else {
+            self.pending_destroy_completions.insert(index, completion);
+        }
+        delegated
     }
 }
 
@@ -5880,6 +5895,11 @@ impl kameo::message::Message<ListRooms> for RoomRegistryActor {
                     // Ignore stale/dead rooms in discovery listing; per-room
                     // operations still fail fast with RoomActorStateLost.
                 }
+                // Listing remains useful while another room completes its
+                // bounded destroy reconciliation. Per-room access stays
+                // fail-closed through `live_room`, but an unrelated room
+                // must not poison the global inventory.
+                Err(RoomRegistryError::OwnershipReconciliationPending(_)) => {}
                 Err(error) => return Err(error),
             }
         }

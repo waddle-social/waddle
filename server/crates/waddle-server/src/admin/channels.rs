@@ -38,8 +38,8 @@ use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
     room_actor::{
         ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
-        GetAffiliation, GetConfig, LeaveByRealJid, ListAffiliations, ListOccupants, OccupantCount,
-        RoomActor, UpdateConfig,
+        GetAffiliation, GetConfig, GetSnapshot, LeaveByRealJid, ListAffiliations, ListOccupants,
+        OccupantCount, RoomActor, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -2058,8 +2058,10 @@ async fn run_group_dm_create(
         .room_registry
         .ask(CreateRoomWithInitialAffiliations {
             room_jid: room_jid.clone(),
-            waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
-            channel_id: localpart.clone(),
+            waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+            ),
+            channel_id: waddle_xmpp::muc::durable::ChannelId::new(localpart.clone()),
             config: config.clone(),
             initial_affiliations,
         })
@@ -2144,6 +2146,10 @@ async fn run_group_dm_leave(
         })
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
+    let pre_leave_snapshot = actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(send_err("room actor GetSnapshot"))?;
     let left = pre_leave_affiliation >= Affiliation::Member;
     if !left {
         return Ok(GroupDmLeaveResult {
@@ -2169,6 +2175,7 @@ async fn run_group_dm_leave(
     }
     resources.sort();
     resources.dedup();
+    let mut reconciled_leave_effects = None;
 
     delete_group_dm_member_tuple(state, &channel_id, &caller_bare)
         .await
@@ -2217,28 +2224,46 @@ async fn run_group_dm_leave(
             )
         ) && !should_restore_membership
         {
-            return Ok(GroupDmLeaveResult {
-                room_jid: args.room_jid.clone(),
-                left,
-            });
+            // Recovery replaces the actor from durable state, which has no
+            // live roster. Preserve the pre-recovery roster and synthesize
+            // the same unavailable effects only after the exact leave is
+            // proven committed.
+            reconciled_leave_effects = Some(group_dm_leave_effects_from_snapshot(
+                &pre_leave_snapshot.room,
+                &resources,
+            ));
         }
-        return Err(send_err("room actor ChangeAffiliation")(error));
+        if should_restore_membership {
+            return Err(send_err("room actor ChangeAffiliation")(error));
+        }
     }
-    for resource in resources {
-        if let Some(outcome) = actor
-            .ask(LeaveByRealJid {
-                sender_jid: resource.clone(),
-            })
-            .await
-            .map_err(send_err("room actor LeaveByRealJid"))?
-        {
+    if let Some(effects) = reconciled_leave_effects {
+        for (resource, effect) in effects {
             broadcast_group_dm_leave(
                 state,
                 connections,
                 &resource,
                 live_resource_set.contains(&resource),
-                &outcome,
+                &effect,
             );
+        }
+    } else {
+        for resource in resources {
+            if let Some(outcome) = actor
+                .ask(LeaveByRealJid {
+                    sender_jid: resource.clone(),
+                })
+                .await
+                .map_err(send_err("room actor LeaveByRealJid"))?
+            {
+                broadcast_group_dm_leave(
+                    state,
+                    connections,
+                    &resource,
+                    live_resource_set.contains(&resource),
+                    &GroupDmLeaveEffect::from(&outcome),
+                );
+            }
         }
     }
 
@@ -2536,12 +2561,73 @@ fn find_occupant_for_full_jid<'a>(
     })
 }
 
+struct GroupDmLeaveEffect {
+    nick: String,
+    affiliation: Affiliation,
+    leaving_room_jid: FullJid,
+    remaining_occupants: Vec<FullJid>,
+    removed_last_session: bool,
+}
+
+impl From<&waddle_xmpp::muc::room_actor::LeaveOutcome> for GroupDmLeaveEffect {
+    fn from(outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome) -> Self {
+        Self {
+            nick: outcome.nick.clone(),
+            affiliation: outcome.affiliation,
+            leaving_room_jid: outcome.leaving_room_jid.clone(),
+            remaining_occupants: outcome.remaining_occupants.clone(),
+            removed_last_session: outcome.removed_last_session,
+        }
+    }
+}
+
+fn group_dm_leave_effects_from_snapshot(
+    room: &waddle_xmpp::muc::MucRoom,
+    resources: &[FullJid],
+) -> Vec<(FullJid, GroupDmLeaveEffect)> {
+    let mut room = room.clone();
+    let mut effects = Vec::new();
+    for resource in resources {
+        let Some(occupant) = room.find_occupant_by_real_jid(resource).cloned() else {
+            continue;
+        };
+        let sessions = room.get_occupant_sessions(&occupant.nick);
+        if !sessions.iter().any(|session| session == resource) {
+            continue;
+        }
+        let remaining_occupants = room
+            .occupants
+            .values()
+            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+            .filter(|session| session != resource)
+            .collect();
+        let removed_last_session = room
+            .remove_occupant_session(&occupant.nick, resource)
+            .expect("occupant session was present in the snapshot");
+        let leaving_room_jid = room
+            .room_jid
+            .with_resource_str(&occupant.nick)
+            .expect("accepted MUC nick is a valid resource");
+        effects.push((
+            resource.clone(),
+            GroupDmLeaveEffect {
+                nick: occupant.nick,
+                affiliation: occupant.affiliation,
+                leaving_room_jid,
+                remaining_occupants,
+                removed_last_session,
+            },
+        ));
+    }
+    effects
+}
+
 fn broadcast_group_dm_leave(
     state: &AppState,
     connections: &ConnectionRegistry,
     leaving_real_jid: &FullJid,
     notify_self: bool,
-    outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome,
+    outcome: &GroupDmLeaveEffect,
 ) {
     let from_jid = outcome
         .leaving_room_jid
@@ -3352,6 +3438,7 @@ async fn run_update(
             sfu,
             &actor,
             &args.channel_jid,
+            None,
         )
         .await;
     }
@@ -4729,6 +4816,7 @@ mod group_dm_durable_reconciliation_tests {
     use kameo::actor::Spawn;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
         RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
@@ -4741,7 +4829,9 @@ mod group_dm_durable_reconciliation_tests {
     use waddle_xmpp::ownership::{
         ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
-    use waddle_xmpp::registry::{ConnectionRegistry, UserRegistryActor};
+    use waddle_xmpp::registry::{
+        ConnectionEntry, ConnectionRegistry, RegisterUserResource, UserRegistryActor,
+    };
     use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4978,8 +5068,10 @@ mod group_dm_durable_reconciliation_tests {
             .room_registry
             .ask(CreateRoomWithInitialAffiliations {
                 room_jid: room_jid.clone(),
-                waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
-                channel_id: channel_id.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(channel_id.clone()),
                 config: config.clone(),
                 initial_affiliations: members
                     .iter()
@@ -5069,7 +5161,17 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("join room");
         let connections = ConnectionRegistry::new();
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+        let connection = ConnectionEntry::new(outbound_tx);
+        connections.register_entry(caller_full.clone(), connection.clone());
+        user_registry
+            .ask(RegisterUserResource {
+                jid: caller_full.clone(),
+                entry: connection,
+            })
+            .await
+            .expect("register live caller resource");
         let sm_sessions = InMemorySmSessionRegistry::new();
 
         let result = run_group_dm_leave(
@@ -5105,6 +5207,10 @@ mod group_dm_durable_reconciliation_tests {
         assert!(
             bookmark_items.is_empty(),
             "a committed ambiguous leave must not republish the bookmark"
+        );
+        assert!(
+            outbound_rx.try_recv().is_ok(),
+            "leave presence should be sent even when ambiguous leave commit is reconciled"
         );
     }
 }
