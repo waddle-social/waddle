@@ -118,6 +118,36 @@ async fn wedged_request_maps_to_typed_timeout_error() {
     assert_eq!(accepted, Ok(()));
 }
 
+#[tokio::test(start_paused = true)]
+async fn shutdown_room_ownership_drain_uses_the_supplied_terminal_timeout() {
+    let registry = test_registry();
+
+    let mut wedged = Box::pin(registry.hang_forever());
+    assert!(
+        futures::poll!(wedged.as_mut()).is_pending(),
+        "request must not resolve before the reply timeout elapses"
+    );
+
+    let mut drain = Box::pin(
+        registry
+            .drain_room_ownership_for_shutdown_with_timeout(Vec::new(), Duration::from_secs(30)),
+    );
+    assert!(
+        futures::poll!(drain.as_mut()).is_pending(),
+        "shutdown drain should wait behind the wedged request"
+    );
+
+    tokio::time::advance(ROOM_REGISTRY_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+    assert!(
+        futures::poll!(drain.as_mut()).is_pending(),
+        "shutdown drain must outlive the normal reply timeout"
+    );
+
+    tokio::time::advance(Duration::from_secs(25)).await;
+    let result = drain.await;
+    assert_eq!(result, Err(RoomRegistryError::Timeout));
+}
+
 #[tokio::test]
 async fn duplicate_create_preserves_typed_handler_error() {
     let registry = test_registry();

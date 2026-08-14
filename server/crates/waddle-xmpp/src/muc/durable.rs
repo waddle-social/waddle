@@ -34,22 +34,187 @@ use std::pin::Pin;
 
 use jid::BareJid;
 
-use super::affiliation::AffiliationEntry;
+use super::affiliation::AffiliationEntry as StoredAffiliationEntry;
 use super::{RoomConfig, SubjectState};
-use crate::ownership::{ClaimEpoch, Entity, NodeIdentity};
+use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
+use crate::types::Affiliation;
 use crate::XmppError;
 
 pub mod lifecycle;
 
 pub use lifecycle::{
-    EphemeralProjectionAuthorization, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId,
-    RoomLifecycleState, RoomMutationCommit, RoomRevision,
+    DestroyAttemptId, EphemeralProjectionAuthorization, RoomCommittedCoordinates, RoomEffectIntent,
+    RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit, RoomRevision,
 };
+
+pub(crate) fn mint_room_mutation_commit(
+    fence: RoomClaimFenceContext,
+    coordinates: RoomCommittedCoordinates,
+) -> RoomMutationCommit {
+    lifecycle::mint_room_mutation_commit(fence, coordinates)
+}
+
+pub(crate) fn authorize_ephemeral_projection(
+    commit: RoomMutationCommit,
+) -> EphemeralProjectionAuthorization {
+    lifecycle::authorize_ephemeral_projection(commit)
+}
 
 /// Boxed future returned by every [`MucDurableStore`] method, mirroring
 /// [`super::affiliation::DurableMembershipFuture`]'s exact shape and
 /// rationale.
 pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppError>> + Send + 'a>>;
+
+/// Boxed future returned by [`MucDurableStore::commit_room_mutation`].
+pub type RoomCommitFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<RoomCommittedCoordinates, RoomCommitError>> + Send + 'a>>;
+
+/// One durable affiliation delta carried by [`RoomDurableMutation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffiliationEntry {
+    pub jid: BareJid,
+    pub affiliation: Option<Affiliation>,
+}
+
+/// The application scope that owns a channel-backed MUC room.
+///
+/// Kept distinct from [`ChannelId`] at the durable mutation boundary so an
+/// authoritative persistence request cannot accidentally swap the two
+/// identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WaddleId(String);
+
+impl WaddleId {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// The channel backing a MUC room within a [`WaddleId`] scope.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelId(String);
+
+impl ChannelId {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AffiliationEntry {
+    pub fn new(jid: BareJid, affiliation: Option<Affiliation>) -> Self {
+        Self { jid, affiliation }
+    }
+}
+
+/// Closed durable mutation vocabulary for authoritative room-state commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomDurableMutation {
+    /// Create the snapshot in a non-serving `preparing` lifecycle. The
+    /// registry must commit [`Self::Publish`] immediately before exposing
+    /// the matching actor; stranded preparation is recoverable after restart.
+    Create {
+        waddle_id: WaddleId,
+        channel_id: ChannelId,
+        config: RoomConfig,
+        initial_affiliations: Vec<AffiliationEntry>,
+    },
+    /// Promote this exact `preparing` room lifecycle to serving `active`
+    /// immediately before registry publication.
+    Publish,
+    /// Return an already-published room to the non-serving `preparing`
+    /// lifecycle once its creator handoff is definitively known to have
+    /// failed. This durable marker survives process loss and is consumed by
+    /// exact-fenced destroy recovery.
+    MarkUnpublishedCleanup,
+    Config {
+        config: RoomConfig,
+        waddle_id: WaddleId,
+        channel_id: ChannelId,
+    },
+    Subject(Option<SubjectState>),
+    Affiliation(AffiliationEntry),
+    AffiliationBatch(Vec<AffiliationEntry>),
+    MembersOnlyEnforcement {
+        config: RoomConfig,
+        affiliations: Vec<AffiliationEntry>,
+    },
+    MediatedInviteGrant(AffiliationEntry),
+    MediatedInviteRollback(AffiliationEntry),
+    /// Tombstone the room under its exact claim. When this destroy originated
+    /// from an owner IQ, `completion_attempt` identifies the server-owned
+    /// post-commit cleanup record that must become visible in the same
+    /// transaction as the tombstone.
+    Destroy {
+        completion_attempt: Option<DestroyAttemptId>,
+    },
+    /// Terminally destroy an unpublished room and release its exact claim in
+    /// the same durable transaction. This prevents a preparation that was
+    /// already in flight from committing `Create` after the destroy returns.
+    DestroyAndReleaseClaim {
+        /// The owner-IQ completion that must be armed atomically with this
+        /// unpublished-room terminal transition.
+        completion_attempt: Option<DestroyAttemptId>,
+    },
+    Dormancy,
+    Activate,
+}
+
+/// Sanitized database failure marker for room commits.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+#[error("database commit failed")]
+pub struct RoomCommitDatabaseError;
+
+impl RoomCommitDatabaseError {
+    pub const fn sanitized() -> Self {
+        Self
+    }
+}
+
+/// Errors surfaced by [`MucDurableStore::commit_room_mutation`].
+#[derive(Debug, thiserror::Error)]
+pub enum RoomCommitError {
+    #[error("room mutation commit rejected: exact ownership fence no longer authorizes the room")]
+    NotOwner,
+    #[error(
+        "room mutation commit temporarily unavailable: exact ownership fence could not be verified"
+    )]
+    OwnershipUnavailable,
+    #[error("room mutation commit retried until the budget was exhausted")]
+    RetryExhausted,
+    /// `COMMIT` lost its acknowledgement and the durable coordinates could
+    /// not be read back. The mutation may already be visible, so callers
+    /// must retain any terminal seal and reconcile rather than compensate.
+    #[error("room mutation transaction outcome could not be reconciled")]
+    CommitOutcomeUnknown,
+    /// A prior committed destroy completion still owns this room's durable
+    /// lifecycle. A fresh create must wait for that cleanup to finish.
+    #[error("room recreation is blocked by pending durable destroy completion")]
+    RecreationBlocked,
+    #[error("room lifecycle revision overflowed")]
+    RevisionOverflow,
+    #[error("room lifecycle state is missing for this mutation")]
+    StateMissing,
+    #[error("room create lost the race to a different durable room identity")]
+    CreateConflict,
+    #[error("room mutation commit failed")]
+    Database(#[source] RoomCommitDatabaseError),
+}
 
 /// Typed fencing context for a room's currently-recorded Postgres claim
 /// (ADR-0017 Phase 3 Slice 7): the immutable `(Entity, ClaimEpoch,
@@ -87,14 +252,14 @@ pub struct DurableRoomState {
     pub channel_id: String,
     pub config: RoomConfig,
     pub subject: Option<SubjectState>,
-    pub affiliations: Vec<AffiliationEntry>,
+    pub affiliations: Vec<StoredAffiliationEntry>,
 }
 
 /// Durable backing store for MUC room ownership (ADR-0017 Phase 3 Slice 7).
 ///
 /// Every load, write, and delete is epoch-fenced against the exact claim
 /// retained by that `RoomActor` incarnation — "epoch-fenced like all
-/// claimed-entity writes" per element 7. The cache populated by
+/// claimed-entity writes" per element 7. The room-JID cache populated by
 /// [`Self::record_claim_fence`] is not an authority for actor-owned writes.
 ///
 /// **Fail-closed ownership contract (ADR-0017 Phase 3 Slice 7 FIX 2).**
@@ -107,12 +272,12 @@ pub struct DurableRoomState {
 /// `ChangeAffiliation`, `ApplyAdminItems`, `ApplyAffiliationChange`,
 /// `EnforceMembersOnlyAffiliations`, `ReconcileChannelBackedRoom`):
 ///
-/// 1. **Before mutating**: the handler runs
-///    [`super::room_actor::RoomActor::gate_mutation`] — a `SELECT ... FOR
-///    SHARE`-fenced [`Self::check_exact_claim_fence`] pre-check using the
-///    actor incarnation's retained fence. It refuses to mutate both when
-///    ownership was lost and when ownership cannot be proven.
-/// 2. **After mutating**: config and ordinary affiliation writes classify a
+/// 1. **Before mutating**: zero-delta handlers run a `SELECT ... FOR SHARE`
+///    [`Self::check_exact_claim_fence`] pre-check using the actor
+///    incarnation's retained fence. Durable-delta handlers use their
+///    in-transaction commit fence as the authority. Both refuse to mutate
+///    when ownership was lost or cannot be proven.
+/// 2. **At commit**: config and ordinary affiliation writes classify a
 ///    `save_*` failure that is NOT ownership loss (a transient backend
 ///    outage) as a typed error rather than silently logging and swallowing
 ///    it. Subject persistence intentionally occurs before applying the
@@ -125,9 +290,8 @@ pub struct DurableRoomState {
 ///    convergence.
 ///
 /// Single-node/non-clustering deployments are unaffected: no
-/// `MucDurableStore` is configured there at all, so `gate_mutation`'s
-/// `None`-store branch always returns `Ok(())` and `save_*` is never
-/// called — today's purely in-memory behavior, byte-identical.
+/// `MucDurableStore` is configured there at all, so no durable fence or
+/// save is attempted — today's purely in-memory behavior, byte-identical.
 pub trait MucDurableStore: Send + Sync {
     /// Load `room_jid`'s durable state, if a row exists. `None` for a room
     /// that has never been durably written (e.g. a brand-new persistent
@@ -145,51 +309,83 @@ pub trait MucDurableStore: Send + Sync {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, Option<DurableRoomState>>;
 
-    /// Durably upsert the room's configuration (plus the `waddle_id`/
-    /// `channel_id` it travels with).
-    fn save_config_fenced<'a>(
+    /// Atomically commit one authoritative durable mutation and return the
+    /// committed lifecycle/revision coordinate.
+    fn commit_room_mutation<'a>(
         &'a self,
         room_jid: &'a BareJid,
-        waddle_id: &'a str,
-        channel_id: &'a str,
-        config: &'a RoomConfig,
         fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
+        intent: RoomDurableMutation,
+    ) -> RoomCommitFuture<'a>;
 
-    /// Update (or, when `subject` is `None`, clear) an existing room's current
-    /// subject. This must not create a parent row: #1352 owns atomically
-    /// creating the complete room plus initial Owner. Until then, a missing
-    /// parent returns [`crate::XmppError::DurableRoomStateMissing`] so callers
-    /// fail before acknowledging or applying a non-durable subject.
-    fn save_subject_fenced<'a>(
+    /// Commit with publication authority that is already held by the caller.
+    /// Implementations that share that authority gate must reuse it rather
+    /// than acquire a nested read guard while a writer may be queued.
+    fn commit_room_mutation_with_authority<'a>(
         &'a self,
         room_jid: &'a BareJid,
-        subject: Option<&'a SubjectState>,
         fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
+        intent: RoomDurableMutation,
+        authority: &'a CurrentNodeIdentityGuard,
+    ) -> RoomCommitFuture<'a> {
+        let _ = authority;
+        self.commit_room_mutation(room_jid, fence, intent)
+    }
 
-    /// Durably upsert one affiliation-list entry. `Affiliation::None`
-    /// removes the row, mirroring `AffiliationList::set`'s in-memory
-    /// contract.
-    fn save_affiliation_fenced<'a>(
+    /// Whether a committed destroy's server-owned completion is still
+    /// present.  Demand-side creation must wait while it is, even after a
+    /// process restart has discarded the registry's local completion queue.
+    ///
+    /// Implementations must fail closed: an error means recreation remains
+    /// blocked until a later retry can prove the completion absent.
+    fn destroy_completion_blocks_recreation<'a>(
         &'a self,
         room_jid: &'a BareJid,
-        entry: &'a AffiliationEntry,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
+    ) -> MucDurableFuture<'a, bool> {
+        let _ = room_jid;
+        Box::pin(async { Ok(false) })
+    }
 
-    /// XEP-0045 §10.9 (#1261): destroy removes the room "even if it was
-    /// defined as persistent". Delete every durable row for `room_jid`
-    /// — config, subject, and the full affiliation list — so a
-    /// destroyed room can never resurrect from storage (with its old
-    /// config, subject, or ban list) on the next join. Called by the
-    /// room registry's explicit-destroy path only; dormancy eviction
-    /// keeps the rows because an evicted-but-live room MUST restore.
-    fn delete_room_state_fenced<'a>(
+    /// Prove whether an inert destroy-completion row belongs to a terminal
+    /// durable room lifecycle. Startup recovery may arm only a row with this
+    /// proof; an unproven intent is discarded rather than allowed to block
+    /// recreation or emit cleanup effects after a crash.
+    fn recover_inert_destroy_completion<'a>(
+        &'a self,
+        attempt: &'a DestroyAttemptId,
+    ) -> MucDurableFuture<'a, bool> {
+        let _ = attempt;
+        Box::pin(async { Ok(false) })
+    }
+
+    /// Return the durable coordinates of a room whose Create committed but
+    /// whose actor was never published. The result is deliberately not a
+    /// mutation authorization: callers must acquire an exact current claim
+    /// and use it for terminal cleanup.
+    ///
+    /// Implementations must fail closed. A lookup error leaves demand-side
+    /// creation blocked rather than restoring an ambiguous room as active.
+    /// The default answers `Ok(None)`: a store that never commits a durable
+    /// `Create` (fakes, single-node stores) cannot strand a preparing row,
+    /// so "no preparing room" is the truthful answer, matching the other
+    /// no-durable-state defaults above.
+    fn find_preparing_room<'a>(
         &'a self,
         room_jid: &'a BareJid,
-        fence: &'a RoomClaimFenceContext,
-    ) -> MucDurableFuture<'a, ()>;
+    ) -> MucDurableFuture<'a, Option<RoomCommittedCoordinates>> {
+        let _ = room_jid;
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Establish the exact claim fence for forthcoming actor-owned durable
+    /// work before the room is published. This is separate from
+    /// [`Self::record_claim_fence`]: preparation-time fenced loads/commits
+    /// may need store-local fence bookkeeping, but legacy room-JID fan-out
+    /// visibility must still wait until the ready actor is inserted into the
+    /// registry. Default no-op for deployments without a durable store.
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+        let _ = (room_jid, fence);
+    }
 
     /// Publish the claim fence alongside the matching ready room-registry
     /// entry — never immediately after acquire/steal while restore is still

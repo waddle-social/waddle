@@ -1153,15 +1153,28 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     })
                     .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
-                let acquisition = match get_or_create_room_actor(
-                    state,
-                    room_jid,
-                    config,
-                    waddle_id,
-                    channel_id,
-                )
-                .await
-                {
+                let initial_affiliations = if managed_channel.is_none() {
+                    vec![waddle_xmpp::muc::DurableAffiliationEntry::new(
+                        sender_jid.to_bare(),
+                        Some(Affiliation::Owner),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                let acquisition = if managed_channel.is_some() {
+                    get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
+                } else {
+                    RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                        .get_or_create_room_with_initial_affiliations(
+                            room_jid.clone(),
+                            waddle_xmpp::muc::durable::WaddleId::new(waddle_id),
+                            waddle_xmpp::muc::durable::ChannelId::new(channel_id),
+                            config,
+                            initial_affiliations,
+                        )
+                        .await
+                };
+                let acquisition = match acquisition {
                     Ok(acquisition) => acquisition,
                     // ADR-0017 Phase 3 Slice 7 FIX 6 (council-adjudicated):
                     // another node genuinely, currently owns this room's
@@ -1291,19 +1304,17 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         );
                     }
                 };
-                // #1134: the created-bit is registry-authoritative —
-                // the registry's serialized handler makes exactly one
-                // racing first-join the creator. Inferring it from "no
-                // actor existed when we looked" gave Owner to every
-                // racer.
-                let created = acquisition.creation
-                    == waddle_xmpp::muc::room_registry_actor::RoomCreation::Created;
-                (acquisition.actor_ref, managed_channel.is_none() && created)
+                let room_created = managed_channel.is_none()
+                    && acquisition.creation
+                        == waddle_xmpp::muc::room_registry_actor::RoomCreation::Created;
+                (acquisition.actor_ref, room_created)
             }
         };
 
         let affiliation_grant = if created_instant_room {
-            // XEP-0045 §10.1.1: only the actual room creator gets Owner.
+            // The registry committed the owner before publication whenever a
+            // durable store exists. Store-less rooms retain the established
+            // in-memory XEP-0045 creator grant.
             JoinAffiliationGrant::CreatorOwner
         } else if let Some(affiliation) = managed_affiliation {
             JoinAffiliationGrant::Resolver(affiliation)
@@ -1966,14 +1977,13 @@ mod resolver_sync_retry_tests {
     use std::sync::Arc;
 
     use kameo::actor::Spawn;
-    use waddle_xmpp::muc::affiliation::AffiliationEntry;
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
     use waddle_xmpp::muc::room_actor::{
         ChangeAffiliation, GetAffiliation, RestoreDurableRoomState, RoomActor,
     };
-    use waddle_xmpp::muc::{MucRoom, RoomConfig, SubjectState};
+    use waddle_xmpp::muc::{MucRoom, RoomConfig};
     use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
 
     use super::*;
@@ -2063,45 +2073,24 @@ mod resolver_sync_retry_tests {
             })
         }
 
-        fn save_config_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a RoomConfig,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_test_claim_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _subject: Option<&'a SubjectState>,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_test_claim_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _entry: &'a AffiliationEntry,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_test_claim_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn delete_room_state_fenced<'a>(
+        fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_test_claim_fence(room_jid, fence);
-            Box::pin(async move { validation })
+            _intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            if let Err(error) = validate_test_claim_fence(room_jid, fence) {
+                return Box::pin(async move {
+                    let _ = error;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                });
+            }
+            Box::pin(async move {
+                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                })
+            })
         }
 
         fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
@@ -2652,7 +2641,12 @@ mod resolver_sync_retry_tests {
             Affiliation::Outcast,
             "an unrelated member mutation must not invalidate the carried revision"
         );
-        assert_eq!(store.checks(), 3);
+        // Two sync workers check ownership once each; the interleaved
+        // `ChangeAffiliation` carries a durable delta, so its ownership
+        // authority is the in-transaction fence assert inside
+        // `commit_room_mutation` (#1645) — the separate pre-commit probe
+        // this count used to include no longer exists.
+        assert_eq!(store.checks(), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2716,9 +2710,12 @@ mod resolver_sync_retry_tests {
             Affiliation::Outcast,
             "stale-source work must not erase a newer completion chain"
         );
+        // The leading `ChangeAffiliation` commits its durable delta under
+        // the in-transaction fence assert (#1645) instead of a counted
+        // pre-commit probe, leaving one counted check per sync worker.
         assert_eq!(
             store.checks(),
-            3,
+            2,
             "stale work must not consume ownership-check or worker capacity"
         );
     }

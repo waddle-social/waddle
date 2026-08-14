@@ -31,15 +31,15 @@ use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{
-    CreateRoom, DestroyRoom, DestroyRoomOutcome, DestroyRoomReason, GetOrCreateRoom, GetRoom,
-    ListRooms, RetryPendingRoomReleases,
+    CreateRoom, CreateRoomWithInitialAffiliations, DestroyRoom, DestroyRoomOutcome,
+    DestroyRoomReason, GetOrCreateRoom, GetRoom, ListRooms, RetryPendingRoomReleases,
 };
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
     room_actor::{
         ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
-        GetAffiliation, GetConfig, LeaveByRealJid, ListAffiliations, ListOccupants, OccupantCount,
-        RoomActor, UpdateConfig,
+        GetAffiliation, GetConfig, GetSnapshot, LeaveByRealJid, ListAffiliations, ListOccupants,
+        OccupantCount, RoomActor, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -2044,26 +2044,37 @@ async fn run_group_dm_create(
         ..RoomConfig::default()
     };
 
-    let actor = state
+    let mut members = args.member_jids.clone();
+    members.push(creator_jid.clone());
+    members.sort();
+    members.dedup();
+    let initial_affiliations = members
+        .iter()
+        .cloned()
+        .map(|jid| waddle_xmpp::muc::DurableAffiliationEntry::new(jid, Some(Affiliation::Member)))
+        .collect();
+
+    state
         .room_registry
-        .ask(CreateRoom {
+        .ask(CreateRoomWithInitialAffiliations {
             room_jid: room_jid.clone(),
-            waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
-            channel_id: localpart.clone(),
+            waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+            ),
+            channel_id: waddle_xmpp::muc::durable::ChannelId::new(localpart.clone()),
             config: config.clone(),
+            initial_affiliations,
         })
         .await
-        .map_err(send_err("room_registry ask CreateRoom"))?;
+        .map_err(send_err(
+            "room_registry ask CreateRoomWithInitialAffiliations",
+        ))?;
 
     if let Err(error) = upsert_group_dm_catalog(state, &localpart, &config).await {
         destroy_room_for_rollback(state, &room_jid, "group-DM catalog creation failed").await?;
         return Err(error);
     }
 
-    let mut members = args.member_jids.clone();
-    members.push(creator_jid.clone());
-    members.sort();
-    members.dedup();
     let mut persisted_members: Vec<BareJid> = Vec::with_capacity(members.len());
     for member_jid in members {
         if let Err(error) = persist_group_dm_member_tuple(state, &localpart, &member_jid).await {
@@ -2071,16 +2082,6 @@ async fn run_group_dm_create(
             return Err(Box::new(CommandResult::Error(error)));
         }
         persisted_members.push(member_jid.clone());
-        if let Err(error) = actor
-            .ask(ChangeAffiliation {
-                jid: member_jid.clone(),
-                affiliation: Affiliation::Member,
-            })
-            .await
-        {
-            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await?;
-            return Err(send_err("room actor ChangeAffiliation")(error));
-        }
         if let Err(error) =
             publish_group_dm_bookmark(state, &member_jid, &room_jid, Some(&args.name)).await
         {
@@ -2145,6 +2146,10 @@ async fn run_group_dm_leave(
         })
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
+    let pre_leave_snapshot = actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(send_err("room actor GetSnapshot"))?;
     let left = pre_leave_affiliation >= Affiliation::Member;
     if !left {
         return Ok(GroupDmLeaveResult {
@@ -2170,6 +2175,7 @@ async fn run_group_dm_leave(
     }
     resources.sort();
     resources.dedup();
+    let mut reconciled_leave_effects = None;
 
     delete_group_dm_member_tuple(state, &channel_id, &caller_bare)
         .await
@@ -2185,31 +2191,79 @@ async fn run_group_dm_leave(
         })
         .await
     {
-        let _ = persist_group_dm_member_tuple(state, &channel_id, &caller_bare).await;
-        let _ = publish_group_dm_bookmark(
-            state,
-            &caller_bare,
-            &args.room_jid,
-            group_dm_shared_name(&record.name),
-        )
-        .await;
-        return Err(send_err("room actor ChangeAffiliation")(error));
-    }
-    for resource in resources {
-        if let Some(outcome) = actor
-            .ask(LeaveByRealJid {
-                sender_jid: resource.clone(),
-            })
-            .await
-            .map_err(send_err("room actor LeaveByRealJid"))?
+        let should_restore_membership = match &error {
+            kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown,
+            ) => {
+                !reconcile_ambiguous_group_dm_leave(
+                    state,
+                    &args.room_jid,
+                    &channel_id,
+                    &record,
+                    &actor,
+                    &caller_bare,
+                )
+                .await
+            }
+            _ => true,
+        };
+        if should_restore_membership {
+            let _ = persist_group_dm_member_tuple(state, &channel_id, &caller_bare).await;
+            let _ = publish_group_dm_bookmark(
+                state,
+                &caller_bare,
+                &args.room_jid,
+                group_dm_shared_name(&record.name),
+            )
+            .await;
+        }
+        if matches!(
+            error,
+            kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown
+            )
+        ) && !should_restore_membership
         {
+            // Recovery replaces the actor from durable state, which has no
+            // live roster. Preserve the pre-recovery roster and synthesize
+            // the same unavailable effects only after the exact leave is
+            // proven committed.
+            reconciled_leave_effects = Some(group_dm_leave_effects_from_snapshot(
+                &pre_leave_snapshot.room,
+                &resources,
+            ));
+        }
+        if should_restore_membership {
+            return Err(send_err("room actor ChangeAffiliation")(error));
+        }
+    }
+    if let Some(effects) = reconciled_leave_effects {
+        for (resource, effect) in effects {
             broadcast_group_dm_leave(
                 state,
                 connections,
                 &resource,
                 live_resource_set.contains(&resource),
-                &outcome,
+                &effect,
             );
+        }
+    } else {
+        for resource in resources {
+            if let Some(outcome) = actor
+                .ask(LeaveByRealJid {
+                    sender_jid: resource.clone(),
+                })
+                .await
+                .map_err(send_err("room actor LeaveByRealJid"))?
+            {
+                broadcast_group_dm_leave(
+                    state,
+                    connections,
+                    &resource,
+                    live_resource_set.contains(&resource),
+                    &GroupDmLeaveEffect::from(&outcome),
+                );
+            }
         }
     }
 
@@ -2246,7 +2300,7 @@ async fn run_group_dm_rename(
         )));
     }
     let _config_guard = acquire_room_config_lock(&args.room_jid).await;
-    let actor = state
+    let mut actor = state
         .room_registry
         .ask(GetOrCreateRoom {
             room_jid: args.room_jid.clone(),
@@ -2271,20 +2325,46 @@ async fn run_group_dm_rename(
     let previous_config = snapshot.room.config.clone();
     let mut config = previous_config.clone();
     config.name = args.name.clone().unwrap_or_default();
+    let intended_config = config.normalized();
+    let mut reconciled_broadcast_snapshot: Option<waddle_xmpp::muc::room_actor::RoomSnapshot> =
+        None;
     let updated_snapshot = match actor
         .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
-            config: config.clone(),
+            config: intended_config.clone(),
             sender_jid: caller_full_jid.clone(),
         })
         .await
     {
         Ok(snapshot) => snapshot,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown,
+        )) => {
+            let Some(recovered) = reconcile_ambiguous_group_dm_rename_commit(
+                state,
+                &args.room_jid,
+                &channel_id,
+                &record,
+                &actor,
+                &intended_config,
+            )
+            .await?
+            else {
+                return Err(unavailable(
+                    "This room's rename outcome is being reconciled; please retry.",
+                ));
+            };
+            actor = recovered.actor;
+            reconciled_broadcast_snapshot = Some(snapshot.clone());
+            recovered.snapshot
+        }
         Err(error) => {
             return Err(group_dm_rename_update_error(state, &args.room_jid, &actor, error).await)
         }
     };
     let expected_revision = updated_snapshot.config_revision;
-    if find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none() {
+    if reconciled_broadcast_snapshot.is_none()
+        && find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none()
+    {
         return Err(internal_err(
             "group-DM rename updated without sender occupant",
         ));
@@ -2294,7 +2374,7 @@ async fn run_group_dm_rename(
             "group-DM rename was superseded by a newer update".to_string(),
         )))));
     }
-    if let Err(error) = upsert_group_dm_catalog(state, &channel_id, &config).await {
+    if let Err(error) = upsert_group_dm_catalog(state, &channel_id, &intended_config).await {
         let _ = rollback_room_config_if_revision(&actor, expected_revision, previous_config).await;
         return Err(error);
     }
@@ -2336,7 +2416,7 @@ async fn run_group_dm_rename(
             state,
             &member.jid,
             &args.room_jid,
-            group_dm_shared_name(&config.name),
+            group_dm_shared_name(&intended_config.name),
         )
         .await
         {
@@ -2372,11 +2452,15 @@ async fn run_group_dm_rename(
             "group-DM rename was superseded by a newer update".to_string(),
         )))));
     }
-    let broadcast_snapshot = actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
-        .await
-        .map_err(send_err("room actor GetSnapshot"))?;
-    broadcast_group_dm_config_change(connections, &args.room_jid, &broadcast_snapshot);
+    if let Some(broadcast_snapshot) = reconciled_broadcast_snapshot.as_ref() {
+        broadcast_group_dm_config_change(connections, &args.room_jid, broadcast_snapshot);
+    } else {
+        let broadcast_snapshot = actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .map_err(send_err("room actor GetSnapshot"))?;
+        broadcast_group_dm_config_change(connections, &args.room_jid, &broadcast_snapshot);
+    }
 
     Ok(GroupDmRenameResult {
         room_jid: args.room_jid.clone(),
@@ -2477,12 +2561,73 @@ fn find_occupant_for_full_jid<'a>(
     })
 }
 
+struct GroupDmLeaveEffect {
+    nick: String,
+    affiliation: Affiliation,
+    leaving_room_jid: FullJid,
+    remaining_occupants: Vec<FullJid>,
+    removed_last_session: bool,
+}
+
+impl From<&waddle_xmpp::muc::room_actor::LeaveOutcome> for GroupDmLeaveEffect {
+    fn from(outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome) -> Self {
+        Self {
+            nick: outcome.nick.clone(),
+            affiliation: outcome.affiliation,
+            leaving_room_jid: outcome.leaving_room_jid.clone(),
+            remaining_occupants: outcome.remaining_occupants.clone(),
+            removed_last_session: outcome.removed_last_session,
+        }
+    }
+}
+
+fn group_dm_leave_effects_from_snapshot(
+    room: &waddle_xmpp::muc::MucRoom,
+    resources: &[FullJid],
+) -> Vec<(FullJid, GroupDmLeaveEffect)> {
+    let mut room = room.clone();
+    let mut effects = Vec::new();
+    for resource in resources {
+        let Some(occupant) = room.find_occupant_by_real_jid(resource).cloned() else {
+            continue;
+        };
+        let sessions = room.get_occupant_sessions(&occupant.nick);
+        if !sessions.iter().any(|session| session == resource) {
+            continue;
+        }
+        let remaining_occupants = room
+            .occupants
+            .values()
+            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+            .filter(|session| session != resource)
+            .collect();
+        let removed_last_session = room
+            .remove_occupant_session(&occupant.nick, resource)
+            .expect("occupant session was present in the snapshot");
+        let leaving_room_jid = room
+            .room_jid
+            .with_resource_str(&occupant.nick)
+            .expect("accepted MUC nick is a valid resource");
+        effects.push((
+            resource.clone(),
+            GroupDmLeaveEffect {
+                nick: occupant.nick,
+                affiliation: occupant.affiliation,
+                leaving_room_jid,
+                remaining_occupants,
+                removed_last_session,
+            },
+        ));
+    }
+    effects
+}
+
 fn broadcast_group_dm_leave(
     state: &AppState,
     connections: &ConnectionRegistry,
     leaving_real_jid: &FullJid,
     notify_self: bool,
-    outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome,
+    outcome: &GroupDmLeaveEffect,
 ) {
     let from_jid = outcome
         .leaving_room_jid
@@ -2683,6 +2828,90 @@ fn group_dm_shared_name(name: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+async fn recover_group_dm_actor_after_demote(
+    state: &AppState,
+    room_jid: &BareJid,
+    channel_id: &str,
+    record: &XmppChannelRecord,
+    stale_actor: &ActorRef<RoomActor>,
+) -> Result<ActorRef<RoomActor>, AdminErr> {
+    let _ = state
+        .room_registry
+        .ask(
+            waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                room_jid: room_jid.clone(),
+                actor_ref: stale_actor.clone(),
+            },
+        )
+        .await;
+    let actor = state
+        .room_registry
+        .ask(GetOrCreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+            channel_id: channel_id.to_string(),
+            config: group_dm_record_config(record),
+        })
+        .await
+        .map_err(send_err(
+            "room_registry ask GetOrCreateRoom during reconciliation",
+        ))?
+        .actor_ref;
+    hydrate_group_dm_member_affiliations(state, &actor, channel_id).await?;
+    Ok(actor)
+}
+
+async fn reconcile_ambiguous_group_dm_leave(
+    state: &AppState,
+    room_jid: &BareJid,
+    channel_id: &str,
+    record: &XmppChannelRecord,
+    stale_actor: &ActorRef<RoomActor>,
+    caller_bare: &BareJid,
+) -> bool {
+    let Ok(actor) =
+        recover_group_dm_actor_after_demote(state, room_jid, channel_id, record, stale_actor).await
+    else {
+        return false;
+    };
+    actor
+        .ask(GetAffiliation {
+            jid: caller_bare.clone(),
+        })
+        .await
+        .map(|affiliation| affiliation == Affiliation::None)
+        .unwrap_or(false)
+}
+
+struct RecoveredGroupDmRenameCommit {
+    actor: ActorRef<RoomActor>,
+    snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
+}
+
+async fn reconcile_ambiguous_group_dm_rename_commit(
+    state: &AppState,
+    room_jid: &BareJid,
+    channel_id: &str,
+    record: &XmppChannelRecord,
+    stale_actor: &ActorRef<RoomActor>,
+    intended_config: &RoomConfig,
+) -> Result<Option<RecoveredGroupDmRenameCommit>, AdminErr> {
+    let actor =
+        recover_group_dm_actor_after_demote(state, room_jid, channel_id, record, stale_actor)
+            .await?;
+    let snapshot = actor
+        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .await
+        .map_err(send_err(
+            "room actor GetSnapshot during group-DM rename reconciliation",
+        ))?;
+    if snapshot.room.config == *intended_config {
+        Ok(Some(RecoveredGroupDmRenameCommit { actor, snapshot }))
+    } else {
+        Ok(None)
+    }
+}
+
 async fn group_dm_rename_update_error(
     state: &AppState,
     room_jid: &BareJid,
@@ -2707,14 +2936,9 @@ async fn group_dm_rename_update_error(
                     "Only joined group-DM occupants can rename the room".to_string(),
                 ))))
             }
-            // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
-            // `NotOwner` means the pre-mutation gate rejected the rename.
-            // `OwnershipLostAfterApply` means the rename may already exist in
-            // this stale actor, but its awaited durable write lost ownership.
-            // Either outcome exact-demotes this actor and returns a
-            // recoverable retry response.
-            UpdateGroupDmConfigByMemberError::NotOwner
-            | UpdateGroupDmConfigByMemberError::OwnershipLostAfterApply => {
+            // A definitive ownership loss rejects the rename before any
+            // actor-memory projection, so exact-demote and let the caller retry.
+            UpdateGroupDmConfigByMemberError::NotOwner => {
                 let _ = state
                     .room_registry
                     .ask(
@@ -2730,7 +2954,10 @@ async fn group_dm_rename_update_error(
                 unavailable("This room's ownership cannot be verified right now; please retry.")
             }
             UpdateGroupDmConfigByMemberError::PersistFailed => {
-                internal_err("group-DM rename applied but durable persist failed")
+                internal_err("group-DM rename durable commit failed")
+            }
+            UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown => {
+                unavailable("This room's rename outcome is being reconciled; please retry.")
             }
         },
         error => internal_err(format!("room actor UpdateGroupDmConfigByMember: {error}")),
@@ -2809,12 +3036,13 @@ async fn rollback_group_dm_create(
     room_jid: &BareJid,
     persisted_members: &[BareJid],
 ) -> Result<(), AdminErr> {
+    destroy_room_for_rollback(state, room_jid, "group-DM creation failed").await?;
     for persisted_member in persisted_members {
         let _ = retract_group_dm_bookmark(state, persisted_member, room_jid).await;
         let _ = delete_group_dm_member_tuple(state, group_dm_id, persisted_member).await;
     }
     let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), group_dm_id).await;
-    destroy_room_for_rollback(state, room_jid, "group-DM creation failed").await
+    Ok(())
 }
 
 pub(crate) async fn persist_group_dm_member_tuple(
@@ -3210,6 +3438,7 @@ async fn run_update(
             sfu,
             &actor,
             &args.channel_jid,
+            None,
         )
         .await;
     }
@@ -4575,6 +4804,413 @@ mod sfu_eviction_tests {
         assert!(
             recorder.snapshot().is_empty(),
             "an affiliation change that keeps the occupant must not evict"
+        );
+    }
+}
+
+#[cfg(test)]
+mod group_dm_durable_reconciliation_tests {
+    use super::*;
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::server::AppState;
+    use kameo::actor::Spawn;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use waddle_xmpp::muc::durable::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
+        RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
+        RoomLifecycleId, RoomRevision,
+    };
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::{
+        CreateRoomWithInitialAffiliations, WireClusteringClaims,
+    };
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::registry::{
+        ConnectionEntry, ConnectionRegistry, RegisterUserResource, UserRegistryActor,
+    };
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum DurableMode {
+        DestroyFails,
+        AffiliationCommitUnknown,
+        ConfigCommitUnknown,
+    }
+
+    struct TestGroupDmDurableStore {
+        mode: DurableMode,
+        states: Mutex<HashMap<BareJid, DurableRoomState>>,
+        fences: Mutex<HashMap<BareJid, waddle_xmpp::muc::RoomClaimFenceContext>>,
+        coordinates: Mutex<HashMap<BareJid, (RoomLifecycleId, i64)>>,
+    }
+
+    impl TestGroupDmDurableStore {
+        fn new(mode: DurableMode) -> Arc<Self> {
+            Arc::new(Self {
+                mode,
+                states: Mutex::new(HashMap::new()),
+                fences: Mutex::new(HashMap::new()),
+                coordinates: Mutex::new(HashMap::new()),
+            })
+        }
+
+        fn next_coordinates(&self, room_jid: &BareJid) -> RoomCommittedCoordinates {
+            let mut coordinates = self.coordinates.lock().expect("coordinates lock");
+            let entry = coordinates
+                .entry(room_jid.clone())
+                .or_insert_with(|| (RoomLifecycleId::generate(), 0));
+            entry.1 += 1;
+            RoomCommittedCoordinates {
+                lifecycle: entry.0,
+                revision: RoomRevision::from_stored(entry.1).expect("positive revision"),
+            }
+        }
+
+        fn exact_fence_matches(
+            &self,
+            room_jid: &BareJid,
+            fence: &waddle_xmpp::muc::RoomClaimFenceContext,
+        ) -> bool {
+            self.fences.lock().expect("fences lock").get(room_jid) == Some(fence)
+        }
+
+        fn apply_mutation(&self, room_jid: &BareJid, intent: RoomDurableMutation) {
+            match intent {
+                RoomDurableMutation::Create {
+                    waddle_id,
+                    channel_id,
+                    config,
+                    initial_affiliations,
+                } => {
+                    self.states.lock().expect("states lock").insert(
+                        room_jid.clone(),
+                        DurableRoomState {
+                            waddle_id: waddle_id.into_string(),
+                            channel_id: channel_id.into_string(),
+                            config,
+                            subject: None,
+                            affiliations: initial_affiliations
+                                .into_iter()
+                                .filter_map(|entry| {
+                                    entry.affiliation.map(|affiliation| {
+                                        waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+                                            entry.jid,
+                                            affiliation,
+                                        )
+                                    })
+                                })
+                                .collect(),
+                        },
+                    );
+                }
+                RoomDurableMutation::Affiliation(entry) => {
+                    let mut states = self.states.lock().expect("states lock");
+                    let state = states.get_mut(room_jid).expect("room state present");
+                    state
+                        .affiliations
+                        .retain(|current| current.jid != entry.jid);
+                    if let Some(affiliation) = entry.affiliation {
+                        state.affiliations.push(
+                            waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+                                entry.jid,
+                                affiliation,
+                            ),
+                        );
+                    }
+                }
+                RoomDurableMutation::Config { config, .. } => {
+                    let mut states = self.states.lock().expect("states lock");
+                    let state = states.get_mut(room_jid).expect("room state present");
+                    state.config = config;
+                }
+                RoomDurableMutation::Destroy { .. } => {
+                    self.states.lock().expect("states lock").remove(room_jid);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl MucDurableStore for TestGroupDmDurableStore {
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            let exact = self.exact_fence_matches(room_jid, fence);
+            let state = self
+                .states
+                .lock()
+                .expect("states lock")
+                .get(room_jid)
+                .cloned();
+            Box::pin(async move {
+                if exact {
+                    Ok(state)
+                } else {
+                    Err(waddle_xmpp::XmppError::OwnershipLost {
+                        entity: fence.entity.clone(),
+                    })
+                }
+            })
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+            intent: RoomDurableMutation,
+        ) -> RoomCommitFuture<'a> {
+            let exact = self.exact_fence_matches(room_jid, fence);
+            let mode = self.mode;
+            let coordinates = self.next_coordinates(room_jid);
+            Box::pin(async move {
+                if !exact {
+                    return Err(RoomCommitError::NotOwner);
+                }
+                let is_affiliation = matches!(intent, RoomDurableMutation::Affiliation(_));
+                let is_config = matches!(intent, RoomDurableMutation::Config { .. });
+                let is_destroy = matches!(intent, RoomDurableMutation::Destroy { .. });
+                self.apply_mutation(room_jid, intent);
+                if is_destroy && mode == DurableMode::DestroyFails {
+                    return Err(RoomCommitError::Database(
+                        RoomCommitDatabaseError::sanitized(),
+                    ));
+                }
+                if is_affiliation && mode == DurableMode::AffiliationCommitUnknown {
+                    return Err(RoomCommitError::CommitOutcomeUnknown);
+                }
+                if is_config && mode == DurableMode::ConfigCommitUnknown {
+                    return Err(RoomCommitError::CommitOutcomeUnknown);
+                }
+                Ok(coordinates)
+            })
+        }
+
+        fn establish_claim_fence(
+            &self,
+            room_jid: &BareJid,
+            fence: waddle_xmpp::muc::RoomClaimFenceContext,
+        ) {
+            self.fences
+                .lock()
+                .expect("fences lock")
+                .insert(room_jid.clone(), fence);
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let exact = self.exact_fence_matches(room_jid, fence);
+            Box::pin(async move { Ok(exact) })
+        }
+    }
+
+    async fn fresh_state_with_room_registry(
+        mode: DurableMode,
+    ) -> (AppState, Arc<TestGroupDmDurableStore>) {
+        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("db pool");
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations");
+        let mut state = AppState::new(Arc::new(db_pool));
+        let store = TestGroupDmDurableStore::new(mode);
+        let registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
+            waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
+                state.muc_domain.to_string(),
+                state.occupant_id_secret.clone(),
+            ),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let _ = registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "group-dm-test-node",
+                    "group-dm-test-epoch",
+                )),
+                durable_store: Some(store.clone()),
+                rollout_backoff: None,
+            })
+            .await;
+        state.room_registry = registry;
+        state.clustering_enabled = true;
+        (state, store)
+    }
+
+    async fn seed_group_dm(
+        state: &AppState,
+        room_jid: &BareJid,
+        name: &str,
+        members: &[BareJid],
+    ) -> (String, ActorRef<RoomActor>) {
+        let channel_id = waddle_xmpp::parse_managed_room_jid(room_jid).expect("managed room jid");
+        let config = RoomConfig {
+            name: name.to_string(),
+            persistent: true,
+            members_only: true,
+            public_room: false,
+            enable_logging: true,
+            group_dm: true,
+            federated_affiliation_config: FederatedAffiliationConfig::open_none(),
+            ..RoomConfig::default()
+        };
+        let actor = state
+            .room_registry
+            .ask(CreateRoomWithInitialAffiliations {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(channel_id.clone()),
+                config: config.clone(),
+                initial_affiliations: members
+                    .iter()
+                    .cloned()
+                    .map(|jid| {
+                        waddle_xmpp::muc::DurableAffiliationEntry::new(
+                            jid,
+                            Some(Affiliation::Member),
+                        )
+                    })
+                    .collect(),
+            })
+            .await
+            .expect("create room");
+        upsert_group_dm_catalog(state, &channel_id, &config)
+            .await
+            .unwrap_or_else(|_| panic!("catalog row"));
+        for member in members {
+            persist_group_dm_member_tuple(state, &channel_id, member)
+                .await
+                .expect("member tuple");
+            publish_group_dm_bookmark(state, member, room_jid, Some(name))
+                .await
+                .unwrap_or_else(|_| panic!("member bookmark"));
+        }
+        (channel_id, actor)
+    }
+
+    #[tokio::test]
+    async fn rollback_group_dm_create_keeps_catalog_and_membership_until_destroy_succeeds() {
+        let (state, _store) = fresh_state_with_room_registry(DurableMode::DestroyFails).await;
+        let room_jid: BareJid = "group-dm-rollback@muc.localhost".parse().expect("room jid");
+        let member: BareJid = "alice@localhost".parse().expect("member jid");
+        let (channel_id, _actor) =
+            seed_group_dm(&state, &room_jid, "Rollback", std::slice::from_ref(&member)).await;
+
+        let error = rollback_group_dm_create(
+            &state,
+            &channel_id,
+            &room_jid,
+            std::slice::from_ref(&member),
+        )
+        .await
+        .expect_err("destroy failure must surface");
+        let _ = error;
+
+        assert!(
+            get_xmpp_channel(state.db_pool.global_actor().clone(), &channel_id)
+                .await
+                .unwrap_or_else(|_| panic!("channel lookup"))
+                .is_some(),
+            "catalog must remain until destroy commits"
+        );
+        assert_eq!(
+            list_durable_group_dm_members(&state, &channel_id)
+                .await
+                .unwrap_or_else(|_| panic!("member lookup")),
+            vec![member.clone()],
+            "membership tuples must remain until destroy commits"
+        );
+        let bookmark = existing_group_dm_bookmark(&state, &member, &room_jid)
+            .await
+            .unwrap_or_else(|_| panic!("bookmark lookup"));
+        assert_eq!(
+            bookmark.jid, room_jid,
+            "bookmark must remain until destroy commits"
+        );
+        assert!(bookmark.autojoin, "bookmark must still be published");
+    }
+
+    #[tokio::test]
+    async fn group_dm_leave_ambiguous_commit_does_not_restore_membership_when_leave_committed() {
+        let (state, _store) =
+            fresh_state_with_room_registry(DurableMode::AffiliationCommitUnknown).await;
+        let room_jid: BareJid = "group-dm-leave@muc.localhost".parse().expect("room jid");
+        let member: BareJid = "alice@localhost".parse().expect("member jid");
+        let caller_full: FullJid = "alice@localhost/web".parse().expect("caller jid");
+        let (channel_id, actor) =
+            seed_group_dm(&state, &room_jid, "Leave", std::slice::from_ref(&member)).await;
+        actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: caller_full.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join room");
+        let connections = ConnectionRegistry::new();
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+        let connection = ConnectionEntry::new(outbound_tx);
+        connections.register_entry(caller_full.clone(), connection.clone());
+        user_registry
+            .ask(RegisterUserResource {
+                jid: caller_full.clone(),
+                entry: connection,
+            })
+            .await
+            .expect("register live caller resource");
+        let sm_sessions = InMemorySmSessionRegistry::new();
+
+        let result = run_group_dm_leave(
+            &state,
+            &connections,
+            &user_registry,
+            &sm_sessions,
+            &caller_full,
+            &GroupDmLeaveArgs {
+                room_jid: room_jid.clone(),
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("leave result"));
+        assert!(result.left, "the committed leave must still report success");
+        assert!(
+            !list_durable_group_dm_members(&state, &channel_id)
+                .await
+                .unwrap_or_else(|_| panic!("member lookup"))
+                .contains(&member),
+            "a committed ambiguous leave must not restore the permission tuple"
+        );
+        let bookmark_items = state
+            .pubsub_storage
+            .get_items(
+                &member,
+                waddle_xmpp::xep::xep0402::PEP_NODE,
+                Some(1),
+                &[room_jid.to_string()],
+            )
+            .await
+            .expect("bookmark items");
+        assert!(
+            bookmark_items.is_empty(),
+            "a committed ambiguous leave must not republish the bookmark"
+        );
+        assert!(
+            outbound_rx.try_recv().is_ok(),
+            "leave presence should be sent even when ambiguous leave commit is reconciled"
         );
     }
 }

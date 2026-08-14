@@ -273,45 +273,24 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             })
         }
 
-        fn save_config_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a waddle_xmpp::muc::RoomConfig,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn delete_room_state_fenced<'a>(
+        fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
+            _intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            if let Err(error) = validate_local_room_fence(room_jid, fence) {
+                return Box::pin(async move {
+                    let _ = error;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                });
+            }
+            Box::pin(async move {
+                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                })
+            })
         }
 
         fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
@@ -3683,6 +3662,389 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
             "muc#roomconfig_allowpm",
             waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
         ]
+    );
+}
+
+#[tokio::test]
+async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_before_replying() {
+    use std::collections::HashMap;
+
+    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+
+    struct AmbiguousConfigCommitStore {
+        expected_owner: NodeIdentity,
+        states: Mutex<HashMap<BareJid, DurableRoomState>>,
+        coordinates: Mutex<HashMap<BareJid, (waddle_xmpp::muc::RoomLifecycleId, i64)>>,
+    }
+
+    impl AmbiguousConfigCommitStore {
+        fn new(expected_owner: NodeIdentity) -> Self {
+            Self {
+                expected_owner,
+                states: Mutex::new(HashMap::new()),
+                coordinates: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn next_coordinates(
+            &self,
+            room_jid: &BareJid,
+        ) -> waddle_xmpp::muc::RoomCommittedCoordinates {
+            let mut coordinates = self.coordinates.lock().expect("coordinates lock");
+            let entry = coordinates
+                .entry(room_jid.clone())
+                .or_insert_with(|| (waddle_xmpp::muc::RoomLifecycleId::generate(), 0));
+            entry.1 += 1;
+            waddle_xmpp::muc::RoomCommittedCoordinates {
+                lifecycle: entry.0,
+                revision: waddle_xmpp::muc::RoomRevision::from_stored(entry.1)
+                    .expect("positive revision"),
+            }
+        }
+
+        fn expected_fence(
+            &self,
+            room_jid: &BareJid,
+        ) -> waddle_xmpp::muc::durable::RoomClaimFenceContext {
+            expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0))
+        }
+
+        fn apply_mutation(
+            &self,
+            room_jid: &BareJid,
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) {
+            match intent {
+                waddle_xmpp::muc::RoomDurableMutation::Create {
+                    waddle_id,
+                    channel_id,
+                    config,
+                    initial_affiliations,
+                } => {
+                    self.states.lock().expect("states lock").insert(
+                        room_jid.clone(),
+                        DurableRoomState {
+                            waddle_id: waddle_id.into_string(),
+                            channel_id: channel_id.into_string(),
+                            config,
+                            subject: None,
+                            affiliations: initial_affiliations
+                                .into_iter()
+                                .filter_map(|entry| {
+                                    entry.affiliation.map(|affiliation| {
+                                        waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+                                            entry.jid,
+                                            affiliation,
+                                        )
+                                    })
+                                })
+                                .collect(),
+                        },
+                    );
+                }
+                waddle_xmpp::muc::RoomDurableMutation::Config { config, .. } => {
+                    if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid)
+                    {
+                        state.config = config;
+                    }
+                }
+                waddle_xmpp::muc::RoomDurableMutation::Affiliation(entry) => {
+                    if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid)
+                    {
+                        state
+                            .affiliations
+                            .retain(|current| current.jid != entry.jid);
+                        if let Some(affiliation) = entry.affiliation {
+                            state.affiliations.push(
+                                waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+                                    entry.jid,
+                                    affiliation,
+                                ),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl MucDurableStore for AmbiguousConfigCommitStore {
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a waddle_xmpp::muc::durable::RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            let matches = fence == &self.expected_fence(room_jid);
+            let state = self
+                .states
+                .lock()
+                .expect("states lock")
+                .get(room_jid)
+                .cloned();
+            Box::pin(async move {
+                if matches {
+                    Ok(state)
+                } else {
+                    Err(waddle_xmpp::XmppError::internal(
+                        "unexpected exact room fence for config reconciliation test",
+                    ))
+                }
+            })
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a waddle_xmpp::muc::durable::RoomClaimFenceContext,
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            let matches = fence == &self.expected_fence(room_jid);
+            let coordinates = self.next_coordinates(room_jid);
+            Box::pin(async move {
+                if !matches {
+                    return Err(waddle_xmpp::muc::RoomCommitError::NotOwner);
+                }
+                let ambiguous_config =
+                    matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Config { .. });
+                self.apply_mutation(room_jid, intent);
+                if ambiguous_config {
+                    Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown)
+                } else {
+                    Ok(coordinates)
+                }
+            })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a waddle_xmpp::muc::durable::RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let matches = fence == &self.expected_fence(room_jid);
+            Box::pin(async move { Ok(matches) })
+        }
+    }
+
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let charlie_session = create_test_session(state.as_ref(), "charlie").await;
+    let room_jid: BareJid = "ambiguous-config@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let charlie_jid: FullJid = "charlie@example.com/web".parse().expect("charlie jid");
+    let ready = ready_phase(&alice_jid);
+    let durable_owner = NodeIdentity::new("config-reconcile-node", "epoch-1");
+    let store = Arc::new(AmbiguousConfigCommitStore::new(durable_owner.clone()));
+
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(WireClusteringClaims {
+            claim_store: Arc::new(InProcessClaimStore::new()) as Arc<dyn ClaimStore>,
+            node_identity: SharedNodeIdentity::new(durable_owner),
+            durable_store: Some(store),
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire ambiguous config durable store");
+
+    let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(8);
+    register_test_connection(state.as_ref(), &bob_jid, bob_tx).await;
+    let (charlie_tx, mut charlie_rx) = mpsc::channel::<OutboundStanza>(8);
+    register_test_connection(state.as_ref(), &charlie_jid, charlie_tx).await;
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "ambiguous-config"),
+                Relation::new("member"),
+                Subject::user(&bob_session.user_jid),
+            ),
+        })
+        .await
+        .expect("grant explicit channel membership");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &charlie_jid,
+        "charlie",
+        None,
+        &Some(charlie_session),
+    )
+    .await;
+    while bob_rx.try_recv().is_ok() {}
+    while charlie_rx.try_recv().is_ok() {}
+
+    let stale_actor = get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("pre-update room actor");
+    let stale_actor_id = stale_actor.id();
+
+    let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_roomname",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("Recovered Config")
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_membersonly",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("1")
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_enablelogging",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("0")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let owner_iq = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "owner-config-ambiguous",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                    .append(submit_form)
+                    .build(),
+            )
+            .build(),
+    );
+
+    let responses = handle_iq(
+        &owner_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+    assert!(
+        responses[0].contains("type='result'"),
+        "a durably committed config must reconcile to success: {}",
+        responses[0]
+    );
+
+    let current_actor = get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("post-reconciliation room actor");
+    assert_ne!(
+        current_actor.id(),
+        stale_actor_id,
+        "the stale actor must be demoted before exact config recovery"
+    );
+    let snapshot = current_actor
+        .ask(GetSnapshot)
+        .await
+        .expect("post-reconciliation snapshot");
+    assert_eq!(snapshot.room.config.name, "Recovered Config");
+    assert!(
+        !snapshot.room.config.enable_logging,
+        "the recovered actor must reflect the durably committed config"
+    );
+
+    let channel = crate::server::xmpp_state::get_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        "ambiguous-config",
+    )
+    .await
+    .expect("channel lookup")
+    .expect("persisted channel");
+    assert_eq!(channel.name, "Recovered Config");
+    assert!(channel.members_only);
+
+    let member_observes_removal = bob_rx
+        .try_recv()
+        .expect("member observes the non-member removal");
+    let member_removal_xml = stanza_to_xml(&member_observes_removal.stanza);
+    assert!(
+        member_removal_xml.contains("code='322'"),
+        "members-only reconciliation must notify surviving members: {member_removal_xml}"
+    );
+    let member_broadcast = bob_rx
+        .try_recv()
+        .expect("explicit channel member receives reconciled config broadcast");
+    let member_broadcast_xml = stanza_to_xml(&member_broadcast.stanza);
+    assert!(
+        member_broadcast_xml.contains("code='171'"),
+        "explicit channel member must survive reconciliation: {member_broadcast_xml}"
+    );
+    let removal = charlie_rx
+        .try_recv()
+        .expect("non-member receives reconciled members-only removal");
+    let xml = stanza_to_xml(&removal.stanza);
+    assert!(
+        xml.contains("code='322'"),
+        "members-only reconciliation must evict existing non-members: {xml}"
+    );
+    assert!(
+        charlie_rx.try_recv().is_err(),
+        "removed non-member must not receive config broadcast"
     );
 }
 
@@ -7996,65 +8358,35 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
                 Ok(None)
             })
         }
-        fn save_config_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a waddle_xmpp::muc::RoomConfig,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let expected =
-                expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
-            let validation = (fence == &expected)
-                .then_some(())
-                .ok_or_else(|| waddle_xmpp::XmppError::internal("unexpected exact room fence"));
-            Box::pin(async move { validation })
-        }
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let expected =
-                expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
-            let validation = (fence == &expected)
-                .then_some(())
-                .ok_or_else(|| waddle_xmpp::XmppError::internal("unexpected exact room fence"));
-            Box::pin(async move { validation })
-        }
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a BareJid,
-            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
-            fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
-            let expected =
-                expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
-            let validation = (fence == &expected)
-                .then_some(())
-                .ok_or_else(|| waddle_xmpp::XmppError::internal("unexpected exact room fence"));
-            Box::pin(async move { validation })
-        }
-        fn delete_room_state_fenced<'a>(
+        fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
-        ) -> MucDurableFuture<'a, ()> {
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             let expected =
                 expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
             if fence != &expected {
-                let error = waddle_xmpp::XmppError::internal("unexpected exact room fence");
-                return Box::pin(async move { Err(error) });
+                return Box::pin(async { Err(waddle_xmpp::muc::RoomCommitError::NotOwner) });
             }
-            Box::pin(async {
-                Err(waddle_xmpp::XmppError::internal(
-                    "destroy-time wipe refused by test store",
-                ))
+            if matches!(
+                intent,
+                waddle_xmpp::muc::RoomDurableMutation::Destroy { .. }
+                    | waddle_xmpp::muc::RoomDurableMutation::DestroyAndReleaseClaim { .. }
+            ) {
+                return Box::pin(async {
+                    Err(waddle_xmpp::muc::RoomCommitError::Database(
+                        waddle_xmpp::muc::RoomCommitDatabaseError::sanitized(),
+                    ))
+                });
+            }
+            Box::pin(async move {
+                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                })
             })
         }
-
         fn check_exact_claim_fence<'a>(
             &'a self,
             room_jid: &'a BareJid,

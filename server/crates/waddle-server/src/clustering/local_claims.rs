@@ -439,8 +439,8 @@ impl LocallyClaimedEntities for RoomLocalClaims {
     /// and every mutation handler this actor exposes
     /// (`UpdateConfig`/`RollbackConfigIfRevision`/
     /// `UpdateGroupDmConfigByMember`/`SetSubject`/`ChangeAffiliation`, and
-    /// the affiliation-bulk-apply path) synchronously `.await`s its own
-    /// `gate_mutation()` check and durable persist call
+    /// the affiliation-bulk-apply path) synchronously `.await`s its
+    /// ownership check and durable persist call
     /// (`persist_config`/`persist_subject`/`persist_affiliation`) before
     /// returning a reply — so a mutation enqueued ahead of this ask has
     /// already run its handler to completion, including its durable write's
@@ -1845,53 +1845,34 @@ mod tests {
             })
         }
 
-        fn save_config_fenced<'a>(
+        fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a jid::BareJid,
-            _waddle_id: &'a str,
-            _channel_id: &'a str,
-            _config: &'a waddle_xmpp::muc::RoomConfig,
             fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = validate_local_room_fence(room_jid, fence) {
-                return Box::pin(async move { Err(error) });
+                return Box::pin(async move {
+                    let _ = error;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                });
             }
+            // Preparation-time Create/Activate commits ride this store too
+            // (#1645); only the Config commit under test participates in
+            // the started/persisted ordering proof.
+            let is_config = matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Config { .. });
             Box::pin(async move {
-                self.started.notify_one();
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                self.persisted
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
+                if is_config {
+                    self.started.notify_one();
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    self.persisted
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                })
             })
-        }
-
-        fn save_subject_fenced<'a>(
-            &'a self,
-            room_jid: &'a jid::BareJid,
-            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
-            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn save_affiliation_fenced<'a>(
-            &'a self,
-            room_jid: &'a jid::BareJid,
-            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
-            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
-        }
-
-        fn delete_room_state_fenced<'a>(
-            &'a self,
-            room_jid: &'a jid::BareJid,
-            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-            let validation = validate_local_room_fence(room_jid, fence);
-            Box::pin(async move { validation })
         }
 
         fn check_exact_claim_fence<'a>(

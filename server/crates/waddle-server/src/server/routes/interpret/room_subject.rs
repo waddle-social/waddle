@@ -1,7 +1,9 @@
 use super::*;
 use kameo::error::SendError;
+use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::muc::room_actor::SetSubjectError;
 use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
+use waddle_xmpp::muc::room_registry_actor::GetOrCreateRoom;
 use waddle_xmpp::muc::{RoomClaimFenceContext, RoomSubjectTexts};
 use waddle_xmpp::ownership::{Entity, EntityType};
 
@@ -130,17 +132,48 @@ pub(super) async fn persist_room_subject_event(
             "This room is temporarily unavailable; please retry.",
         );
     }
+    let durable_recovery_snapshot = room_actor.ask(GetSnapshot).await.ok();
 
     match room_actor
         .ask(SetSubject {
-            texts,
+            texts: texts.clone(),
             setter: setter.clone(),
-            setter_nick,
+            setter_nick: setter_nick.clone(),
             set_at,
         })
         .await
     {
         Ok(()) => PersistRoomSubjectEventOutcome::Committed,
+        Err(SendError::HandlerError(SetSubjectError::CommitOutcomeUnknown)) => {
+            warn!(
+                room = %room,
+                setter = %setter,
+                "PersistRoomSubject: exact room subject commit was ambiguous; reconciling exact durable subject before replying"
+            );
+            if reconcile_ambiguous_subject_commit(
+                room_registry,
+                &room,
+                &room_actor,
+                durable_recovery_snapshot.as_ref(),
+                waddle_xmpp::muc::SubjectState {
+                    texts: texts.clone(),
+                    setter: setter.clone(),
+                    setter_nick: setter_nick.to_string(),
+                    set_at,
+                },
+            )
+            .await
+            {
+                PersistRoomSubjectEventOutcome::Committed
+            } else {
+                retryable_subject_bounce(
+                    &message,
+                    &room,
+                    &sender,
+                    "This room's subject change is being reconciled; please retry.",
+                )
+            }
+        }
         Err(SendError::HandlerError(SetSubjectError::NotOwner)) => {
             warn!(
                 room = %room,
@@ -202,6 +235,45 @@ pub(super) async fn persist_room_subject_event(
             )
         }
     }
+}
+
+async fn reconcile_ambiguous_subject_commit(
+    room_registry: &ActorRef<RoomRegistryActor>,
+    room: &BareJid,
+    stale_actor: &ActorRef<RoomActor>,
+    durable_recovery_snapshot: Option<&waddle_xmpp::muc::room_actor::RoomSnapshot>,
+    intended_subject: waddle_xmpp::muc::SubjectState,
+) -> bool {
+    let Some(recovery_snapshot) = durable_recovery_snapshot else {
+        return false;
+    };
+    let _ = room_registry
+        .ask(DemoteRoomIfExactActor {
+            room_jid: room.clone(),
+            actor_ref: stale_actor.clone(),
+        })
+        .await;
+    let recovered_room = match room_registry
+        .ask(GetOrCreateRoom {
+            room_jid: room.clone(),
+            waddle_id: recovery_snapshot.room.waddle_id.clone(),
+            channel_id: recovery_snapshot.room.channel_id.clone(),
+            config: recovery_snapshot.room.config.clone(),
+        })
+        .await
+    {
+        Ok(room) => room,
+        Err(error) => {
+            warn!(room = %room, %error, "ambiguous subject reconciliation could not restore the room");
+            return false;
+        }
+    };
+    recovered_room
+        .actor_ref
+        .ask(GetSnapshot)
+        .await
+        .map(|snapshot| snapshot.room.subject == Some(intended_subject))
+        .unwrap_or(false)
 }
 
 fn retryable_subject_bounce(

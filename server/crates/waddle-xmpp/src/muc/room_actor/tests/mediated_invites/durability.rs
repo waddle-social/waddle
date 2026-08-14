@@ -133,6 +133,11 @@ async fn mediated_invite_authorization_fails_closed_while_durable_restore_is_pen
 async fn invite_grant_persist_failure_leaves_memory_unchanged_and_creates_no_token() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
     let store = FailNthAffiliationSaveStore::new(1);
+    crate::muc::durable::MucDurableStore::establish_claim_fence(
+        store.as_ref(),
+        &test_room().room_jid,
+        test_claim_fence(&test_room().room_jid),
+    );
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
@@ -266,6 +271,11 @@ async fn invite_grant_and_rollback_persist_the_exact_room_invitee_and_affiliatio
 async fn rollback_persist_failure_retains_the_exact_token_and_reservation_for_retry() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
     let store = FailNthAffiliationSaveStore::new(2);
+    crate::muc::durable::MucDurableStore::establish_claim_fence(
+        store.as_ref(),
+        &test_room().room_jid,
+        test_claim_fence(&test_room().room_jid),
+    );
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),

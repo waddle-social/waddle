@@ -65,6 +65,36 @@ async fn spawn_room_actor() -> ActorRef<RoomActor> {
     RoomActor::spawn(RoomActor::new(test_room(), test_secret()))
 }
 
+#[tokio::test]
+async fn restoring_live_roster_rederives_occupant_authorization() {
+    let mut stale_room = test_room();
+    stale_room.add_occupant(crate::muc::Occupant {
+        real_jid: test_full_jid("visitor"),
+        nick: "visitor".to_string(),
+        role: Role::Participant,
+        affiliation: crate::Affiliation::None,
+        is_remote: false,
+        home_server: None,
+    });
+    let mut authoritative_room = test_room();
+    authoritative_room.config.moderated = true;
+    let actor = RoomActor::spawn(RoomActor::new(authoritative_room, test_secret()));
+
+    actor
+        .ask(RestoreLiveRoster { room: stale_room })
+        .await
+        .expect("restore live roster");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+    let visitor = snapshot
+        .room
+        .occupants
+        .get("visitor")
+        .expect("restored visitor");
+    assert_eq!(visitor.affiliation, crate::Affiliation::None);
+    assert_eq!(visitor.role, Role::Visitor);
+}
+
 async fn current_admission_revision(actor: &ActorRef<RoomActor>) -> u64 {
     actor
         .ask(GetSnapshot)
@@ -1077,8 +1107,8 @@ async fn channel_reconciliation_invalidates_pre_policy_change_repairs() {
     actor
         .ask(ReconcileChannelBackedRoom {
             room_jid: "testroom@muc.example.com".parse().expect("room JID"),
-            waddle_id: "waddle-2".to_string(),
-            channel_id: "channel-2".to_string(),
+            waddle_id: crate::muc::durable::WaddleId::new("waddle-2".to_string()),
+            channel_id: crate::muc::durable::ChannelId::new("channel-2".to_string()),
             desired_config: RoomConfig {
                 members_only: true,
                 ..RoomConfig::default()
@@ -3510,79 +3540,112 @@ async fn health_check_replies_when_the_room_actor_is_idle() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the pre-mutation
-// fencing gate every durable-relevant mutation handler now runs.
+// ADR-0017 Phase 3 Slice 7: the durable commit is the ownership authority for
+// mutations that carry a durable delta. Zero-delta paths retain a direct probe.
 // ---------------------------------------------------------------------------
 
 /// A [`crate::muc::durable::MucDurableStore`] test double whose
-/// `check_exact_claim_fence` result is controlled by the test, so
-/// `RoomActor::gate_mutation` can be exercised without a real Postgres
-/// backend. `save_*` calls always succeed (or, when `fail_persist` is
-/// set, always fail, or when `lose_config_persist_ownership` is set,
-/// return exact ownership loss) — only the two-stage gate is under test
-/// here; the concrete Postgres fencing SQL itself is covered by
-/// `waddle-server::muc_durable`'s own Postgres-gated test suite.
+/// `check_exact_claim_fence` and durable-commit result are controlled by the
+/// test, so ownership handling can be exercised without a real Postgres
+/// backend. `save_*` calls always succeed (or, when `fail_persist` is set,
+/// always fail, or when `lose_config_persist_ownership` is set, return exact
+/// ownership loss). `commit_outcome_unknown` simulates a lost COMMIT
+/// acknowledgement after durable state may have advanced. The concrete
+/// Postgres fencing SQL itself is covered by `waddle-server::muc_durable`'s
+/// own Postgres-gated test suite.
 #[derive(Default)]
 struct FakeDurableStore {
-    /// `check_exact_claim_fence`'s result: `Some(true)` = owned, `Some(false)`
-    /// = deposed, `None` = simulate a transient backend error (fails
-    /// closed, per `gate_mutation`'s own contract).
+    /// Ownership result for both direct zero-delta probes and durable commits:
+    /// `Some(true)` = owned, `Some(false)` = deposed, `None` = transient
+    /// backend error (fails closed).
     fenced: std::sync::Mutex<Option<bool>>,
     fail_persist: bool,
+    commit_outcome_unknown: bool,
+    commit_config_outcome_unknown: bool,
     lose_config_persist_ownership: bool,
     lose_restore_ownership: bool,
     load_calls: std::sync::atomic::AtomicUsize,
     save_calls: std::sync::atomic::AtomicUsize,
     saved_affiliations: std::sync::Mutex<Vec<(BareJid, BareJid, Affiliation)>>,
+    established_fences:
+        std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
+    lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
+    next_revision: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeDurableStore {
+    fn with_established_test_fence(store: std::sync::Arc<Self>) -> std::sync::Arc<Self> {
+        let room_jid = test_room().room_jid;
+        <Self as crate::muc::durable::MucDurableStore>::establish_claim_fence(
+            &*store,
+            &room_jid,
+            test_claim_fence(&room_jid),
+        );
+        store
+    }
+
     fn owned() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             ..Default::default()
-        })
+        }))
     }
 
     fn deposed() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(false)),
             ..Default::default()
-        })
+        }))
     }
 
     fn transient_failure() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(None),
             ..Default::default()
-        })
+        }))
     }
 
     fn owned_but_persist_fails() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             fail_persist: true,
             lose_config_persist_ownership: false,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
             saved_affiliations: std::sync::Mutex::new(Vec::new()),
             ..Default::default()
-        })
+        }))
+    }
+
+    fn owned_but_commit_outcome_is_unknown() -> std::sync::Arc<Self> {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            commit_outcome_unknown: true,
+            ..Default::default()
+        }))
+    }
+
+    fn owned_but_config_commit_outcome_is_unknown() -> std::sync::Arc<Self> {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            commit_config_outcome_unknown: true,
+            ..Default::default()
+        }))
     }
 
     fn owned_but_config_persist_loses_ownership() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             lose_config_persist_ownership: true,
             ..Default::default()
-        })
+        }))
     }
 
     fn ownership_lost_during_restore() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             lose_restore_ownership: true,
             ..Default::default()
-        })
+        }))
     }
 
     fn save_call_count(&self) -> usize {
@@ -3596,9 +3659,99 @@ impl FakeDurableStore {
     fn set_fenced(&self, fenced: Option<bool>) {
         *self.fenced.lock().expect("lock") = fenced;
     }
+
+    fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
+        let lifecycle = *self
+            .lifecycle
+            .get_or_init(crate::muc::RoomLifecycleId::generate);
+        let revision = self
+            .next_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        crate::muc::RoomCommittedCoordinates {
+            lifecycle,
+            revision: crate::muc::RoomRevision::from_stored(revision as i64)
+                .expect("positive revision"),
+        }
+    }
 }
 
 impl crate::muc::durable::MucDurableStore for FakeDurableStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a crate::muc::RoomClaimFenceContext,
+        intent: crate::muc::RoomDurableMutation,
+    ) -> crate::muc::RoomCommitFuture<'a> {
+        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
+            return Box::pin(async move {
+                match error {
+                    crate::XmppError::OwnershipLost { .. } => {
+                        Err(crate::muc::RoomCommitError::NotOwner)
+                    }
+                    _ => Err(crate::muc::RoomCommitError::OwnershipUnavailable),
+                }
+            });
+        }
+        self.save_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
+        let fenced = *self.fenced.lock().expect("lock");
+        let lose_ownership = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
+            && self.lose_config_persist_ownership;
+        let config_commit = matches!(&intent, crate::muc::RoomDurableMutation::Config { .. });
+        let committed_affiliations = match intent {
+            crate::muc::RoomDurableMutation::Affiliation(entry)
+            | crate::muc::RoomDurableMutation::MediatedInviteGrant(entry)
+            | crate::muc::RoomDurableMutation::MediatedInviteRollback(entry) => vec![entry],
+            crate::muc::RoomDurableMutation::AffiliationBatch(entries)
+            | crate::muc::RoomDurableMutation::MembersOnlyEnforcement {
+                affiliations: entries,
+                ..
+            }
+            | crate::muc::RoomDurableMutation::Create {
+                initial_affiliations: entries,
+                ..
+            } => entries,
+            _ => Vec::new(),
+        };
+        let saved_affiliations = &self.saved_affiliations;
+        let committed_room = room_jid.clone();
+        let fail = self.fail_persist;
+        let commit_outcome_unknown =
+            self.commit_outcome_unknown || (self.commit_config_outcome_unknown && config_commit);
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            if !established {
+                Err(crate::muc::RoomCommitError::OwnershipUnavailable)
+            } else if fenced == Some(false) {
+                Err(crate::muc::RoomCommitError::NotOwner)
+            } else if fenced.is_none() {
+                Err(crate::muc::RoomCommitError::OwnershipUnavailable)
+            } else if lose_ownership {
+                Err(crate::muc::RoomCommitError::NotOwner)
+            } else if commit_outcome_unknown {
+                Err(crate::muc::RoomCommitError::CommitOutcomeUnknown)
+            } else if fail {
+                Err(crate::muc::RoomCommitError::Database(
+                    crate::muc::durable::RoomCommitDatabaseError::sanitized(),
+                ))
+            } else {
+                saved_affiliations.lock().expect("lock").extend(
+                    committed_affiliations.into_iter().map(|entry| {
+                        (
+                            committed_room.clone(),
+                            entry.jid,
+                            entry.affiliation.unwrap_or(crate::Affiliation::None),
+                        )
+                    }),
+                );
+                Ok(coordinates)
+            }
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3620,93 +3773,11 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         })
     }
 
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        self.save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fail = self.fail_persist;
-        let lose_ownership = self.lose_config_persist_ownership;
-        let entity = test_claim_fence(room_jid).entity;
-        Box::pin(async move {
-            if lose_ownership {
-                Err(crate::XmppError::OwnershipLost { entity })
-            } else if fail {
-                Err(crate::XmppError::internal(
-                    "simulated transient persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        self.save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fail = self.fail_persist;
-        Box::pin(async move {
-            if fail {
-                Err(crate::XmppError::internal(
-                    "simulated transient persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        entry: &'a crate::muc::affiliation::AffiliationEntry,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        self.save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.saved_affiliations.lock().expect("lock").push((
-            room_jid.clone(),
-            entry.jid.clone(),
-            entry.affiliation,
-        ));
-        let fail = self.fail_persist;
-        Box::pin(async move {
-            if fail {
-                Err(crate::XmppError::internal(
-                    "simulated transient persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: crate::muc::RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
     }
 
     fn check_exact_claim_fence<'a>(
@@ -3733,6 +3804,10 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
 struct FailNthAffiliationSaveStore {
     fail_on_call: usize,
     save_calls: std::sync::atomic::AtomicUsize,
+    lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
+    next_revision: std::sync::atomic::AtomicUsize,
+    established_fences:
+        std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
 }
 
 impl FailNthAffiliationSaveStore {
@@ -3740,15 +3815,83 @@ impl FailNthAffiliationSaveStore {
         std::sync::Arc::new(Self {
             fail_on_call,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
+            lifecycle: std::sync::OnceLock::new(),
+            next_revision: std::sync::atomic::AtomicUsize::new(0),
+            established_fences: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
     fn save_call_count(&self) -> usize {
         self.save_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
+        let lifecycle = *self
+            .lifecycle
+            .get_or_init(crate::muc::RoomLifecycleId::generate);
+        let revision = self
+            .next_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        crate::muc::RoomCommittedCoordinates {
+            lifecycle,
+            revision: crate::muc::RoomRevision::from_stored(revision as i64)
+                .expect("positive revision"),
+        }
+    }
 }
 
 impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a crate::muc::RoomClaimFenceContext,
+        intent: crate::muc::RoomDurableMutation,
+    ) -> crate::muc::RoomCommitFuture<'a> {
+        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
+            return Box::pin(async move {
+                match error {
+                    crate::XmppError::OwnershipLost { .. } => {
+                        Err(crate::muc::RoomCommitError::NotOwner)
+                    }
+                    _ => Err(crate::muc::RoomCommitError::OwnershipUnavailable),
+                }
+            });
+        }
+        let counts_as_affiliation_commit = matches!(
+            intent,
+            crate::muc::RoomDurableMutation::Affiliation(_)
+                | crate::muc::RoomDurableMutation::AffiliationBatch(_)
+                | crate::muc::RoomDurableMutation::MembersOnlyEnforcement { .. }
+                | crate::muc::RoomDurableMutation::MediatedInviteGrant(_)
+                | crate::muc::RoomDurableMutation::MediatedInviteRollback(_)
+                | crate::muc::RoomDurableMutation::Create { .. }
+        );
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
+        let fail = if counts_as_affiliation_commit {
+            let call = self
+                .save_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            call == self.fail_on_call
+        } else {
+            false
+        };
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            if !established {
+                Err(crate::muc::RoomCommitError::OwnershipUnavailable)
+            } else if fail {
+                Err(crate::muc::RoomCommitError::Database(
+                    crate::muc::durable::RoomCommitDatabaseError::sanitized(),
+                ))
+            } else {
+                Ok(coordinates)
+            }
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3762,60 +3905,11 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
         })
     }
 
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _entry: &'a crate::muc::affiliation::AffiliationEntry,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        if let Err(error) = validate_test_claim_fence(room_jid, fence) {
-            return Box::pin(async move { Err(error) });
-        }
-        let call = self
-            .save_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let fail = call == self.fail_on_call;
-        Box::pin(async move {
-            if fail {
-                Err(crate::XmppError::internal(
-                    "simulated affiliation persist failure",
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: crate::muc::RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
     }
 
     fn check_exact_claim_fence<'a>(
@@ -3831,15 +3925,54 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
 async fn spawn_room_actor_with_store(
     store: std::sync::Arc<dyn crate::muc::durable::MucDurableStore>,
 ) -> ActorRef<RoomActor> {
-    let actor = spawn_room_actor().await;
+    spawn_room_actor_with_config_and_store(RoomConfig::default(), store).await
+}
+
+async fn spawn_room_actor_with_config_and_store(
+    mut config: RoomConfig,
+    store: std::sync::Arc<dyn crate::muc::durable::MucDurableStore>,
+) -> ActorRef<RoomActor> {
+    config.name = "Test Room".to_string();
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    let actor = RoomActor::spawn(RoomActor::new(
+        MucRoom::new(
+            room_jid,
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            config,
+        ),
+        test_secret(),
+    ));
+    let room_jid = test_room().room_jid;
+    let claim_fence = test_claim_fence(&room_jid);
+    store.establish_claim_fence(&room_jid, claim_fence.clone());
     actor
-        .ask(RestoreDurableRoomState {
-            store,
-            claim_fence: test_claim_fence(&test_room().room_jid),
-        })
+        .ask(RestoreDurableRoomState { store, claim_fence })
         .await
         .expect("restore");
     actor
+}
+
+async fn seal_for_destroy(actor: &ActorRef<RoomActor>) {
+    actor
+        .ask(SealForDestroy {
+            attempt: crate::muc::DestroyAttemptId::generate(),
+        })
+        .await
+        .expect("pre-seal for destroy");
+}
+
+fn correlated_groupchat_message() -> xmpp_parsers::message::Message {
+    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    message.id = Some(xmpp_parsers::message::Id(
+        "sealed-groupchat-message".to_string(),
+    ));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "sealed room message".into(),
+    );
+    message
 }
 
 #[tokio::test]
@@ -3886,6 +4019,10 @@ struct FlakyThenRecoveringStore {
     fail_count: usize,
     calls: std::sync::atomic::AtomicUsize,
     banned: BareJid,
+    lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
+    next_revision: std::sync::atomic::AtomicUsize,
+    established_fences:
+        std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
 }
 
 impl FlakyThenRecoveringStore {
@@ -3894,15 +4031,55 @@ impl FlakyThenRecoveringStore {
             fail_count,
             calls: std::sync::atomic::AtomicUsize::new(0),
             banned,
+            lifecycle: std::sync::OnceLock::new(),
+            next_revision: std::sync::atomic::AtomicUsize::new(0),
+            established_fences: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
     fn call_count(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
+        let lifecycle = *self
+            .lifecycle
+            .get_or_init(crate::muc::RoomLifecycleId::generate);
+        let revision = self
+            .next_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        crate::muc::RoomCommittedCoordinates {
+            lifecycle,
+            revision: crate::muc::RoomRevision::from_stored(revision as i64)
+                .expect("positive revision"),
+        }
+    }
 }
 
 impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
+    fn commit_room_mutation<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a crate::muc::RoomClaimFenceContext,
+        _intent: crate::muc::RoomDurableMutation,
+    ) -> crate::muc::RoomCommitFuture<'a> {
+        let validation = validate_test_claim_fence(room_jid, fence);
+        let established =
+            self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
+        let coordinates = self.next_commit_coordinates();
+        Box::pin(async move {
+            validation.map_err(|error| match error {
+                crate::XmppError::OwnershipLost { .. } => crate::muc::RoomCommitError::NotOwner,
+                _ => crate::muc::RoomCommitError::OwnershipUnavailable,
+            })?;
+            if !established {
+                return Err(crate::muc::RoomCommitError::OwnershipUnavailable);
+            }
+            Ok(coordinates)
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3937,45 +4114,11 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
         })
     }
 
-    fn save_config_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _waddle_id: &'a str,
-        _channel_id: &'a str,
-        _config: &'a RoomConfig,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_subject_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _subject: Option<&'a SubjectState>,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn save_affiliation_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        _entry: &'a crate::muc::affiliation::AffiliationEntry,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
-    }
-
-    fn delete_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-        fence: &'a crate::muc::RoomClaimFenceContext,
-    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
-        let validation = validate_test_claim_fence(room_jid, fence);
-        Box::pin(async move { validation })
+    fn establish_claim_fence(&self, room_jid: &BareJid, fence: crate::muc::RoomClaimFenceContext) {
+        self.established_fences
+            .lock()
+            .expect("lock")
+            .insert(room_jid.clone(), fence);
     }
 
     fn check_exact_claim_fence<'a>(
@@ -4005,10 +4148,17 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
     // in-line retry (calls 0 and 1); the SECOND retry (call 2) succeeds.
     let store = FlakyThenRecoveringStore::new(2, banned.clone());
     let actor = spawn_room_actor().await;
+    let room_jid = test_room().room_jid;
+    let claim_fence = test_claim_fence(&room_jid);
+    <FlakyThenRecoveringStore as crate::muc::durable::MucDurableStore>::establish_claim_fence(
+        &*store,
+        &room_jid,
+        claim_fence.clone(),
+    );
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
-            claim_fence: test_claim_fence(&test_room().room_jid),
+            claim_fence,
         })
         .await
         .expect("restore ask itself always replies, even on a load failure");
@@ -4072,7 +4222,7 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
 }
 
 #[tokio::test]
-async fn update_config_gate_blocks_the_mutation_when_deposed() {
+async fn update_config_durable_commit_blocks_the_mutation_when_deposed() {
     let store = FakeDurableStore::deposed();
     let actor = spawn_room_actor_with_store(store.clone()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
@@ -4091,7 +4241,7 @@ async fn update_config_gate_blocks_the_mutation_when_deposed() {
     let after = actor.ask(GetConfig).await.expect("ask").members_only;
     assert_eq!(
         after, original,
-        "a gated-out mutation must never have applied in-memory"
+        "a rejected durable commit must never apply the mutation in memory"
     );
 
     store.set_fenced(None);
@@ -4112,7 +4262,7 @@ async fn update_config_gate_blocks_the_mutation_when_deposed() {
 }
 
 #[tokio::test]
-async fn update_config_gate_allows_the_mutation_when_owned() {
+async fn update_config_durable_commit_allows_the_mutation_when_owned() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store.clone()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
@@ -4129,7 +4279,7 @@ async fn update_config_gate_allows_the_mutation_when_owned() {
 }
 
 #[tokio::test]
-async fn update_config_gate_fails_closed_on_a_transient_fencing_error() {
+async fn update_config_durable_commit_fails_closed_on_transient_ownership_error() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::transient_failure()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
 
@@ -4185,6 +4335,431 @@ async fn inactive_seal_strengthens_to_ownership_lost_on_join() {
 }
 
 #[tokio::test]
+async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
+    use crate::muc::pin::{PinPreview, PinStateChange, PinnedEntry};
+    use chrono::Utc;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Moderator,
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    // Zero-durable-delta admin work (a role-only change) reaches only the
+    // pre-mutation gate; the destroy pre-seal must refuse it so no kicks,
+    // presence, or SFU effects race the terminal commit.
+    let role_only = actor
+        .ask(ApplyAdminItems {
+            sender_jid: alice.clone(),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::Visitor),
+                reason: None,
+            }],
+        })
+        .await;
+    assert!(
+        matches!(
+            role_only,
+            Err(SendError::HandlerError(
+                AdminApplyError::OwnershipUnavailable
+            ))
+        ),
+        "destroy pre-seal must refuse zero-delta mutations: {role_only:?}"
+    );
+
+    // Pins are ungated in-memory state; the seal must still make them inert.
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    let target = StanzaId::new(
+        "pin-during-destroy".to_string(),
+        jid::Jid::from(room_jid.clone()),
+    );
+    let pin_result = actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(PinnedEntry {
+                target_stanza_id: target,
+                pinner_jid: "admin@example.com".parse().expect("valid jid"),
+                pinned_at: Utc::now(),
+                preview: PinPreview::new(
+                    "alice@example.com".parse().expect("valid jid"),
+                    Some("alice".into()),
+                    "sealed",
+                    Utc::now(),
+                ),
+            }),
+        })
+        .await;
+    assert!(
+        matches!(
+            pin_result,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "destroy pre-seal must refuse pin state changes: {pin_result:?}"
+    );
+    assert!(
+        actor
+            .ask(GetPinList)
+            .await
+            .expect("pins readable")
+            .is_empty(),
+        "a sealed actor must not mutate pin state"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_members_only_enforcement() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice,
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(matches!(
+        actor.ask(EnforceMembersOnly).await,
+        Err(SendError::HandlerError(
+            RoomMutationError::OwnershipUnavailable
+        ))
+    ));
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        1,
+        "sealed enforcement must leave the occupant set untouched"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    let attempt = crate::muc::DestroyAttemptId::generate();
+    actor
+        .ask(SealForDestroy { attempt })
+        .await
+        .expect("pre-seal for destroy");
+
+    assert!(
+        actor
+            .ask(LeaveByRealJid { sender_jid: alice })
+            .await
+            .expect("leave ask")
+            .is_none(),
+        "a sealed actor must not emit leave effects from a queued session departure"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        0,
+        "a destroy that reopens must not restore a session that departed while sealed"
+    );
+    assert!(actor
+        .ask(UnsealDestroy { attempt })
+        .await
+        .expect("matching unseal reply"));
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        0,
+        "unsealing a failed destroy retains the departure reconciliation"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_presence_reflection() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(PresenceUpdateData { sender_jid: alice })
+            .await
+            .expect("presence ask")
+            .is_none(),
+        "a sealed actor must not return broadcast recipients for plain presence reflection"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_muji_upserts() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                muji: audio_muji(),
+            })
+            .await
+            .expect("muji ask")
+            .is_none(),
+        "a sealed actor must refuse queued Muji advertisements"
+    );
+    assert!(
+        actor
+            .ask(GetActiveMujiSessions)
+            .await
+            .expect("active Muji sessions")
+            .is_empty(),
+        "refused Muji work must not mutate active call state"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_muji_clears() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+    actor
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("seed muji")
+        .expect("occupant can advertise before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(ClearMujiPresence {
+                sender_jid: alice.clone(),
+            })
+            .await
+            .expect("clear ask")
+            .is_none(),
+        "a sealed actor must not clear call presence or emit reflected clears"
+    );
+    assert_eq!(
+        actor
+            .ask(GetActiveMujiSessions)
+            .await
+            .expect("active Muji sessions"),
+        vec![alice],
+        "refused clears must leave prior Muji state untouched"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_in_call_state_updates() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    assert!(
+        actor
+            .ask(UpsertInCallState {
+                sender_jid: alice,
+                state: crate::xep::InCallPresenceState {
+                    hand_raised: true,
+                    muted: false,
+                },
+            })
+            .await
+            .expect("in-call ask")
+            .is_none(),
+        "a sealed actor must not mutate in-call state or emit reflected presence"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .in_call_sessions_for_nick("alice")
+            .is_empty(),
+        "refused in-call updates must leave the session state empty"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_legacy_leave_handler() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    let leave = actor
+        .ask(Leave {
+            nick: "alice".to_string(),
+        })
+        .await;
+    assert!(
+        matches!(
+            leave,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "a sealed actor must reject the legacy leave mutation path: {leave:?}"
+    );
+    assert_eq!(
+        actor.ask(OccupantCount).await.expect("occupant count"),
+        1,
+        "refused legacy leave must not remove the occupant"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_groupchat_broadcasts() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    let broadcast = actor
+        .ask(BuildGroupchatBroadcast {
+            sender_jid: alice,
+            message: correlated_groupchat_message(),
+        })
+        .await;
+    assert!(
+        matches!(
+            broadcast,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "a sealed actor must not fan out queued groupchat messages: {broadcast:?}"
+    );
+}
+
+#[tokio::test]
+async fn destroy_seal_blocks_room_dispatch_snapshots() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join before seal");
+
+    seal_for_destroy(&actor).await;
+
+    let snapshot = actor.ask(GetRoomSnapshot { sender_jid: alice }).await;
+    assert!(
+        matches!(
+            snapshot,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ),
+        "a sealed actor must not mint dispatch-authorizing room snapshots: {snapshot:?}"
+    );
+}
+
+#[tokio::test]
 async fn ownership_lost_seal_blocks_a_later_mutation() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store.clone()).await;
@@ -4226,7 +4801,7 @@ async fn ownership_lost_seal_blocks_a_later_mutation() {
 }
 
 #[tokio::test]
-async fn update_config_surfaces_a_typed_persist_failure_after_mutating() {
+async fn update_config_surfaces_a_typed_persist_failure_without_mutating_memory() {
     let store = FakeDurableStore::owned_but_persist_fails();
     let actor = spawn_room_actor_with_store(store.clone()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
@@ -4243,11 +4818,11 @@ async fn update_config_surfaces_a_typed_persist_failure_after_mutating() {
     );
     assert_eq!(store.save_call_count(), 1);
 
-    // FIX 2: the in-memory mutation still committed (undoing it risks a
-    // worse inconsistency than leaving it applied-but-not-yet-durable) —
-    // only the caller's visibility into durable convergence changed.
     let after = actor.ask(GetConfig).await.expect("ask").members_only;
-    assert_ne!(after, original, "the in-memory mutation still applies");
+    assert_eq!(
+        after, original,
+        "a failed durable commit must leave the in-memory config unchanged"
+    );
 }
 
 #[tokio::test]
@@ -4258,25 +4833,22 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
 
     let mut changed = original.clone();
     changed.members_only = !changed.members_only;
-    let result = actor
-        .ask(UpdateConfig {
-            config: changed.clone(),
-        })
-        .await;
+    let result = actor.ask(UpdateConfig { config: changed }).await;
     assert!(
         matches!(
             result,
-            Err(SendError::HandlerError(
-                RoomMutationError::OwnershipLostAfterApply
-            ))
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
         ),
-        "expected OwnershipLostAfterApply, got: {result:?}"
+        "expected NotOwner, got: {result:?}"
     );
     assert_eq!(store.save_call_count(), 1, "the fenced write was attempted");
     assert_eq!(
-        actor.ask(GetConfig).await.expect("mutated config"),
-        changed,
-        "the local config mutation remains applied after the durable ownership loss"
+        actor
+            .ask(GetConfig)
+            .await
+            .expect("config after failed commit"),
+        original,
+        "a lost durable claim must leave config memory unchanged"
     );
     assert_eq!(
         actor.ask(GetRoomSealState).await.expect("typed seal state"),
@@ -4300,7 +4872,71 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
 }
 
 #[tokio::test]
-async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
+async fn unknown_durable_commit_outcome_seals_actor_before_it_can_serve_stale_memory() {
+    let store = FakeDurableStore::owned_but_commit_outcome_is_unknown();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let original = actor.ask(GetConfig).await.expect("original config");
+
+    let mut changed = original.clone();
+    changed.members_only = !changed.members_only;
+    let result = actor
+        .ask(UpdateConfig {
+            config: changed.clone(),
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                RoomMutationError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable commit must retire the stale actor: {result:?}"
+    );
+    assert_eq!(
+        store.save_call_count(),
+        1,
+        "the ambiguous commit was attempted"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must become non-serving until the registry retires it"
+    );
+
+    let later = actor.ask(UpdateConfig { config: original }).await;
+    assert!(
+        matches!(
+            later,
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+        ),
+        "the sealed actor must never attempt a follow-up durable mutation: {later:?}"
+    );
+    assert_eq!(
+        store.save_call_count(),
+        1,
+        "a sealed actor must not write a possibly stale follow-up mutation"
+    );
+
+    let join = actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await;
+    assert!(
+        matches!(
+            join,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ),
+        "the stale actor must refuse admissions until a fresh actor restores durable state: {join:?}"
+    );
+}
+
+#[tokio::test]
+async fn change_affiliation_durable_commit_blocks_the_mutation_when_deposed() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
     let jid: BareJid = "carol@example.com".parse().expect("valid jid");
 
@@ -4322,7 +4958,192 @@ async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
     assert_eq!(
         affiliation,
         Affiliation::None,
-        "a gated-out affiliation change must never have applied"
+        "a rejected durable affiliation commit must never apply in memory"
+    );
+}
+
+#[tokio::test]
+async fn change_affiliation_surfaces_ambiguous_commit_outcome_without_compensation_proof() {
+    let actor =
+        spawn_room_actor_with_store(FakeDurableStore::owned_but_commit_outcome_is_unknown()).await;
+    let jid: BareJid = "carol@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(ChangeAffiliation {
+            jid: jid.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                AffiliationMutationError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable affiliation commit must not masquerade as a failed grant: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must still retire after the ambiguous commit"
+    );
+    assert_eq!(
+        actor
+            .ask(GetAffiliation { jid })
+            .await
+            .expect("affiliation query"),
+        Affiliation::None,
+        "the actor must not apply an in-memory affiliation after an ambiguous durable commit"
+    );
+}
+
+#[tokio::test]
+async fn apply_admin_items_surfaces_ambiguous_commit_outcome_without_compensation_proof() {
+    let actor =
+        spawn_room_actor_with_store(FakeDurableStore::owned_but_commit_outcome_is_unknown()).await;
+    let jid: BareJid = "dana@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(jid.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Member),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                AdminApplyError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable admin batch must stay ambiguous instead of masquerading as a clean rollback: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must still retire after the ambiguous admin batch"
+    );
+    assert_eq!(
+        actor
+            .ask(GetAffiliation { jid })
+            .await
+            .expect("affiliation query"),
+        Affiliation::None,
+        "the actor must not apply an in-memory affiliation after an ambiguous durable admin batch"
+    );
+}
+
+#[tokio::test]
+async fn update_group_dm_config_surfaces_ambiguous_commit_outcome_without_compensation_proof() {
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            group_dm: true,
+            members_only: true,
+            ..RoomConfig::default()
+        },
+        FakeDurableStore::owned_but_config_commit_outcome_is_unknown(),
+    )
+    .await;
+    let alice_bare: BareJid = "alice@example.com".parse().expect("valid jid");
+    let alice = test_full_jid("alice");
+    let config = actor.ask(GetConfig).await.expect("config");
+    actor
+        .ask(ChangeAffiliation {
+            jid: alice_bare,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("member grant");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+
+    let result = actor
+        .ask(UpdateGroupDmConfigByMember {
+            config,
+            sender_jid: alice,
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable group-DM rename must stay ambiguous instead of masquerading as a failed ownership check: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_op_affiliation_change_still_checks_ownership_when_deposed() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+    let jid: BareJid = "carol@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(ChangeAffiliation {
+            jid,
+            affiliation: Affiliation::None,
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(AffiliationMutationError::NotOwner))
+    ));
+}
+
+#[tokio::test]
+async fn set_subject_surfaces_ambiguous_commit_outcome_without_mutating() {
+    let actor =
+        spawn_room_actor_with_store(FakeDurableStore::owned_but_commit_outcome_is_unknown()).await;
+    let setter: BareJid = "alice@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(SetSubject {
+            texts: RoomSubjectTexts::from_iter([(String::new(), "new subject".to_string())]),
+            setter,
+            setter_nick: "alice".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                SetSubjectError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable subject commit must stay ambiguous instead of masquerading as ownership loss: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must still retire after the ambiguous subject commit"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("subject query")
+            .room
+            .subject
+            .is_none(),
+        "the actor must not apply an in-memory subject after an ambiguous durable commit"
     );
 }
 
@@ -5321,5 +6142,46 @@ async fn banned_join_denial_reason_is_banned_even_in_members_only_room() {
             }))
         ),
         "plain non-member keeps the MembersOnly reason, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn destroy_unseal_only_reopens_the_matching_attempt() {
+    let actor = spawn_room_actor().await;
+    let first = crate::muc::DestroyAttemptId::generate();
+    let second = crate::muc::DestroyAttemptId::generate();
+
+    assert_eq!(
+        actor
+            .ask(SealForDestroy { attempt: first })
+            .await
+            .expect("pre-seal first destroy"),
+        RoomSealState::Destroying { attempt: first }
+    );
+    assert_eq!(
+        actor
+            .ask(SealForDestroy { attempt: second })
+            .await
+            .expect("do not replace active destroy attempt"),
+        RoomSealState::Destroying { attempt: first }
+    );
+    assert!(actor
+        .ask(UnsealDestroy { attempt: first })
+        .await
+        .expect("matching unseal reply"));
+    assert_eq!(
+        actor
+            .ask(SealForDestroy { attempt: second })
+            .await
+            .expect("pre-seal newer destroy"),
+        RoomSealState::Destroying { attempt: second }
+    );
+    assert!(!actor
+        .ask(UnsealDestroy { attempt: first })
+        .await
+        .expect("stale unseal reply"));
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal state"),
+        RoomSealState::Destroying { attempt: second }
     );
 }
