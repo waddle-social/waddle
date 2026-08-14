@@ -691,6 +691,7 @@ async fn interpret_with_depth(
                     &room,
                     &target_message_id,
                     &retraction_message,
+                    deps.ingress_effect_capture.as_ref(),
                 )
                 .await;
                 if tombstone_outcome == GroupchatRetractionTombstoneOutcome::Replaced {

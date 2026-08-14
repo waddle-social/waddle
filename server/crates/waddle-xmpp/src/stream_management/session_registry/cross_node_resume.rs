@@ -411,7 +411,7 @@ impl InMemorySmSessionRegistry {
                     return self
                         .classify_window_expiry(&entity)
                         .await
-                        .map(CrossNodeResumeStage::Terminal)
+                        .map(CrossNodeResumeStage::Terminal);
                 }
             };
             if let Some(persisted) = persisted {

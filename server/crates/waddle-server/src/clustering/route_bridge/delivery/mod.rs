@@ -95,6 +95,7 @@ pub(super) fn no_client_reply_outcome_with_commit_state_and_join_repair(
         maybe_committed,
         join_repair_allowed,
         relay_target: None,
+        target_claim: None,
     }
 }
 

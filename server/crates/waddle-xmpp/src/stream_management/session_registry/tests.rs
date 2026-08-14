@@ -926,7 +926,10 @@ async fn terminal_release_retry_clears_retained_exact_fence() {
         .expect("take session");
     assert_eq!(registry.pending_claim_release_count(), 1);
     assert!(
-        registry.live_session_ids().expect("live session snapshot").is_empty(),
+        registry
+            .live_session_ids()
+            .expect("live session snapshot")
+            .is_empty(),
         "a terminal exact-release retry is not a resumable session and must not shield pending-delivery claims"
     );
     assert_eq!(
@@ -2459,6 +2462,46 @@ async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
             .iter()
             .any(|entry| entry.stanza_xml.contains("<iq")),
         "iq frame must remain (not a message)"
+    );
+}
+
+#[tokio::test]
+async fn xep_0198_scrub_for_tombstone_with_entries_returns_exact_identity() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(make_test_session_with_unacked(
+            "stream-tomb-identities",
+            vec![
+                (
+                    11,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='target' type='chat'><body>secret</body></message>"
+                        .to_string(),
+                ),
+                (
+                    12,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='other' type='chat'><body>safe</body></message>"
+                        .to_string(),
+                ),
+            ],
+        ))
+        .await
+        .unwrap();
+
+    let scrubbed = registry
+        .scrub_unacked_for_tombstone_with_entries(&direct_target(
+            "target",
+            "alice@example.com",
+            "user@example.com",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scrubbed.removed_count, 1);
+    assert_eq!(
+        scrubbed.entries,
+        vec![TombstoneScrubbedSmEntry {
+            stream_id: crate::pending_delivery::SmSessionId::new("stream-tomb-identities"),
+            sequence: 11,
+        }]
     );
 }
 

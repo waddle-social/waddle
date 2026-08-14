@@ -2,7 +2,11 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::core::{DetachClaimFenceReservation, InMemorySmSessionRegistry};
-use super::{DetachedSession, PendingPromotionRetryRetention, SmRegistryError, SmSessionRegistry};
+use super::{
+    DetachedSession, PendingPromotionRetryRetention, SmRegistryError, SmSessionRegistry,
+    TombstoneScrubbedSmEntries, TombstoneScrubbedSmEntry,
+};
+use crate::pending_delivery::SmSessionId;
 use crate::tombstone::{matching_tombstone_sequences, TombstoneTarget};
 
 struct DetachReservationGuard<'a> {
@@ -449,6 +453,16 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         &self,
         target: &TombstoneTarget,
     ) -> Result<usize, SmRegistryError> {
+        Ok(self
+            .scrub_unacked_for_tombstone_with_entries(target)
+            .await?
+            .removed_count)
+    }
+
+    async fn scrub_unacked_for_tombstone_with_entries(
+        &self,
+        target: &TombstoneTarget,
+    ) -> Result<TombstoneScrubbedSmEntries, SmRegistryError> {
         // Phase 0 (round-2 review R2): record the tombstone identity
         // BEFORE any scrub phase runs so a promotion already holding a
         // drained copy of a session (off both maps, pending row not
@@ -555,7 +569,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // and storage stay consistent, and the caller's error path
         // logs that the pre-scrub stanza may still replay so the
         // failure is never silent.
-        let mut removed_total = 0usize;
+        let mut removed_entries = Vec::new();
         let mut durable_failures = 0usize;
         for (stream_id, sequences) in matched {
             let stream_lock = self.stream_lock(&stream_id)?;
@@ -585,18 +599,26 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
                 match sessions.get_mut(&stream_id) {
                     Some(session) => {
-                        let before = session.unacked_stanzas.len();
+                        let removed = session
+                            .unacked_stanzas
+                            .iter()
+                            .filter(|entry| {
+                                entry.original_receipt_at <= scrub_horizon
+                                    && sequences.contains(&entry.sequence)
+                            })
+                            .map(|entry| entry.sequence)
+                            .collect::<Vec<_>>();
                         session.unacked_stanzas.retain(|entry| {
                             entry.original_receipt_at > scrub_horizon
                                 || !sequences.contains(&entry.sequence)
                         });
-                        Some(before - session.unacked_stanzas.len())
+                        Some(removed)
                     }
                     None => None,
                 }
             };
             let removed_here = match removed_here {
-                Some(count) => Some(count),
+                Some(removed) => Some(removed),
                 None => {
                     let mut claimed = self
                         .claimed_sessions
@@ -604,19 +626,27 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                         .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
                     match claimed.get_mut(&stream_id) {
                         Some(session) => {
-                            let before = session.unacked_stanzas.len();
+                            let removed = session
+                                .unacked_stanzas
+                                .iter()
+                                .filter(|entry| {
+                                    entry.original_receipt_at <= scrub_horizon
+                                        && sequences.contains(&entry.sequence)
+                                })
+                                .map(|entry| entry.sequence)
+                                .collect::<Vec<_>>();
                             session.unacked_stanzas.retain(|entry| {
                                 entry.original_receipt_at > scrub_horizon
                                     || !sequences.contains(&entry.sequence)
                             });
-                            Some(before - session.unacked_stanzas.len())
+                            Some(removed)
                         }
                         None => None,
                     }
                 }
             };
             let removed_here = match removed_here {
-                Some(count) => count,
+                Some(removed) => removed,
                 None => {
                     let mut retries = self
                         .pending_promotion_retries
@@ -624,18 +654,31 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                         .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
                     match retries.get_mut(&stream_id) {
                         Some(session) => {
-                            let before = session.unacked_stanzas.len();
+                            let removed = session
+                                .unacked_stanzas
+                                .iter()
+                                .filter(|entry| {
+                                    entry.original_receipt_at <= scrub_horizon
+                                        && sequences.contains(&entry.sequence)
+                                })
+                                .map(|entry| entry.sequence)
+                                .collect::<Vec<_>>();
                             session.unacked_stanzas.retain(|entry| {
                                 entry.original_receipt_at > scrub_horizon
                                     || !sequences.contains(&entry.sequence)
                             });
-                            before - session.unacked_stanzas.len()
+                            removed
                         }
-                        None => 0,
+                        None => Vec::new(),
                     }
                 }
             };
-            removed_total += removed_here;
+            removed_entries.extend(removed_here.into_iter().map(|sequence| {
+                TombstoneScrubbedSmEntry {
+                    stream_id: SmSessionId::new(stream_id.clone()),
+                    sequence,
+                }
+            }));
         }
 
         // Phase 4 (durable-side sweep): durable rows can exist for
@@ -682,7 +725,14 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     .await
                 {
                     Ok(deleted) => {
-                        removed_total += deleted as usize;
+                        if deleted > 0 {
+                            removed_entries.extend(sequences.iter().copied().map(|sequence| {
+                                TombstoneScrubbedSmEntry {
+                                    stream_id: SmSessionId::new(stream_id.clone()),
+                                    sequence,
+                                }
+                            }));
+                        }
                         for inventory in [
                             &self.sessions,
                             &self.claimed_sessions,
@@ -722,6 +772,9 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                  stream(s); matching entries were preserved for retry"
             )));
         }
-        Ok(removed_total)
+        Ok(TombstoneScrubbedSmEntries {
+            removed_count: removed_entries.len(),
+            entries: removed_entries,
+        })
     }
 }

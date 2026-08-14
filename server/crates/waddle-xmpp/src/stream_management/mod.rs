@@ -41,8 +41,8 @@ pub use session_registry::{
     DetachedUnackedStanza, InMemorySmSessionRegistry, PendingPromotionRetryRetention,
     RecentTombstoneRecord, ReclaimedClaimReservation, ReclaimedHydrationOutcome,
     RemoteResumeAskOutcome, RemoteResumeAsker, ResumableSessionProbe, SmClaimCompletion,
-    SmRegistryError, SmSessionRegistry, StealTicket, DEFAULT_MAX_SESSIONS,
-    TOMBSTONE_CLOCK_SKEW_SLACK,
+    SmRegistryError, SmSessionRegistry, StealTicket, TombstoneScrubbedSmEntries,
+    TombstoneScrubbedSmEntry, DEFAULT_MAX_SESSIONS, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
 pub use shadow_ordinal::ShadowOrdinal;
 pub use stanzas::{SmAck, SmEnable, SmEnabled, SmFailed, SmRequest, SmResume, SmResumed, SmStanza};

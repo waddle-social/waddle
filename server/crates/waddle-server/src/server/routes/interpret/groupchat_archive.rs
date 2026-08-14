@@ -389,6 +389,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         room,
         target_message_id,
         retraction_message,
+        None,
     )
     .await
     .tombstoned()
@@ -403,6 +404,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
+    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
 ) -> GroupchatRetractionTombstoneOutcome {
     // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
     // retraction names the target by the room-assigned XEP-0359
@@ -460,6 +462,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
             pending_storage,
             &scrub_target,
             "ApplyGroupchatRetractionTombstone",
+            capture,
         )
         .await;
         return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
@@ -514,6 +517,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
+                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
@@ -529,6 +533,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
+                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::NotFound;
@@ -545,6 +550,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
+                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::Failed;
@@ -563,6 +569,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
         pending_storage,
         &scrub_target,
         "ApplyGroupchatRetractionTombstone",
+        capture,
     )
     .await;
     GroupchatRetractionTombstoneOutcome::Replaced
@@ -592,17 +599,26 @@ pub(super) async fn scrub_unacked_for_tombstone(
     >,
     target: &waddle_xmpp::tombstone::TombstoneTarget,
     site: &'static str,
+    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
 ) {
+    let mut sm_entries = Vec::new();
+    let mut pending_rows = Vec::new();
     if let Some(sm) = sm_session_registry {
         use waddle_xmpp::stream_management::SmSessionRegistry as _;
-        match sm.scrub_unacked_for_tombstone(target).await {
-            Ok(removed) if removed > 0 => {
+        match sm.scrub_unacked_for_tombstone_with_entries(target).await {
+            Ok(removed) if removed.removed_count > 0 => {
                 debug!(
                     target = target.id(),
                     archive = %target.archive_jid(),
-                    removed,
+                    removed = removed.removed_count,
                     "{site}: scrubbed unacked SM queue entries for tombstoned message"
                 );
+                sm_entries.extend(removed.entries.into_iter().map(|entry| {
+                    waddle_xmpp::ingress::TombstoneReplaySmEntry {
+                        stream: entry.stream_id,
+                        sequence: entry.sequence,
+                    }
+                }));
             }
             Ok(_) => {}
             Err(error) => {
@@ -616,14 +632,15 @@ pub(super) async fn scrub_unacked_for_tombstone(
         }
     }
     if let Some(pending) = pending_storage {
-        match pending.scrub_for_tombstone(target).await {
-            Ok(removed) if removed > 0 => {
+        match pending.scrub_for_tombstone_with_row_ids(target).await {
+            Ok(removed) if removed.removed_count > 0 => {
                 debug!(
                     target = target.id(),
                     archive = %target.archive_jid(),
-                    removed,
+                    removed = removed.removed_count,
                     "{site}: scrubbed pending_delivery rows for tombstoned message"
                 );
+                pending_rows.extend(removed.row_ids);
             }
             Ok(_) => {}
             Err(error) => {
@@ -635,6 +652,32 @@ pub(super) async fn scrub_unacked_for_tombstone(
                      content may still deliver at the recipient's next login"
                 );
             }
+        }
+    }
+    if !sm_entries.is_empty() || !pending_rows.is_empty() {
+        if let Some(capture) = capture {
+            let target = match target {
+                waddle_xmpp::tombstone::TombstoneTarget::Groupchat { stanza_id, room } => {
+                    waddle_xmpp::ingress::TombstoneReplayTarget::Groupchat {
+                        stanza_id: stanza_id.clone(),
+                        room: room.clone(),
+                    }
+                }
+                waddle_xmpp::tombstone::TombstoneTarget::Direct {
+                    wire_id,
+                    author,
+                    archive,
+                } => waddle_xmpp::ingress::TombstoneReplayTarget::Direct {
+                    wire_id: wire_id.clone(),
+                    author: author.clone(),
+                    archive: archive.clone(),
+                },
+            };
+            capture.record_intent(IngressEffectIntent::TombstoneReplayDeletion {
+                target,
+                sm_entries,
+                pending_rows,
+            });
         }
     }
 }
@@ -682,13 +725,17 @@ pub(super) async fn project_groupchat_inbox(
     } else {
         None
     };
+    let channel_records_recovery = channel_recovery.is_some();
+    let thread_records_recovery = notification_recovery.is_some();
     match inbox_storage
         .upsert_with_groupchat_notification_recovery(owner, entry, is_recipient, channel_recovery)
         .await
     {
         Ok(updated) if is_recipient => {
             outcome.channel_committed = true;
-            push_inbox_update(connection_registry, user_registry, owner, &updated).await;
+            outcome.notification_recovery_committed = channel_records_recovery;
+            outcome.channel_push_recipients =
+                push_inbox_update(connection_registry, user_registry, owner, &updated).await;
         }
         Ok(_) => {
             outcome.channel_committed = true;
@@ -731,7 +778,9 @@ pub(super) async fn project_groupchat_inbox(
     {
         Ok(updated) if is_recipient => {
             outcome.thread_committed = true;
-            push_inbox_update(connection_registry, user_registry, owner, &updated).await;
+            outcome.notification_recovery_committed = thread_records_recovery;
+            outcome.thread_push_recipients =
+                push_inbox_update(connection_registry, user_registry, owner, &updated).await;
         }
         Ok(_) => {
             outcome.thread_committed = true;
@@ -748,10 +797,17 @@ pub(super) async fn project_groupchat_inbox(
     outcome
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct GroupchatInboxProjectionOutcome {
     pub channel_committed: bool,
     pub thread_committed: bool,
+    /// Live resources that accepted the channel's stamped XEP-0430 push.
+    pub channel_push_recipients: Vec<FullJid>,
+    /// Live resources that accepted the thread's stamped XEP-0430 push.
+    pub thread_push_recipients: Vec<FullJid>,
+    /// The inbox upsert atomically committed its durable notification retry
+    /// row.  This is distinct from later candidate completion.
+    pub notification_recovery_committed: bool,
 }
 
 /// XEP-0430 inbox push to all live resources of `user`. Decoupled
@@ -769,19 +825,26 @@ pub(crate) async fn push_inbox_update(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     user: &BareJid,
     entry: &InboxEntry,
-) {
+) -> Vec<FullJid> {
     let resources = match user_registry {
         Some(user_registry) => {
             waddle_xmpp::registry::get_resources_for_user(user_registry, user).await
         }
         None => Vec::new(),
     };
+    let mut delivered = Vec::new();
     for resource_jid in resources {
         let msg = build_inbox_push(Jid::from(resource_jid.clone()), entry);
-        let _ = connection_registry
-            .send_to(&resource_jid, Stanza::Message(msg))
-            .await;
+        if matches!(
+            connection_registry
+                .send_to(&resource_jid, Stanza::Message(msg))
+                .await,
+            waddle_xmpp::registry::SendResult::Sent
+        ) {
+            delivered.push(resource_jid);
+        }
     }
+    delivered
 }
 
 pub(super) fn extract_groupchat_reply_reference(

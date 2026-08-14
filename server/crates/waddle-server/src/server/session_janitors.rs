@@ -6331,15 +6331,8 @@ async fn run_graceful_shutdown_drain(
     {
         warn!(
             timeout_ms = shadow_budget.as_millis(),
-            "Graceful shutdown: ingress shadow drain exceeded the shutdown budget; waiting for safe completion before finishing shutdown"
+            "Graceful shutdown: ingress shadow drain exceeded the shutdown budget; stopping unfinished shadow work"
         );
-        websocket_state
-            .deps
-            .protocol
-            .ingress_shadow
-            .wait_for_completion()
-            .await;
-        info!("Graceful shutdown: ingress shadow drain completed after budget expiry");
     } else {
         info!("Graceful shutdown: ingress shadow drain complete");
     }
@@ -7932,7 +7925,7 @@ mod graceful_shutdown_drain_tests {
     }
 
     #[tokio::test]
-    async fn graceful_shutdown_waits_for_shadow_completion_after_budget_timeout() {
+    async fn graceful_shutdown_completes_after_shadow_budget_timeout() {
         let submit_started = Arc::new(Notify::new());
         let release_submit = Arc::new(Notify::new());
         let ingress_shadow = IngressShadowHandle::spawn_test_worker(8, 1, {
@@ -7975,17 +7968,16 @@ mod graceful_shutdown_drain_tests {
         ));
 
         drain_token.cancel();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(400), drain_notify.notified())
-                .await
-                .is_err(),
-            "shutdown must stay pending after the shadow budget expires while an accepted shadow submission is still unresolved"
-        );
-
-        release_submit.notify_waiters();
-        tokio::time::timeout(Duration::from_secs(2), drain_notify.notified())
+        tokio::time::timeout(Duration::from_millis(400), drain_notify.notified())
             .await
-            .expect("shutdown should complete once the held shadow work finishes");
+            .expect("shutdown should complete once the shadow drain budget expires");
         drain_task.await.expect("graceful drain task");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            state.deps.protocol.ingress_shadow.wait_for_completion(),
+        )
+        .await
+        .expect("shutdown deadline should stop the held shadow work");
     }
 }

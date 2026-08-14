@@ -631,6 +631,7 @@ async fn apply_direct_retraction_tombstone(
                 archive_jid,
                 &retraction.retracts_id,
                 message,
+                deps.ingress_effect_capture.as_ref(),
             )
             .await;
             if let Some(target_stanza_id) = target_stanza_id {

@@ -2491,6 +2491,7 @@ mod eviction_tests {
             remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
                 MucProxyRouteAttempt {
                     relay_target: Some(RelayTargetIdentity::relay_node("relay-node")),
+                    room_fence: None,
                     outcome: Delivered(Vec::new()),
                 }
             )),
@@ -2713,6 +2714,7 @@ mod remote_muc_cleanup_disposition_tests {
     fn attempted(outcome: OrderedRelayMucProxyOutcome) -> MucProxyRouteDecision {
         MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
             relay_target: Some(RelayTargetIdentity::relay_node("relay-node")),
+            room_fence: None,
             outcome,
         })
     }

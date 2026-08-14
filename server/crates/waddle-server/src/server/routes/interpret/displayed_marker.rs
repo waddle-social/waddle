@@ -23,6 +23,7 @@
 use jid::BareJid;
 use tracing::{debug, warn};
 use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp_core::mam::ThreadId;
 
 use super::groupchat_archive::push_inbox_update;
 use super::Deps;
@@ -54,25 +55,9 @@ pub(super) async fn mark_inbox_read_from_displayed(
     };
     let thread_id = resolve_thread_id(deps, &room, &displayed_message_id).await;
 
-    apply_mark_read(
-        deps.connection_registry,
-        deps.user_registry,
-        inbox_storage.as_ref(),
-        &owner,
-        &room,
-        None,
-    )
-    .await;
+    apply_mark_read(deps, inbox_storage.as_ref(), &owner, &room, None).await;
     if let Some(ref thread_id) = thread_id {
-        apply_mark_read(
-            deps.connection_registry,
-            deps.user_registry,
-            inbox_storage.as_ref(),
-            &owner,
-            &room,
-            Some(thread_id.as_str()),
-        )
-        .await;
+        apply_mark_read(deps, inbox_storage.as_ref(), &owner, &room, Some(thread_id)).await;
     }
 }
 
@@ -84,13 +69,13 @@ async fn resolve_thread_id(
     deps: &Deps<'_>,
     room: &BareJid,
     displayed_message_id: &str,
-) -> Option<String> {
+) -> Option<ThreadId> {
     let mam_storage = deps.mam_storage?;
     match mam_storage
         .get_message_by_message_id(room, displayed_message_id)
         .await
     {
-        Ok(Some(archived)) => archived.thread.map(|thread| thread.id.as_str().to_owned()),
+        Ok(Some(archived)) => archived.thread.map(|thread| thread.id),
         Ok(None) => {
             debug!(
                 %room,
@@ -116,22 +101,40 @@ async fn resolve_thread_id(
 /// Run the inbox `mark_read` write for one `(owner, room, thread_id)`
 /// key and push the post-update entry to the owner's other resources.
 async fn apply_mark_read(
-    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
-    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    deps: &Deps<'_>,
     inbox_storage: &dyn InboxStorage,
     owner: &BareJid,
     room: &BareJid,
-    thread_id: Option<&str>,
+    thread_id: Option<&ThreadId>,
 ) {
-    match inbox_storage.mark_read(owner, room, thread_id).await {
+    match inbox_storage
+        .mark_read(owner, room, thread_id.map(ThreadId::as_str))
+        .await
+    {
         Ok(Some(entry)) => {
-            push_inbox_update(connection_registry, user_registry, owner, &entry).await;
+            let _ = push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry)
+                .await;
+            let mutation = match thread_id {
+                Some(thread_id) => {
+                    waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThreadRead {
+                        room: room.clone(),
+                        thread_id: thread_id.clone(),
+                    }
+                }
+                None => waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannelRead {
+                    room: room.clone(),
+                },
+            };
+            deps.capture_intent(waddle_xmpp::ingress::IngressEffectIntent::InboxProject {
+                owner: owner.clone(),
+                mutation,
+            });
         }
         Ok(None) => {
             debug!(
                 %owner,
                 %room,
-                thread = thread_id.unwrap_or(""),
+                thread = thread_id.map_or("", ThreadId::as_str),
                 "MarkInboxReadFromDisplayed: no matching inbox row; no-op"
             );
         }
@@ -139,7 +142,7 @@ async fn apply_mark_read(
             warn!(
                 %owner,
                 %room,
-                thread = thread_id.unwrap_or(""),
+                thread = thread_id.map_or("", ThreadId::as_str),
                 %error,
                 "MarkInboxReadFromDisplayed: mark_read failed"
             );

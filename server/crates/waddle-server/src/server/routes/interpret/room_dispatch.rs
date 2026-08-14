@@ -123,6 +123,7 @@ pub(super) async fn dispatch_to_room(
             {
                 MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
+                        refresh_shadow_room_fence(deps, &room_jid, attempt.room_fence.as_ref());
                         if let (Some(capture), Some(relay_target)) =
                             (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
                         {
@@ -130,7 +131,15 @@ pub(super) async fn dispatch_to_room(
                         }
                         for reply in replies {
                             match reply.to_element_string() {
-                                Ok(xml) => outcome.frames.push(xml),
+                                Ok(xml) => {
+                                    // A remote room's delivered response may be an
+                                    // authoritative typed message error.  Freeze it only
+                                    // after serialization succeeds, just like local
+                                    // `SendStanza` replies, so shadow reflects the reply the
+                                    // sender actually received.
+                                    super::capture_serialized_error_reply(deps, &reply);
+                                    outcome.frames.push(xml);
+                                }
                                 Err(error) => {
                                     warn!(
                                         room = %room_jid,
@@ -165,6 +174,7 @@ pub(super) async fn dispatch_to_room(
                     }
                     OrderedRelayMucProxyOutcome::MaybeCommitted
                     | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                        refresh_shadow_room_fence(deps, &room_jid, attempt.room_fence.as_ref());
                         if let (Some(capture), Some(relay_target)) =
                             (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
                         {
@@ -686,6 +696,25 @@ fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
 fn clear_provisional_shadow_room_fence(deps: &Deps<'_>) {
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
         capture.clear_room_fence();
+    }
+}
+
+/// Replace parse-time room ownership with the immutable claim carried by the
+/// final proxy attempt. A local snapshot is never taken for a proxy delivery,
+/// so retaining the provisional frame fence can make shadow assert an
+/// owner/epoch the actual relay no longer used.
+#[cfg(feature = "clustering")]
+fn refresh_shadow_room_fence(
+    deps: &Deps<'_>,
+    room: &jid::BareJid,
+    claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,
+) {
+    let Some(claim_fence) = claim_fence else {
+        clear_provisional_shadow_room_fence(deps);
+        return;
+    };
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        capture.record_room_fence(IngressShadowRoomFence::from_context(room, claim_fence));
     }
 }
 

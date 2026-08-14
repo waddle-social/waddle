@@ -3497,3 +3497,41 @@ async fn database_scrub_for_tombstone_removes_transient_and_archived_matches() {
         1
     );
 }
+
+#[tokio::test]
+async fn database_scrub_for_tombstone_with_row_ids_returns_exact_removed_rows() {
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open");
+    let transient = transient_dm_row_with_id("alice@example.com", "retract-me", "secret");
+    let transient_id = transient.id.clone();
+    let archived = archived_row("alice@example.com", "retract-me");
+    let archived_id = archived.id.clone();
+    let kept = archived_row("alice@example.com", "keep-me");
+    let kept_id = kept.id.clone();
+    storage.insert(transient).await.expect("insert");
+    storage.insert(archived).await.expect("insert");
+    storage.insert(kept).await.expect("insert");
+
+    let scrubbed = storage
+        .scrub_for_tombstone_with_row_ids(&waddle_xmpp::tombstone::TombstoneTarget::Direct {
+            wire_id: "retract-me".to_string(),
+            author: bare("bob@elsewhere"),
+            archive: bare("alice@example.com"),
+        })
+        .await
+        .expect("scrub");
+    assert_eq!(scrubbed.removed_count, 2);
+    let removed_ids: std::collections::HashSet<_> = scrubbed.row_ids.into_iter().collect();
+    assert_eq!(
+        removed_ids,
+        std::collections::HashSet::from([transient_id, archived_id])
+    );
+
+    let remaining = storage
+        .claim_for_session(&bare("alice@example.com"), &SmSessionId::new("s-next"))
+        .await
+        .expect("claim");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, kept_id);
+}

@@ -423,6 +423,10 @@ pub(super) struct RemoteDeliveryOutcome {
     /// The owner that actually accepted this delivery.  A target-refresh can
     /// change it from the owner used to construct the initial envelope.
     pub(super) relay_target: Option<NodeIdentity>,
+    /// Exact target claim carried by the envelope accepted by a remote owner.
+    /// This is retained separately from the mutable room-claim cache so
+    /// callers can freeze the claim that authorized a delivered MUC stanza.
+    pub(super) target_claim: Option<OrderedRelayClaim>,
 }
 
 pub(super) fn caller_delivery_outcome(outcome: RemoteDeliveryOutcome) -> FullJidDeliveryOutcome {

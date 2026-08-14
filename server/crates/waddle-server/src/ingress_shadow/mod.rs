@@ -137,6 +137,8 @@ type IngressShadowTx =
 #[derive(Debug, Default)]
 struct IngressShadowShutdown {
     cancellation: CancellationToken,
+    force_stop: CancellationToken,
+    active_task_aborts: std::sync::Mutex<Vec<ActiveShadowTask>>,
     complete: AtomicBool,
     complete_notify: Notify,
 }
@@ -145,6 +147,39 @@ struct IngressShadowShutdown {
 impl IngressShadowShutdown {
     fn cancel(&self) {
         self.cancellation.cancel();
+    }
+
+    /// End the scheduler at the graceful-shutdown deadline. Queued work is
+    /// dropped and active, still-uncommitted attempts are aborted rather than
+    /// being left to an imminent runtime teardown.
+    fn force_stop(&self) {
+        self.force_stop.cancel();
+        for task in self
+            .active_task_aborts
+            .lock()
+            .expect("shadow active task abort handles must not be poisoned")
+            .drain(..)
+        {
+            task.abort.abort();
+        }
+    }
+
+    fn track_active_task(&self, finished: Arc<AtomicBool>, abort: tokio::task::AbortHandle) {
+        let mut tasks = self
+            .active_task_aborts
+            .lock()
+            .expect("shadow active task abort handles must not be poisoned");
+        if !finished.load(Ordering::Acquire) {
+            tasks.push(ActiveShadowTask { finished, abort });
+        }
+    }
+
+    fn finish_active_task(&self, finished: &Arc<AtomicBool>) {
+        finished.store(true, Ordering::Release);
+        self.active_task_aborts
+            .lock()
+            .expect("shadow active task abort handles must not be poisoned")
+            .retain(|task| !Arc::ptr_eq(&task.finished, finished));
     }
 
     fn mark_complete(&self) {
@@ -161,6 +196,13 @@ impl IngressShadowShutdown {
             notified.await;
         }
     }
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Debug)]
+struct ActiveShadowTask {
+    finished: Arc<AtomicBool>,
+    abort: tokio::task::AbortHandle,
 }
 
 #[cfg(feature = "clustering")]
@@ -432,12 +474,19 @@ impl IngressShadowHandle {
                 let Some(waiter) = wait_for_stream_idle_notifier(stream_activity, stream_id) else {
                     return true;
                 };
+                // Register the waiter before checking activity again.  The
+                // finisher removes the waiter from the map as it notifies;
+                // without this arming/recheck pair, that notification can
+                // fall between `wait_for_stream_idle_notifier` and the
+                // first poll of `notified()`, forcing a false timeout.
+                let notified = waiter.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if stream_is_idle(stream_activity, stream_id) {
+                    return true;
+                }
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero()
-                    || tokio::time::timeout(remaining, waiter.notified())
-                        .await
-                        .is_err()
-                {
+                if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
                     return false;
                 }
             }
@@ -453,9 +502,15 @@ impl IngressShadowHandle {
             IngressShadowInner::Worker { tx, shutdown, .. } => {
                 shutdown.cancel();
                 close_worker_intake(tx);
-                tokio::time::timeout(timeout, shutdown.wait_for_completion())
+                if tokio::time::timeout(timeout, shutdown.wait_for_completion())
                     .await
                     .is_ok()
+                {
+                    true
+                } else {
+                    shutdown.force_stop();
+                    false
+                }
             }
         }
     }
@@ -566,9 +621,16 @@ impl IngressShadowHandle {
         let submission_capacity = Arc::new(Semaphore::new(queue_capacity));
         let enrollment_capacity = Arc::new(Semaphore::new(queue_capacity));
         let shutdown = Arc::new(IngressShadowShutdown::default());
+        let scheduler_shutdown = shutdown.clone();
         let scheduler = tokio::spawn(
-            IngressShadowScheduler::new(rx, max_concurrency, execute, stream_activity.clone())
-                .run(),
+            IngressShadowScheduler::new(
+                rx,
+                max_concurrency,
+                execute,
+                stream_activity.clone(),
+                scheduler_shutdown,
+            )
+            .run(),
         );
         let retirement_retry_dispatcher = RetirementRetryDispatcher {
             state: Arc::new(std::sync::Mutex::new(RetirementRetryState {
@@ -904,6 +966,18 @@ fn wait_for_stream_idle_notifier(
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone()
     })
+}
+
+#[cfg(feature = "clustering")]
+fn stream_is_idle(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: &SmSessionId,
+) -> bool {
+    !stream_activity
+        .lock()
+        .expect("stream activity mutex must not be poisoned")
+        .pending
+        .contains_key(stream_id)
 }
 
 #[cfg(feature = "clustering")]
@@ -1683,6 +1757,7 @@ struct IngressShadowScheduler {
     execute: IngressShadowExecutor,
     max_concurrency: usize,
     stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
+    shutdown: Arc<IngressShadowShutdown>,
     active_streams: HashSet<SmSessionId>,
     ready_streams: VecDeque<SmSessionId>,
     ready_members: HashSet<SmSessionId>,
@@ -1696,6 +1771,7 @@ impl IngressShadowScheduler {
         max_concurrency: usize,
         execute: IngressShadowExecutor,
         stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
+        shutdown: Arc<IngressShadowShutdown>,
     ) -> Self {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         Self {
@@ -1705,6 +1781,7 @@ impl IngressShadowScheduler {
             execute,
             max_concurrency: max_concurrency.max(1),
             stream_activity,
+            shutdown,
             active_streams: HashSet::new(),
             ready_streams: VecDeque::new(),
             ready_members: HashSet::new(),
@@ -1720,6 +1797,7 @@ impl IngressShadowScheduler {
                 break;
             }
             tokio::select! {
+                _ = self.shutdown.force_stop.cancelled() => break,
                 maybe_task = self.rx.recv(), if intake_open => {
                     match maybe_task {
                         Some(task) => self.enqueue(task),
@@ -1782,19 +1860,25 @@ impl IngressShadowScheduler {
             let completion_tx = self.completion_tx.clone();
             let execute = self.execute.clone();
             let stream_activity = self.stream_activity.clone();
+            let task_shutdown = self.shutdown.clone();
+            let task_finished = Arc::new(AtomicBool::new(false));
+            let task_finished_for_completion = task_finished.clone();
             // Only submissions were counted at enqueue time; decrementing for
             // an Enroll/Retire task would consume a still-running submission's
             // pending count and let a claim transfer treat active shadow work
             // as drained.
             let counted_submission = matches!(task.task, IngressShadowTask::Submit(_));
-            tokio::spawn(async move {
+            let task_handle = tokio::spawn(async move {
                 (execute)(task.task).await;
                 drop(task.permit);
+                task_shutdown.finish_active_task(&task_finished_for_completion);
                 if counted_submission {
                     note_stream_task_finished(&stream_activity, &stream_id);
                 }
                 let _ = completion_tx.send(stream_id);
             });
+            self.shutdown
+                .track_active_task(task_finished, task_handle.abort_handle());
         }
     }
 
@@ -2014,11 +2098,16 @@ impl IngressShadowSubmission {
         {
             return Some(IngressShadowDecisionClass::AuthorizationDenied);
         }
-        if self
-            .capture
-            .markers
-            .iter()
-            .any(|marker| matches!(marker, ShadowDecisionMarker::SemanticRejected { .. }))
+        // A semantic rejection normally represents a rowless decision.  A
+        // handler may, however, have already committed a separately valid
+        // mutation before a later payload member is rejected.  Keep those
+        // frozen intents rather than making the complete submission rowless.
+        if self.capture.intents.is_empty()
+            && self
+                .capture
+                .markers
+                .iter()
+                .any(|marker| matches!(marker, ShadowDecisionMarker::SemanticRejected { .. }))
         {
             return Some(IngressShadowDecisionClass::SemanticMalformed);
         }
@@ -2459,6 +2548,30 @@ mod tests {
         .await
         .expect("disabled ingress shadow should not fail startup");
         assert!(!handle.is_enabled());
+    }
+
+    #[test]
+    fn semantic_rejection_keeps_already_committed_intents() {
+        let mut message = Message::new(Some(Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+        message.type_ = MessageType::Groupchat;
+        let mut submission = base_submission(message);
+        submission
+            .capture
+            .intents
+            .push(waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+                recipient: "romeo@example.com".parse().expect("recipient"),
+                fanout: Vec::new(),
+                route_identity: waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(1),
+            });
+        submission.capture.markers = vec![ShadowDecisionMarker::SemanticRejected {
+            reason: ShadowSemanticRejectedReason::MalformedPayload,
+        }];
+
+        assert_eq!(submission.rowless_decision_marker(), None);
     }
 
     #[test]

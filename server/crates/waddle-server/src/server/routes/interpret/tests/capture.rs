@@ -318,6 +318,20 @@ async fn groupchat_inbox_boundary_records_notification_intent_after_candidate_ac
         IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
             if *intent_owner == owner
     )));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::GroupchatNotificationRecovery { mutation }
+            if mutation.recipient == owner
+                && mutation.action
+                    == waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Recorded
+    )));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::GroupchatNotificationRecovery { mutation }
+            if mutation.recipient == owner
+                && mutation.action
+                    == waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Completed
+    )));
 }
 
 #[tokio::test]
@@ -451,6 +465,73 @@ async fn offline_delivery_boundary_records_notification_preview_intent() {
         IngressEffectIntent::NotificationActivityPreview { owner, .. }
             if *owner == recipient
     )));
+    assert!(snapshot.intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::PendingDelivery {
+            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
+                recipient: intent_recipient,
+                ..
+            }
+        } if *intent_recipient == recipient
+    )));
+}
+
+#[tokio::test]
+async fn transient_offline_delivery_records_pending_delivery_intent() {
+    let registry = ConnectionRegistry::new();
+    let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
+        waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+    ));
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps {
+        connection_registry: &registry,
+        user_registry: None,
+        sm_session_registry: None,
+        mam_storage: None,
+        inbox_storage: None,
+        extension_manager: None,
+        room_registry: None,
+        web_socket_state: None,
+        authenticated_principal: None,
+        local_domain: "example.com",
+        blocking_storage: None,
+        message_dispatcher: None,
+        pending_delivery_storage: Some(&pending),
+        ordered_relay_origin: None,
+        sfu: None,
+        ingress_effect_capture: Some(capture.clone()),
+    };
+    let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
+    let transient = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com"),
+        "transient offline hi",
+    );
+    let _ = interpret(
+        vec![OutboundEvent::QueueOfflineDelivery {
+            recipient: recipient.clone(),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
+                transient.clone(),
+            )),
+            original_receipt_at: chrono::Utc::now(),
+            original_message: Box::new(transient),
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(capture_snapshot(&capture)
+        .intents
+        .iter()
+        .any(|intent| matches!(
+            intent,
+            IngressEffectIntent::PendingDelivery {
+                mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                    recipient: intent_recipient,
+                    ..
+                }
+            } if *intent_recipient == recipient
+        )));
 }
 
 #[tokio::test]

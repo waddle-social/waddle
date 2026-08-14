@@ -1195,12 +1195,29 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         &self,
         target: &waddle_xmpp::tombstone::TombstoneTarget,
     ) -> Result<u64, PendingStorageError> {
+        Ok(self
+            .scrub_for_tombstone_with_row_ids(target)
+            .await?
+            .removed_count)
+    }
+
+    async fn scrub_for_tombstone_with_row_ids(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+    ) -> Result<waddle_xmpp::pending_delivery::TombstoneScrubbedPendingRows, PendingStorageError>
+    {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         // Archived pointers: exact (stanza-id, archive-by) match —
         // pure SQL. The MAM row was tombstoned, so the pointer must
         // not flush a stub for a message the recipient never saw.
-        let mut removed = self
-            .execute(
-                "DELETE FROM pending_delivery \
+        let mut removed_ids = Vec::new();
+        let mut archived_rows = tx
+            .query(
+                "SELECT row_id FROM pending_delivery \
                  WHERE payload_kind = ? \
                    AND archive_stanza_id = ? \
                    AND archive_stanza_by = ?",
@@ -1210,19 +1227,30 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                     target.archive_jid().to_string(),
                 ],
             )
-            .await?;
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        while let Some(row) = archived_rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            let row_id: String = row
+                .get(0)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            removed_ids.push(PendingRowId::new(row_id));
+        }
         // Transient rows carry inline XML — match in Rust with the
         // shared XEP-0424/0425 predicate, then delete by row_id.
         // COST NOTE: scans every transient row; scrubs are rare
         // (retraction / moderation only), so a full listing is
         // acceptable — mirrors the SM registry's durable sweep.
-        let mut rows = self
+        let mut rows = tx
             .query(
                 "SELECT row_id, transient_xml FROM pending_delivery WHERE payload_kind = ?",
                 crate::db_params![PAYLOAD_KIND_TRANSIENT],
             )
-            .await?;
-        let mut matched_ids: Vec<String> = Vec::new();
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         while let Some(row) = rows
             .next()
             .await
@@ -1243,18 +1271,26 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 continue;
             };
             if target.matches_message_element(&element) {
-                matched_ids.push(row_id);
+                removed_ids.push(PendingRowId::new(row_id));
             }
         }
-        for row_id in matched_ids {
-            removed += self
-                .execute(
-                    "DELETE FROM pending_delivery WHERE row_id = ?",
-                    crate::db_params![row_id],
-                )
-                .await?;
+        for row_id in &removed_ids {
+            tx.execute(
+                "DELETE FROM pending_delivery WHERE row_id = ?",
+                crate::db_params![row_id.as_str().to_string()],
+            )
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         }
-        Ok(removed)
+        tx.commit()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        Ok(
+            waddle_xmpp::pending_delivery::TombstoneScrubbedPendingRows {
+                removed_count: removed_ids.len() as u64,
+                row_ids: removed_ids,
+            },
+        )
     }
 
     fn sweep_internal_bookkeeping(&self) -> usize {

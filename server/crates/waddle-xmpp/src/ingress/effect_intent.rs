@@ -19,7 +19,7 @@ use crate::{
     error::StanzaErrorCondition,
     ingress::EntityGeneration,
     muc::{pin::PinnedEntry, SubjectState},
-    pending_delivery::SmSessionId,
+    pending_delivery::{PendingRowId, SmSessionId},
     protocol::CarbonKind,
     xep::{xep0085::ChatState, CallThreadDuration, CallThreadMedia},
 };
@@ -263,6 +263,13 @@ pub enum InboxProjectionMutation {
         room: BareJid,
         thread_id: ThreadId,
     },
+    GroupchatChannelRead {
+        room: BareJid,
+    },
+    GroupchatThreadRead {
+        room: BareJid,
+        thread_id: ThreadId,
+    },
     GroupchatChannelAndThread {
         room: BareJid,
         thread_id: ThreadId,
@@ -296,6 +303,12 @@ impl InboxProjectionMutation {
             } => format!("groupchat_channel|{}|{}", room, increment_unread),
             Self::GroupchatThread { room, thread_id } => {
                 format!("groupchat_thread|{}|{}", room, thread_id.as_str())
+            }
+            Self::GroupchatChannelRead { room } => {
+                format!("groupchat_channel_read|{}", room)
+            }
+            Self::GroupchatThreadRead { room, thread_id } => {
+                format!("groupchat_thread_read|{}|{}", room, thread_id.as_str())
             }
             Self::GroupchatChannelAndThread {
                 room,
@@ -335,6 +348,126 @@ impl InboxProjectionMutation {
                 duration.as_str(),
             ),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupchatNotificationRecoveryAction {
+    Recorded,
+    Completed,
+}
+
+impl GroupchatNotificationRecoveryAction {
+    pub fn storage_identity(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupchatNotificationRecoveryMutation {
+    pub recipient: BareJid,
+    pub room: BareJid,
+    pub thread_id: Option<ThreadId>,
+    pub archive_stanza_id: StanzaId,
+    pub sender: Jid,
+    pub is_live_occupant: bool,
+    pub room_members_only: bool,
+    pub sender_can_broadcast_channel_mention: bool,
+    pub created_at_ms: i64,
+    pub action: GroupchatNotificationRecoveryAction,
+}
+
+impl GroupchatNotificationRecoveryMutation {
+    pub fn storage_identity(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.action.storage_identity(),
+            self.recipient,
+            self.room,
+            self.thread_id.as_ref().map_or("", ThreadId::as_str),
+            stanza_storage_identity(&self.archive_stanza_id),
+            self.sender,
+            self.is_live_occupant,
+            self.room_members_only,
+            self.sender_can_broadcast_channel_mention,
+            self.created_at_ms
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingDeliveryMutation {
+    Archived {
+        recipient: BareJid,
+        row_id: PendingRowId,
+        archive_stanza_id: StanzaId,
+    },
+    Transient {
+        recipient: BareJid,
+        row_id: PendingRowId,
+    },
+}
+
+impl PendingDeliveryMutation {
+    pub fn storage_identity(&self) -> String {
+        match self {
+            Self::Archived {
+                recipient,
+                row_id,
+                archive_stanza_id,
+            } => format!(
+                "archived|{}|{}|{}",
+                recipient,
+                row_id.as_str(),
+                stanza_storage_identity(archive_stanza_id)
+            ),
+            Self::Transient { recipient, row_id } => {
+                format!("transient|{}|{}", recipient, row_id.as_str())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TombstoneReplayTarget {
+    Groupchat {
+        stanza_id: String,
+        room: BareJid,
+    },
+    Direct {
+        wire_id: String,
+        author: BareJid,
+        archive: BareJid,
+    },
+}
+
+impl TombstoneReplayTarget {
+    pub fn storage_identity(&self) -> String {
+        match self {
+            Self::Groupchat { stanza_id, room } => {
+                format!("groupchat|{}|{}", room, stanza_id)
+            }
+            Self::Direct {
+                wire_id,
+                author,
+                archive,
+            } => format!("direct|{}|{}|{}", archive, author, wire_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TombstoneReplaySmEntry {
+    pub stream: SmSessionId,
+    pub sequence: u32,
+}
+
+impl TombstoneReplaySmEntry {
+    pub fn storage_identity(&self) -> String {
+        format!("{}|{:010}", self.stream.as_str(), self.sequence)
     }
 }
 
@@ -865,6 +998,12 @@ pub enum IngressEffectIntent {
         owner: BareJid,
         mutation: NotificationActivityMutation,
     },
+    GroupchatNotificationRecovery {
+        mutation: GroupchatNotificationRecoveryMutation,
+    },
+    PendingDelivery {
+        mutation: PendingDeliveryMutation,
+    },
     LinkPreviewMediaRef {
         mutation: LinkPreviewMediaRefMutation,
     },
@@ -904,6 +1043,11 @@ pub enum IngressEffectIntent {
         recipient: BareJid,
         stanza_id: StanzaId,
     },
+    TombstoneReplayDeletion {
+        target: TombstoneReplayTarget,
+        sm_entries: Vec<TombstoneReplaySmEntry>,
+        pending_rows: Vec<PendingRowId>,
+    },
     ErrorReply {
         recipient: FullJid,
         error: FrozenStanzaError,
@@ -922,6 +1066,8 @@ pub enum IngressEffectKey {
     Carbons(FullJid, CarbonKind),
     InboxProject(BareJid, String),
     NotificationActivityPreview(BareJid, String),
+    GroupchatNotificationRecovery(String),
+    PendingDelivery(String),
     LinkPreviewMediaRef(String),
     RetractionTombstone(String),
     DmPinMutation(String),
@@ -933,6 +1079,7 @@ pub enum IngressEffectKey {
     CallSignal(FullJid),
     Pin(BareJid, String),
     Extension(BareJid),
+    TombstoneReplayDeletion(String),
     ErrorReply(FullJid, String),
 }
 
@@ -962,6 +1109,8 @@ impl IngressEffectKey {
             Self::NotificationActivityPreview(owner, mutation) => {
                 format!("{}|{}", owner, mutation)
             }
+            Self::GroupchatNotificationRecovery(identity) => identity.clone(),
+            Self::PendingDelivery(identity) => identity.clone(),
             Self::LinkPreviewMediaRef(identity) => identity.clone(),
             Self::RetractionTombstone(identity) => identity.clone(),
             Self::DmPinMutation(identity) => identity.clone(),
@@ -973,6 +1122,7 @@ impl IngressEffectKey {
             Self::CallSignal(value) => value.to_string(),
             Self::Pin(room, pin_identity) => format!("{}|{}", room, pin_identity),
             Self::Extension(value) => value.to_string(),
+            Self::TombstoneReplayDeletion(identity) => identity.clone(),
             Self::ErrorReply(value, error_identity) => format!("{}|{}", value, error_identity),
         }
     }
@@ -988,18 +1138,21 @@ impl IngressEffectKey {
             Self::Carbons(..) => 6,
             Self::InboxProject(..) => 7,
             Self::NotificationActivityPreview(..) => 8,
-            Self::LinkPreviewMediaRef(..) => 9,
-            Self::RetractionTombstone(..) => 10,
-            Self::DmPinMutation(..) => 11,
-            Self::MucInviteMembershipGrant(..) => 12,
-            Self::MucInviteLedger(..) => 13,
-            Self::GroupDmMembershipGrant(..) => 14,
-            Self::GroupDmInviteLedger(..) => 15,
-            Self::RoomSubjectMutation(..) => 16,
-            Self::CallSignal(..) => 17,
-            Self::Pin(..) => 18,
-            Self::Extension(..) => 19,
-            Self::ErrorReply(..) => 20,
+            Self::GroupchatNotificationRecovery(..) => 9,
+            Self::PendingDelivery(..) => 10,
+            Self::LinkPreviewMediaRef(..) => 11,
+            Self::RetractionTombstone(..) => 12,
+            Self::DmPinMutation(..) => 13,
+            Self::MucInviteMembershipGrant(..) => 14,
+            Self::MucInviteLedger(..) => 15,
+            Self::GroupDmMembershipGrant(..) => 16,
+            Self::GroupDmInviteLedger(..) => 17,
+            Self::RoomSubjectMutation(..) => 18,
+            Self::CallSignal(..) => 19,
+            Self::Pin(..) => 20,
+            Self::Extension(..) => 21,
+            Self::TombstoneReplayDeletion(..) => 22,
+            Self::ErrorReply(..) => 23,
         };
         (class, self.storage_identity())
     }
@@ -1080,6 +1233,29 @@ impl IngressEffectIntent {
                     conversation: bare("room@conference.example.test"),
                     archive_stanza_id: stanza(),
                     outcome: NotificationCandidateOutcome::Inserted,
+                },
+            },
+            Self::GroupchatNotificationRecovery {
+                mutation: GroupchatNotificationRecoveryMutation {
+                    recipient: bare("romeo@example.test"),
+                    room: bare("room@conference.example.test"),
+                    thread_id: Some(ThreadId::new("thread-1").expect("fixture thread id")),
+                    archive_stanza_id: stanza(),
+                    sender: "juliet@example.test/balcony"
+                        .parse::<Jid>()
+                        .expect("valid fixture JID"),
+                    is_live_occupant: true,
+                    room_members_only: false,
+                    sender_can_broadcast_channel_mention: true,
+                    created_at_ms: 1_753_620_000_000,
+                    action: GroupchatNotificationRecoveryAction::Recorded,
+                },
+            },
+            Self::PendingDelivery {
+                mutation: PendingDeliveryMutation::Archived {
+                    recipient: bare("romeo@example.test"),
+                    row_id: PendingRowId::new("pending-row-1"),
+                    archive_stanza_id: stanza(),
                 },
             },
             Self::LinkPreviewMediaRef {
@@ -1187,6 +1363,18 @@ impl IngressEffectIntent {
                 recipient: bare("romeo@example.test"),
                 stanza_id: stanza(),
             },
+            Self::TombstoneReplayDeletion {
+                target: TombstoneReplayTarget::Direct {
+                    wire_id: "wire-1".to_owned(),
+                    author: bare("juliet@example.test"),
+                    archive: bare("romeo@example.test"),
+                },
+                sm_entries: vec![TombstoneReplaySmEntry {
+                    stream: SmSessionId::new("stream-1"),
+                    sequence: 42,
+                }],
+                pending_rows: vec![PendingRowId::new("pending-row-1")],
+            },
             Self::ErrorReply {
                 recipient: full("romeo@example.test/phone"),
                 error: FrozenStanzaError::new(
@@ -1252,6 +1440,12 @@ impl IngressEffectIntent {
                     mutation.storage_identity(),
                 )
             }
+            Self::GroupchatNotificationRecovery { mutation } => {
+                IngressEffectKey::GroupchatNotificationRecovery(mutation.storage_identity())
+            }
+            Self::PendingDelivery { mutation } => {
+                IngressEffectKey::PendingDelivery(mutation.storage_identity())
+            }
             Self::LinkPreviewMediaRef { mutation } => {
                 IngressEffectKey::LinkPreviewMediaRef(mutation.storage_identity())
             }
@@ -1289,6 +1483,24 @@ impl IngressEffectIntent {
                 IngressEffectKey::Pin(room.clone(), mutation.storage_identity())
             }
             Self::Extension { recipient, .. } => IngressEffectKey::Extension(recipient.clone()),
+            Self::TombstoneReplayDeletion {
+                target,
+                sm_entries,
+                pending_rows,
+            } => IngressEffectKey::TombstoneReplayDeletion(format!(
+                "{}|sm:{}|pending:{}",
+                target.storage_identity(),
+                canonicalized_tombstone_replay_sm_entries(sm_entries)
+                    .iter()
+                    .map(TombstoneReplaySmEntry::storage_identity)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                canonicalized_pending_row_ids(pending_rows)
+                    .iter()
+                    .map(|row_id| row_id.as_str().to_owned())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
             Self::ErrorReply { recipient, error } => {
                 IngressEffectKey::ErrorReply(recipient.clone(), error.semantic_identity())
             }
@@ -1572,6 +1784,13 @@ enum StoredInboxProjectionMutation {
         room: BareJid,
         thread_id: String,
     },
+    GroupchatChannelRead {
+        room: BareJid,
+    },
+    GroupchatThreadRead {
+        room: BareJid,
+        thread_id: String,
+    },
     GroupchatChannelAndThread {
         room: BareJid,
         thread_id: String,
@@ -1613,6 +1832,15 @@ impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
                 room,
                 thread_id: thread_id.as_str().to_owned(),
             },
+            InboxProjectionMutation::GroupchatChannelRead { room } => {
+                Self::GroupchatChannelRead { room }
+            }
+            InboxProjectionMutation::GroupchatThreadRead { room, thread_id } => {
+                Self::GroupchatThreadRead {
+                    room,
+                    thread_id: thread_id.as_str().to_owned(),
+                }
+            }
             InboxProjectionMutation::GroupchatChannelAndThread {
                 room,
                 thread_id,
@@ -1672,6 +1900,16 @@ impl StoredInboxProjectionMutation {
                 thread_id: ThreadId::new(thread_id)
                     .ok_or(EffectIntentCodecError::MalformedPayload)?,
             },
+            Self::GroupchatChannelRead { room } => {
+                InboxProjectionMutation::GroupchatChannelRead { room }
+            }
+            Self::GroupchatThreadRead { room, thread_id } => {
+                InboxProjectionMutation::GroupchatThreadRead {
+                    room,
+                    thread_id: ThreadId::new(thread_id)
+                        .ok_or(EffectIntentCodecError::MalformedPayload)?,
+                }
+            }
             Self::GroupchatChannelAndThread {
                 room,
                 thread_id,
@@ -1814,6 +2052,116 @@ impl StoredNotificationActivityMutation {
                 outcome: notification_candidate_outcome_from_tag(outcome)?,
             },
         })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredGroupchatNotificationRecoveryMutation {
+    recipient: BareJid,
+    room: BareJid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_id: Option<String>,
+    archive_stanza_id: StanzaId,
+    sender: Jid,
+    is_live_occupant: bool,
+    room_members_only: bool,
+    sender_can_broadcast_channel_mention: bool,
+    created_at_ms: i64,
+    action: u8,
+}
+
+impl From<GroupchatNotificationRecoveryMutation> for StoredGroupchatNotificationRecoveryMutation {
+    fn from(value: GroupchatNotificationRecoveryMutation) -> Self {
+        Self {
+            recipient: value.recipient,
+            room: value.room,
+            thread_id: value
+                .thread_id
+                .map(|thread_id| thread_id.as_str().to_owned()),
+            archive_stanza_id: value.archive_stanza_id,
+            sender: value.sender,
+            is_live_occupant: value.is_live_occupant,
+            room_members_only: value.room_members_only,
+            sender_can_broadcast_channel_mention: value.sender_can_broadcast_channel_mention,
+            created_at_ms: value.created_at_ms,
+            action: groupchat_notification_recovery_action_tag(value.action),
+        }
+    }
+}
+
+impl StoredGroupchatNotificationRecoveryMutation {
+    fn into_domain(self) -> Result<GroupchatNotificationRecoveryMutation, EffectIntentCodecError> {
+        Ok(GroupchatNotificationRecoveryMutation {
+            recipient: self.recipient,
+            room: self.room,
+            thread_id: self
+                .thread_id
+                .map(|thread_id| {
+                    ThreadId::new(thread_id).ok_or(EffectIntentCodecError::MalformedPayload)
+                })
+                .transpose()?,
+            archive_stanza_id: self.archive_stanza_id,
+            sender: self.sender,
+            is_live_occupant: self.is_live_occupant,
+            room_members_only: self.room_members_only,
+            sender_can_broadcast_channel_mention: self.sender_can_broadcast_channel_mention,
+            created_at_ms: self.created_at_ms,
+            action: groupchat_notification_recovery_action_from_tag(self.action)?,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StoredPendingDeliveryMutation {
+    Archived {
+        recipient: BareJid,
+        row_id: String,
+        archive_stanza_id: StanzaId,
+    },
+    Transient {
+        recipient: BareJid,
+        row_id: String,
+    },
+}
+
+impl From<PendingDeliveryMutation> for StoredPendingDeliveryMutation {
+    fn from(value: PendingDeliveryMutation) -> Self {
+        match value {
+            PendingDeliveryMutation::Archived {
+                recipient,
+                row_id,
+                archive_stanza_id,
+            } => Self::Archived {
+                recipient,
+                row_id: row_id.as_str().to_owned(),
+                archive_stanza_id,
+            },
+            PendingDeliveryMutation::Transient { recipient, row_id } => Self::Transient {
+                recipient,
+                row_id: row_id.as_str().to_owned(),
+            },
+        }
+    }
+}
+
+impl From<StoredPendingDeliveryMutation> for PendingDeliveryMutation {
+    fn from(value: StoredPendingDeliveryMutation) -> Self {
+        match value {
+            StoredPendingDeliveryMutation::Archived {
+                recipient,
+                row_id,
+                archive_stanza_id,
+            } => Self::Archived {
+                recipient,
+                row_id: PendingRowId::new(row_id),
+                archive_stanza_id,
+            },
+            StoredPendingDeliveryMutation::Transient { recipient, row_id } => Self::Transient {
+                recipient,
+                row_id: PendingRowId::new(row_id),
+            },
+        }
     }
 }
 
@@ -1998,6 +2346,82 @@ impl From<StoredRoomPinMutation> for RoomPinMutation {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+enum StoredTombstoneReplayTarget {
+    Groupchat {
+        stanza_id: String,
+        room: BareJid,
+    },
+    Direct {
+        wire_id: String,
+        author: BareJid,
+        archive: BareJid,
+    },
+}
+
+impl From<TombstoneReplayTarget> for StoredTombstoneReplayTarget {
+    fn from(value: TombstoneReplayTarget) -> Self {
+        match value {
+            TombstoneReplayTarget::Groupchat { stanza_id, room } => {
+                Self::Groupchat { stanza_id, room }
+            }
+            TombstoneReplayTarget::Direct {
+                wire_id,
+                author,
+                archive,
+            } => Self::Direct {
+                wire_id,
+                author,
+                archive,
+            },
+        }
+    }
+}
+
+impl From<StoredTombstoneReplayTarget> for TombstoneReplayTarget {
+    fn from(value: StoredTombstoneReplayTarget) -> Self {
+        match value {
+            StoredTombstoneReplayTarget::Groupchat { stanza_id, room } => {
+                Self::Groupchat { stanza_id, room }
+            }
+            StoredTombstoneReplayTarget::Direct {
+                wire_id,
+                author,
+                archive,
+            } => Self::Direct {
+                wire_id,
+                author,
+                archive,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredTombstoneReplaySmEntry {
+    stream: SmSessionId,
+    sequence: u32,
+}
+
+impl From<TombstoneReplaySmEntry> for StoredTombstoneReplaySmEntry {
+    fn from(value: TombstoneReplaySmEntry) -> Self {
+        Self {
+            stream: value.stream,
+            sequence: value.sequence,
+        }
+    }
+}
+
+impl From<StoredTombstoneReplaySmEntry> for TombstoneReplaySmEntry {
+    fn from(value: StoredTombstoneReplaySmEntry) -> Self {
+        Self {
+            stream: value.stream,
+            sequence: value.sequence,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum StoredEffectIntent {
     ArchiveAuthoritative {
         archive: BareJid,
@@ -2041,6 +2465,12 @@ enum StoredEffectIntent {
         owner: BareJid,
         mutation: StoredNotificationActivityMutation,
     },
+    GroupchatNotificationRecovery {
+        mutation: StoredGroupchatNotificationRecoveryMutation,
+    },
+    PendingDelivery {
+        mutation: StoredPendingDeliveryMutation,
+    },
     LinkPreviewMediaRef {
         mutation: StoredLinkPreviewMediaRefMutation,
     },
@@ -2081,6 +2511,13 @@ enum StoredEffectIntent {
         recipient: BareJid,
         stanza_id: StanzaId,
     },
+    TombstoneReplayDeletion {
+        target: StoredTombstoneReplayTarget,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sm_entries: Vec<StoredTombstoneReplaySmEntry>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_rows: Vec<String>,
+    },
     ErrorReply {
         recipient: FullJid,
         error: StoredFrozenStanzaError,
@@ -2099,6 +2536,8 @@ impl StoredEffectIntent {
             Self::Carbons { .. } => 5,
             Self::InboxProject { .. } => 6,
             Self::NotificationActivityPreview { .. } => 7,
+            Self::GroupchatNotificationRecovery { .. } => 21,
+            Self::PendingDelivery { .. } => 22,
             Self::LinkPreviewMediaRef { .. } => 18,
             Self::RetractionTombstone { .. } => 14,
             Self::DmPinMutation { .. } => 15,
@@ -2110,6 +2549,7 @@ impl StoredEffectIntent {
             Self::CallSignal { .. } => 8,
             Self::Pin { .. } => 9,
             Self::Extension { .. } => 10,
+            Self::TombstoneReplayDeletion { .. } => 23,
             Self::ErrorReply { .. } => 11,
         }
     }
@@ -2191,6 +2631,14 @@ impl StoredEffectIntent {
                     mutation: mutation.into(),
                 }
             }
+            IngressEffectIntent::GroupchatNotificationRecovery { mutation } => {
+                Self::GroupchatNotificationRecovery {
+                    mutation: mutation.into(),
+                }
+            }
+            IngressEffectIntent::PendingDelivery { mutation } => Self::PendingDelivery {
+                mutation: mutation.into(),
+            },
             IngressEffectIntent::LinkPreviewMediaRef { mutation } => Self::LinkPreviewMediaRef {
                 mutation: mutation.into(),
             },
@@ -2242,6 +2690,22 @@ impl StoredEffectIntent {
                 recipient,
                 stanza_id,
             },
+            IngressEffectIntent::TombstoneReplayDeletion {
+                target,
+                mut sm_entries,
+                mut pending_rows,
+            } => {
+                canonicalize_tombstone_replay_sm_entries(&mut sm_entries);
+                canonicalize_pending_row_ids(&mut pending_rows);
+                Self::TombstoneReplayDeletion {
+                    target: target.into(),
+                    sm_entries: sm_entries.into_iter().map(Into::into).collect(),
+                    pending_rows: pending_rows
+                        .into_iter()
+                        .map(|row_id| row_id.as_str().to_owned())
+                        .collect(),
+                }
+            }
             IngressEffectIntent::ErrorReply { recipient, error } => Self::ErrorReply {
                 recipient,
                 error: StoredFrozenStanzaError::from_domain(error),
@@ -2317,6 +2781,14 @@ impl StoredEffectIntent {
                     mutation: mutation.into_domain()?,
                 }
             }
+            Self::GroupchatNotificationRecovery { mutation } => {
+                IngressEffectIntent::GroupchatNotificationRecovery {
+                    mutation: mutation.into_domain()?,
+                }
+            }
+            Self::PendingDelivery { mutation } => IngressEffectIntent::PendingDelivery {
+                mutation: mutation.into(),
+            },
             Self::LinkPreviewMediaRef { mutation } => IngressEffectIntent::LinkPreviewMediaRef {
                 mutation: mutation.into_domain()?,
             },
@@ -2368,6 +2840,15 @@ impl StoredEffectIntent {
                 recipient,
                 stanza_id,
             },
+            Self::TombstoneReplayDeletion {
+                target,
+                sm_entries,
+                pending_rows,
+            } => IngressEffectIntent::TombstoneReplayDeletion {
+                target: target.into(),
+                sm_entries: sm_entries.into_iter().map(Into::into).collect(),
+                pending_rows: pending_rows.into_iter().map(PendingRowId::new).collect(),
+            },
             Self::ErrorReply { recipient, error } => IngressEffectIntent::ErrorReply {
                 recipient,
                 error: error.into_domain()?,
@@ -2381,11 +2862,52 @@ fn canonicalize(values: &mut Vec<FullJid>) {
     values.dedup();
 }
 
+fn canonicalize_tombstone_replay_sm_entries(entries: &mut Vec<TombstoneReplaySmEntry>) {
+    entries.sort_by_key(TombstoneReplaySmEntry::storage_identity);
+    entries.dedup_by(|left, right| left.storage_identity() == right.storage_identity());
+}
+
+fn canonicalized_tombstone_replay_sm_entries(
+    entries: &[TombstoneReplaySmEntry],
+) -> Vec<TombstoneReplaySmEntry> {
+    let mut entries = entries.to_vec();
+    canonicalize_tombstone_replay_sm_entries(&mut entries);
+    entries
+}
+
+fn canonicalize_pending_row_ids(row_ids: &mut Vec<PendingRowId>) {
+    row_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    row_ids.dedup_by(|left, right| left.as_str() == right.as_str());
+}
+
+fn canonicalized_pending_row_ids(row_ids: &[PendingRowId]) -> Vec<PendingRowId> {
+    let mut row_ids = row_ids.to_vec();
+    canonicalize_pending_row_ids(&mut row_ids);
+    row_ids
+}
+
 fn carbon_kind_tag(kind: CarbonKind) -> u8 {
     match kind {
         CarbonKind::Sent => 0,
         CarbonKind::Received => 1,
     }
+}
+
+fn groupchat_notification_recovery_action_tag(action: GroupchatNotificationRecoveryAction) -> u8 {
+    match action {
+        GroupchatNotificationRecoveryAction::Recorded => 0,
+        GroupchatNotificationRecoveryAction::Completed => 1,
+    }
+}
+
+fn groupchat_notification_recovery_action_from_tag(
+    tag: u8,
+) -> Result<GroupchatNotificationRecoveryAction, EffectIntentCodecError> {
+    Ok(match tag {
+        0 => GroupchatNotificationRecoveryAction::Recorded,
+        1 => GroupchatNotificationRecoveryAction::Completed,
+        _ => return Err(EffectIntentCodecError::MalformedPayload),
+    })
 }
 
 fn carbon_kind_from_tag(tag: u8) -> Result<CarbonKind, EffectIntentCodecError> {
@@ -2654,6 +3176,29 @@ mod tests {
                     outcome: NotificationCandidateOutcome::Inserted,
                 },
             },
+            IngressEffectIntent::GroupchatNotificationRecovery {
+                mutation: GroupchatNotificationRecoveryMutation {
+                    recipient: bare("romeo@example.test"),
+                    room: bare("room@conference.example.test"),
+                    thread_id: Some(thread_id("thread-1")),
+                    archive_stanza_id: stanza_id(),
+                    sender: "juliet@example.test/balcony"
+                        .parse::<Jid>()
+                        .expect("valid JID"),
+                    is_live_occupant: true,
+                    room_members_only: false,
+                    sender_can_broadcast_channel_mention: true,
+                    created_at_ms: 1_753_620_000_000,
+                    action: GroupchatNotificationRecoveryAction::Recorded,
+                },
+            },
+            IngressEffectIntent::PendingDelivery {
+                mutation: PendingDeliveryMutation::Archived {
+                    recipient: bare("romeo@example.test"),
+                    row_id: PendingRowId::new("pending-row-1"),
+                    archive_stanza_id: stanza_id(),
+                },
+            },
             IngressEffectIntent::LinkPreviewMediaRef {
                 mutation: LinkPreviewMediaRefMutation {
                     upload_slot_id: Uuid::parse_str("d5c7a44f-7c8c-4587-b0fb-f0e68444d36a")
@@ -2757,6 +3302,18 @@ mod tests {
                 recipient: bare("romeo@example.test"),
                 stanza_id: stanza_id(),
             },
+            IngressEffectIntent::TombstoneReplayDeletion {
+                target: TombstoneReplayTarget::Direct {
+                    wire_id: "wire-1".to_owned(),
+                    author: bare("juliet@example.test"),
+                    archive: bare("romeo@example.test"),
+                },
+                sm_entries: vec![TombstoneReplaySmEntry {
+                    stream: SmSessionId::new("stream-1"),
+                    sequence: 42,
+                }],
+                pending_rows: vec![PendingRowId::new("pending-row-1")],
+            },
             IngressEffectIntent::ErrorReply {
                 recipient: full("romeo@example.test/phone"),
                 error: FrozenStanzaError::new(
@@ -2788,6 +3345,8 @@ mod tests {
             r#"{"version":1,"intent":{"type":"carbons","carbon_recipients":["romeo@example.test/phone"],"excluded_source":"romeo@example.test/laptop","kind":0}}"#,
             r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","mutation":{"type":"direct","peer":"juliet@example.test","increment_unread":true}}}"#,
             r#"{"version":1,"intent":{"type":"notification_activity_preview","owner":"romeo@example.test","mutation":{"type":"notification_candidate","conversation":"room@conference.example.test","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"outcome":0}}}"#,
+            r#"{"version":1,"intent":{"type":"groupchat_notification_recovery","mutation":{"recipient":"romeo@example.test","room":"room@conference.example.test","thread_id":"thread-1","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"sender":"juliet@example.test/balcony","is_live_occupant":true,"room_members_only":false,"sender_can_broadcast_channel_mention":true,"created_at_ms":1753620000000,"action":0}}}"#,
+            r#"{"version":1,"intent":{"type":"pending_delivery","mutation":{"type":"archived","recipient":"romeo@example.test","row_id":"pending-row-1","archive_stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"link_preview_media_ref","mutation":{"upload_slot_id":"d5c7a44f-7c8c-4587-b0fb-f0e68444d36a","archive":"room@conference.example.test","message_id":"client-msg-1","current_archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"state":0}}}"#,
             r#"{"version":1,"intent":{"type":"retraction_tombstone","mutation":{"archive":"archive@example.test","target_stanza_id":{"id":"target-1","by":"archive@example.test"},"retraction_stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"dm_pin_mutation","first_peer":"juliet@example.test","second_peer":"romeo@example.test","target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
@@ -2799,6 +3358,7 @@ mod tests {
             r#"{"version":1,"intent":{"type":"call_signal","recipient":"romeo@example.test/phone","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"pin","room":"room@conference.example.test","mutation":{"type":"pin","entry":{"target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"pinner_jid":"romeo@example.test","pinned_at":"2025-07-27T12:00:00Z","preview":{"author_jid":"juliet@example.test","author_nick":"Juliet","text":"important","message_timestamp":"2025-07-27T11:59:00Z"}}}}}"#,
             r#"{"version":1,"intent":{"type":"extension","recipient":"romeo@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
+            r#"{"version":1,"intent":{"type":"tombstone_replay_deletion","target":{"type":"direct","wire_id":"wire-1","author":"juliet@example.test","archive":"romeo@example.test"},"sm_entries":[{"stream":"stream-1","sequence":42}],"pending_rows":["pending-row-1"]}}"#,
             r#"{"version":1,"intent":{"type":"error_reply","recipient":"romeo@example.test/phone","error":{"error_type":3,"condition":13,"texts":[{"lang":"nb","text":"moved"}],"condition_payload":{"type":"redirect","new_address":"xmpp:romeo@example.test/mobile"}}}}"#,
         ];
         assert_eq!(
@@ -3048,6 +3608,134 @@ mod tests {
         };
 
         for intent in [inbox, notification, carbons] {
+            let encoded = intent.encode_v1().expect("encode typed effect");
+            assert_eq!(
+                IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                    .expect("decode typed effect"),
+                intent
+            );
+        }
+    }
+
+    #[test]
+    fn inbox_groupchat_read_mutations_round_trip_with_distinct_keys() {
+        let channel_read = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::GroupchatChannelRead {
+                room: bare("room@conference.example.test"),
+            },
+        };
+        let thread_read = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::GroupchatThreadRead {
+                room: bare("room@conference.example.test"),
+                thread_id: thread_id("thread-1"),
+            },
+        };
+        let unread = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::GroupchatChannel {
+                room: bare("room@conference.example.test"),
+                increment_unread: true,
+            },
+        };
+
+        for intent in [&channel_read, &thread_read] {
+            let encoded = intent.encode_v1().expect("encode read mutation");
+            assert_eq!(
+                IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                    .expect("decode read mutation"),
+                *intent
+            );
+        }
+        assert_ne!(channel_read.semantic_key(), thread_read.semantic_key());
+        assert_ne!(channel_read.semantic_key(), unread.semantic_key());
+    }
+
+    #[test]
+    fn recovery_pending_and_tombstone_keys_distinguish_actions_and_identities() {
+        let recovery_recorded = IngressEffectIntent::GroupchatNotificationRecovery {
+            mutation: GroupchatNotificationRecoveryMutation {
+                recipient: bare("romeo@example.test"),
+                room: bare("room@conference.example.test"),
+                thread_id: Some(thread_id("thread-1")),
+                archive_stanza_id: stanza_id(),
+                sender: "juliet@example.test/balcony"
+                    .parse::<Jid>()
+                    .expect("valid JID"),
+                is_live_occupant: true,
+                room_members_only: false,
+                sender_can_broadcast_channel_mention: true,
+                created_at_ms: 1_753_620_000_000,
+                action: GroupchatNotificationRecoveryAction::Recorded,
+            },
+        };
+        let recovery_completed = IngressEffectIntent::GroupchatNotificationRecovery {
+            mutation: GroupchatNotificationRecoveryMutation {
+                action: GroupchatNotificationRecoveryAction::Completed,
+                ..match &recovery_recorded {
+                    IngressEffectIntent::GroupchatNotificationRecovery { mutation } => {
+                        mutation.clone()
+                    }
+                    _ => unreachable!("fixture shape"),
+                }
+            },
+        };
+        let pending_archived = IngressEffectIntent::PendingDelivery {
+            mutation: PendingDeliveryMutation::Archived {
+                recipient: bare("romeo@example.test"),
+                row_id: PendingRowId::new("pending-row-1"),
+                archive_stanza_id: stanza_id(),
+            },
+        };
+        let pending_transient = IngressEffectIntent::PendingDelivery {
+            mutation: PendingDeliveryMutation::Transient {
+                recipient: bare("romeo@example.test"),
+                row_id: PendingRowId::new("pending-row-1"),
+            },
+        };
+        let tombstone_one = IngressEffectIntent::TombstoneReplayDeletion {
+            target: TombstoneReplayTarget::Direct {
+                wire_id: "wire-1".to_owned(),
+                author: bare("juliet@example.test"),
+                archive: bare("romeo@example.test"),
+            },
+            sm_entries: vec![TombstoneReplaySmEntry {
+                stream: SmSessionId::new("stream-1"),
+                sequence: 42,
+            }],
+            pending_rows: vec![PendingRowId::new("pending-row-1")],
+        };
+        let tombstone_two = IngressEffectIntent::TombstoneReplayDeletion {
+            target: TombstoneReplayTarget::Direct {
+                wire_id: "wire-1".to_owned(),
+                author: bare("juliet@example.test"),
+                archive: bare("romeo@example.test"),
+            },
+            sm_entries: vec![TombstoneReplaySmEntry {
+                stream: SmSessionId::new("stream-1"),
+                sequence: 43,
+            }],
+            pending_rows: vec![PendingRowId::new("pending-row-1")],
+        };
+
+        assert_ne!(
+            recovery_recorded.semantic_key(),
+            recovery_completed.semantic_key()
+        );
+        assert_ne!(
+            pending_archived.semantic_key(),
+            pending_transient.semantic_key()
+        );
+        assert_ne!(tombstone_one.semantic_key(), tombstone_two.semantic_key());
+
+        for intent in [
+            recovery_recorded,
+            recovery_completed,
+            pending_archived,
+            pending_transient,
+            tombstone_one,
+        ] {
             let encoded = intent.encode_v1().expect("encode typed effect");
             assert_eq!(
                 IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())

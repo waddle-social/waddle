@@ -26,6 +26,21 @@ pub(super) async fn queue_offline_delivery(
         waddle_xmpp::pending_delivery::PendingPayload::Transient(_) => None,
     };
     let row_id = waddle_xmpp::pending_delivery::PendingRowId::fresh();
+    let pending_delivery_mutation = match &payload {
+        waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id) => {
+            waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
+                recipient: recipient.clone(),
+                row_id: row_id.clone(),
+                archive_stanza_id: archive_stanza_id.clone(),
+            }
+        }
+        waddle_xmpp::pending_delivery::PendingPayload::Transient(_) => {
+            waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                recipient: recipient.clone(),
+                row_id: row_id.clone(),
+            }
+        }
+    };
     let row = waddle_xmpp::pending_delivery::PendingRow {
         id: row_id.clone(),
         recipient: recipient.clone(),
@@ -40,14 +55,15 @@ pub(super) async fn queue_offline_delivery(
                 recipient = %recipient,
                 "pending_delivery row inserted"
             );
-            if notification_archive_stanza_id.is_some() {
+            deps.capture_intent(IngressEffectIntent::PendingDelivery {
+                mutation: pending_delivery_mutation,
+            });
+            if let Some(archive_stanza_id) = notification_archive_stanza_id.as_ref() {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: recipient.clone(),
                     mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {
                         conversation: recipient.clone(),
-                        archive_stanza_id: notification_archive_stanza_id
-                            .clone()
-                            .expect("checked above"),
+                        archive_stanza_id: archive_stanza_id.clone(),
                     },
                 });
             }
@@ -57,9 +73,21 @@ pub(super) async fn queue_offline_delivery(
                 notification_archive_stanza_id.as_ref(),
             )
             .await;
-            if notification_archive_stanza_id.is_some()
-                && outcome == NotificationCandidateQueueOutcome::Completed
-            {
+            if let (Some(archive_stanza_id), Some(candidate_outcome)) = (
+                notification_archive_stanza_id.as_ref(),
+                outcome.candidate_outcome(),
+            ) {
+                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                    owner: recipient.clone(),
+                    mutation:
+                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                            conversation: recipient.clone(),
+                            archive_stanza_id: archive_stanza_id.clone(),
+                            outcome: candidate_outcome,
+                        },
+                });
+            }
+            if notification_archive_stanza_id.is_some() && outcome.completed() {
                 mark_pending_notification_outboxed(storage.as_ref(), &row_id, &recipient).await;
             }
         }
@@ -175,7 +203,23 @@ pub(super) async fn queue_offline_delivery(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotificationCandidateQueueOutcome {
     Completed,
+    Inserted,
+    Duplicate,
     RetryLater,
+}
+
+impl NotificationCandidateQueueOutcome {
+    fn completed(self) -> bool {
+        !matches!(self, Self::RetryLater)
+    }
+
+    fn candidate_outcome(self) -> Option<waddle_xmpp::ingress::NotificationCandidateOutcome> {
+        match self {
+            Self::Inserted => Some(waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted),
+            Self::Duplicate => Some(waddle_xmpp::ingress::NotificationCandidateOutcome::Duplicate),
+            Self::Completed | Self::RetryLater => None,
+        }
+    }
 }
 
 async fn enqueue_xep0357_notification_candidate(
@@ -490,7 +534,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 is_mention,
                 "XEP-0357 notification candidate inserted for durable outbox worker"
             );
-            NotificationCandidateQueueOutcome::Completed
+            NotificationCandidateQueueOutcome::Inserted
         }
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
             debug!(
@@ -498,7 +542,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 sender = %sender,
                 "Duplicate XEP-0357 notification candidate ignored"
             );
-            NotificationCandidateQueueOutcome::Completed
+            NotificationCandidateQueueOutcome::Duplicate
         }
         Err(error) => {
             warn!(
@@ -678,7 +722,9 @@ pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
         )
         .await;
         match outcome {
-            NotificationCandidateQueueOutcome::Completed => {
+            NotificationCandidateQueueOutcome::Completed
+            | NotificationCandidateQueueOutcome::Inserted
+            | NotificationCandidateQueueOutcome::Duplicate => {
                 if !mark_pending_notification_outboxed(pending_storage, &row.id, &row.recipient)
                     .await
                 {

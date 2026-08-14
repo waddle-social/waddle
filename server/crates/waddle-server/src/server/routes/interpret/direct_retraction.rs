@@ -11,6 +11,7 @@ pub(super) async fn apply_retraction_tombstone(
     archive: &jid::BareJid,
     target_wire_id: &str,
     retraction_message: &Message,
+    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
 ) -> Option<StanzaId> {
     // XEP-0424 §"Using the correct ID": a non-groupchat retraction
     // names the target by the SENDER's wire id, which is client-chosen
@@ -107,6 +108,7 @@ pub(super) async fn apply_retraction_tombstone(
                     pending_storage,
                     scrub_target,
                     "ApplyRetractionTombstone",
+                    capture,
                 )
                 .await;
             }
@@ -125,6 +127,7 @@ pub(super) async fn apply_retraction_tombstone(
                     pending_storage,
                     scrub_target,
                     "ApplyRetractionTombstone",
+                    capture,
                 )
                 .await;
             }
@@ -145,6 +148,7 @@ pub(super) async fn apply_retraction_tombstone(
             pending_storage,
             scrub_target,
             "ApplyRetractionTombstone",
+            capture,
         )
         .await;
     }
