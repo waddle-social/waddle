@@ -921,7 +921,8 @@ async fn create_websocket_state(
         state.lineage_config.clone(),
         state.clustering_claims.node_identity.clone(),
     )
-    .await;
+    .await
+    .map_err(|error| anyhow::anyhow!("failed to initialize ingress shadow: {error}"))?;
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
             app_state: state.clone(),

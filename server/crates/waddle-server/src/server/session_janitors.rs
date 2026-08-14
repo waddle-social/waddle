@@ -6027,329 +6027,366 @@ pub(crate) fn spawn_graceful_shutdown_drain(
     drain_token: tokio_util::sync::CancellationToken,
     drain_notify: Arc<tokio::sync::Notify>,
 ) {
-    tokio::spawn(async move {
-        // Always notify_one on exit (success or early-return) so
-        // the runtime's awaiting code never blocks indefinitely
-        // on drain completion.
-        struct NotifyOnDrop(Arc<tokio::sync::Notify>);
-        impl Drop for NotifyOnDrop {
-            fn drop(&mut self) {
-                self.0.notify_one();
-            }
-        }
-        let _notify_guard = NotifyOnDrop(drain_notify);
+    tokio::spawn(run_graceful_shutdown_drain(
+        websocket_state,
+        drain_token,
+        drain_notify,
+        max_drain_duration_from_env(),
+    ));
+}
 
-        drain_token.cancelled().await;
-        // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
-        // timestamp, fed into the SAME `drain_duration_ms` histogram the
-        // generic per-entity room drain records into (below, once the Q6
-        // portion completes) — one shared observability surface across
-        // both independent drain mechanisms.
-        #[cfg(feature = "clustering")]
-        let sm_drain_started = std::time::Instant::now();
-        // Issue #1091: live sessions observe the same stop token, send
-        // <system-shutdown/> and detach into the SmSessionRegistry.
-        // Wait for every connection guard to drop before the Q6 passes
-        // below, so live sessions' unacked queues are in the registry
-        // when drain_all_for_shutdown runs — otherwise the quiet window
-        // could conclude before a slow session finishes detaching.
-        //
-        // One deadline covers BOTH phases (connection drain + Q6
-        // promotion): the pod's terminationGracePeriodSeconds is sized
-        // for a single WADDLE_DRAIN_TIMEOUT_SECS budget, so serializing
-        // two full budgets would let SIGKILL truncate Q6 promotion.
-        // The connection wait gets at most HALF the budget: a single
-        // stuck peer must not consume the whole deadline and starve Q6
-        // promotion for sessions that already detached cleanly — the
-        // stuck session itself falls back to its durable SM row on
-        // next startup either way.
-        let total_budget = max_drain_duration_from_env();
-        let drain_deadline = std::time::Instant::now() + total_budget;
-        info!(
-            active_connections = websocket_state.deps.shutdown.active_connections(),
-            "Graceful shutdown: waiting for live sessions to close and detach"
-        );
-        if !websocket_state
-            .deps
-            .shutdown
-            .wait_for_connections_drained_for(total_budget / 2)
-            .await
-        {
-            warn!(
-                remaining_connections = websocket_state.deps.shutdown.active_connections(),
-                "Graceful shutdown: connection drain timed out; promoting \
-                 whatever detached in time. Remaining sessions keep their \
-                 durable SM rows for next-startup retry."
-            );
+async fn run_graceful_shutdown_drain(
+    websocket_state: Arc<WebSocketState>,
+    drain_token: tokio_util::sync::CancellationToken,
+    drain_notify: Arc<tokio::sync::Notify>,
+    total_budget: std::time::Duration,
+) {
+    // Always notify_one on exit (success or early-return) so
+    // the runtime's awaiting code never blocks indefinitely
+    // on drain completion.
+    struct NotifyOnDrop(Arc<tokio::sync::Notify>);
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            self.0.notify_one();
         }
-        info!("Graceful shutdown: starting SM session Q6 drain");
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
-        const QUIET_WINDOW_PASSES: u32 = 8;
-        let mut empty_passes = 0u32;
-        let mut total_drained = 0usize;
-        loop {
-            if std::time::Instant::now() >= drain_deadline {
-                waddle_xmpp::telemetry::reliability::increment_sm_drain_timeout();
-                // ADR-0017 Phase 3 Slice 10: whatever this node still
-                // believes it owns at the timeout never even reached
-                // `drain_all_for_shutdown` this pass — abandoned, same as
-                // the generic per-entity drain's own budget-overrun path.
-                let remaining = websocket_state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .live_session_ids()
-                    .map(|ids| ids.len())
-                    .unwrap_or(0);
-                if remaining > 0 {
-                    #[cfg(feature = "clustering")]
-                    crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
-                }
-                warn!(
-                    total_drained,
-                    remaining,
-                    "Graceful shutdown: drain timeout reached. Remaining sessions \
-                     keep their durable SM rows and will be retried on next startup \
-                     via restore_from_persistence + Q6 expiry."
-                );
-                break;
-            }
-            let drained = match websocket_state
+    }
+    let _notify_guard = NotifyOnDrop(drain_notify);
+
+    drain_token.cancelled().await;
+    // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
+    // timestamp, fed into the SAME `drain_duration_ms` histogram the
+    // generic per-entity room drain records into (below, once the Q6
+    // portion completes) — one shared observability surface across
+    // both independent drain mechanisms.
+    #[cfg(feature = "clustering")]
+    let sm_drain_started = std::time::Instant::now();
+    // Issue #1091: live sessions observe the same stop token, send
+    // <system-shutdown/> and detach into the SmSessionRegistry.
+    // Wait for every connection guard to drop before the Q6 passes
+    // below, so live sessions' unacked queues are in the registry
+    // when drain_all_for_shutdown runs — otherwise the quiet window
+    // could conclude before a slow session finishes detaching.
+    //
+    // One deadline covers BOTH phases (connection drain + Q6
+    // promotion): the pod's terminationGracePeriodSeconds is sized
+    // for a single WADDLE_DRAIN_TIMEOUT_SECS budget, so serializing
+    // two full budgets would let SIGKILL truncate Q6 promotion.
+    // The connection wait gets at most HALF the budget: a single
+    // stuck peer must not consume the whole deadline and starve Q6
+    // promotion for sessions that already detached cleanly — the
+    // stuck session itself falls back to its durable SM row on
+    // next startup either way.
+    let drain_deadline = std::time::Instant::now() + total_budget;
+    info!(
+        active_connections = websocket_state.deps.shutdown.active_connections(),
+        "Graceful shutdown: waiting for live sessions to close and detach"
+    );
+    if !websocket_state
+        .deps
+        .shutdown
+        .wait_for_connections_drained_for(total_budget / 2)
+        .await
+    {
+        warn!(
+            remaining_connections = websocket_state.deps.shutdown.active_connections(),
+            "Graceful shutdown: connection drain timed out; promoting \
+             whatever detached in time. Remaining sessions keep their \
+             durable SM rows for next-startup retry."
+        );
+    }
+    info!("Graceful shutdown: starting SM session Q6 drain");
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+    const QUIET_WINDOW_PASSES: u32 = 8;
+    let mut empty_passes = 0u32;
+    let mut total_drained = 0usize;
+    loop {
+        if std::time::Instant::now() >= drain_deadline {
+            waddle_xmpp::telemetry::reliability::increment_sm_drain_timeout();
+            // ADR-0017 Phase 3 Slice 10: whatever this node still
+            // believes it owns at the timeout never even reached
+            // `drain_all_for_shutdown` this pass — abandoned, same as
+            // the generic per-entity drain's own budget-overrun path.
+            let remaining = websocket_state
                 .deps
                 .protocol
                 .sm_session_registry
-                .drain_all_for_shutdown()
-                .await
-            {
-                Ok(s) => s,
-                Err(error) => {
-                    warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
-                    break;
-                }
-            };
-            let release_retry_budget =
-                drain_deadline.saturating_duration_since(std::time::Instant::now());
-            if tokio::time::timeout(
-                release_retry_budget,
-                websocket_state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .retry_pending_claim_releases(64),
-            )
-            .await
-            .is_err()
-            {
-                // Re-enter at the deadline check so timeout telemetry and
-                // abandonment accounting stay centralized above.
-                continue;
+                .live_session_ids()
+                .map(|ids| ids.len())
+                .unwrap_or(0);
+            if remaining > 0 {
+                #[cfg(feature = "clustering")]
+                crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
             }
-            if drained.is_empty() {
-                empty_passes += 1;
-                if empty_passes >= QUIET_WINDOW_PASSES {
-                    break;
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-            empty_passes = 0;
-            total_drained += drained.len();
-            info!(
-                count = drained.len(),
-                "Graceful shutdown: promoting unacked queues for detached SM sessions"
+            warn!(
+                total_drained,
+                remaining,
+                "Graceful shutdown: drain timeout reached. Remaining sessions \
+                 keep their durable SM rows and will be retried on next startup \
+                 via restore_from_persistence + Q6 expiry."
             );
-            let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
-                &websocket_state.deps.protocol.sm_session_registry,
-                drained,
-            );
-            while let Some(session) = promotion_batch.pop() {
-                let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
-                    &websocket_state.deps.protocol.sm_session_registry,
-                    session,
-                );
-                let session = promotion_guard.session();
-                let blocklist = match websocket_state
-                    .deps
-                    .protocol
-                    .blocking_storage
-                    .list_blocked_jid_entries(&session.jid.to_bare())
-                    .await
-                {
-                    Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
-                    Err(error) => {
-                        warn!(
-                            jid = %session.jid,
-                            error = %error,
-                            "Graceful shutdown: blocklist load failed; SKIPPING \
-                             promotion to preserve fail-closed XEP-0191 policy. \
-                             Durable SM row will be retried on next startup."
-                        );
-                        record_sm_drain_outcome(false);
-                        continue;
-                    }
-                };
-                // Round-2 review R2 + round-3 finding 1: per-session
-                // recent-tombstone fetch so a retraction landing
-                // mid-batch during the shutdown drain is still seen.
-                let mut recent_tombstones = Vec::new();
-                if let Ok(records) = crate::sm_promotion::recent_tombstones_for_promotion(
-                    &websocket_state.deps.protocol.sm_session_registry,
-                    "Graceful shutdown",
-                ) {
-                    recent_tombstones = records;
-                }
-                let summary = crate::sm_promotion::promote_session_unacked(
-                    session,
-                    &websocket_state.deps.protocol.connection_registry,
-                    &websocket_state.deps.protocol.user_registry,
-                    &websocket_state.deps.protocol.pending_delivery_storage,
-                    &blocklist,
-                    websocket_state.deps.auth_state.xmpp_domain.as_str(),
-                    &recent_tombstones,
-                )
-                .await;
-                // Finding B: same TOCTOU close-out as the SM janitor —
-                // re-scrub pending rows for tombstones recorded during
-                // this session's promotion window before confirming.
-                let _ =
-                    crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
-                        &websocket_state.deps.protocol.sm_session_registry,
-                        &websocket_state.deps.protocol.pending_delivery_storage,
-                        &recent_tombstones,
-                        "Graceful shutdown",
-                    )
-                    .await;
-                info!(
-                    jid = %session.jid,
-                    redelivered = summary.redelivered,
-                    queued = summary.queued,
-                    bounced = summary.bounced,
-                    dropped = summary.dropped,
-                    unparseable = summary.unparseable,
-                    scrubbed = summary.scrubbed,
-                    storage_failed = summary.storage_failed,
-                    "Graceful shutdown: Q6 promotion completed for session"
-                );
-                if summary.has_storage_failure() {
-                    warn!(
-                        jid = %session.jid,
-                        storage_failed = summary.storage_failed,
-                        "Graceful shutdown: promotion had storage failures; \
-                         preserving durable SM row for restart-time retry"
-                    );
-                    record_sm_drain_outcome(false);
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
-                        &websocket_state.deps.protocol.sm_session_registry,
-                        session.clone(),
-                        &summary,
-                    )
-                    .await
-                    {
-                        promotion_guard.complete();
-                    }
-                    continue;
-                }
-                let confirmed = websocket_state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .confirm_drained(&session.stream_id)
-                    .await;
-                // ADR-0017 Phase 3 Slice 10: this session's own "final
-                // fenced write, then release" sequence — `confirm_drained`
-                // deletes the durable row and releases the `ClaimStore`
-                // claim only on success (see that method's own doc
-                // comment).
-                record_sm_drain_outcome(confirmed);
-                if !confirmed {
-                    warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        "Graceful shutdown: durable SM confirmation failed; retaining \
-                         promotion ownership and pending-delivery claim for retry"
-                    );
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
-                        &websocket_state.deps.protocol.sm_session_registry,
-                        session.clone(),
-                        &summary,
-                    )
-                    .await
-                    {
-                        promotion_guard.complete();
-                    }
-                    continue;
-                }
-                let session_id =
-                    waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
-                if let Err(error) = websocket_state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .release_claim(&session_id)
-                    .await
-                {
-                    warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        error = %error,
-                        "Graceful shutdown: pending_delivery release_claim failed; \
-                         rows remain claimed and will be released by next-startup \
-                        claim-expiry janitor"
-                    );
-                }
-                promotion_guard.complete();
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            break;
         }
-        info!(
-            total_drained,
-            "Graceful shutdown: SM Q6 drain complete (iterative)"
-        );
-        #[cfg(feature = "clustering")]
-        crate::clustering::metrics::record_drain_duration_ms(
-            sm_drain_started.elapsed().as_secs_f64() * 1000.0,
-        );
-
-        // Drain the OIDC profile-publish tracker before notifying
-        // shutdown complete. Each in-flight `ensure_pep_profile_published`
-        // call is bounded by the fetcher's 25s timeout budget +
-        // storage latency, so the wait is naturally bounded; calling
-        // `close()` first prevents new publishes from racing in
-        // during the drain. Without this wait the runtime can tear
-        // down mid-step and leave the avatar in a split state
-        // (empty `<metadata/>` published but vcard-temp PHOTO not
-        // yet stripped — exactly the inconsistency XEP-0398 §3
-        // forbids).
-        let publish_tracker = websocket_state
+        let drained = match websocket_state
             .deps
             .protocol
-            .profile_publish_tracker
-            .clone();
-        publish_tracker.close();
-        if !publish_tracker.is_empty() {
-            info!(
-                in_flight = publish_tracker.len(),
-                "Graceful shutdown: awaiting in-flight OIDC profile publishes"
-            );
+            .sm_session_registry
+            .drain_all_for_shutdown()
+            .await
+        {
+            Ok(s) => s,
+            Err(error) => {
+                warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
+                break;
+            }
+        };
+        let release_retry_budget =
+            drain_deadline.saturating_duration_since(std::time::Instant::now());
+        if tokio::time::timeout(
+            release_retry_budget,
+            websocket_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .retry_pending_claim_releases(64),
+        )
+        .await
+        .is_err()
+        {
+            // Re-enter at the deadline check so timeout telemetry and
+            // abandonment accounting stay centralized above.
+            continue;
         }
-        publish_tracker.wait().await;
-        info!("Graceful shutdown: OIDC profile-publish drain complete");
+        if drained.is_empty() {
+            empty_passes += 1;
+            if empty_passes >= QUIET_WINDOW_PASSES {
+                break;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
+        empty_passes = 0;
+        total_drained += drained.len();
+        info!(
+            count = drained.len(),
+            "Graceful shutdown: promoting unacked queues for detached SM sessions"
+        );
+        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+            &websocket_state.deps.protocol.sm_session_registry,
+            drained,
+        );
+        while let Some(session) = promotion_batch.pop() {
+            let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                &websocket_state.deps.protocol.sm_session_registry,
+                session,
+            );
+            let session = promotion_guard.session();
+            let blocklist = match websocket_state
+                .deps
+                .protocol
+                .blocking_storage
+                .list_blocked_jid_entries(&session.jid.to_bare())
+                .await
+            {
+                Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                Err(error) => {
+                    warn!(
+                        jid = %session.jid,
+                        error = %error,
+                        "Graceful shutdown: blocklist load failed; SKIPPING \
+                         promotion to preserve fail-closed XEP-0191 policy. \
+                         Durable SM row will be retried on next startup."
+                    );
+                    record_sm_drain_outcome(false);
+                    continue;
+                }
+            };
+            // Round-2 review R2 + round-3 finding 1: per-session
+            // recent-tombstone fetch so a retraction landing
+            // mid-batch during the shutdown drain is still seen.
+            let mut recent_tombstones = Vec::new();
+            if let Ok(records) = crate::sm_promotion::recent_tombstones_for_promotion(
+                &websocket_state.deps.protocol.sm_session_registry,
+                "Graceful shutdown",
+            ) {
+                recent_tombstones = records;
+            }
+            let summary = crate::sm_promotion::promote_session_unacked(
+                session,
+                &websocket_state.deps.protocol.connection_registry,
+                &websocket_state.deps.protocol.user_registry,
+                &websocket_state.deps.protocol.pending_delivery_storage,
+                &blocklist,
+                websocket_state.deps.auth_state.xmpp_domain.as_str(),
+                &recent_tombstones,
+            )
+            .await;
+            // Finding B: same TOCTOU close-out as the SM janitor —
+            // re-scrub pending rows for tombstones recorded during
+            // this session's promotion window before confirming.
+            let _ = crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                &websocket_state.deps.protocol.sm_session_registry,
+                &websocket_state.deps.protocol.pending_delivery_storage,
+                &recent_tombstones,
+                "Graceful shutdown",
+            )
+            .await;
+            info!(
+                jid = %session.jid,
+                redelivered = summary.redelivered,
+                queued = summary.queued,
+                bounced = summary.bounced,
+                dropped = summary.dropped,
+                unparseable = summary.unparseable,
+                scrubbed = summary.scrubbed,
+                storage_failed = summary.storage_failed,
+                "Graceful shutdown: Q6 promotion completed for session"
+            );
+            if summary.has_storage_failure() {
+                warn!(
+                    jid = %session.jid,
+                    storage_failed = summary.storage_failed,
+                    "Graceful shutdown: promotion had storage failures; \
+                     preserving durable SM row for restart-time retry"
+                );
+                record_sm_drain_outcome(false);
+                if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    session.clone(),
+                    &summary,
+                )
+                .await
+                {
+                    promotion_guard.complete();
+                }
+                continue;
+            }
+            let confirmed = websocket_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .confirm_drained(&session.stream_id)
+                .await;
+            // ADR-0017 Phase 3 Slice 10: this session's own "final
+            // fenced write, then release" sequence — `confirm_drained`
+            // deletes the durable row and releases the `ClaimStore`
+            // claim only on success (see that method's own doc
+            // comment).
+            record_sm_drain_outcome(confirmed);
+            if !confirmed {
+                warn!(
+                    jid = %session.jid,
+                    stream_id = %session.stream_id,
+                    "Graceful shutdown: durable SM confirmation failed; retaining \
+                     promotion ownership and pending-delivery claim for retry"
+                );
+                if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    session.clone(),
+                    &summary,
+                )
+                .await
+                {
+                    promotion_guard.complete();
+                }
+                continue;
+            }
+            let session_id =
+                waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+            websocket_state
+                .deps
+                .protocol
+                .ingress_shadow
+                .forget_stream(&session_id);
+            if let Err(error) = websocket_state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .release_claim(&session_id)
+                .await
+            {
+                warn!(
+                    jid = %session.jid,
+                    stream_id = %session.stream_id,
+                    error = %error,
+                    "Graceful shutdown: pending_delivery release_claim failed; \
+                     rows remain claimed and will be released by next-startup \
+                    claim-expiry janitor"
+                );
+            }
+            promotion_guard.complete();
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    info!(
+        total_drained,
+        "Graceful shutdown: SM Q6 drain complete (iterative)"
+    );
+    let shadow_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
+    if !websocket_state
+        .deps
+        .protocol
+        .ingress_shadow
+        .drain_and_join(shadow_budget)
+        .await
+    {
+        warn!(
+            timeout_ms = shadow_budget.as_millis(),
+            "Graceful shutdown: ingress shadow drain exceeded the shutdown budget; waiting for safe completion before finishing shutdown"
+        );
+        websocket_state
+            .deps
+            .protocol
+            .ingress_shadow
+            .wait_for_completion()
+            .await;
+        info!("Graceful shutdown: ingress shadow drain completed after budget expiry");
+    } else {
+        info!("Graceful shutdown: ingress shadow drain complete");
+    }
+    #[cfg(feature = "clustering")]
+    crate::clustering::metrics::record_drain_duration_ms(
+        sm_drain_started.elapsed().as_secs_f64() * 1000.0,
+    );
 
-        // Drain in-flight provider webhook dispatch tasks so the ledger
-        // status update (`mark_provider_delivery`) lands before teardown.
-        // Rows that never reach dispatch (process kill between insert and
-        // task start) still stay 'queued' — V1 has no sweep job.
-        let dispatch_tracker = websocket_state.deps.provider_dispatch_tasks.clone();
-        dispatch_tracker.close();
-        if !dispatch_tracker.is_empty() {
-            info!(
-                in_flight = dispatch_tracker.len(),
-                "Graceful shutdown: awaiting in-flight provider webhook dispatches"
-            );
-        }
-        dispatch_tracker.wait().await;
-        info!("Graceful shutdown: provider webhook dispatch drain complete");
-    });
+    // Drain the OIDC profile-publish tracker before notifying
+    // shutdown complete. Each in-flight `ensure_pep_profile_published`
+    // call is bounded by the fetcher's 25s timeout budget +
+    // storage latency, so the wait is naturally bounded; calling
+    // `close()` first prevents new publishes from racing in
+    // during the drain. Without this wait the runtime can tear
+    // down mid-step and leave the avatar in a split state
+    // (empty `<metadata/>` published but vcard-temp PHOTO not
+    // yet stripped — exactly the inconsistency XEP-0398 §3
+    // forbids).
+    let publish_tracker = websocket_state
+        .deps
+        .protocol
+        .profile_publish_tracker
+        .clone();
+    publish_tracker.close();
+    if !publish_tracker.is_empty() {
+        info!(
+            in_flight = publish_tracker.len(),
+            "Graceful shutdown: awaiting in-flight OIDC profile publishes"
+        );
+    }
+    publish_tracker.wait().await;
+    info!("Graceful shutdown: OIDC profile-publish drain complete");
+
+    // Drain in-flight provider webhook dispatch tasks so the ledger
+    // status update (`mark_provider_delivery`) lands before teardown.
+    // Rows that never reach dispatch (process kill between insert and
+    // task start) still stay 'queued' — V1 has no sweep job.
+    let dispatch_tracker = websocket_state.deps.provider_dispatch_tasks.clone();
+    dispatch_tracker.close();
+    if !dispatch_tracker.is_empty() {
+        info!(
+            in_flight = dispatch_tracker.len(),
+            "Graceful shutdown: awaiting in-flight provider webhook dispatches"
+        );
+    }
+    dispatch_tracker.wait().await;
+    info!("Graceful shutdown: provider webhook dispatch drain complete");
 }
 
 /// Sweep expired entries from the durable auth handshake tables
@@ -7755,5 +7792,200 @@ mod remote_muc_reconciler_tests {
             vec![ghost],
             "only the fully departed occupant is re-driven"
         );
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod graceful_shutdown_drain_tests {
+    use super::run_graceful_shutdown_drain;
+    use crate::ingress_shadow::{
+        IngressShadowHandle, IngressShadowSubmission, IngressShadowTestTaskKind,
+    };
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Notify;
+    use waddle_xmpp::auth::{
+        AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+    };
+    use waddle_xmpp::ingress::{ConnectionGeneration, IngressOrdinal, NormalizedTarget};
+    use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::{
+        DetachedSession, InMemorySmSessionRegistry, ShadowOrdinal, SmSessionRegistry,
+    };
+    use xmpp_parsers::message::{Message, MessageType};
+
+    fn principal() -> AuthenticatedPrincipalRef {
+        AuthenticatedPrincipalRef::new(
+            "romeo@example.com".parse().expect("bare jid"),
+            AuthContextId::new(uuid::Uuid::new_v4()),
+            AuthContextVersion::new(1),
+            PrincipalAuthEpoch::new(1),
+        )
+    }
+
+    fn detached_session(stream_id: &str, jid: jid::FullJid) -> DetachedSession {
+        DetachedSession {
+            stream_id: stream_id.to_string(),
+            user_id: jid.to_bare().to_string(),
+            jid,
+            inbound_count: 0,
+            shadow_ordinal: ShadowOrdinal::ZERO,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(120),
+            detached_at: Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        }
+    }
+
+    fn held_shadow_submission(stream_id: &str) -> IngressShadowSubmission {
+        let mut message = Message::new(Some(jid::Jid::from(
+            "juliet@example.com"
+                .parse::<jid::BareJid>()
+                .expect("bare jid"),
+        )));
+        message.type_ = MessageType::Chat;
+        IngressShadowSubmission {
+            stream_id: SmSessionId::new(stream_id),
+            owner: NodeIdentity::new("node-a", "epoch-a"),
+            claim_epoch: ClaimEpoch(1),
+            handled_ordinal: IngressOrdinal::FIRST,
+            principal: principal(),
+            target: NormalizedTarget::Bare("juliet@example.com".parse().expect("bare jid")),
+            message,
+            capture: crate::ingress_shadow::IngressEffectCaptureSnapshot {
+                stanza_lang: None,
+                sanitized_message: None,
+                room_fence: None,
+                intents: Vec::new(),
+                markers: Vec::new(),
+            },
+            connection_generation: Some(ConnectionGeneration::INITIAL),
+        }
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_successful_confirm_drains_and_retires_shadow_stream() {
+        let retired = Arc::new(Notify::new());
+        let retired_stream = Arc::new(tokio::sync::Mutex::new(None::<SmSessionId>));
+        let ingress_shadow = IngressShadowHandle::spawn_test_worker(8, 1, {
+            let retired = Arc::clone(&retired);
+            let retired_stream = Arc::clone(&retired_stream);
+            move |kind, stream_id| {
+                let retired = Arc::clone(&retired);
+                let retired_stream = Arc::clone(&retired_stream);
+                async move {
+                    if matches!(kind, IngressShadowTestTaskKind::Retire) {
+                        *retired_stream.lock().await = Some(stream_id);
+                        retired.notify_one();
+                    }
+                }
+            }
+        });
+        let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
+        let state = create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+            Arc::clone(&sm_registry),
+            ingress_shadow,
+        )
+        .await;
+        let stream_id = "shutdown-retire-stream";
+        sm_registry
+            .store_session(detached_session(
+                stream_id,
+                "romeo@example.com/phone".parse().expect("full jid"),
+            ))
+            .await
+            .expect("store detached session");
+        let drain_token = tokio_util::sync::CancellationToken::new();
+        let drain_notify = Arc::new(Notify::new());
+        let drain_task = tokio::spawn(run_graceful_shutdown_drain(
+            Arc::clone(&state),
+            drain_token.clone(),
+            Arc::clone(&drain_notify),
+            Duration::from_millis(400),
+        ));
+
+        drain_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), retired.notified())
+            .await
+            .expect("successful confirm_drained should retire the shadow stream");
+        assert_eq!(
+            retired_stream.lock().await.clone(),
+            Some(SmSessionId::new(stream_id)),
+        );
+        tokio::time::timeout(Duration::from_secs(2), drain_notify.notified())
+            .await
+            .expect("graceful shutdown drain should finish");
+        drain_task.await.expect("graceful drain task");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_waits_for_shadow_completion_after_budget_timeout() {
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let ingress_shadow = IngressShadowHandle::spawn_test_worker(8, 1, {
+            let submit_started = Arc::clone(&submit_started);
+            let release_submit = Arc::clone(&release_submit);
+            move |kind, stream_id| {
+                let submit_started = Arc::clone(&submit_started);
+                let release_submit = Arc::clone(&release_submit);
+                async move {
+                    if matches!(kind, IngressShadowTestTaskKind::Submit)
+                        && stream_id == SmSessionId::new("shadow-held")
+                    {
+                        submit_started.notify_one();
+                        release_submit.notified().await;
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            ingress_shadow.try_submit(held_shadow_submission("shadow-held")),
+            crate::ingress_shadow::IngressShadowDisposition::Enqueued,
+            "the held shadow submission must be accepted before shutdown starts"
+        );
+        tokio::time::timeout(Duration::from_secs(1), submit_started.notified())
+            .await
+            .expect("shadow submit should enter the worker");
+
+        let state = create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+            Arc::new(InMemorySmSessionRegistry::new()),
+            ingress_shadow,
+        )
+        .await;
+        let drain_token = tokio_util::sync::CancellationToken::new();
+        let drain_notify = Arc::new(Notify::new());
+        let drain_task = tokio::spawn(run_graceful_shutdown_drain(
+            Arc::clone(&state),
+            drain_token.clone(),
+            Arc::clone(&drain_notify),
+            Duration::from_millis(50),
+        ));
+
+        drain_token.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), drain_notify.notified())
+                .await
+                .is_err(),
+            "shutdown must stay pending after the shadow budget expires while an accepted shadow submission is still unresolved"
+        );
+
+        release_submit.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(2), drain_notify.notified())
+            .await
+            .expect("shutdown should complete once the held shadow work finishes");
+        drain_task.await.expect("graceful drain task");
     }
 }

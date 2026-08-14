@@ -7,8 +7,8 @@ use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
 use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::ingress::{
-    AliasResolution, DeliveryKey, IngressEffectIntent, IngressEffectKey, IngressOrdinal,
-    MessageKey, NormalizedTarget, SemanticDigest, SmIngressId,
+    AliasResolution, DeliveryKey, IngressEffectIntent, IngressOrdinal, MessageKey,
+    NormalizedTarget, SemanticDigest, SmIngressId,
 };
 use waddle_xmpp::mam::{ArchivedMessage, MamTxStoreOutcome};
 #[cfg(feature = "clustering")]
@@ -186,6 +186,49 @@ impl SmIngressRepository {
         )
         .await
     }
+
+    #[cfg(feature = "clustering")]
+    pub async fn message_keys_for_stream(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+    ) -> Result<Vec<MessageKey>, IngressUowError> {
+        let mut rows = transaction
+            .transaction_mut()
+            .query(
+                "SELECT DISTINCT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid",
+                crate::db_params![sm_ingress_id.to_storage().to_string()],
+            )
+            .await?;
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let key: String = row.get(0)?;
+            keys.push(
+                key.parse::<Uuid>()
+                    .map(MessageKey::from_storage)
+                    .map_err(|_| {
+                        IngressUowError::Substrate(
+                            ingress_substrate::IngressSubstrateError::InvalidStoredMessageKey,
+                        )
+                    })?,
+            );
+        }
+        Ok(keys)
+    }
+
+    #[cfg(feature = "clustering")]
+    pub async fn delete_for_stream(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+    ) -> Result<u64, IngressUowError> {
+        transaction
+            .transaction_mut()
+            .execute(
+                "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid",
+                crate::db_params![sm_ingress_id.to_storage().to_string()],
+            )
+            .await
+            .map_err(Into::into)
+    }
 }
 
 /// Outcome of advancing the shadow stream's non-wrapping handled frontier.
@@ -269,6 +312,27 @@ impl SmIngressStreamRepository {
         Ok(Some((id, frontier)))
     }
 
+    pub async fn lookup_unclaimed(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<SmIngressId>, IngressUowError> {
+        let mut rows = transaction
+            .transaction_mut()
+            .query(
+                "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let id: String = row.get(0)?;
+        id.parse::<Uuid>()
+            .map(SmIngressId::from_storage)
+            .map(Some)
+            .map_err(|_| IngressUowError::InvalidStoredSmIngressId)
+    }
+
     /// Advance only the next contiguous shadow ordinal for the locked stream.
     pub async fn advance_frontier(
         transaction: &mut IngressUowTransaction<'_>,
@@ -322,6 +386,20 @@ impl SmIngressStreamRepository {
         } else {
             Ok(ShadowFrontierOutcome::Stale { stored })
         }
+    }
+
+    pub async fn delete_unclaimed(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<u64, IngressUowError> {
+        transaction
+            .transaction_mut()
+            .execute(
+                "DELETE FROM ingress_sm_streams WHERE stream_id = ?",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -504,26 +582,7 @@ struct StoredEffectIntentRow {
 }
 
 fn semantic_identity_hash(intent: &IngressEffectIntent) -> [u8; 32] {
-    let identity = match intent.semantic_key() {
-        IngressEffectKey::ArchiveAuthoritative(archive) => archive.to_string(),
-        IngressEffectKey::RouteDirect(recipient) => recipient.to_string(),
-        IngressEffectKey::RouteMucGroupchat(room) => room.to_string(),
-        IngressEffectKey::RouteOccupantPm(recipient) => recipient.to_string(),
-        IngressEffectKey::DispatchToRoomRemote(room, relay_target) => format!(
-            "{}|{}|{}",
-            room,
-            relay_target.node_id,
-            relay_target.node_epoch.as_deref().unwrap_or("")
-        ),
-        IngressEffectKey::RecipientSmAppend(stream) => stream.as_str().to_string(),
-        IngressEffectKey::Carbons(excluded_source) => excluded_source.to_string(),
-        IngressEffectKey::InboxProject(owner) => owner.to_string(),
-        IngressEffectKey::NotificationActivityPreview(owner) => owner.to_string(),
-        IngressEffectKey::CallSignal(recipient) => recipient.to_string(),
-        IngressEffectKey::Pin(room) => room.to_string(),
-        IngressEffectKey::Extension(recipient) => recipient.to_string(),
-        IngressEffectKey::ErrorReply(recipient) => recipient.to_string(),
-    };
+    let identity = intent.semantic_key().storage_identity();
     Sha256::digest(identity.as_bytes()).into()
 }
 

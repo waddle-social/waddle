@@ -127,23 +127,6 @@ pub(crate) async fn send_carbons_to_registry(
             }),
         None => Vec::new(),
     };
-    let mut carbon_recipients = live_targets.clone();
-    let detached_only = detached_targets
-        .iter()
-        .filter(|target| !carbon_recipients.contains(*target))
-        .cloned()
-        .collect::<Vec<_>>();
-    carbon_recipients.extend(detached_only);
-    if let Some(excluded_source) = exclude.first().cloned() {
-        if !carbon_recipients.is_empty() {
-            if let Some(capture) = deps.ingress_effect_capture {
-                capture.record_intent(IngressEffectIntent::Carbons {
-                    carbon_recipients: carbon_recipients.clone(),
-                    excluded_source,
-                });
-            }
-        }
-    }
     if live_targets.is_empty() && detached_targets.is_empty() {
         debug!(
             owner = %owner,
@@ -152,6 +135,7 @@ pub(crate) async fn send_carbons_to_registry(
         );
         return Vec::new();
     }
+    let mut carbon_recipients = Vec::new();
     for target in live_targets {
         let envelope = match build_carbon_envelope(kind, &message, &owner_str, &target) {
             Ok(env) => env,
@@ -171,6 +155,7 @@ pub(crate) async fn send_carbons_to_registry(
         {
             match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                    carbon_recipients.push(target.clone());
                     debug!(target = %target, kind = ?kind, "SendCarbons: delivered to remote resource");
                 }
                 FullJidDeliveryOutcome::Unavailable => {
@@ -189,6 +174,7 @@ pub(crate) async fn send_carbons_to_registry(
                 }
                 #[cfg(feature = "clustering")]
                 FullJidDeliveryOutcome::MaybeCommitted => {
+                    carbon_recipients.push(target.clone());
                     debug!(
                         target = %target,
                         kind = ?kind,
@@ -200,6 +186,7 @@ pub(crate) async fn send_carbons_to_registry(
         }
         match registry.send_to(&target, stanza).await {
             waddle_xmpp::registry::SendResult::Sent => {
+                carbon_recipients.push(target.clone());
                 debug!(target = %target, kind = ?kind, "SendCarbons: delivered");
             }
             waddle_xmpp::registry::SendResult::NotConnected => {
@@ -251,8 +238,9 @@ pub(crate) async fn send_carbons_to_registry(
             {
                 Ok(Some(stream)) => {
                     if let Some(capture) = deps.ingress_effect_capture {
-                        capture.record_intent(IngressEffectIntent::RecipientSmAppend { stream });
+                        capture.record_recipient_sm_append(stream);
                     }
+                    carbon_recipients.push(target.clone());
                     debug!(
                         target = %target,
                         kind = ?kind,
@@ -276,6 +264,18 @@ pub(crate) async fn send_carbons_to_registry(
                     );
                 }
             }
+        }
+    }
+    carbon_recipients.sort_by_key(ToString::to_string);
+    carbon_recipients.dedup();
+    if let (Some(capture), Some(excluded_source)) =
+        (deps.ingress_effect_capture, exclude.first().cloned())
+    {
+        if !carbon_recipients.is_empty() {
+            capture.record_intent(IngressEffectIntent::Carbons {
+                carbon_recipients: carbon_recipients.clone(),
+                excluded_source,
+            });
         }
     }
     carbon_recipients

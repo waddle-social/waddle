@@ -14,9 +14,7 @@ use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
     ingress_substrate::{PostgresIngressSubstrate, ALIAS_RETENTION},
 };
-use waddle_xmpp::ingress::{
-    IngressEffectIntent, IngressEffectKey, MessageKey, NormalizedTarget, SemanticDigest,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NormalizedTarget, SemanticDigest};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 
 #[cfg(feature = "clustering")]
@@ -249,26 +247,7 @@ fn bare(value: &str) -> jid::BareJid {
 }
 
 fn semantic_identity_hash(intent: &IngressEffectIntent) -> Vec<u8> {
-    let identity = match intent.semantic_key() {
-        IngressEffectKey::ArchiveAuthoritative(archive) => archive.to_string(),
-        IngressEffectKey::RouteDirect(recipient) => recipient.to_string(),
-        IngressEffectKey::RouteMucGroupchat(room) => room.to_string(),
-        IngressEffectKey::RouteOccupantPm(recipient) => recipient.to_string(),
-        IngressEffectKey::DispatchToRoomRemote(room, relay_target) => format!(
-            "{}|{}|{}",
-            room,
-            relay_target.node_id,
-            relay_target.node_epoch.as_deref().unwrap_or("")
-        ),
-        IngressEffectKey::RecipientSmAppend(stream) => stream.as_str().to_string(),
-        IngressEffectKey::Carbons(excluded_source) => excluded_source.to_string(),
-        IngressEffectKey::InboxProject(owner) => owner.to_string(),
-        IngressEffectKey::NotificationActivityPreview(owner) => owner.to_string(),
-        IngressEffectKey::CallSignal(recipient) => recipient.to_string(),
-        IngressEffectKey::Pin(room) => room.to_string(),
-        IngressEffectKey::Extension(recipient) => recipient.to_string(),
-        IngressEffectKey::ErrorReply(recipient) => recipient.to_string(),
-    };
+    let identity = intent.semantic_key().storage_identity();
     Sha256::digest(identity.as_bytes()).to_vec()
 }
 

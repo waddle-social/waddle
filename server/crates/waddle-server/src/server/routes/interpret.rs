@@ -107,6 +107,7 @@ use waddle_xmpp::muc::room_actor::{
 #[cfg(feature = "clustering")]
 use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
+use waddle_xmpp::muc::SubjectState;
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
 use waddle_xmpp::protocol::event::{
@@ -714,6 +715,15 @@ async fn interpret_with_depth(
                 setter_nick,
                 set_at,
             } => {
+                let subject_intent = IngressEffectIntent::RoomSubjectMutation {
+                    room: room.clone(),
+                    state: SubjectState {
+                        texts: texts.clone(),
+                        setter: setter.clone(),
+                        setter_nick: setter_nick.clone(),
+                        set_at,
+                    },
+                };
                 match persist_room_subject_event(
                     deps,
                     PersistRoomSubjectRequest {
@@ -729,7 +739,9 @@ async fn interpret_with_depth(
                 )
                 .await
                 {
-                    PersistRoomSubjectEventOutcome::Committed => {}
+                    PersistRoomSubjectEventOutcome::Committed => {
+                        deps.capture_intent(subject_intent);
+                    }
                     PersistRoomSubjectEventOutcome::BounceAndHalt(bounce) => {
                         match Stanza::Message(*bounce).to_element_string() {
                             Ok(xml) => outcome.frames.push(xml),

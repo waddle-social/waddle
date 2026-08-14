@@ -1,4 +1,5 @@
 use super::*;
+use chrono::TimeZone;
 
 // XEP-0045 §8.1 — PersistRoomSubject interpreter arm
 // -----------------------------------------------------------------
@@ -439,6 +440,87 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
 }
 
 #[tokio::test]
+async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent() {
+    use chrono::TimeZone;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::RoomConfig;
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+    let registry = ConnectionRegistry::new();
+    let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".to_string(),
+        OccupantIdSecret::new(b"persist-subject-capture-test-secret".to_vec())
+            .expect("test secret meets length floor"),
+    ));
+    let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
+    let _room_actor = room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w-subject-intent".to_string(),
+            channel_id: "c-subject-intent".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let deps = Deps {
+        connection_registry: &registry,
+        user_registry: None,
+        sm_session_registry: None,
+        mam_storage: None,
+        inbox_storage: None,
+        extension_manager: None,
+        room_registry: Some(&room_registry),
+        web_socket_state: None,
+        authenticated_principal: None,
+        local_domain: "example.com",
+        blocking_storage: None,
+        message_dispatcher: None,
+        pending_delivery_storage: None,
+        ordered_relay_origin: None,
+        sfu: None,
+        ingress_effect_capture: Some(capture.clone()),
+    };
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+    let set_at = chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+    let texts = waddle_xmpp::muc::RoomSubjectTexts::from_iter([
+        (String::new(), "Default subject".to_string()),
+        ("fr".to_string(), "Sujet".to_string()),
+    ]);
+
+    let _outcome = interpret(
+        vec![OutboundEvent::PersistRoomSubject {
+            room: room_jid.clone(),
+            claim_fence: None,
+            texts: texts.clone(),
+            setter: sender.to_bare(),
+            sender: sender.clone(),
+            message: Box::new(subject_change_message(
+                &room_jid,
+                &sender,
+                "Default subject",
+            )),
+            setter_nick: "alice-nick".to_string(),
+            set_at,
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(capture.snapshot().intents.iter().any(|intent| {
+        matches!(
+            intent,
+            waddle_xmpp::ingress::IngressEffectIntent::RoomSubjectMutation { room, state }
+                if room == &room_jid
+                    && state.texts == texts
+                    && state.setter == sender.to_bare()
+                    && state.setter_nick == "alice-nick"
+                    && state.set_at == set_at
+        )
+    }));
+}
+
+#[tokio::test]
 async fn xep_0045_persist_room_subject_with_no_registry_bounces_and_halts_batch() {
     // A subject effect cannot safely complete without its room registry.
     // Reject it and suppress all later effects from the same dispatch batch.
@@ -469,6 +551,44 @@ async fn xep_0045_persist_room_subject_with_no_registry_bounces_and_halts_batch(
     assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
     assert!(outcome.frames[0].contains("resource-constraint"));
     assert!(!outcome.close, "later effects must be suppressed");
+}
+
+#[tokio::test]
+async fn xep_0045_rejected_room_subject_does_not_record_subject_mutation_intent() {
+    let registry = ConnectionRegistry::new();
+    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let mut deps = Deps::registry_only(&registry);
+    deps.ingress_effect_capture = Some(capture.clone());
+
+    let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+    let outcome = interpret(
+        vec![OutboundEvent::PersistRoomSubject {
+            room: room_jid.clone(),
+            claim_fence: None,
+            texts: waddle_xmpp::muc::RoomSubjectTexts::from_iter([(
+                String::new(),
+                "ignored".to_string(),
+            )]),
+            setter: sender.to_bare(),
+            sender: sender.clone(),
+            message: Box::new(subject_change_message(&room_jid, &sender, "ignored")),
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        }],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(
+        !capture.snapshot().intents.iter().any(|intent| matches!(
+            intent,
+            waddle_xmpp::ingress::IngressEffectIntent::RoomSubjectMutation { room, .. }
+                if room == &room_jid
+        )),
+        "bounce paths must not capture a committed subject mutation intent"
+    );
 }
 
 #[tokio::test]

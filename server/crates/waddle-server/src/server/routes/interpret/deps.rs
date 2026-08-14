@@ -213,6 +213,12 @@ impl<'a> Deps<'a> {
         }
     }
 
+    pub fn capture_recipient_sm_append(&self, stream: waddle_xmpp::pending_delivery::SmSessionId) {
+        if let Some(capture) = self.ingress_effect_capture.as_ref() {
+            capture.record_recipient_sm_append(stream);
+        }
+    }
+
     pub fn capture_marker(&self, marker: crate::ingress_shadow::ShadowDecisionMarker) {
         if let Some(capture) = self.ingress_effect_capture.as_ref() {
             capture.record_marker(marker);

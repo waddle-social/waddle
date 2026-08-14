@@ -559,17 +559,16 @@ fn error_frame(
 ) -> String {
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-    let capture_condition = waddle_xmpp::StanzaErrorCondition::from_xmpp(&condition);
-    let reply = message_error_reply(
-        &stamped,
-        StanzaError::new(error_type, condition, "en", text),
-    );
+    let error = StanzaError::new(error_type, condition, "en", text);
+    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+        .expect("server-built stanza error should freeze");
+    let reply = message_error_reply(&stamped, error);
     match stanza_to_string(reply) {
         Ok(xml) => {
             if let Some(capture) = ingress_effect_capture {
                 capture.record_intent(IngressEffectIntent::ErrorReply {
                     recipient: bound_jid.clone(),
-                    condition: capture_condition,
+                    error: frozen_error,
                 });
             }
             xml
@@ -663,12 +662,19 @@ mod tests {
                 .expect("handled");
 
         assert_eq!(frames.len(), 1);
+        let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::NotAuthorized,
+            "en",
+            "Mediator is not authorized to send invitations.",
+        ))
+        .expect("server-built stanza error should freeze");
         assert!(capture
             .snapshot()
             .intents
             .contains(&IngressEffectIntent::ErrorReply {
                 recipient: sender,
-                condition: waddle_xmpp::StanzaErrorCondition::NotAuthorized,
+                error: expected_error,
             }));
     }
 }

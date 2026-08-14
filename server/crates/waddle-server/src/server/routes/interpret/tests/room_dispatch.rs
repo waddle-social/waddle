@@ -475,26 +475,28 @@ fn successful_room_error_reply_records_error_intent() {
         "bad",
     );
     let mut outcome = InterpretOutcome::default();
+    let expected_error = xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Cancel,
+        xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
+        "en",
+        "missing",
+    );
     push_sender_error_reply(
         &deps,
         &mut outcome,
         &incoming,
         &room,
         &sender,
-        xmpp_parsers::stanza_error::StanzaError::new(
-            xmpp_parsers::stanza_error::ErrorType::Cancel,
-            xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
-            "en",
-            "missing",
-        ),
+        expected_error.clone(),
     );
     assert_eq!(outcome.frames.len(), 1);
     assert!(capture.snapshot().intents.iter().any(|intent| {
         matches!(
             intent,
-            IngressEffectIntent::ErrorReply { recipient, condition }
+            IngressEffectIntent::ErrorReply { recipient, error }
                 if *recipient == sender
-                    && *condition == waddle_xmpp::StanzaErrorCondition::ItemNotFound
+                    && *error == waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&expected_error)
+                        .expect("server-built stanza error should freeze")
         )
     }));
 }

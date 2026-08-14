@@ -1,14 +1,81 @@
 use super::*;
 use crate::ingress_shadow::IngressEffectCapture;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use waddle_xmpp::inbox::storage::InboxStorageError;
+use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::pending_delivery::storage::{
     InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
 };
+use waddle_xmpp::xep::CallThreadDuration;
 use waddle_xmpp_core::xep0359::{build_stanza_id_element, StanzaId as XepStanzaId};
 
 fn capture_snapshot(
     capture: &IngressEffectCapture,
 ) -> crate::ingress_shadow::IngressEffectCaptureSnapshot {
     capture.snapshot()
+}
+
+struct FailingInboxStorage;
+
+#[async_trait]
+impl InboxStorage for FailingInboxStorage {
+    async fn list(&self, _user: &jid::BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_threads(
+        &self,
+        _user: &jid::BareJid,
+        _room: &jid::BareJid,
+    ) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn upsert(
+        &self,
+        _user: &jid::BareJid,
+        _entry: InboxEntry,
+        _increment_unread: bool,
+    ) -> Result<InboxEntry, InboxStorageError> {
+        Err(InboxStorageError::Other(
+            "forced upsert failure".to_string(),
+        ))
+    }
+
+    async fn mark_read(
+        &self,
+        _user: &jid::BareJid,
+        _partner: &jid::BareJid,
+        _thread_id: Option<&str>,
+    ) -> Result<Option<InboxEntry>, InboxStorageError> {
+        Ok(None)
+    }
+
+    async fn total_unread(&self, _user: &jid::BareJid) -> Result<u64, InboxStorageError> {
+        Ok(0)
+    }
+
+    async fn mark_call_thread_ended(
+        &self,
+        _room: &jid::BareJid,
+        _thread_id: &str,
+        _ended: DateTime<Utc>,
+        _duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError> {
+        Ok(())
+    }
+
+    async fn mark_direct_call_thread_ended(
+        &self,
+        _user: &jid::BareJid,
+        _partner: &jid::BareJid,
+        _thread_id: &str,
+        _ended: DateTime<Utc>,
+        _duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -49,6 +116,48 @@ async fn direct_inbox_boundary_records_inbox_project_intent() {
             owner,
             increment_unread: true,
         }));
+}
+
+#[tokio::test]
+async fn direct_inbox_boundary_skips_inbox_project_intent_when_upsert_fails() {
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(FailingInboxStorage);
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::test_with_storage(&registry, &mam, &inbox)
+        .with_ingress_effect_capture(Some(capture.clone()));
+
+    let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
+    let peer: jid::BareJid = "bob@example.com".parse().expect("peer");
+    let archive_ref = XepStanzaId::new("archive-1", jid::Jid::from(owner.clone()));
+    let _ = interpret(
+        vec![OutboundEvent::ProjectInbox {
+            owner: owner.clone(),
+            peer,
+            message: Box::new(chat_msg(
+                jid("alice@example.com/web"),
+                jid("bob@example.com"),
+                "hi",
+            )),
+            archive_ref,
+            increment_unread: true,
+        }],
+        &deps,
+    )
+    .await;
+
+    let snapshot = capture_snapshot(&capture);
+    assert!(
+        !snapshot
+            .intents
+            .contains(&IngressEffectIntent::InboxProject {
+                owner,
+                increment_unread: true,
+            }),
+        "failed direct inbox projection must not record InboxProject",
+    );
 }
 
 #[tokio::test]
@@ -103,9 +212,153 @@ async fn groupchat_inbox_boundary_records_inbox_and_notification_intents() {
             owner: owner.clone(),
             increment_unread: true,
         }));
+    assert!(
+        !snapshot
+            .intents
+            .contains(&IngressEffectIntent::NotificationActivityPreview {
+                owner: owner.clone()
+            }),
+        "candidate retry without websocket state must not capture preview intent",
+    );
+}
+
+#[tokio::test]
+async fn groupchat_inbox_boundary_records_notification_intent_after_candidate_acceptance() {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let registry = state.deps.protocol.connection_registry.as_ref();
+    let mam = Arc::clone(&state.deps.protocol.mam_storage);
+    let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::test_with_storage(registry, &mam, &inbox)
+        .with_ingress_effect_capture(Some(capture.clone()));
+    let mut deps = deps;
+    deps.user_registry = Some(&state.deps.protocol.user_registry);
+    deps.web_socket_state = Some(state.as_ref());
+
+    let owner: jid::BareJid = "bob@example.com".parse().expect("owner");
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    let occupant: jid::FullJid = "room@conference.example.com/alice"
+        .parse()
+        .expect("occupant");
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room.clone())));
+    message.from = Some(jid::Jid::from(occupant));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello room".to_string());
+    message.payloads.push(build_stanza_id_element(
+        "room-archive-accepted",
+        &jid::Jid::from(room.clone()),
+    ));
+
+    let _ = interpret(
+        vec![OutboundEvent::ProjectGroupchatInbox {
+            owner: owner.clone(),
+            room: room.clone(),
+            message: Box::new(message),
+            is_recipient: true,
+            is_durable_recipient: true,
+            is_live_occupant: true,
+            room_members_only: true,
+            sender_can_broadcast_channel_mention: false,
+            thread: None,
+            dispatch_timestamp: 1_752_768_000,
+        }],
+        &deps,
+    )
+    .await;
+
+    let snapshot = capture_snapshot(&capture);
+    assert!(snapshot
+        .intents
+        .contains(&IngressEffectIntent::InboxProject {
+            owner: owner.clone(),
+            increment_unread: true,
+        }));
     assert!(snapshot
         .intents
         .contains(&IngressEffectIntent::NotificationActivityPreview { owner }));
+}
+
+#[tokio::test]
+async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppresses_candidate() {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let registry = state.deps.protocol.connection_registry.as_ref();
+    let mam = Arc::clone(&state.deps.protocol.mam_storage);
+    let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::test_with_storage(registry, &mam, &inbox)
+        .with_ingress_effect_capture(Some(capture.clone()));
+    let mut deps = deps;
+    deps.user_registry = Some(&state.deps.protocol.user_registry);
+    deps.web_socket_state = Some(state.as_ref());
+
+    let owner: jid::BareJid = "bob@example.com".parse().expect("owner");
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    state
+        .deps
+        .protocol
+        .notification_settings_projection
+        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+            owner_bare_jid: owner.clone(),
+            conversation_jid: room.clone(),
+            conversation_kind:
+                crate::notification_settings_projection::ConversationKind::PrivateGroup,
+            mode: waddle_xmpp::xep::NotificationLevel::Never,
+            rich_payload_opt_in: false,
+            source_version: 1,
+            updated_at_ms: 1,
+            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source_item_jid: owner.clone(),
+        })
+        .await
+        .expect("seed notification settings");
+    let occupant: jid::FullJid = "room@conference.example.com/alice"
+        .parse()
+        .expect("occupant");
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room.clone())));
+    message.from = Some(jid::Jid::from(occupant));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello room".to_string());
+    message.payloads.push(build_stanza_id_element(
+        "room-archive-suppressed",
+        &jid::Jid::from(room.clone()),
+    ));
+
+    let _ = interpret(
+        vec![OutboundEvent::ProjectGroupchatInbox {
+            owner: owner.clone(),
+            room: room.clone(),
+            message: Box::new(message),
+            is_recipient: true,
+            is_durable_recipient: true,
+            is_live_occupant: true,
+            room_members_only: true,
+            sender_can_broadcast_channel_mention: false,
+            thread: None,
+            dispatch_timestamp: 1_752_768_000,
+        }],
+        &deps,
+    )
+    .await;
+
+    let snapshot = capture_snapshot(&capture);
+    assert!(snapshot
+        .intents
+        .contains(&IngressEffectIntent::InboxProject {
+            owner: owner.clone(),
+            increment_unread: true,
+        }));
+    assert!(
+        !snapshot
+            .intents
+            .contains(&IngressEffectIntent::NotificationActivityPreview {
+                owner: owner.clone()
+            }),
+        "T0 policy suppression must leave no preview intent",
+    );
 }
 
 #[tokio::test]
@@ -170,6 +423,46 @@ async fn archive_direct_boundary_records_notification_activity_preview_intent() 
     let capture = IngressEffectCapture::new(None);
     let deps = Deps::test_with_storage(&registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
+    let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
+
+    let _ = interpret(
+        vec![OutboundEvent::ArchiveDirect {
+            archive_jid: owner.clone(),
+            from: jid("alice@example.com/web"),
+            to: jid("bob@example.com"),
+            message: Box::new(chat_msg(
+                jid("alice@example.com/web"),
+                jid("bob@example.com"),
+                "hello",
+            )),
+        }],
+        &deps,
+    )
+    .await;
+
+    let snapshot = capture_snapshot(&capture);
+    assert!(
+        !snapshot
+            .intents
+            .contains(&IngressEffectIntent::NotificationActivityPreview {
+                owner: owner.clone()
+            }),
+        "missing websocket state must leave no notification-activity preview intent",
+    );
+}
+
+#[tokio::test]
+async fn archive_direct_boundary_records_notification_activity_preview_after_projection_write() {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let registry = state.deps.protocol.connection_registry.as_ref();
+    let mam = Arc::clone(&state.deps.protocol.mam_storage);
+    let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::test_with_storage(registry, &mam, &inbox)
+        .with_ingress_effect_capture(Some(capture.clone()));
+    let mut deps = deps;
+    deps.user_registry = Some(&state.deps.protocol.user_registry);
+    deps.web_socket_state = Some(state.as_ref());
     let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
 
     let _ = interpret(

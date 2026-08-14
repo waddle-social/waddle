@@ -35,10 +35,6 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         thread,
         dispatch_timestamp,
     } = input;
-    deps.capture_intent(IngressEffectIntent::InboxProject {
-        owner: owner.clone(),
-        increment_unread: is_recipient,
-    });
     let Some(inbox_storage) = deps.inbox_storage else {
         debug!(
             owner = %owner,
@@ -63,6 +59,12 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         notification_recovery,
     })
     .await;
+    if outcome.channel_committed || outcome.thread_committed {
+        deps.capture_intent(IngressEffectIntent::InboxProject {
+            owner: owner.clone(),
+            increment_unread: is_recipient,
+        });
+    }
     maybe_enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
         deps,
         owner: &owner,
@@ -210,9 +212,6 @@ async fn enqueue_groupchat_notification_candidate(
     if !projection_committed {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
-    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-        owner: owner.clone(),
-    });
     let Some(state) = deps.web_socket_state else {
         return GroupchatNotificationCandidateQueueOutcome::RetryLater;
     };
@@ -239,6 +238,7 @@ async fn enqueue_groupchat_notification_candidate(
         })
         .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
     insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
+        deps: Some(deps),
         state,
         owner,
         room,
@@ -258,6 +258,7 @@ async fn enqueue_groupchat_notification_candidate(
 /// (`enqueue_groupchat_notification_candidate`) or during restart
 /// recovery (`reconcile_groupchat_notification_candidates`).
 struct GroupchatNotificationCandidateSeed<'a> {
+    deps: Option<&'a Deps<'a>>,
     state: &'a WebSocketState,
     owner: &'a BareJid,
     room: &'a BareJid,
@@ -286,6 +287,7 @@ async fn insert_groupchat_notification_candidate(
     seed: GroupchatNotificationCandidateSeed<'_>,
 ) -> GroupchatNotificationCandidateQueueOutcome {
     let GroupchatNotificationCandidateSeed {
+        deps,
         state,
         owner,
         room,
@@ -496,6 +498,11 @@ async fn insert_groupchat_notification_candidate(
         .await
     {
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
+            if let Some(deps) = deps {
+                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                    owner: owner.clone(),
+                });
+            }
             debug!(
                 recipient = %owner,
                 room = %room,
@@ -505,6 +512,11 @@ async fn insert_groupchat_notification_candidate(
             GroupchatNotificationCandidateQueueOutcome::Completed
         }
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
+            if let Some(deps) = deps {
+                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                    owner: owner.clone(),
+                });
+            }
             debug!(
                 recipient = %owner,
                 room = %room,
@@ -633,6 +645,7 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
             })
             .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
         let outcome = insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
+            deps: None,
             state,
             owner: &recovery.key.recipient,
             room: &recovery.key.room,

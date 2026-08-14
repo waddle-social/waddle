@@ -241,7 +241,6 @@ async fn handle_muc_private_message(
             exclude,
         });
     }
-    capture_muc_private_routes(ingress_effect_capture, &from_room_jid, &recipient_sessions);
     let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None)
         .with_ingress_effect_capture(ingress_effect_capture.cloned());
     let nested = crate::server::routes::interpret::interpret(events, &deps).await;
@@ -260,6 +259,7 @@ async fn handle_muc_private_message(
     // clustered remote-resource relay for occupant sessions whose
     // socket lives on another node.
     let mut any_session_handled = false;
+    let mut handled_recipients = Vec::new();
     for recipient in &recipient_sessions {
         let mut routed = relayed.clone();
         routed.to = Some(jid::Jid::from(recipient.clone()));
@@ -279,6 +279,7 @@ async fn handle_muc_private_message(
         };
         if session_handled {
             any_session_handled = true;
+            handled_recipients.push(recipient.clone());
         } else {
             warn!(
                 room = %room_jid,
@@ -288,6 +289,7 @@ async fn handle_muc_private_message(
             );
         }
     }
+    capture_muc_private_routes(ingress_effect_capture, &from_room_jid, handled_recipients);
     // XEP-0045 §7.5: the service is responsible for delivering the PM.
     // An ARCHIVED PM that reached no live/detached session is still
     // durable — the occupant sees it via MAM — so only an unarchivable
@@ -541,12 +543,12 @@ async fn handle_muc_mediated_decline(
 fn capture_muc_private_routes(
     ingress_effect_capture: Option<&IngressEffectCapture>,
     sender: &jid::FullJid,
-    recipients: &[jid::FullJid],
+    recipients: Vec<jid::FullJid>,
 ) {
     let Some(capture) = ingress_effect_capture else {
         return;
     };
-    let mut recipients = recipients.to_vec();
+    let mut recipients = recipients;
     recipients.sort_by_key(ToString::to_string);
     recipients.dedup();
     for recipient in recipients {
@@ -628,17 +630,16 @@ fn message_error_frame(
 ) -> String {
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-    let capture_condition = waddle_xmpp::StanzaErrorCondition::from_xmpp(&condition);
-    let reply = message_error_reply(
-        &stamped,
-        StanzaError::new(error_type, condition, "en", text),
-    );
+    let error = StanzaError::new(error_type, condition, "en", text);
+    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+        .expect("server-built stanza error should freeze");
+    let reply = message_error_reply(&stamped, error);
     match stanza_to_string(reply) {
         Ok(xml) => {
             if let Some(capture) = ingress_effect_capture {
                 capture.record_intent(IngressEffectIntent::ErrorReply {
                     recipient: bound_jid.clone(),
-                    condition: capture_condition,
+                    error: frozen_error,
                 });
             }
             xml
@@ -651,14 +652,18 @@ fn message_error_frame(
 mod tests {
     use super::*;
     use crate::ingress_shadow::IngressEffectCapture;
-    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
     use kameo::actor::ActorRef;
+    use waddle_xmpp::muc::room_actor::Join;
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::{
         extract_occupant_id_from_message, generate_occupant_id, OccupantId, OccupantIdSecret,
         NS_OCCUPANT_ID, OCCUPANT_ID_SECRET_MIN_BYTES,
     };
+    use waddle_xmpp::{Affiliation, Role};
 
     fn secret() -> OccupantIdSecret {
         OccupantIdSecret::new(vec![3u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
@@ -827,7 +832,7 @@ mod tests {
         capture_muc_private_routes(
             Some(&capture),
             &sender,
-            &[bob_phone.clone(), bob_laptop.clone(), bob_phone.clone()],
+            vec![bob_phone.clone(), bob_laptop.clone(), bob_phone.clone()],
         );
 
         let snapshot = capture.snapshot();
@@ -877,12 +882,73 @@ mod tests {
             .expect("handled");
 
         assert_eq!(frames.len(), 1);
+        let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
+            ErrorType::Modify,
+            DefinedCondition::NotAcceptable,
+            "en",
+            "Message body required for private message delivery.",
+        ))
+        .expect("server-built stanza error should freeze");
         assert!(capture
             .snapshot()
             .intents
             .contains(&IngressEffectIntent::ErrorReply {
                 recipient: sender,
-                condition: waddle_xmpp::StanzaErrorCondition::NotAcceptable,
+                error: expected_error,
             }));
+    }
+
+    #[tokio::test]
+    async fn muc_private_unreachable_bodyless_pm_does_not_record_route_intent() {
+        let state = create_test_websocket_state().await;
+        let room: jid::BareJid = "pm-capture@muc.example.com".parse().expect("room");
+        let room_actor = create_test_room(state.as_ref(), room.clone()).await;
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let recipient: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
+        room_actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: sender.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join alice");
+        room_actor
+            .ask(Join {
+                nick: "bob".to_string(),
+                real_jid: recipient.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join bob");
+
+        let (recipient_tx, recipient_rx) = tokio::sync::mpsc::channel(8);
+        let _owner = register_test_connection(state.as_ref(), &recipient, recipient_tx).await;
+        drop(recipient_rx);
+
+        let capture = IngressEffectCapture::new(None);
+        let mut incoming = Message::new(Some(
+            format!("{room}/bob")
+                .parse::<jid::Jid>()
+                .expect("target occupant jid"),
+        ));
+        incoming.from = Some(jid::Jid::from(sender.clone()));
+        incoming.type_ = MessageType::Chat;
+
+        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, Some(&capture))
+            .await
+            .expect("handled");
+
+        assert_eq!(frames.len(), 1, "bodyless unreachable PM returns one error");
+        assert!(
+            !capture
+                .snapshot()
+                .intents
+                .iter()
+                .any(|intent| { matches!(intent, IngressEffectIntent::RouteOccupantPm { .. }) }),
+            "failed PM delivery must not record RouteOccupantPm"
+        );
     }
 }

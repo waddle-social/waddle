@@ -109,7 +109,8 @@ impl ShadowFixture {
             lineage,
             Some(SharedNodeIdentity::new(owner.clone())),
         )
-        .await;
+        .await
+        .expect("clustering shadow worker should initialize");
         assert!(
             handle.is_enabled(),
             "clustering shadow worker must be enabled"

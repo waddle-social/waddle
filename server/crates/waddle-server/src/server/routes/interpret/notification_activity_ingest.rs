@@ -97,9 +97,6 @@ pub(super) async fn record_chat_state_activity(
         );
         return;
     }
-    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-        owner: sender.clone(),
-    });
     let Some(store) = activity_store(deps) else {
         return;
     };
@@ -120,8 +117,12 @@ pub(super) async fn record_chat_state_activity(
                 conversation = %conversation,
                 %error,
                 "notification_activity: record_chat_state_gone failed; \
-                 projection write skipped (XMPP routing unaffected)",
+                projection write skipped (XMPP routing unaffected)",
             );
+        } else {
+            deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                owner: sender.clone(),
+            });
         }
         return;
     }
@@ -138,6 +139,10 @@ pub(super) async fn record_chat_state_activity(
             "notification_activity: record_chat_state failed; \
              projection write skipped (XMPP routing unaffected)",
         );
+    } else {
+        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+            owner: sender.clone(),
+        });
     }
 }
 
@@ -148,9 +153,6 @@ pub(super) async fn record_read_marker_activity(
     owner: &BareJid,
     conversation: &BareJid,
 ) {
-    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-        owner: owner.clone(),
-    });
     let Some(store) = activity_store(deps) else {
         return;
     };
@@ -163,6 +165,10 @@ pub(super) async fn record_read_marker_activity(
             "notification_activity: record_read_marker failed; \
              projection write skipped (XMPP routing unaffected)",
         );
+    } else {
+        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+            owner: owner.clone(),
+        });
     }
 }
 
@@ -197,9 +203,6 @@ pub(super) async fn record_outbound_message_activity(
         );
         return;
     }
-    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-        owner: sender.clone(),
-    });
     let Some(store) = activity_store(deps) else {
         return;
     };
@@ -215,6 +218,10 @@ pub(super) async fn record_outbound_message_activity(
             "notification_activity: record_outbound_message failed; \
              projection write skipped (XMPP routing unaffected)",
         );
+    } else {
+        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+            owner: sender.clone(),
+        });
     }
 }
 

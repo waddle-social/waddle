@@ -22,7 +22,6 @@ use crate::server::routes::interpret::ParkedIngressShadowSubmission;
 #[cfg(any(feature = "clustering", test))]
 use jid::BareJid;
 use xmpp_parsers::message::Lang;
-use xmpp_parsers::minidom::Element;
 
 /// Handle an XMPP frame per RFC 7395
 #[cfg(test)]
@@ -65,19 +64,9 @@ async fn await_control_stage<T>(
     Ok(output)
 }
 
-fn message_stanza_lang_from_raw_frame(frame: &str) -> Option<Lang> {
-    let element = frame.trim().parse::<Element>().ok()?;
-    if element.name() != "message" {
-        return None;
-    }
-    element
-        .attr_ns(&xmpp_parsers::minidom::rxml::Namespace::XML, "lang")
-        .map(Lang::from)
-}
-
 fn ingress_effect_capture_for_stanza(
     state: &WebSocketState,
-    frame: &str,
+    stanza_lang: Option<Lang>,
     stanza: &Stanza,
 ) -> Option<crate::ingress_shadow::IngressEffectCapture> {
     if !state.deps.protocol.ingress_shadow.is_enabled() {
@@ -86,8 +75,7 @@ fn ingress_effect_capture_for_stanza(
     let Stanza::Message(message) = stanza else {
         return None;
     };
-    let capture =
-        crate::ingress_shadow::IngressEffectCapture::new(message_stanza_lang_from_raw_frame(frame));
+    let capture = crate::ingress_shadow::IngressEffectCapture::new(stanza_lang);
     if let Some(room_fence) = shadow_room_fence_for_message(state, message) {
         capture.record_room_fence(room_fence);
     }
@@ -234,8 +222,8 @@ async fn handle_xmpp_frame_impl(
         }
     }
 
-    let inbound = match parse_frame(frame) {
-        Ok(f) => f,
+    let parsed = match waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame) {
+        Ok(parsed) => parsed,
         Err(ParseError::Empty) => return vec![],
         Err(err) => {
             if let Some(responses) = parse_error_responses(frame, &err) {
@@ -255,8 +243,9 @@ async fn handle_xmpp_frame_impl(
             return vec![];
         }
     };
+    let stanza_lang = parsed.message_stanza_lang;
 
-    match inbound {
+    match parsed.frame {
         InboundFrame::Open => {
             info!("XMPP stream open requested");
             let open_element = websocket_stream_open_xml(domain);
@@ -395,7 +384,7 @@ async fn handle_xmpp_frame_impl(
             // message/presence are dropped (logged + metered).
             let backstop = StanzaBackstop::capture(&stanza, phase.bound_jid());
             let ingress_effect_capture =
-                ingress_effect_capture_for_stanza(state, frame, stanza.as_ref());
+                ingress_effect_capture_for_stanza(state, stanza_lang, stanza.as_ref());
             if let (Some(inbound_sequence), Some(shadow_submission)) = (
                 reserved_inbound_for_sm,
                 parked_shadow_submission(
@@ -804,12 +793,10 @@ mod inbound_dispatch_tests {
                 "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
             ));
             let stanza = Stanza::Message(message);
-            assert!(ingress_effect_capture_for_stanza(
-                websocket_state.as_ref(),
-                "<message to='room@muc.example.com'/>",
-                &stanza,
-            )
-            .is_none());
+            assert!(
+                ingress_effect_capture_for_stanza(websocket_state.as_ref(), None, &stanza,)
+                    .is_none()
+            );
             assert!(parked_shadow_submission(
                 websocket_state.as_ref(),
                 &sm_state,
@@ -832,6 +819,35 @@ mod inbound_dispatch_tests {
         assert_eq!(sequence.0, 1);
         assert_eq!(sm_state.shadow_ordinal.to_storage(), 0);
         assert_eq!(sm_state.get_inbound_count(), 1);
+    }
+
+    #[test]
+    fn ingress_effect_capture_uses_stanza_lang_from_initial_parse_metadata() {
+        // The stanza language captured during the initial typed parse is the
+        // capture's single source — no raw-frame re-parse exists to fall
+        // back on, so the constructor must carry it verbatim.
+        let capture = crate::ingress_shadow::IngressEffectCapture::new(Some(Lang::from("fr")));
+        assert_eq!(capture.snapshot().stanza_lang, Some(Lang::from("fr")));
+
+        // With the shadow disabled (the default, and this fixture's state),
+        // the seam allocates nothing at all — the default-off gate.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let websocket_state = runtime
+            .block_on(crate::server::routes::websocket::tests::create_test_websocket_state());
+        let mut message = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        ));
+        message.type_ = MessageType::Groupchat;
+        let stanza = Stanza::Message(message);
+        assert!(ingress_effect_capture_for_stanza(
+            websocket_state.as_ref(),
+            Some(Lang::from("fr")),
+            &stanza,
+        )
+        .is_none());
     }
 
     #[test]

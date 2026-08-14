@@ -17,10 +17,6 @@ pub(super) async fn project_direct_inbox(
         );
         return;
     };
-    deps.capture_intent(IngressEffectIntent::InboxProject {
-        owner: owner.clone(),
-        increment_unread,
-    });
     // Build the inbox entry from the typed message, then
     // overwrite its stanza-id with the typed `archive_ref`
     // so the inbox row links to the canonicalized MAM
@@ -37,6 +33,10 @@ pub(super) async fn project_direct_inbox(
             "ProjectInbox: inbox upsert failed; dropping projection"
         );
     } else {
+        deps.capture_intent(IngressEffectIntent::InboxProject {
+            owner: owner.clone(),
+            increment_unread,
+        });
         debug!(
             owner = %owner,
             peer = %peer,

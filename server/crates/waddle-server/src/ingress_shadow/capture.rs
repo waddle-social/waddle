@@ -2,9 +2,12 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use jid::BareJid;
-use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey, RelayTargetIdentity};
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, IngressEffectKey, RecipientSmAppendIdentity, RelayTargetIdentity,
+};
 use waddle_xmpp::muc::RoomClaimFenceContext;
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
+use waddle_xmpp::pending_delivery::SmSessionId;
 use xmpp_parsers::message::{Lang, Message};
 
 const MAX_CAPTURE_ENTRIES: usize = 128;
@@ -28,6 +31,7 @@ pub enum ShadowDecisionMarker {
         room: BareJid,
         relay_target: RelayTargetIdentity,
     },
+    OperationalFenceLoss,
     AuthorizationDenied {
         reason: ShadowAuthorizationDeniedReason,
     },
@@ -77,6 +81,7 @@ struct CaptureState {
     intents: Vec<IngressEffectIntent>,
     intent_keys: BTreeSet<IngressEffectKey>,
     markers: Vec<ShadowDecisionMarker>,
+    next_append_identity: u64,
     overflowed: bool,
 }
 
@@ -90,6 +95,7 @@ impl IngressEffectCapture {
                 intents: Vec::new(),
                 intent_keys: BTreeSet::new(),
                 markers: Vec::new(),
+                next_append_identity: 0,
                 overflowed: false,
             })),
         }
@@ -100,6 +106,24 @@ impl IngressEffectCapture {
             let key = intent.semantic_key();
             if state.intent_keys.insert(key) {
                 state.intents.push(intent.clone());
+            }
+        });
+    }
+
+    pub fn record_recipient_sm_append(&self, stream: SmSessionId) {
+        self.with_state(|state| {
+            let append_identity = RecipientSmAppendIdentity::new(state.next_append_identity);
+            state.next_append_identity = state
+                .next_append_identity
+                .checked_add(1)
+                .expect("capture append identity should not overflow in tests or production");
+            let intent = IngressEffectIntent::RecipientSmAppend {
+                stream,
+                append_identity,
+            };
+            let key = intent.semantic_key();
+            if state.intent_keys.insert(key) {
+                state.intents.push(intent);
             }
         });
     }
@@ -232,5 +256,35 @@ mod tests {
         capture.clear_room_fence();
 
         assert_eq!(capture.snapshot().room_fence, None);
+    }
+
+    #[test]
+    fn recipient_sm_append_sequence_is_capture_global_not_per_stream() {
+        let capture = IngressEffectCapture::new(None);
+        capture.record_recipient_sm_append(SmSessionId::new("stream-a"));
+        capture.record_recipient_sm_append(SmSessionId::new("stream-a"));
+        capture.record_recipient_sm_append(SmSessionId::new("stream-b"));
+
+        let append_identities: Vec<_> = capture
+            .snapshot()
+            .intents
+            .into_iter()
+            .filter_map(|intent| match intent {
+                IngressEffectIntent::RecipientSmAppend {
+                    stream,
+                    append_identity,
+                } => Some((stream.to_string(), append_identity.as_u64())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            append_identities,
+            vec![
+                ("stream-a".to_string(), 0),
+                ("stream-a".to_string(), 1),
+                ("stream-b".to_string(), 2),
+            ]
+        );
     }
 }

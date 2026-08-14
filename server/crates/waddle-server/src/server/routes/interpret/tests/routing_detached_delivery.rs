@@ -190,7 +190,7 @@ async fn detached_dm_append_records_the_actual_sm_stream() {
     assert!(capture.snapshot().intents.iter().any(|intent| {
         matches!(
             intent,
-            IngressEffectIntent::RecipientSmAppend { stream }
+            IngressEffectIntent::RecipientSmAppend { stream, .. }
                 if stream.as_str() == "captured-dm-stream"
         )
     }));

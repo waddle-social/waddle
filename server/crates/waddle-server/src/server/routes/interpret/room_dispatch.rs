@@ -349,9 +349,7 @@ pub(super) async fn dispatch_to_room(
                         "This room is temporarily unavailable; please retry.",
                     ),
                 );
-                deps.capture_marker(ShadowDecisionMarker::AuthorizationDenied {
-                    reason: ShadowAuthorizationDeniedReason::Forbidden,
-                });
+                deps.capture_marker(ShadowDecisionMarker::OperationalFenceLoss);
                 return outcome;
             }
             Err(error) => {
@@ -731,13 +729,14 @@ pub(crate) fn push_sender_error_reply(
     sender_full: &jid::FullJid,
     error: xmpp_parsers::stanza_error::StanzaError,
 ) {
-    let condition = waddle_xmpp::StanzaErrorCondition::from_xmpp(&error.defined_condition);
+    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+        .expect("server-built stanza error should freeze");
     let reply = build_message_error_reply(incoming, room_jid, sender_full, error);
     match Stanza::Message(reply).to_element_string() {
         Ok(xml) => {
             deps.capture_intent(IngressEffectIntent::ErrorReply {
                 recipient: sender_full.clone(),
-                condition,
+                error: frozen_error,
             });
             outcome.frames.push(xml);
         }
