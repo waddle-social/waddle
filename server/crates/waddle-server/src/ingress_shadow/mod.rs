@@ -2664,6 +2664,7 @@ mod tests {
                 occupants,
                 reflection,
                 room_generation: EntityGeneration::INITIAL,
+                route_identity: waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(0),
             },
         );
 

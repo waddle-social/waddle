@@ -1,6 +1,7 @@
 use super::*;
-use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ingress::{IngressEffectIntent, RetractionTombstoneMutation};
 use waddle_xmpp::mam::StoreOutcome;
+use waddle_xmpp_core::xep0359::{extract_stanza_id_by, StanzaId};
 
 const DM_CALL_PENDING_TTL_SECS: i64 = 30 * 60;
 const DM_CALL_ACTIVE_TTL_SECS: i64 = 12 * 60 * 60;
@@ -623,7 +624,7 @@ async fn apply_direct_retraction_tombstone(
         waddle_xmpp::xep::xep0424::extract_retraction_from_message(message)
     {
         if let Some(mam_storage) = deps.mam_storage {
-            let tombstoned = apply_retraction_tombstone(
+            let target_stanza_id = apply_retraction_tombstone(
                 mam_storage,
                 deps.sm_session_registry,
                 deps.pending_delivery_storage,
@@ -632,7 +633,16 @@ async fn apply_direct_retraction_tombstone(
                 message,
             )
             .await;
-            if tombstoned {
+            if let Some(target_stanza_id) = target_stanza_id {
+                if let Some(retraction_stanza_id) = retraction_stanza_id(message, archive_jid) {
+                    deps.capture_intent(IngressEffectIntent::RetractionTombstone {
+                        mutation: RetractionTombstoneMutation {
+                            archive: archive_jid.clone(),
+                            target_stanza_id,
+                            retraction_stanza_id,
+                        },
+                    });
+                }
                 if let Some(state) = deps.web_socket_state {
                     crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                         state.deps.app_state.db_pool.global_actor(),
@@ -644,4 +654,9 @@ async fn apply_direct_retraction_tombstone(
             }
         }
     }
+}
+
+fn retraction_stanza_id(message: &Message, archive: &BareJid) -> Option<StanzaId> {
+    let by = jid::Jid::from(archive.clone());
+    extract_stanza_id_by(message, &by).map(|id| StanzaId::new(id, by))
 }

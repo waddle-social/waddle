@@ -480,7 +480,7 @@ CREATE TABLE ingress_effect_intents (
     message_key UUID NOT NULL REFERENCES ingress_messages (message_key) ON DELETE CASCADE,
     effect_ordinal NUMERIC(20,0) NOT NULL
         CHECK (effect_ordinal >= 0 AND effect_ordinal <= 18446744073709551615),
-    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 15),
+    kind INTEGER NOT NULL CHECK (kind >= 0),
     semantic_identity_hash BYTEA NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
     payload_version INTEGER NOT NULL CHECK (payload_version = 1),
     payload BYTEA NOT NULL CHECK (octet_length(payload) <= 65536),

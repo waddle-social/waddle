@@ -636,6 +636,7 @@ pub(super) async fn dispatch_to_room(
                     .collect(),
                 reflection: sender_full.clone(),
                 room_generation,
+                route_identity: capture.next_route_identity(),
             });
         }
     }

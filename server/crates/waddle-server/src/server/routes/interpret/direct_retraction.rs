@@ -1,5 +1,6 @@
 use super::groupchat_archive::scrub_unacked_for_tombstone;
 use super::*;
+use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(super) async fn apply_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
@@ -10,7 +11,7 @@ pub(super) async fn apply_retraction_tombstone(
     archive: &jid::BareJid,
     target_wire_id: &str,
     retraction_message: &Message,
-) -> bool {
+) -> Option<StanzaId> {
     // XEP-0424 §"Using the correct ID": a non-groupchat retraction
     // names the target by the SENDER's wire id, which is client-chosen
     // and unique only per author. The scrub identity therefore carries
@@ -51,7 +52,7 @@ pub(super) async fn apply_retraction_tombstone(
                 target = target_wire_id,
                 "ApplyRetractionTombstone: target not found in archive; skipping"
             );
-            return false;
+            return None;
         }
         Err(error) => {
             warn!(
@@ -60,7 +61,7 @@ pub(super) async fn apply_retraction_tombstone(
                 %error,
                 "ApplyRetractionTombstone: archive lookup failed; skipping"
             );
-            return false;
+            return None;
         }
     };
     let Some(retraction_id) = retraction_message
@@ -73,7 +74,7 @@ pub(super) async fn apply_retraction_tombstone(
             target = target_wire_id,
             "ApplyRetractionTombstone: retraction stanza missing valid message id; skipping"
         );
-        return false;
+        return None;
     };
     let tombstone = waddle_xmpp::mam::ArchivedTombstone {
         retraction_id: Some(retraction_id),
@@ -109,7 +110,7 @@ pub(super) async fn apply_retraction_tombstone(
                 )
                 .await;
             }
-            return false;
+            return None;
         }
         Err(error) => {
             warn!(
@@ -127,7 +128,7 @@ pub(super) async fn apply_retraction_tombstone(
                 )
                 .await;
             }
-            return false;
+            return None;
         }
     }
     // Drop matching unacked outbound copies from any detached XEP-0198
@@ -147,5 +148,5 @@ pub(super) async fn apply_retraction_tombstone(
         )
         .await;
     }
-    true
+    Some(StanzaId::new(original.id, jid::Jid::from(archive.clone())))
 }

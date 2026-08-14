@@ -357,6 +357,21 @@ pub(super) struct ArchiveStoreResult {
     pub rewrite: Option<ArchiveIdRewrite>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupchatRetractionTombstoneOutcome {
+    Replaced,
+    AlreadyTombstoned,
+    NotFound,
+    Failed,
+}
+
+impl GroupchatRetractionTombstoneOutcome {
+    pub(super) fn tombstoned(self) -> bool {
+        matches!(self, Self::Replaced | Self::AlreadyTombstoned)
+    }
+}
+
+#[cfg(test)]
 pub(super) async fn apply_groupchat_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
@@ -367,6 +382,28 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
     target_message_id: &str,
     retraction_message: &Message,
 ) -> bool {
+    apply_groupchat_retraction_tombstone_outcome(
+        mam_storage,
+        sm_session_registry,
+        pending_storage,
+        room,
+        target_message_id,
+        retraction_message,
+    )
+    .await
+    .tombstoned()
+}
+
+pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
+    mam_storage: &Arc<dyn MamStorage>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    pending_storage: Option<
+        &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
+    >,
+    room: &BareJid,
+    target_message_id: &str,
+    retraction_message: &Message,
+) -> GroupchatRetractionTombstoneOutcome {
     // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
     // retraction names the target by the room-assigned XEP-0359
     // stanza-id, which is persisted as the archive primary key. Resolve
@@ -389,7 +426,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 target = target_message_id,
                 "ApplyGroupchatRetractionTombstone: target not found in room archive; skipping"
             );
-            return false;
+            return GroupchatRetractionTombstoneOutcome::NotFound;
         }
         Err(error) => {
             warn!(
@@ -398,7 +435,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 %error,
                 "ApplyGroupchatRetractionTombstone: archive lookup failed; skipping"
             );
-            return false;
+            return GroupchatRetractionTombstoneOutcome::Failed;
         }
     };
     // Tombstones are terminal. A heal-retry of an XEP-0424 author
@@ -425,7 +462,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             "ApplyGroupchatRetractionTombstone",
         )
         .await;
-        return true;
+        return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
     }
     let Some(retraction_id) = retraction_message
         .id
@@ -438,7 +475,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             target = target_message_id,
             "ApplyGroupchatRetractionTombstone: retraction stanza missing valid message id; skipping"
         );
-        return false;
+        return GroupchatRetractionTombstoneOutcome::Failed;
     };
     let tombstone = ArchivedTombstone {
         retraction_id: Some(retraction_id),
@@ -479,7 +516,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
-            return true;
+            return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
         }
         Ok(TerminalTombstoneOutcome::NotFound) => {
             warn!(
@@ -494,7 +531,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
-            return false;
+            return GroupchatRetractionTombstoneOutcome::NotFound;
         }
         Err(error) => {
             warn!(
@@ -510,7 +547,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
-            return false;
+            return GroupchatRetractionTombstoneOutcome::Failed;
         }
     }
     // Drop matching unacked groupchat reflections from detached
@@ -528,7 +565,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         "ApplyGroupchatRetractionTombstone",
     )
     .await;
-    true
+    GroupchatRetractionTombstoneOutcome::Replaced
 }
 
 /// Walk the SM session registry AND the pending-delivery store and

@@ -177,9 +177,12 @@ use direct_archive::archive_direct;
 use direct_inbox::project_direct_inbox;
 use direct_retraction::apply_retraction_tombstone;
 use displayed_marker::mark_inbox_read_from_displayed;
+#[cfg(test)]
+use groupchat_archive::apply_groupchat_retraction_tombstone;
 use groupchat_archive::{
-    apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
-    resolve_room_claim_fence, ArchiveGroupchatOutcome,
+    apply_groupchat_retraction_tombstone_outcome, archive_groupchat_message,
+    project_groupchat_inbox, resolve_room_claim_fence, ArchiveGroupchatOutcome,
+    GroupchatRetractionTombstoneOutcome,
 };
 #[cfg(test)]
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
@@ -676,7 +679,7 @@ async fn interpret_with_depth(
                     );
                     continue;
                 };
-                let tombstoned = apply_groupchat_retraction_tombstone(
+                let tombstone_outcome = apply_groupchat_retraction_tombstone_outcome(
                     mam_storage,
                     deps.sm_session_registry,
                     deps.pending_delivery_storage,
@@ -685,7 +688,23 @@ async fn interpret_with_depth(
                     &retraction_message,
                 )
                 .await;
-                if tombstoned {
+                if tombstone_outcome == GroupchatRetractionTombstoneOutcome::Replaced {
+                    if let Some(retraction_stanza_id) =
+                        groupchat_retraction_stanza_id(&retraction_message, &room)
+                    {
+                        deps.capture_intent(IngressEffectIntent::RetractionTombstone {
+                            mutation: waddle_xmpp::ingress::RetractionTombstoneMutation {
+                                archive: room.clone(),
+                                target_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                                    target_message_id.clone(),
+                                    jid::Jid::from(room.clone()),
+                                ),
+                                retraction_stanza_id,
+                            },
+                        });
+                    }
+                }
+                if tombstone_outcome.tombstoned() {
                     if let Some(state) = deps.web_socket_state {
                         crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                             state.deps.app_state.db_pool.global_actor(),
@@ -877,6 +896,15 @@ async fn interpret_with_depth(
 
     outcome.archive_id_rewrites = archive_id_rewrites;
     outcome
+}
+
+fn groupchat_retraction_stanza_id(
+    message: &Message,
+    room: &BareJid,
+) -> Option<waddle_xmpp_core::xep0359::StanzaId> {
+    let by = jid::Jid::from(room.clone());
+    waddle_xmpp_core::xep0359::extract_stanza_id_by(message, &by)
+        .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, by))
 }
 
 /// `route_to_connection` only yields a message error for the local-account

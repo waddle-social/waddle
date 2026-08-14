@@ -2,7 +2,7 @@
 
 use std::{cmp::Ordering, collections::BTreeMap, ops::Deref};
 
-use jid::{BareJid, FullJid};
+use jid::{BareJid, FullJid, Jid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -15,8 +15,12 @@ use xmpp_parsers::{
 };
 
 use crate::{
-    error::StanzaErrorCondition, ingress::EntityGeneration, muc::SubjectState,
-    pending_delivery::SmSessionId, protocol::CarbonKind, xep::xep0085::ChatState,
+    error::StanzaErrorCondition,
+    ingress::EntityGeneration,
+    muc::SubjectState,
+    pending_delivery::SmSessionId,
+    protocol::CarbonKind,
+    xep::{xep0085::ChatState, CallThreadDuration, CallThreadMedia},
 };
 
 /// Largest accepted version-one storage payload, matching the database check.
@@ -266,6 +270,19 @@ pub enum InboxProjectionMutation {
         thread_id: ThreadId,
         increment_unread: bool,
     },
+    DirectCallThreadAnchor {
+        peer: BareJid,
+        thread_id: ThreadId,
+        archive_stanza_id: StanzaId,
+        media: CallThreadMedia,
+        last_updated: i64,
+    },
+    DirectCallThreadEnded {
+        peer: BareJid,
+        thread_id: ThreadId,
+        ended: chrono::DateTime<chrono::Utc>,
+        duration: CallThreadDuration,
+    },
 }
 
 impl InboxProjectionMutation {
@@ -291,6 +308,33 @@ impl InboxProjectionMutation {
                 room,
                 thread_id.as_str(),
                 increment_unread
+            ),
+            Self::DirectCallThreadAnchor {
+                peer,
+                thread_id,
+                archive_stanza_id,
+                media,
+                last_updated,
+            } => format!(
+                "direct_call_thread_anchor|{}|{}|{}|{}|{}|{}",
+                peer,
+                thread_id.as_str(),
+                stanza_storage_identity(archive_stanza_id),
+                media.audio,
+                media.video,
+                last_updated,
+            ),
+            Self::DirectCallThreadEnded {
+                peer,
+                thread_id,
+                ended,
+                duration,
+            } => format!(
+                "direct_call_thread_ended|{}|{}|{}|{}",
+                peer,
+                thread_id.as_str(),
+                ended.to_rfc3339(),
+                duration.as_str(),
             ),
         }
     }
@@ -683,6 +727,7 @@ pub enum IngressEffectIntent {
         occupants: Vec<FullJid>,
         reflection: FullJid,
         room_generation: EntityGeneration,
+        route_identity: EffectMessageIdentity,
     },
     RouteOccupantPm {
         recipient: FullJid,
@@ -754,7 +799,7 @@ pub enum IngressEffectIntent {
 pub enum IngressEffectKey {
     ArchiveAuthoritative(BareJid, String),
     RouteDirect(BareJid, String),
-    RouteMucGroupchat(BareJid),
+    RouteMucGroupchat(BareJid, String),
     RouteOccupantPm(FullJid),
     DispatchToRoomRemote(BareJid, RelayTargetIdentity),
     RecipientSmAppend(SmSessionId, RecipientSmAppendIdentity),
@@ -782,7 +827,9 @@ impl IngressEffectKey {
             Self::RouteDirect(recipient, route_identity) => {
                 format!("{}|{}", recipient, route_identity)
             }
-            Self::RouteMucGroupchat(value) => value.to_string(),
+            Self::RouteMucGroupchat(room, route_identity) => {
+                format!("{}|{}", room, route_identity)
+            }
             Self::RouteOccupantPm(value) => value.to_string(),
             Self::DispatchToRoomRemote(room, relay_target) => {
                 format!("{}|{}", room, relay_target.storage_identity())
@@ -849,6 +896,154 @@ impl PartialOrd for IngressEffectKey {
 }
 
 impl IngressEffectIntent {
+    /// Representative values for every stable V1 kind, used by storage
+    /// integration tests to keep the codec and ledger contract in sync.
+    #[doc(hidden)]
+    pub fn storage_round_trip_samples() -> Vec<Self> {
+        let bare = |value: &str| value.parse::<BareJid>().expect("valid fixture bare JID");
+        let full = |value: &str| value.parse::<FullJid>().expect("valid fixture full JID");
+        let stanza = || {
+            StanzaId::new(
+                "stable-1",
+                "archive@example.test"
+                    .parse::<Jid>()
+                    .expect("valid fixture JID"),
+            )
+        };
+        vec![
+            Self::ArchiveAuthoritative {
+                archive: bare("archive@example.test"),
+                stanza_id: stanza(),
+                by: bare("archive@example.test"),
+            },
+            Self::RouteDirect {
+                recipient: bare("romeo@example.test"),
+                fanout: vec![full("romeo@example.test/phone")],
+                route_identity: EffectMessageIdentity::stanza(stanza()),
+            },
+            Self::RouteMucGroupchat {
+                room: bare("room@conference.example.test"),
+                occupants: vec![full("juliet@example.test/laptop")],
+                reflection: full("romeo@example.test/phone"),
+                room_generation: EntityGeneration::from_storage(7),
+                route_identity: EffectMessageIdentity::stanza(stanza()),
+            },
+            Self::RouteOccupantPm {
+                recipient: full("juliet@example.test/laptop"),
+                sender: full("romeo@example.test/phone"),
+            },
+            Self::DispatchToRoomRemote {
+                room: bare("room@conference.example.test"),
+                relay_target: RelayTargetIdentity::owner_node("relay-node", "relay-epoch"),
+            },
+            Self::RecipientSmAppend {
+                stream: SmSessionId::new("stream-1"),
+                append_identity: RecipientSmAppendIdentity::new(0),
+            },
+            Self::Carbons {
+                carbon_recipients: vec![full("romeo@example.test/phone")],
+                excluded_source: full("romeo@example.test/laptop"),
+                kind: CarbonKind::Sent,
+            },
+            Self::InboxProject {
+                owner: bare("romeo@example.test"),
+                mutation: InboxProjectionMutation::Direct {
+                    peer: bare("juliet@example.test"),
+                    increment_unread: true,
+                },
+            },
+            Self::NotificationActivityPreview {
+                owner: bare("romeo@example.test"),
+                mutation: NotificationActivityMutation::NotificationCandidate {
+                    conversation: bare("room@conference.example.test"),
+                    archive_stanza_id: stanza(),
+                    outcome: NotificationCandidateOutcome::Inserted,
+                },
+            },
+            Self::LinkPreviewMediaRef {
+                mutation: LinkPreviewMediaRefMutation {
+                    upload_slot_id: Uuid::parse_str("d5c7a44f-7c8c-4587-b0fb-f0e68444d36a")
+                        .expect("fixture UUID"),
+                    archive: bare("room@conference.example.test"),
+                    message_id: RichMessageId::new("client-msg-1").expect("fixture message id"),
+                    current_archive_stanza_id: stanza(),
+                    state: LinkPreviewMediaRefState::Current,
+                },
+            },
+            Self::RetractionTombstone {
+                mutation: RetractionTombstoneMutation {
+                    archive: bare("archive@example.test"),
+                    target_stanza_id: StanzaId::new(
+                        "target-1",
+                        "archive@example.test"
+                            .parse::<Jid>()
+                            .expect("valid fixture JID"),
+                    ),
+                    retraction_stanza_id: stanza(),
+                },
+            },
+            Self::DmPinMutation {
+                pair: (bare("juliet@example.test"), bare("romeo@example.test")),
+                target_stanza_id: stanza(),
+                action: DmPinMutationAction::Pin,
+            },
+            Self::GroupDmMembershipGrant {
+                grant: GroupDmMembershipGrant {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                },
+            },
+            Self::GroupDmInviteLedger {
+                grant: GroupDmMembershipGrant {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                },
+            },
+            Self::RoomSubjectMutation {
+                room: bare("room@conference.example.test"),
+                state: SubjectState {
+                    texts: crate::muc::RoomSubjectTexts::new(),
+                    setter: bare("romeo@example.test"),
+                    setter_nick: "romeo".to_owned(),
+                    set_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                        .expect("fixture timestamp")
+                        .with_timezone(&chrono::Utc),
+                },
+            },
+            Self::CallSignal {
+                recipient: full("romeo@example.test/phone"),
+                stanza_id: stanza(),
+            },
+            Self::Pin {
+                room: bare("room@conference.example.test"),
+                stanza_id: stanza(),
+                action: PinAction::Pin,
+            },
+            Self::Extension {
+                recipient: bare("romeo@example.test"),
+                stanza_id: stanza(),
+            },
+            Self::ErrorReply {
+                recipient: full("romeo@example.test/phone"),
+                error: FrozenStanzaError::new(
+                    FrozenStanzaErrorType::Modify,
+                    StanzaErrorCondition::Redirect,
+                )
+                .with_text("nb", "moved")
+                .with_condition_payload(
+                    FrozenStanzaErrorConditionPayload::Redirect {
+                        new_address: Some(
+                            FrozenStanzaErrorAddress::parse("xmpp:romeo@example.test/mobile")
+                                .expect("valid fixture URI"),
+                        ),
+                    },
+                ),
+            },
+        ]
+    }
+
     pub fn semantic_key(&self) -> IngressEffectKey {
         match self {
             Self::ArchiveAuthoritative {
@@ -864,8 +1059,12 @@ impl IngressEffectIntent {
             } => {
                 IngressEffectKey::RouteDirect(recipient.clone(), route_identity.storage_identity())
             }
-            Self::RouteMucGroupchat { room, .. } => {
-                IngressEffectKey::RouteMucGroupchat(room.clone())
+            Self::RouteMucGroupchat {
+                room,
+                route_identity,
+                ..
+            } => {
+                IngressEffectKey::RouteMucGroupchat(room.clone(), route_identity.storage_identity())
             }
             Self::RouteOccupantPm { recipient, .. } => {
                 IngressEffectKey::RouteOccupantPm(recipient.clone())
@@ -1214,6 +1413,19 @@ enum StoredInboxProjectionMutation {
         thread_id: String,
         increment_unread: bool,
     },
+    DirectCallThreadAnchor {
+        peer: BareJid,
+        thread_id: String,
+        archive_stanza_id: StanzaId,
+        media: CallThreadMedia,
+        last_updated: i64,
+    },
+    DirectCallThreadEnded {
+        peer: BareJid,
+        thread_id: String,
+        ended: chrono::DateTime<chrono::Utc>,
+        duration: CallThreadDuration,
+    },
 }
 
 impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
@@ -1245,6 +1457,30 @@ impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
                 room,
                 thread_id: thread_id.as_str().to_owned(),
                 increment_unread,
+            },
+            InboxProjectionMutation::DirectCallThreadAnchor {
+                peer,
+                thread_id,
+                archive_stanza_id,
+                media,
+                last_updated,
+            } => Self::DirectCallThreadAnchor {
+                peer,
+                thread_id: thread_id.as_str().to_owned(),
+                archive_stanza_id,
+                media,
+                last_updated,
+            },
+            InboxProjectionMutation::DirectCallThreadEnded {
+                peer,
+                thread_id,
+                ended,
+                duration,
+            } => Self::DirectCallThreadEnded {
+                peer,
+                thread_id: thread_id.as_str().to_owned(),
+                ended,
+                duration,
             },
         }
     }
@@ -1281,6 +1517,32 @@ impl StoredInboxProjectionMutation {
                 thread_id: ThreadId::new(thread_id)
                     .ok_or(EffectIntentCodecError::MalformedPayload)?,
                 increment_unread,
+            },
+            Self::DirectCallThreadAnchor {
+                peer,
+                thread_id,
+                archive_stanza_id,
+                media,
+                last_updated,
+            } => InboxProjectionMutation::DirectCallThreadAnchor {
+                peer,
+                thread_id: ThreadId::new(thread_id)
+                    .ok_or(EffectIntentCodecError::MalformedPayload)?,
+                archive_stanza_id,
+                media,
+                last_updated,
+            },
+            Self::DirectCallThreadEnded {
+                peer,
+                thread_id,
+                ended,
+                duration,
+            } => InboxProjectionMutation::DirectCallThreadEnded {
+                peer,
+                thread_id: ThreadId::new(thread_id)
+                    .ok_or(EffectIntentCodecError::MalformedPayload)?,
+                ended,
+                duration,
             },
         })
     }
@@ -1496,6 +1758,7 @@ enum StoredEffectIntent {
         occupants: Vec<FullJid>,
         reflection: FullJid,
         room_generation: u64,
+        route_identity: StoredEffectMessageIdentity,
     },
     RouteOccupantPm {
         recipient: FullJid,
@@ -1616,6 +1879,7 @@ impl StoredEffectIntent {
                 mut occupants,
                 reflection,
                 room_generation,
+                route_identity,
             } => {
                 canonicalize(&mut occupants);
                 Self::RouteMucGroupchat {
@@ -1623,6 +1887,7 @@ impl StoredEffectIntent {
                     occupants,
                     reflection,
                     room_generation: room_generation.to_storage(),
+                    route_identity: route_identity.into(),
                 }
             }
             IngressEffectIntent::RouteOccupantPm { recipient, sender } => {
@@ -1743,11 +2008,13 @@ impl StoredEffectIntent {
                 occupants,
                 reflection,
                 room_generation,
+                route_identity,
             } => IngressEffectIntent::RouteMucGroupchat {
                 room,
                 occupants,
                 reflection,
                 room_generation: EntityGeneration::from_storage(room_generation),
+                route_identity: route_identity.into_domain(),
             },
             Self::RouteOccupantPm { recipient, sender } => {
                 IngressEffectIntent::RouteOccupantPm { recipient, sender }
@@ -2082,6 +2349,7 @@ mod tests {
                 occupants: vec![full("juliet@example.test/laptop")],
                 reflection: full("romeo@example.test/phone"),
                 room_generation: EntityGeneration::from_storage(7),
+                route_identity: EffectMessageIdentity::stanza(stanza_id()),
             },
             IngressEffectIntent::RouteOccupantPm {
                 recipient: full("juliet@example.test/laptop"),
@@ -2154,6 +2422,17 @@ mod tests {
                     inviter: bare("romeo@example.test"),
                 },
             },
+            IngressEffectIntent::RoomSubjectMutation {
+                room: bare("room@conference.example.test"),
+                state: SubjectState {
+                    texts: crate::muc::RoomSubjectTexts::new(),
+                    setter: bare("romeo@example.test"),
+                    setter_nick: "romeo".to_owned(),
+                    set_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                        .expect("timestamp")
+                        .with_timezone(&chrono::Utc),
+                },
+            },
             IngressEffectIntent::CallSignal {
                 recipient: full("romeo@example.test/phone"),
                 stanza_id: stanza_id(),
@@ -2191,7 +2470,7 @@ mod tests {
         let golden = [
             r#"{"version":1,"intent":{"type":"archive_authoritative","archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test"}}"#,
             r#"{"version":1,"intent":{"type":"route_direct","recipient":"romeo@example.test","fanout":["romeo@example.test/phone"],"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
-            r#"{"version":1,"intent":{"type":"route_muc_groupchat","room":"room@conference.example.test","occupants":["juliet@example.test/laptop"],"reflection":"romeo@example.test/phone","room_generation":7}}"#,
+            r#"{"version":1,"intent":{"type":"route_muc_groupchat","room":"room@conference.example.test","occupants":["juliet@example.test/laptop"],"reflection":"romeo@example.test/phone","room_generation":7,"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"route_occupant_pm","recipient":"juliet@example.test/laptop","sender":"romeo@example.test/phone"}}"#,
             r#"{"version":1,"intent":{"type":"dispatch_to_room_remote","room":"room@conference.example.test","relay_target":{"node_id":"relay-node","node_epoch":"relay-epoch"}}}"#,
             r#"{"version":1,"intent":{"type":"recipient_sm_append","stream":"stream-1","append_identity":0}}"#,
@@ -2203,11 +2482,17 @@ mod tests {
             r#"{"version":1,"intent":{"type":"dm_pin_mutation","first_peer":"juliet@example.test","second_peer":"romeo@example.test","target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
             r#"{"version":1,"intent":{"type":"group_dm_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"group_dm_invite_ledger","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
+            r#"{"version":1,"intent":{"type":"room_subject_mutation","room":"room@conference.example.test","state":{"texts":{},"setter":"romeo@example.test","setter_nick":"romeo","set_at":"2025-07-27T12:00:00Z"}}}"#,
             r#"{"version":1,"intent":{"type":"call_signal","recipient":"romeo@example.test/phone","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"pin","room":"room@conference.example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
             r#"{"version":1,"intent":{"type":"extension","recipient":"romeo@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"error_reply","recipient":"romeo@example.test/phone","error":{"error_type":3,"condition":13,"texts":[{"lang":"nb","text":"moved"}],"condition_payload":{"type":"redirect","new_address":"xmpp:romeo@example.test/mobile"}}}}"#,
         ];
+        assert_eq!(
+            samples().len(),
+            golden.len(),
+            "every stable kind has a golden vector"
+        );
         for (intent, expected) in samples().into_iter().zip(golden) {
             let encoded = intent.encode_v1().expect("encode sample");
             assert_eq!(encoded.payload(), expected.as_bytes());
@@ -2217,6 +2502,63 @@ mod tests {
                 intent
             );
         }
+    }
+
+    #[test]
+    fn direct_call_thread_inbox_mutations_round_trip_with_distinct_identities() {
+        let anchor = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::DirectCallThreadAnchor {
+                peer: bare("juliet@example.test"),
+                thread_id: thread_id("call-thread-1"),
+                archive_stanza_id: stanza_id(),
+                media: CallThreadMedia::audio_video(),
+                last_updated: 1_752_768_000,
+            },
+        };
+        let ended = IngressEffectIntent::InboxProject {
+            owner: bare("romeo@example.test"),
+            mutation: InboxProjectionMutation::DirectCallThreadEnded {
+                peer: bare("juliet@example.test"),
+                thread_id: thread_id("call-thread-1"),
+                ended: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                    .expect("timestamp")
+                    .with_timezone(&chrono::Utc),
+                duration: CallThreadDuration::parse("PT1M").expect("duration"),
+            },
+        };
+
+        for intent in [&anchor, &ended] {
+            let encoded = intent.encode_v1().expect("encode typed mutation");
+            assert_eq!(
+                IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                    .expect("decode typed mutation"),
+                *intent
+            );
+        }
+        assert_ne!(anchor.semantic_key(), ended.semantic_key());
+    }
+
+    #[test]
+    fn room_routes_preserve_distinct_server_authored_stanza_identities() {
+        let first = IngressEffectIntent::RouteMucGroupchat {
+            room: bare("room@conference.example.test"),
+            occupants: vec![full("juliet@example.test/laptop")],
+            reflection: full("room@conference.example.test/__system__"),
+            room_generation: EntityGeneration::INITIAL,
+            route_identity: EffectMessageIdentity::stanza(stanza_id()),
+        };
+        let second = IngressEffectIntent::RouteMucGroupchat {
+            room: bare("room@conference.example.test"),
+            occupants: vec![full("juliet@example.test/laptop")],
+            reflection: full("room@conference.example.test/__system__"),
+            room_generation: EntityGeneration::INITIAL,
+            route_identity: EffectMessageIdentity::stanza(StanzaId::new(
+                "stable-2",
+                "archive@example.test".parse::<Jid>().expect("valid JID"),
+            )),
+        };
+        assert_ne!(first.semantic_key(), second.semantic_key());
     }
 
     #[test]

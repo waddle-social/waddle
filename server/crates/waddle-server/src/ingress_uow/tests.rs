@@ -861,6 +861,53 @@ async fn shadow_frontier_advances_idempotently_and_detects_gaps() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
+async fn every_effect_intent_kind_round_trips_through_postgres_storage() {
+    let Some(fixture) = Fixture::open("every_effect_intent_kind").await else {
+        return;
+    };
+    let message_key = MessageKey::new();
+    let intents = IngressEffectIntent::storage_round_trip_samples();
+    let expected_kinds = intents
+        .iter()
+        .map(|intent| {
+            intent
+                .with_encoded_v1(|kind, _| kind)
+                .expect("encode representative intent")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut transaction = fixture.begin().await;
+    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(10))
+        .await
+        .expect("record effect parent message");
+    assert_eq!(
+        EffectIntentRepository::record_all(&mut transaction, message_key, &intents)
+            .await
+            .expect("persist every codec kind"),
+        EffectIntentWriteOutcome::Recorded
+    );
+    transaction.commit().await.expect("commit effect intents");
+
+    let conn = fixture.db.guard().await.expect("read stored effects");
+    let mut rows = conn
+        .query(
+            "SELECT kind::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("select stored effects");
+    let mut decoded_kinds = std::collections::BTreeSet::new();
+    while let Some(row) = rows.next().await.expect("read stored effect") {
+        let kind = i32::try_from(row.get::<i64>(0).expect("effect kind")).expect("i32 kind");
+        let payload = row.get::<Vec<u8>>(1).expect("effect payload");
+        IngressEffectIntent::decode_v1(kind, &payload).expect("decode persisted effect");
+        decoded_kinds.insert(kind);
+    }
+    assert_eq!(decoded_kinds, expected_kinds);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
 async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_alias_divergence() {
     let Some(fixture) = Fixture::open("effect_intents").await else {
         return;

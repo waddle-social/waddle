@@ -111,6 +111,12 @@ pub(super) async fn handle_dm_pin_message(
         {
             return Some(Vec::new());
         }
+        record_dm_pin_mutation(
+            ingress_effect_capture,
+            &key,
+            target.canonical_stanza_id.clone(),
+            waddle_xmpp::ingress::DmPinMutationAction::Unpin,
+        );
         let event = build_dm_pin_event_message(
             &sender,
             &peer,
@@ -165,7 +171,13 @@ pub(super) async fn handle_dm_pin_message(
         .deps
         .protocol
         .dm_pin_store
-        .apply_pin(key, entry.clone());
+        .apply_pin(key.clone(), entry.clone());
+    record_dm_pin_mutation(
+        ingress_effect_capture,
+        &key,
+        entry.target_stanza_id.clone(),
+        waddle_xmpp::ingress::DmPinMutationAction::Pin,
+    );
 
     let event = build_dm_pin_event_message(
         &sender,
@@ -486,6 +498,12 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
     {
         return;
     }
+    record_dm_pin_mutation(
+        ingress_effect_capture,
+        &key,
+        target.canonical_stanza_id.clone(),
+        waddle_xmpp::ingress::DmPinMutationAction::RetractionCascadeUnpin,
+    );
     let event = build_dm_pin_event_message(
         &sender,
         &peer,
@@ -512,6 +530,22 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
         ingress_effect_capture,
     )
     .await;
+}
+
+fn record_dm_pin_mutation(
+    ingress_effect_capture: Option<&IngressEffectCapture>,
+    pair: &crate::server::routes::websocket::DmPairKey,
+    target_stanza_id: StanzaId,
+    action: waddle_xmpp::ingress::DmPinMutationAction,
+) {
+    let Some(capture) = ingress_effect_capture else {
+        return;
+    };
+    capture.record_intent(IngressEffectIntent::DmPinMutation {
+        pair: (pair.low_peer.clone(), pair.high_peer.clone()),
+        target_stanza_id,
+        action,
+    });
 }
 
 fn capture_dm_pin_routes(
