@@ -644,12 +644,14 @@ async fn apply_direct_retraction_tombstone(
                     });
                 }
                 if let Some(state) = deps.web_socket_state {
-                    crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                    for intent in crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                         state.deps.app_state.db_pool.global_actor(),
                         archive_jid,
                         &retraction.retracts_id,
                     )
-                    .await;
+                    .await {
+                        deps.capture_intent(intent);
+                    }
                 }
             }
         }

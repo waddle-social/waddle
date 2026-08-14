@@ -81,8 +81,14 @@ pub(crate) async fn clear_current_message_preview_refs(
     global_db_actor: &ActorRef<DbActor>,
     archive_jid: &BareJid,
     message_id: &str,
-) {
-    let _ = cleared_current_message_preview_refs(global_db_actor, archive_jid, message_id).await;
+) -> Vec<IngressEffectIntent> {
+    committed_link_preview_media_ref_effects(
+        archive_jid,
+        message_id,
+        "",
+        cleared_current_message_preview_refs(global_db_actor, archive_jid, message_id).await,
+        Vec::new(),
+    )
 }
 
 async fn cleared_current_message_preview_refs(

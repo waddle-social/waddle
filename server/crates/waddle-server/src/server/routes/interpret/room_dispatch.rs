@@ -123,12 +123,10 @@ pub(super) async fn dispatch_to_room(
             {
                 MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
-                        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-                            capture_delivered_remote_room_route(
-                                capture,
-                                &room_jid,
-                                attempt.relay_target,
-                            );
+                        if let (Some(capture), Some(relay_target)) =
+                            (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
+                        {
+                            capture_delivered_remote_room_route(capture, &room_jid, relay_target);
                         }
                         for reply in replies {
                             match reply.to_element_string() {
@@ -167,12 +165,10 @@ pub(super) async fn dispatch_to_room(
                     }
                     OrderedRelayMucProxyOutcome::MaybeCommitted
                     | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
-                        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-                            capture_ambiguous_remote_room_route(
-                                capture,
-                                &room_jid,
-                                attempt.relay_target,
-                            );
+                        if let (Some(capture), Some(relay_target)) =
+                            (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
+                        {
+                            capture_ambiguous_remote_room_route(capture, &room_jid, relay_target);
                         }
                         return outcome;
                     }

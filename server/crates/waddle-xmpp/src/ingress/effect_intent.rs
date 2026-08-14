@@ -3,6 +3,7 @@
 use std::{cmp::Ordering, collections::BTreeMap, ops::Deref};
 
 use jid::{BareJid, FullJid, Jid};
+use minidom::Element;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -17,7 +18,7 @@ use xmpp_parsers::{
 use crate::{
     error::StanzaErrorCondition,
     ingress::EntityGeneration,
-    muc::SubjectState,
+    muc::{pin::PinnedEntry, SubjectState},
     pending_delivery::SmSessionId,
     protocol::CarbonKind,
     xep::{xep0085::ChatState, CallThreadDuration, CallThreadMedia},
@@ -25,6 +26,9 @@ use crate::{
 
 /// Largest accepted version-one storage payload, matching the database check.
 pub const MAX_EFFECT_INTENT_PAYLOAD_BYTES: usize = 65_536;
+
+/// XEP-0191 application-condition namespace preserved in frozen errors.
+pub const NS_XEP0191_BLOCKING_ERRORS: &str = "urn:xmpp:blocking:errors";
 
 /// Typed relay target node identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -168,12 +172,6 @@ impl EffectMessageIdentity {
             Self::CaptureOrdinal(ordinal) => format!("capture:{ordinal:020}"),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinAction {
-    Pin,
-    Unpin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,11 +405,114 @@ pub struct GroupDmMembershipGrant {
     pub room: BareJid,
     pub invitee: BareJid,
     pub inviter: BareJid,
+    pub history_visibility: GroupDmHistoryVisibility,
 }
 
 impl GroupDmMembershipGrant {
     pub fn storage_identity(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.room,
+            self.invitee,
+            self.inviter,
+            self.history_visibility.storage_identity()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupDmHistoryVisibility {
+    Full,
+    FromJoin {
+        visible_after: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+impl GroupDmHistoryVisibility {
+    pub fn storage_identity(&self) -> String {
+        match self {
+            Self::Full => "full".to_string(),
+            Self::FromJoin { visible_after } => {
+                format!("from_join|{}", visible_after.to_rfc3339())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MucInviteMembershipGrant {
+    pub room: BareJid,
+    pub invitee: BareJid,
+    pub inviter: BareJid,
+}
+
+impl MucInviteMembershipGrant {
+    pub fn storage_identity(&self) -> String {
         format!("{}|{}|{}", self.room, self.invitee, self.inviter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucInviteLedgerAction {
+    Recorded,
+    Claimed,
+}
+
+impl MucInviteLedgerAction {
+    pub fn storage_identity(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Claimed => "claimed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MucInviteLedgerMutation {
+    pub room: BareJid,
+    pub invitee: BareJid,
+    pub inviter: BareJid,
+    pub action: MucInviteLedgerAction,
+}
+
+impl MucInviteLedgerMutation {
+    pub fn storage_identity(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.room,
+            self.invitee,
+            self.inviter,
+            self.action.storage_identity()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomPinMutation {
+    Pin { entry: PinnedEntry },
+    Unpin { target_stanza_id: StanzaId },
+}
+
+impl RoomPinMutation {
+    pub fn storage_identity(&self) -> String {
+        match self {
+            Self::Pin { entry } => {
+                let preview = &entry.preview;
+                format!(
+                    "pin|{}|{}|{}|{}|{}|{}|{}",
+                    stanza_storage_identity(&entry.target_stanza_id),
+                    entry.pinner_jid,
+                    entry.pinned_at.to_rfc3339(),
+                    preview.author_jid,
+                    preview.author_nick.as_deref().unwrap_or(""),
+                    preview.text,
+                    preview.message_timestamp.to_rfc3339(),
+                )
+            }
+            Self::Unpin { target_stanza_id } => {
+                format!("unpin|{}", stanza_storage_identity(target_stanza_id))
+            }
+        }
     }
 }
 
@@ -507,6 +608,9 @@ impl std::fmt::Display for FrozenStanzaErrorAddress {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrozenStanzaErrorConditionPayload {
+    /// XEP-0191 §3.2 application condition. This has no fields, but it is
+    /// semantically distinct from an otherwise-identical not-acceptable.
+    Blocked,
     Gone {
         new_address: Option<FrozenStanzaErrorAddress>,
     },
@@ -550,6 +654,13 @@ impl FrozenStanzaError {
             texts.insert(Lang(lang.clone()), text.clone());
         }
         let condition_payload = match &error.defined_condition {
+            _ if error
+                .other
+                .as_ref()
+                .is_some_and(|condition| condition.is("blocked", NS_XEP0191_BLOCKING_ERRORS)) =>
+            {
+                Some(FrozenStanzaErrorConditionPayload::Blocked)
+            }
             DefinedCondition::Gone { new_address } => {
                 Some(FrozenStanzaErrorConditionPayload::Gone {
                     new_address: new_address
@@ -583,12 +694,18 @@ impl FrozenStanzaError {
         for (lang, text) in self.texts.iter() {
             texts.insert(lang.to_string(), text.clone());
         }
+        let other = match self.condition_payload.as_ref() {
+            Some(FrozenStanzaErrorConditionPayload::Blocked) => {
+                Some(Element::builder("blocked", NS_XEP0191_BLOCKING_ERRORS).build())
+            }
+            _ => None,
+        };
         StanzaError {
             type_: self.error_type.to_xmpp(),
             by: None,
             defined_condition: self.to_xmpp_condition(),
             texts,
-            other: None,
+            other,
         }
     }
 
@@ -620,6 +737,7 @@ impl FrozenStanzaError {
             .collect::<Vec<_>>()
             .join("|");
         let payload = match self.condition_payload.as_ref() {
+            Some(FrozenStanzaErrorConditionPayload::Blocked) => "blocked".to_string(),
             Some(FrozenStanzaErrorConditionPayload::Gone { new_address }) => format!(
                 "gone:{}",
                 new_address
@@ -701,13 +819,6 @@ fn chat_state_storage_identity(state: ChatState) -> &'static str {
     }
 }
 
-fn pin_action_storage_identity(action: PinAction) -> &'static str {
-    match action {
-        PinAction::Pin => "pin",
-        PinAction::Unpin => "unpin",
-    }
-}
-
 /// A frozen effect decision; it carries no executable callback or mutable
 /// lookup and can therefore be durably replayed without re-deriving policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -765,6 +876,12 @@ pub enum IngressEffectIntent {
         target_stanza_id: StanzaId,
         action: DmPinMutationAction,
     },
+    MucInviteMembershipGrant {
+        grant: MucInviteMembershipGrant,
+    },
+    MucInviteLedger {
+        mutation: MucInviteLedgerMutation,
+    },
     GroupDmMembershipGrant {
         grant: GroupDmMembershipGrant,
     },
@@ -781,8 +898,7 @@ pub enum IngressEffectIntent {
     },
     Pin {
         room: BareJid,
-        stanza_id: StanzaId,
-        action: PinAction,
+        mutation: RoomPinMutation,
     },
     Extension {
         recipient: BareJid,
@@ -809,6 +925,8 @@ pub enum IngressEffectKey {
     LinkPreviewMediaRef(String),
     RetractionTombstone(String),
     DmPinMutation(String),
+    MucInviteMembershipGrant(String),
+    MucInviteLedger(String),
     GroupDmMembershipGrant(String),
     GroupDmInviteLedger(String),
     RoomSubjectMutation(BareJid),
@@ -847,6 +965,8 @@ impl IngressEffectKey {
             Self::LinkPreviewMediaRef(identity) => identity.clone(),
             Self::RetractionTombstone(identity) => identity.clone(),
             Self::DmPinMutation(identity) => identity.clone(),
+            Self::MucInviteMembershipGrant(identity) => identity.clone(),
+            Self::MucInviteLedger(identity) => identity.clone(),
             Self::GroupDmMembershipGrant(identity) => identity.clone(),
             Self::GroupDmInviteLedger(identity) => identity.clone(),
             Self::RoomSubjectMutation(value) => value.to_string(),
@@ -871,13 +991,15 @@ impl IngressEffectKey {
             Self::LinkPreviewMediaRef(..) => 9,
             Self::RetractionTombstone(..) => 10,
             Self::DmPinMutation(..) => 11,
-            Self::GroupDmMembershipGrant(..) => 12,
-            Self::GroupDmInviteLedger(..) => 13,
-            Self::RoomSubjectMutation(..) => 14,
-            Self::CallSignal(..) => 15,
-            Self::Pin(..) => 16,
-            Self::Extension(..) => 17,
-            Self::ErrorReply(..) => 18,
+            Self::MucInviteMembershipGrant(..) => 12,
+            Self::MucInviteLedger(..) => 13,
+            Self::GroupDmMembershipGrant(..) => 14,
+            Self::GroupDmInviteLedger(..) => 15,
+            Self::RoomSubjectMutation(..) => 16,
+            Self::CallSignal(..) => 17,
+            Self::Pin(..) => 18,
+            Self::Extension(..) => 19,
+            Self::ErrorReply(..) => 20,
         };
         (class, self.storage_identity())
     }
@@ -987,11 +1109,31 @@ impl IngressEffectIntent {
                 target_stanza_id: stanza(),
                 action: DmPinMutationAction::Pin,
             },
+            Self::MucInviteMembershipGrant {
+                grant: MucInviteMembershipGrant {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                },
+            },
+            Self::MucInviteLedger {
+                mutation: MucInviteLedgerMutation {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                    action: MucInviteLedgerAction::Recorded,
+                },
+            },
             Self::GroupDmMembershipGrant {
                 grant: GroupDmMembershipGrant {
                     room: bare("room@conference.example.test"),
                     invitee: bare("mercutio@example.test"),
                     inviter: bare("romeo@example.test"),
+                    history_visibility: GroupDmHistoryVisibility::FromJoin {
+                        visible_after: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("fixture timestamp")
+                            .with_timezone(&chrono::Utc),
+                    },
                 },
             },
             Self::GroupDmInviteLedger {
@@ -999,6 +1141,11 @@ impl IngressEffectIntent {
                     room: bare("room@conference.example.test"),
                     invitee: bare("mercutio@example.test"),
                     inviter: bare("romeo@example.test"),
+                    history_visibility: GroupDmHistoryVisibility::FromJoin {
+                        visible_after: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("fixture timestamp")
+                            .with_timezone(&chrono::Utc),
+                    },
                 },
             },
             Self::RoomSubjectMutation {
@@ -1018,8 +1165,23 @@ impl IngressEffectIntent {
             },
             Self::Pin {
                 room: bare("room@conference.example.test"),
-                stanza_id: stanza(),
-                action: PinAction::Pin,
+                mutation: RoomPinMutation::Pin {
+                    entry: PinnedEntry {
+                        target_stanza_id: stanza(),
+                        pinner_jid: bare("romeo@example.test"),
+                        pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("fixture timestamp")
+                            .with_timezone(&chrono::Utc),
+                        preview: crate::muc::pin::PinPreview::new(
+                            bare("juliet@example.test"),
+                            Some("Juliet".to_string()),
+                            "important",
+                            chrono::DateTime::parse_from_rfc3339("2025-07-27T11:59:00Z")
+                                .expect("fixture timestamp")
+                                .with_timezone(&chrono::Utc),
+                        ),
+                    },
+                },
             },
             Self::Extension {
                 recipient: bare("romeo@example.test"),
@@ -1107,6 +1269,12 @@ impl IngressEffectIntent {
                 stanza_storage_identity(target_stanza_id),
                 dm_pin_action_storage_identity(*action)
             )),
+            Self::MucInviteMembershipGrant { grant } => {
+                IngressEffectKey::MucInviteMembershipGrant(grant.storage_identity())
+            }
+            Self::MucInviteLedger { mutation } => {
+                IngressEffectKey::MucInviteLedger(mutation.storage_identity())
+            }
             Self::GroupDmMembershipGrant { grant } => {
                 IngressEffectKey::GroupDmMembershipGrant(grant.storage_identity())
             }
@@ -1117,18 +1285,9 @@ impl IngressEffectIntent {
                 IngressEffectKey::RoomSubjectMutation(room.clone())
             }
             Self::CallSignal { recipient, .. } => IngressEffectKey::CallSignal(recipient.clone()),
-            Self::Pin {
-                room,
-                stanza_id,
-                action,
-            } => IngressEffectKey::Pin(
-                room.clone(),
-                format!(
-                    "{}|{}",
-                    stanza_storage_identity(stanza_id),
-                    pin_action_storage_identity(*action)
-                ),
-            ),
+            Self::Pin { room, mutation } => {
+                IngressEffectKey::Pin(room.clone(), mutation.storage_identity())
+            }
             Self::Extension { recipient, .. } => IngressEffectKey::Extension(recipient.clone()),
             Self::ErrorReply { recipient, error } => {
                 IngressEffectKey::ErrorReply(recipient.clone(), error.semantic_identity())
@@ -1273,6 +1432,7 @@ impl FrozenStanzaErrorTexts {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StoredFrozenStanzaErrorConditionPayload {
+    Blocked,
     Gone {
         #[serde(skip_serializing_if = "Option::is_none")]
         new_address: Option<String>,
@@ -1286,6 +1446,7 @@ enum StoredFrozenStanzaErrorConditionPayload {
 impl From<FrozenStanzaErrorConditionPayload> for StoredFrozenStanzaErrorConditionPayload {
     fn from(value: FrozenStanzaErrorConditionPayload) -> Self {
         match value {
+            FrozenStanzaErrorConditionPayload::Blocked => Self::Blocked,
             FrozenStanzaErrorConditionPayload::Gone { new_address } => Self::Gone {
                 new_address: new_address.map(|address| address.to_string()),
             },
@@ -1299,6 +1460,9 @@ impl From<FrozenStanzaErrorConditionPayload> for StoredFrozenStanzaErrorConditio
 impl StoredFrozenStanzaErrorConditionPayload {
     fn into_domain(self) -> Result<FrozenStanzaErrorConditionPayload, EffectIntentCodecError> {
         Ok(match self {
+            StoredFrozenStanzaErrorConditionPayload::Blocked => {
+                FrozenStanzaErrorConditionPayload::Blocked
+            }
             StoredFrozenStanzaErrorConditionPayload::Gone { new_address } => {
                 FrozenStanzaErrorConditionPayload::Gone {
                     new_address: new_address
@@ -1718,14 +1882,20 @@ struct StoredGroupDmMembershipGrant {
     room: BareJid,
     invitee: BareJid,
     inviter: BareJid,
+    visible_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl From<GroupDmMembershipGrant> for StoredGroupDmMembershipGrant {
     fn from(value: GroupDmMembershipGrant) -> Self {
+        let visible_after = match value.history_visibility {
+            GroupDmHistoryVisibility::Full => None,
+            GroupDmHistoryVisibility::FromJoin { visible_after } => Some(visible_after),
+        };
         Self {
             room: value.room,
             invitee: value.invitee,
             inviter: value.inviter,
+            visible_after,
         }
     }
 }
@@ -1736,6 +1906,92 @@ impl From<StoredGroupDmMembershipGrant> for GroupDmMembershipGrant {
             room: value.room,
             invitee: value.invitee,
             inviter: value.inviter,
+            history_visibility: match value.visible_after {
+                Some(visible_after) => GroupDmHistoryVisibility::FromJoin { visible_after },
+                None => GroupDmHistoryVisibility::Full,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredMucInviteMembershipGrant {
+    room: BareJid,
+    invitee: BareJid,
+    inviter: BareJid,
+}
+
+impl From<MucInviteMembershipGrant> for StoredMucInviteMembershipGrant {
+    fn from(value: MucInviteMembershipGrant) -> Self {
+        Self {
+            room: value.room,
+            invitee: value.invitee,
+            inviter: value.inviter,
+        }
+    }
+}
+
+impl From<StoredMucInviteMembershipGrant> for MucInviteMembershipGrant {
+    fn from(value: StoredMucInviteMembershipGrant) -> Self {
+        Self {
+            room: value.room,
+            invitee: value.invitee,
+            inviter: value.inviter,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredMucInviteLedgerMutation {
+    room: BareJid,
+    invitee: BareJid,
+    inviter: BareJid,
+    action: u8,
+}
+
+impl From<MucInviteLedgerMutation> for StoredMucInviteLedgerMutation {
+    fn from(value: MucInviteLedgerMutation) -> Self {
+        Self {
+            room: value.room,
+            invitee: value.invitee,
+            inviter: value.inviter,
+            action: muc_invite_ledger_action_tag(value.action),
+        }
+    }
+}
+
+impl StoredMucInviteLedgerMutation {
+    fn into_domain(self) -> Result<MucInviteLedgerMutation, EffectIntentCodecError> {
+        Ok(MucInviteLedgerMutation {
+            room: self.room,
+            invitee: self.invitee,
+            inviter: self.inviter,
+            action: muc_invite_ledger_action_from_tag(self.action)?,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StoredRoomPinMutation {
+    Pin { entry: PinnedEntry },
+    Unpin { target_stanza_id: StanzaId },
+}
+
+impl From<RoomPinMutation> for StoredRoomPinMutation {
+    fn from(value: RoomPinMutation) -> Self {
+        match value {
+            RoomPinMutation::Pin { entry } => Self::Pin { entry },
+            RoomPinMutation::Unpin { target_stanza_id } => Self::Unpin { target_stanza_id },
+        }
+    }
+}
+
+impl From<StoredRoomPinMutation> for RoomPinMutation {
+    fn from(value: StoredRoomPinMutation) -> Self {
+        match value {
+            StoredRoomPinMutation::Pin { entry } => Self::Pin { entry },
+            StoredRoomPinMutation::Unpin { target_stanza_id } => Self::Unpin { target_stanza_id },
         }
     }
 }
@@ -1797,6 +2053,12 @@ enum StoredEffectIntent {
         target_stanza_id: StanzaId,
         action: u8,
     },
+    MucInviteMembershipGrant {
+        grant: StoredMucInviteMembershipGrant,
+    },
+    MucInviteLedger {
+        mutation: StoredMucInviteLedgerMutation,
+    },
     GroupDmMembershipGrant {
         grant: StoredGroupDmMembershipGrant,
     },
@@ -1813,8 +2075,7 @@ enum StoredEffectIntent {
     },
     Pin {
         room: BareJid,
-        stanza_id: StanzaId,
-        action: u8,
+        mutation: StoredRoomPinMutation,
     },
     Extension {
         recipient: BareJid,
@@ -1841,6 +2102,8 @@ impl StoredEffectIntent {
             Self::LinkPreviewMediaRef { .. } => 18,
             Self::RetractionTombstone { .. } => 14,
             Self::DmPinMutation { .. } => 15,
+            Self::MucInviteMembershipGrant { .. } => 19,
+            Self::MucInviteLedger { .. } => 20,
             Self::GroupDmMembershipGrant { .. } => 16,
             Self::GroupDmInviteLedger { .. } => 17,
             Self::RoomSubjectMutation { .. } => 13,
@@ -1944,6 +2207,14 @@ impl StoredEffectIntent {
                 target_stanza_id,
                 action: dm_pin_action_tag(action),
             },
+            IngressEffectIntent::MucInviteMembershipGrant { grant } => {
+                Self::MucInviteMembershipGrant {
+                    grant: grant.into(),
+                }
+            }
+            IngressEffectIntent::MucInviteLedger { mutation } => Self::MucInviteLedger {
+                mutation: mutation.into(),
+            },
             IngressEffectIntent::GroupDmMembershipGrant { grant } => Self::GroupDmMembershipGrant {
                 grant: grant.into(),
             },
@@ -1960,14 +2231,9 @@ impl StoredEffectIntent {
                 recipient,
                 stanza_id,
             },
-            IngressEffectIntent::Pin {
+            IngressEffectIntent::Pin { room, mutation } => Self::Pin {
                 room,
-                stanza_id,
-                action,
-            } => Self::Pin {
-                room,
-                stanza_id,
-                action: pin_action_tag(action),
+                mutation: mutation.into(),
             },
             IngressEffectIntent::Extension {
                 recipient,
@@ -2067,6 +2333,14 @@ impl StoredEffectIntent {
                 target_stanza_id,
                 action: dm_pin_action_from_tag(action)?,
             },
+            Self::MucInviteMembershipGrant { grant } => {
+                IngressEffectIntent::MucInviteMembershipGrant {
+                    grant: grant.into(),
+                }
+            }
+            Self::MucInviteLedger { mutation } => IngressEffectIntent::MucInviteLedger {
+                mutation: mutation.into_domain()?,
+            },
             Self::GroupDmMembershipGrant { grant } => IngressEffectIntent::GroupDmMembershipGrant {
                 grant: grant.into(),
             },
@@ -2083,14 +2357,9 @@ impl StoredEffectIntent {
                 recipient,
                 stanza_id,
             },
-            Self::Pin {
+            Self::Pin { room, mutation } => IngressEffectIntent::Pin {
                 room,
-                stanza_id,
-                action,
-            } => IngressEffectIntent::Pin {
-                room,
-                stanza_id,
-                action: pin_action_from_tag(action)?,
+                mutation: mutation.into(),
             },
             Self::Extension {
                 recipient,
@@ -2127,17 +2396,19 @@ fn carbon_kind_from_tag(tag: u8) -> Result<CarbonKind, EffectIntentCodecError> {
     })
 }
 
-fn pin_action_tag(action: PinAction) -> u8 {
+fn muc_invite_ledger_action_tag(action: MucInviteLedgerAction) -> u8 {
     match action {
-        PinAction::Pin => 0,
-        PinAction::Unpin => 1,
+        MucInviteLedgerAction::Recorded => 0,
+        MucInviteLedgerAction::Claimed => 1,
     }
 }
 
-fn pin_action_from_tag(tag: u8) -> Result<PinAction, EffectIntentCodecError> {
+fn muc_invite_ledger_action_from_tag(
+    tag: u8,
+) -> Result<MucInviteLedgerAction, EffectIntentCodecError> {
     Ok(match tag {
-        0 => PinAction::Pin,
-        1 => PinAction::Unpin,
+        0 => MucInviteLedgerAction::Recorded,
+        1 => MucInviteLedgerAction::Claimed,
         _ => return Err(EffectIntentCodecError::MalformedPayload),
     })
 }
@@ -2408,11 +2679,31 @@ mod tests {
                 target_stanza_id: stanza_id(),
                 action: DmPinMutationAction::Pin,
             },
+            IngressEffectIntent::MucInviteMembershipGrant {
+                grant: MucInviteMembershipGrant {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                },
+            },
+            IngressEffectIntent::MucInviteLedger {
+                mutation: MucInviteLedgerMutation {
+                    room: bare("room@conference.example.test"),
+                    invitee: bare("mercutio@example.test"),
+                    inviter: bare("romeo@example.test"),
+                    action: MucInviteLedgerAction::Recorded,
+                },
+            },
             IngressEffectIntent::GroupDmMembershipGrant {
                 grant: GroupDmMembershipGrant {
                     room: bare("room@conference.example.test"),
                     invitee: bare("mercutio@example.test"),
                     inviter: bare("romeo@example.test"),
+                    history_visibility: GroupDmHistoryVisibility::FromJoin {
+                        visible_after: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("timestamp")
+                            .with_timezone(&chrono::Utc),
+                    },
                 },
             },
             IngressEffectIntent::GroupDmInviteLedger {
@@ -2420,6 +2711,11 @@ mod tests {
                     room: bare("room@conference.example.test"),
                     invitee: bare("mercutio@example.test"),
                     inviter: bare("romeo@example.test"),
+                    history_visibility: GroupDmHistoryVisibility::FromJoin {
+                        visible_after: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("timestamp")
+                            .with_timezone(&chrono::Utc),
+                    },
                 },
             },
             IngressEffectIntent::RoomSubjectMutation {
@@ -2439,8 +2735,23 @@ mod tests {
             },
             IngressEffectIntent::Pin {
                 room: bare("room@conference.example.test"),
-                stanza_id: stanza_id(),
-                action: PinAction::Pin,
+                mutation: RoomPinMutation::Pin {
+                    entry: PinnedEntry {
+                        target_stanza_id: stanza_id(),
+                        pinner_jid: bare("romeo@example.test"),
+                        pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                            .expect("timestamp")
+                            .with_timezone(&chrono::Utc),
+                        preview: crate::muc::pin::PinPreview::new(
+                            bare("juliet@example.test"),
+                            Some("Juliet".to_string()),
+                            "important",
+                            chrono::DateTime::parse_from_rfc3339("2025-07-27T11:59:00Z")
+                                .expect("timestamp")
+                                .with_timezone(&chrono::Utc),
+                        ),
+                    },
+                },
             },
             IngressEffectIntent::Extension {
                 recipient: bare("romeo@example.test"),
@@ -2480,11 +2791,13 @@ mod tests {
             r#"{"version":1,"intent":{"type":"link_preview_media_ref","mutation":{"upload_slot_id":"d5c7a44f-7c8c-4587-b0fb-f0e68444d36a","archive":"room@conference.example.test","message_id":"client-msg-1","current_archive_stanza_id":{"id":"stable-1","by":"archive@example.test"},"state":0}}}"#,
             r#"{"version":1,"intent":{"type":"retraction_tombstone","mutation":{"archive":"archive@example.test","target_stanza_id":{"id":"target-1","by":"archive@example.test"},"retraction_stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"dm_pin_mutation","first_peer":"juliet@example.test","second_peer":"romeo@example.test","target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
-            r#"{"version":1,"intent":{"type":"group_dm_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
-            r#"{"version":1,"intent":{"type":"group_dm_invite_ledger","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
+            r#"{"version":1,"intent":{"type":"muc_invite_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test"}}}"#,
+            r#"{"version":1,"intent":{"type":"muc_invite_ledger","mutation":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test","action":0}}}"#,
+            r#"{"version":1,"intent":{"type":"group_dm_membership_grant","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test","visible_after":"2025-07-27T12:00:00Z"}}}"#,
+            r#"{"version":1,"intent":{"type":"group_dm_invite_ledger","grant":{"room":"room@conference.example.test","invitee":"mercutio@example.test","inviter":"romeo@example.test","visible_after":"2025-07-27T12:00:00Z"}}}"#,
             r#"{"version":1,"intent":{"type":"room_subject_mutation","room":"room@conference.example.test","state":{"texts":{},"setter":"romeo@example.test","setter_nick":"romeo","set_at":"2025-07-27T12:00:00Z"}}}"#,
             r#"{"version":1,"intent":{"type":"call_signal","recipient":"romeo@example.test/phone","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
-            r#"{"version":1,"intent":{"type":"pin","room":"room@conference.example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"action":0}}"#,
+            r#"{"version":1,"intent":{"type":"pin","room":"room@conference.example.test","mutation":{"type":"pin","entry":{"target_stanza_id":{"id":"stable-1","by":"archive@example.test"},"pinner_jid":"romeo@example.test","pinned_at":"2025-07-27T12:00:00Z","preview":{"author_jid":"juliet@example.test","author_nick":"Juliet","text":"important","message_timestamp":"2025-07-27T11:59:00Z"}}}}}"#,
             r#"{"version":1,"intent":{"type":"extension","recipient":"romeo@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}"#,
             r#"{"version":1,"intent":{"type":"error_reply","recipient":"romeo@example.test/phone","error":{"error_type":3,"condition":13,"texts":[{"lang":"nb","text":"moved"}],"condition_payload":{"type":"redirect","new_address":"xmpp:romeo@example.test/mobile"}}}}"#,
         ];
@@ -2654,15 +2967,49 @@ mod tests {
 
         let pin = IngressEffectIntent::Pin {
             room: bare("room@conference.example.test"),
-            stanza_id: stanza_id(),
-            action: PinAction::Pin,
+            mutation: RoomPinMutation::Pin {
+                entry: PinnedEntry {
+                    target_stanza_id: stanza_id(),
+                    pinner_jid: bare("romeo@example.test"),
+                    pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
+                        .expect("timestamp")
+                        .with_timezone(&chrono::Utc),
+                    preview: crate::muc::pin::PinPreview::new(
+                        bare("juliet@example.test"),
+                        Some("Juliet".to_string()),
+                        "important",
+                        chrono::DateTime::parse_from_rfc3339("2025-07-27T11:59:00Z")
+                            .expect("timestamp")
+                            .with_timezone(&chrono::Utc),
+                    ),
+                },
+            },
         };
         let unpin = IngressEffectIntent::Pin {
             room: bare("room@conference.example.test"),
-            stanza_id: stanza_id(),
-            action: PinAction::Unpin,
+            mutation: RoomPinMutation::Unpin {
+                target_stanza_id: stanza_id(),
+            },
         };
         assert_ne!(pin.semantic_key(), unpin.semantic_key());
+
+        let recorded = IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: bare("room@conference.example.test"),
+                invitee: bare("mercutio@example.test"),
+                inviter: bare("romeo@example.test"),
+                action: MucInviteLedgerAction::Recorded,
+            },
+        };
+        let claimed = IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: bare("room@conference.example.test"),
+                invitee: bare("mercutio@example.test"),
+                inviter: bare("romeo@example.test"),
+                action: MucInviteLedgerAction::Claimed,
+            },
+        };
+        assert_ne!(recorded.semantic_key(), claimed.semantic_key());
 
         let warning_one = IngressEffectIntent::ErrorReply {
             recipient: full("romeo@example.test/phone"),
@@ -2860,6 +3207,38 @@ mod tests {
             }
         );
         assert_eq!(round_trip.texts.get("en"), Some(&"redirected".to_string()));
+    }
+
+    #[test]
+    fn frozen_stanza_error_preserves_xep_0191_blocked_condition() {
+        let mut xmpp = StanzaError::new(
+            XmppStanzaErrorType::Cancel,
+            DefinedCondition::NotAcceptable,
+            "en",
+            "Recipient is on your blocklist.",
+        );
+        xmpp.other = Some(Element::builder("blocked", NS_XEP0191_BLOCKING_ERRORS).build());
+
+        let frozen = FrozenStanzaError::from_xmpp(&xmpp).expect("typed stanza error");
+        assert_eq!(
+            frozen.condition_payload,
+            Some(FrozenStanzaErrorConditionPayload::Blocked)
+        );
+
+        let intent = IngressEffectIntent::ErrorReply {
+            recipient: full("romeo@example.test/phone"),
+            error: frozen.clone(),
+        };
+        let encoded = intent.encode_v1().expect("encode blocked error");
+        assert_eq!(
+            IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                .expect("decode blocked error"),
+            intent
+        );
+        assert!(matches!(
+            frozen.to_xmpp().other,
+            Some(condition) if condition.is("blocked", NS_XEP0191_BLOCKING_ERRORS)
+        ));
     }
 
     #[test]

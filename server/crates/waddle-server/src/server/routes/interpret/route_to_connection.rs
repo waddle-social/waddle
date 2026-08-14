@@ -1064,7 +1064,14 @@ async fn deliver_peer_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+    deliver_peer_to_full_capturing_detached(
+        deps.user_registry,
+        deps.sm_session_registry,
+        deps.ingress_effect_capture.as_ref(),
+        target,
+        stanza,
+    )
+    .await
 }
 
 async fn deliver_direct_to_full_with_registered_remote(
@@ -1353,7 +1360,10 @@ async fn retry_unqueued_detached_as_live(
     let mut landed = Vec::new();
     for full in not_queued {
         let outcome = deliver_direct_to_full_with_registered_remote(deps, &full, processed).await;
-        if outcome.suppresses_fallback() {
+        if matches!(
+            outcome,
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+        ) {
             landed.push(full.clone());
         }
         debug!(

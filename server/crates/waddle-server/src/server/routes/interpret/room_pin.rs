@@ -126,7 +126,7 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
 
     if let Err(error) = room_actor
         .ask(ApplyPin {
-            change: PinStateChange::Pin(entry),
+            change: PinStateChange::Pin(entry.clone()),
         })
         .await
     {
@@ -139,8 +139,7 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
     }
     deps.capture_intent(IngressEffectIntent::Pin {
         room: room.clone(),
-        stanza_id: target_stanza_id.clone(),
-        action: waddle_xmpp::ingress::PinAction::Pin,
+        mutation: waddle_xmpp::ingress::RoomPinMutation::Pin { entry },
     });
 
     let system_message = build_pinned_system_message(
@@ -196,8 +195,9 @@ async fn apply_unpin(
     }
     deps.capture_intent(IngressEffectIntent::Pin {
         room: room.clone(),
-        stanza_id: target_stanza_id.clone(),
-        action: waddle_xmpp::ingress::PinAction::Unpin,
+        mutation: waddle_xmpp::ingress::RoomPinMutation::Unpin {
+            target_stanza_id: target_stanza_id.clone(),
+        },
     });
 
     let system_message = build_unpinned_system_message(

@@ -120,7 +120,8 @@ enum IngressShadowInner {
         tx: IngressShadowTx,
         enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
         retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
-        retrying_retirements: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+        retirement_retry_dispatcher: RetirementRetryDispatcher,
+        stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
         submission_capacity: Arc<Semaphore>,
         enrollment_capacity: Arc<Semaphore>,
         retirement_capacity: usize,
@@ -165,8 +166,12 @@ impl IngressShadowShutdown {
 #[cfg(feature = "clustering")]
 impl Drop for IngressShadowInner {
     fn drop(&mut self) {
-        if let Self::Worker { shutdown, .. } = self {
+        if let Self::Worker { tx, shutdown, .. } = self {
             shutdown.cancel();
+            // The scheduler's executor retains a processor clone, and that
+            // processor retains this sender.  Cancellation alone therefore
+            // cannot close `rx` when the final public handle is dropped.
+            close_worker_intake(tx);
         }
     }
 }
@@ -176,6 +181,40 @@ enum IngressShadowTask {
     Enroll { stream_id: SmSessionId },
     Submit(Box<IngressShadowSubmission>),
     Retire { stream_id: SmSessionId },
+}
+
+/// Result of terminal stream retirement.  A live claim is not an absent
+/// stream: its deferred release must be observed before the shadow rows can
+/// be retired.
+#[cfg(feature = "clustering")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetirementOutcome {
+    Deleted,
+    StreamMissing,
+    DeferredClaim,
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Debug, Default)]
+struct RetirementRetryState {
+    queued: VecDeque<SmSessionId>,
+    queued_members: HashSet<SmSessionId>,
+    scan_requested: bool,
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Debug, Clone)]
+struct RetirementRetryDispatcher {
+    state: Arc<std::sync::Mutex<RetirementRetryState>>,
+    notify: Arc<Notify>,
+    capacity: usize,
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Debug, Default)]
+struct StreamActivityState {
+    pending: HashMap<SmSessionId, usize>,
+    idle_waiters: HashMap<SmSessionId, Arc<Notify>>,
 }
 
 #[cfg(feature = "clustering")]
@@ -265,7 +304,7 @@ impl IngressShadowHandle {
             let tx = Arc::new(std::sync::Mutex::new(None));
             let enqueued_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
             let retiring_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
-            let retrying_retirements = Arc::new(std::sync::Mutex::new(HashSet::new()));
+            let stream_activity = Arc::new(std::sync::Mutex::new(StreamActivityState::default()));
             let worker = IngressShadowProcessor {
                 database,
                 lineage,
@@ -285,12 +324,18 @@ impl IngressShadowHandle {
             };
             let recovery_database = worker.database.clone();
             let handle = Self::spawn_worker_with_enqueued_streams(
-                config.queue_capacity,
-                ingress_shadow_max_concurrency(config.queue_capacity, config.pool_size),
+                WorkerLimits {
+                    queue_capacity: config.queue_capacity,
+                    max_concurrency: ingress_shadow_max_concurrency(
+                        config.queue_capacity,
+                        config.pool_size,
+                    ),
+                },
                 tx,
                 enqueued_streams,
                 retiring_streams,
-                retrying_retirements,
+                Some(worker.database.clone()),
+                stream_activity,
                 Arc::new(move |task| {
                     let worker = worker.clone();
                     Box::pin(async move {
@@ -332,16 +377,21 @@ impl IngressShadowHandle {
 
     #[cfg(feature = "clustering")]
     async fn recover_orphaned_retirements(&self, database: &Database) {
-        let IngressShadowInner::Worker { .. } = self.inner.as_ref() else {
+        let IngressShadowInner::Worker {
+            retirement_capacity,
+            ..
+        } = self.inner.as_ref()
+        else {
             return;
         };
-        let orphaned = match orphaned_shadow_streams(database).await {
-            Ok(orphaned) => orphaned,
-            Err(error) => {
-                tracing::warn!(%error, "ingress shadow orphan retirement recovery failed");
-                return;
-            }
-        };
+        let orphaned =
+            match orphaned_shadow_streams(database, retirement_capacity.saturating_add(1)).await {
+                Ok(orphaned) => orphaned,
+                Err(error) => {
+                    tracing::warn!(%error, "ingress shadow orphan retirement recovery failed");
+                    return;
+                }
+            };
         for stream_id in orphaned {
             let _ = self.try_send(IngressShadowTask::Retire { stream_id });
         }
@@ -360,6 +410,38 @@ impl IngressShadowHandle {
 
     pub fn try_submit(&self, submission: IngressShadowSubmission) -> IngressShadowDisposition {
         self.try_send(IngressShadowTask::Submit(Box::new(submission)))
+    }
+
+    pub async fn wait_for_stream_idle(&self, stream_id: &SmSessionId, timeout: Duration) -> bool {
+        #[cfg(not(feature = "clustering"))]
+        {
+            let _ = (stream_id, timeout);
+            true
+        }
+        #[cfg(feature = "clustering")]
+        {
+            let IngressShadowInner::Worker {
+                stream_activity, ..
+            } = self.inner.as_ref()
+            else {
+                let _ = (stream_id, timeout);
+                return true;
+            };
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                let Some(waiter) = wait_for_stream_idle_notifier(stream_activity, stream_id) else {
+                    return true;
+                };
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero()
+                    || tokio::time::timeout(remaining, waiter.notified())
+                        .await
+                        .is_err()
+                {
+                    return false;
+                }
+            }
+        }
     }
 
     pub async fn drain_and_join(&self, timeout: Duration) -> bool {
@@ -396,22 +478,22 @@ impl IngressShadowHandle {
                 tx,
                 enqueued_streams,
                 retiring_streams,
-                retrying_retirements,
+                retirement_retry_dispatcher,
+                stream_activity,
                 submission_capacity,
                 enrollment_capacity,
                 retirement_capacity,
-                shutdown,
                 ..
             } => try_send_worker_task(
                 WorkerTaskContext {
                     tx,
                     enqueued_streams,
                     retiring_streams,
-                    retrying_retirements,
+                    retirement_retry_dispatcher,
+                    stream_activity,
                     submission_capacity,
                     enrollment_capacity,
                     retirement_capacity: *retirement_capacity,
-                    shutdown,
                 },
                 task,
             ),
@@ -426,12 +508,15 @@ impl IngressShadowHandle {
         execute: IngressShadowExecutor,
     ) -> Self {
         Self::spawn_worker_with_enqueued_streams(
-            queue_capacity,
-            max_concurrency,
+            WorkerLimits {
+                queue_capacity,
+                max_concurrency,
+            },
             Arc::new(std::sync::Mutex::new(None)),
             Arc::new(std::sync::Mutex::new(HashSet::new())),
             Arc::new(std::sync::Mutex::new(HashSet::new())),
-            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            None,
+            Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
             execute,
         )
     }
@@ -463,22 +548,44 @@ impl IngressShadowHandle {
 
     #[cfg(feature = "clustering")]
     fn spawn_worker_with_enqueued_streams(
-        queue_capacity: usize,
-        max_concurrency: usize,
+        limits: WorkerLimits,
         tx: IngressShadowTx,
         enqueued_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
         retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
-        retrying_retirements: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+        retry_database: Option<Database>,
+        stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
         execute: IngressShadowExecutor,
     ) -> Self {
+        let WorkerLimits {
+            queue_capacity,
+            max_concurrency,
+        } = limits;
         let (sender, rx) = mpsc::unbounded_channel();
         *tx.lock()
             .expect("shadow worker sender mutex must not be poisoned") = Some(sender);
         let submission_capacity = Arc::new(Semaphore::new(queue_capacity));
         let enrollment_capacity = Arc::new(Semaphore::new(queue_capacity));
         let shutdown = Arc::new(IngressShadowShutdown::default());
-        let scheduler =
-            tokio::spawn(IngressShadowScheduler::new(rx, max_concurrency, execute).run());
+        let scheduler = tokio::spawn(
+            IngressShadowScheduler::new(rx, max_concurrency, execute, stream_activity.clone())
+                .run(),
+        );
+        let retirement_retry_dispatcher = RetirementRetryDispatcher {
+            state: Arc::new(std::sync::Mutex::new(RetirementRetryState {
+                scan_requested: true,
+                ..RetirementRetryState::default()
+            })),
+            notify: Arc::new(Notify::new()),
+            capacity: queue_capacity,
+        };
+        tokio::spawn(run_retirement_retry_dispatcher(
+            tx.clone(),
+            retiring_streams.clone(),
+            retirement_retry_dispatcher.clone(),
+            queue_capacity,
+            shutdown.clone(),
+            retry_database,
+        ));
         let shutdown_completion = shutdown.clone();
         tokio::spawn(async move {
             shutdown_completion.cancellation.cancelled().await;
@@ -490,7 +597,8 @@ impl IngressShadowHandle {
                 tx,
                 enqueued_streams,
                 retiring_streams,
-                retrying_retirements,
+                retirement_retry_dispatcher,
+                stream_activity,
                 submission_capacity,
                 enrollment_capacity,
                 retirement_capacity: queue_capacity,
@@ -508,6 +616,13 @@ impl IngressShadowHandle {
     }
 }
 
+/// Sizing knobs for a spawned shadow worker.
+#[cfg(feature = "clustering")]
+struct WorkerLimits {
+    queue_capacity: usize,
+    max_concurrency: usize,
+}
+
 /// Borrowed view of the worker-variant queue state that a single task
 /// admission needs; groups what would otherwise be eight loose parameters.
 #[cfg(feature = "clustering")]
@@ -515,11 +630,11 @@ struct WorkerTaskContext<'a> {
     tx: &'a IngressShadowTx,
     enqueued_streams: &'a Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
     retiring_streams: &'a Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
-    retrying_retirements: &'a Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    retirement_retry_dispatcher: &'a RetirementRetryDispatcher,
+    stream_activity: &'a Arc<std::sync::Mutex<StreamActivityState>>,
     submission_capacity: &'a Arc<Semaphore>,
     enrollment_capacity: &'a Arc<Semaphore>,
     retirement_capacity: usize,
-    shutdown: &'a Arc<IngressShadowShutdown>,
 }
 
 #[cfg(feature = "clustering")]
@@ -531,11 +646,11 @@ fn try_send_worker_task(
         tx,
         enqueued_streams,
         retiring_streams,
-        retrying_retirements,
+        retirement_retry_dispatcher,
+        stream_activity,
         submission_capacity,
         enrollment_capacity,
         retirement_capacity,
-        shutdown,
     } = ctx;
     match task {
         IngressShadowTask::Enroll { stream_id } => {
@@ -563,7 +678,10 @@ fn try_send_worker_task(
                     permit: Some(permit),
                 },
             ) {
-                Ok(()) => IngressShadowDisposition::Enqueued,
+                Ok(()) => {
+                    note_stream_task_enqueued(stream_activity, &stream_id);
+                    IngressShadowDisposition::Enqueued
+                }
                 Err(task) => {
                     drop(task.permit);
                     IngressShadowDisposition::Closed
@@ -574,14 +692,7 @@ fn try_send_worker_task(
             let disposition =
                 send_retirement_task(tx, retiring_streams, retirement_capacity, stream_id.clone());
             if matches!(disposition, IngressShadowDisposition::QueueFull) {
-                schedule_retirement_task_retry(
-                    tx.clone(),
-                    retiring_streams.clone(),
-                    retrying_retirements.clone(),
-                    retirement_capacity,
-                    shutdown.clone(),
-                    stream_id.clone(),
-                );
+                schedule_retirement_task_retry(retirement_retry_dispatcher, stream_id.clone());
             }
             if !matches!(disposition, IngressShadowDisposition::Enqueued) {
                 // A closed worker cannot run the ordered retirement task; do
@@ -715,47 +826,193 @@ fn reschedule_retirement_task(
 }
 
 #[cfg(feature = "clustering")]
-fn schedule_retirement_task_retry(
-    tx: IngressShadowTx,
-    retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
-    retrying_retirements: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
-    retirement_capacity: usize,
-    shutdown: Arc<IngressShadowShutdown>,
-    stream_id: SmSessionId,
+fn schedule_deferred_retirement_retry(tx: IngressShadowTx, stream_id: SmSessionId) {
+    // Only an already-admitted retirement can enter this path, so this timer
+    // is bounded by `retirement_capacity`.  Preserve its admission while a
+    // deferred SM claim is released rather than declaring terminal cleanup
+    // complete on the first fenced observation.
+    tokio::spawn(async move {
+        tokio::time::sleep(DEFAULT_RETIREMENT_ADMISSION_RETRY_DELAY).await;
+        let _ = reschedule_retirement_task(&tx, stream_id);
+    });
+}
+
+#[cfg(feature = "clustering")]
+fn schedule_retirement_task_retry(dispatcher: &RetirementRetryDispatcher, stream_id: SmSessionId) {
+    let mut state = dispatcher
+        .state
+        .lock()
+        .expect("retirement retry dispatcher mutex must not be poisoned");
+    if state.queued_members.contains(&stream_id) {
+        state.scan_requested = true;
+    } else if state.queued.len() < dispatcher.capacity {
+        state.queued_members.insert(stream_id.clone());
+        state.queued.push_back(stream_id);
+    } else {
+        state.scan_requested = true;
+    }
+    dispatcher.notify.notify_one();
+}
+
+#[cfg(feature = "clustering")]
+fn note_stream_task_enqueued(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: &SmSessionId,
 ) {
-    {
-        let mut retrying = retrying_retirements
+    let mut state = stream_activity
+        .lock()
+        .expect("stream activity mutex must not be poisoned");
+    *state.pending.entry(stream_id.clone()).or_insert(0) += 1;
+}
+
+#[cfg(feature = "clustering")]
+fn note_stream_task_finished(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: &SmSessionId,
+) {
+    let waiter = {
+        let mut state = stream_activity
             .lock()
-            .expect("retrying retirement mutex must not be poisoned");
-        if !retrying.insert(stream_id.clone()) {
+            .expect("stream activity mutex must not be poisoned");
+        let Some(pending) = state.pending.get_mut(stream_id) else {
+            return;
+        };
+        *pending = pending.saturating_sub(1);
+        if *pending > 0 {
             return;
         }
+        state.pending.remove(stream_id);
+        state.idle_waiters.remove(stream_id)
+    };
+    if let Some(waiter) = waiter {
+        waiter.notify_waiters();
     }
+}
 
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = shutdown.cancellation.cancelled() => break,
-                _ = tokio::time::sleep(DEFAULT_RETIREMENT_ADMISSION_RETRY_DELAY) => {}
-            }
-            match send_retirement_task(
-                &tx,
-                &retiring_streams,
-                retirement_capacity,
-                stream_id.clone(),
-            ) {
-                IngressShadowDisposition::QueueFull => continue,
-                IngressShadowDisposition::Enqueued | IngressShadowDisposition::Closed => break,
-                IngressShadowDisposition::Disabled => {
-                    unreachable!("worker retry path cannot be disabled")
+#[cfg(feature = "clustering")]
+fn wait_for_stream_idle_notifier(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: &SmSessionId,
+) -> Option<Arc<Notify>> {
+    let mut state = stream_activity
+        .lock()
+        .expect("stream activity mutex must not be poisoned");
+    state.pending.contains_key(stream_id).then(|| {
+        state
+            .idle_waiters
+            .entry(stream_id.clone())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
+    })
+}
+
+#[cfg(feature = "clustering")]
+async fn run_retirement_retry_dispatcher(
+    tx: IngressShadowTx,
+    retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
+    dispatcher: RetirementRetryDispatcher,
+    retirement_capacity: usize,
+    shutdown: Arc<IngressShadowShutdown>,
+    database: Option<Database>,
+) {
+    loop {
+        let has_work = {
+            let state = dispatcher
+                .state
+                .lock()
+                .expect("retirement retry dispatcher mutex must not be poisoned");
+            !state.queued.is_empty() || state.scan_requested
+        };
+        tokio::select! {
+            _ = shutdown.cancellation.cancelled() => return,
+            _ = tokio::time::sleep(DEFAULT_RETIREMENT_ADMISSION_RETRY_DELAY), if has_work => {}
+            _ = dispatcher.notify.notified(), if !has_work => {}
+        }
+
+        let should_scan = {
+            let state = dispatcher
+                .state
+                .lock()
+                .expect("retirement retry dispatcher mutex must not be poisoned");
+            state.scan_requested
+        };
+        if should_scan {
+            let Some(database) = database.as_ref() else {
+                dispatcher
+                    .state
+                    .lock()
+                    .expect("retirement retry dispatcher mutex must not be poisoned")
+                    .scan_requested = false;
+                continue;
+            };
+            match orphaned_shadow_streams(database, dispatcher.capacity).await {
+                Ok(orphaned) => {
+                    let mut state = dispatcher
+                        .state
+                        .lock()
+                        .expect("retirement retry dispatcher mutex must not be poisoned");
+                    state.scan_requested = false;
+                    for stream_id in orphaned {
+                        if !state.queued_members.insert(stream_id.clone()) {
+                            continue;
+                        }
+                        if state.queued.len() >= dispatcher.capacity {
+                            state.queued_members.remove(&stream_id);
+                            state.scan_requested = true;
+                            break;
+                        }
+                        state.queued.push_back(stream_id);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "ingress shadow orphan retirement retry scan failed");
+                    dispatcher
+                        .state
+                        .lock()
+                        .expect("retirement retry dispatcher mutex must not be poisoned")
+                        .scan_requested = true;
                 }
             }
         }
-        retrying_retirements
-            .lock()
-            .expect("retrying retirement mutex must not be poisoned")
-            .remove(&stream_id);
-    });
+
+        let next = {
+            let mut state = dispatcher
+                .state
+                .lock()
+                .expect("retirement retry dispatcher mutex must not be poisoned");
+            let next = state.queued.pop_front();
+            if let Some(stream_id) = next.as_ref() {
+                state.queued_members.remove(stream_id);
+            }
+            next
+        };
+        let Some(stream_id) = next else {
+            continue;
+        };
+        match send_retirement_task(
+            &tx,
+            &retiring_streams,
+            retirement_capacity,
+            stream_id.clone(),
+        ) {
+            IngressShadowDisposition::QueueFull => {
+                let mut state = dispatcher
+                    .state
+                    .lock()
+                    .expect("retirement retry dispatcher mutex must not be poisoned");
+                if state.queued.len() < dispatcher.capacity
+                    && state.queued_members.insert(stream_id.clone())
+                {
+                    state.queued.push_back(stream_id);
+                }
+                state.scan_requested = true;
+            }
+            IngressShadowDisposition::Enqueued | IngressShadowDisposition::Closed => {}
+            IngressShadowDisposition::Disabled => {
+                unreachable!("worker retry path cannot be disabled")
+            }
+        }
+    }
 }
 
 #[cfg(feature = "clustering")]
@@ -899,6 +1156,7 @@ fn observe_retry_sequence(attempts: usize, exhausted: bool) {
 #[cfg(feature = "clustering")]
 async fn orphaned_shadow_streams(
     database: &Database,
+    limit: usize,
 ) -> Result<Vec<SmSessionId>, crate::db::DatabaseError> {
     let conn = database.guard().await?;
     let mut rows = conn
@@ -910,8 +1168,10 @@ async fn orphaned_shadow_streams(
                 ON c.entity = ('sm_session:' || s.stream_id)
                AND c.entity_type = 'sm_session'
             WHERE c.entity IS NULL
+            ORDER BY s.stream_id ASC
+            LIMIT ?
             "#,
-            (),
+            crate::db_params![limit as i64],
         )
         .await?;
     let mut stream_ids = Vec::new();
@@ -1049,12 +1309,18 @@ impl IngressShadowProcessor {
                 )
                 .await;
                 match timed {
-                    Ok(Ok(deleted_rows)) => {
+                    Ok(Ok(
+                        outcome @ (RetirementOutcome::Deleted | RetirementOutcome::StreamMissing),
+                    )) => {
                         observe_retry_sequence(attempts, false);
                         forget_retiring_stream(&self.retiring_streams, &retire_stream);
-                        if deleted_rows {
+                        if matches!(outcome, RetirementOutcome::Deleted) {
                             self.run_retention_gc().await;
                         }
+                    }
+                    Ok(Ok(RetirementOutcome::DeferredClaim)) => {
+                        observe_retry_sequence(attempts, false);
+                        schedule_deferred_retirement_retry(self.tx.clone(), retire_stream.clone());
                     }
                     Ok(Err(_)) | Err(_) => {
                         observe_retry_sequence(attempts, true);
@@ -1329,7 +1595,10 @@ impl IngressShadowProcessor {
         ))
     }
 
-    async fn execute_retirement(&self, stream_id: &SmSessionId) -> Result<bool, IngressUowError> {
+    async fn execute_retirement(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<RetirementOutcome, IngressUowError> {
         #[cfg(test)]
         if self
             .forced_retirement_retryable_failures
@@ -1353,12 +1622,6 @@ impl IngressShadowProcessor {
         transaction
             .set_local_timeouts(DEFAULT_LOCK_TIMEOUT_MS, DEFAULT_STATEMENT_TIMEOUT_MS)
             .await?;
-        let Some(sm_ingress_id) =
-            SmIngressStreamRepository::lookup_unclaimed(&mut transaction, stream_id).await?
-        else {
-            transaction.commit().await?;
-            return Ok(false);
-        };
         if !SmIngressStreamRepository::fence_claim_absence_for_retirement(
             &mut transaction,
             stream_id,
@@ -1366,8 +1629,14 @@ impl IngressShadowProcessor {
         .await?
         {
             transaction.commit().await?;
-            return Ok(false);
+            return Ok(RetirementOutcome::DeferredClaim);
         }
+        let Some(sm_ingress_id) =
+            SmIngressStreamRepository::lookup_unclaimed(&mut transaction, stream_id).await?
+        else {
+            transaction.commit().await?;
+            return Ok(RetirementOutcome::StreamMissing);
+        };
         let message_keys =
             SmIngressRepository::message_keys_for_stream(&mut transaction, sm_ingress_id).await?;
         let terminal_at = Utc::now();
@@ -1378,7 +1647,7 @@ impl IngressShadowProcessor {
         let _ = SmIngressRepository::delete_for_stream(&mut transaction, sm_ingress_id).await?;
         let _ = SmIngressStreamRepository::delete_unclaimed(&mut transaction, stream_id).await?;
         transaction.commit().await?;
-        Ok(true)
+        Ok(RetirementOutcome::Deleted)
     }
 
     async fn run_retention_gc(&self) {
@@ -1413,6 +1682,7 @@ struct IngressShadowScheduler {
     completion_rx: mpsc::UnboundedReceiver<SmSessionId>,
     execute: IngressShadowExecutor,
     max_concurrency: usize,
+    stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
     active_streams: HashSet<SmSessionId>,
     ready_streams: VecDeque<SmSessionId>,
     ready_members: HashSet<SmSessionId>,
@@ -1425,6 +1695,7 @@ impl IngressShadowScheduler {
         rx: mpsc::UnboundedReceiver<QueuedIngressShadowTask>,
         max_concurrency: usize,
         execute: IngressShadowExecutor,
+        stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
     ) -> Self {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         Self {
@@ -1433,6 +1704,7 @@ impl IngressShadowScheduler {
             completion_rx,
             execute,
             max_concurrency: max_concurrency.max(1),
+            stream_activity,
             active_streams: HashSet::new(),
             ready_streams: VecDeque::new(),
             ready_members: HashSet::new(),
@@ -1509,9 +1781,18 @@ impl IngressShadowScheduler {
             self.active_streams.insert(stream_id.clone());
             let completion_tx = self.completion_tx.clone();
             let execute = self.execute.clone();
+            let stream_activity = self.stream_activity.clone();
+            // Only submissions were counted at enqueue time; decrementing for
+            // an Enroll/Retire task would consume a still-running submission's
+            // pending count and let a claim transfer treat active shadow work
+            // as drained.
+            let counted_submission = matches!(task.task, IngressShadowTask::Submit(_));
             tokio::spawn(async move {
                 (execute)(task.task).await;
                 drop(task.permit);
+                if counted_submission {
+                    note_stream_task_finished(&stream_activity, &stream_id);
+                }
                 let _ = completion_tx.send(stream_id);
             });
         }
@@ -1677,8 +1958,10 @@ fn capture_payload_overflow(
     intents: &[waddle_xmpp::ingress::IngressEffectIntent],
 ) -> Result<bool, IngressUowError> {
     for intent in intents {
-        if format!("{intent:?}").len() > waddle_xmpp::ingress::MAX_EFFECT_INTENT_PAYLOAD_BYTES {
-            return Ok(true);
+        match intent.with_encoded_v1(|_, payload| payload.len()) {
+            Ok(_) => {}
+            Err(waddle_xmpp::ingress::EffectIntentCodecError::PayloadTooLarge) => return Ok(true),
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(false)
@@ -2757,11 +3040,14 @@ mod tests {
         ));
 
         assert!(
-            !fixture
-                .processor
-                .execute_retirement(&fixture.stream_id)
-                .await
-                .expect("live claim should short-circuit retirement"),
+            matches!(
+                fixture
+                    .processor
+                    .execute_retirement(&fixture.stream_id)
+                    .await
+                    .expect("live claim should short-circuit retirement"),
+                RetirementOutcome::DeferredClaim
+            ),
             "retirement must not delete shadow rows while the exact SM claim still exists"
         );
         assert_eq!(fixture.count("ingress_sm_streams").await, 1);
@@ -3459,6 +3745,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_idle_wait_includes_queued_shadow_submission() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let handle = IngressShadowHandle::spawn_test_worker(2, 1, {
+            let started = started.clone();
+            let release = release.clone();
+            move |kind, _stream_id| {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    if kind == IngressShadowTestTaskKind::Submit {
+                        started.notify_waiters();
+                        release.notified().await;
+                    }
+                }
+            }
+        });
+        let stream_id = SmSessionId::new("stream-a");
+        let message = Message::new(Some(jid::Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+
+        let started_wait = started.notified();
+        assert_eq!(
+            handle.try_submit(base_submission(message)),
+            IngressShadowDisposition::Enqueued
+        );
+        tokio::time::timeout(Duration::from_millis(250), started_wait)
+            .await
+            .expect("submission should start");
+        assert!(
+            !handle
+                .wait_for_stream_idle(&stream_id, Duration::from_millis(25))
+                .await,
+            "claim transfer must not treat active shadow work as drained"
+        );
+
+        release.notify_waiters();
+        assert!(
+            handle
+                .wait_for_stream_idle(&stream_id, Duration::from_millis(250))
+                .await,
+            "the stream becomes transferable only after its shadow work finishes"
+        );
+    }
+
+    #[tokio::test]
     async fn retirement_admission_is_bounded_by_unique_streams() {
         let release_retirements = Arc::new(Notify::new());
         let handle = test_handle(2, 1, {
@@ -3496,21 +3831,44 @@ mod tests {
         release_retirements.notify_waiters();
     }
 
+    #[test]
+    fn retirement_retry_inventory_is_bounded_and_requests_durable_rescan() {
+        let dispatcher = RetirementRetryDispatcher {
+            state: Arc::new(std::sync::Mutex::new(RetirementRetryState::default())),
+            notify: Arc::new(Notify::new()),
+            capacity: 1,
+        };
+
+        schedule_retirement_task_retry(&dispatcher, SmSessionId::new("retire-a"));
+        schedule_retirement_task_retry(&dispatcher, SmSessionId::new("retire-b"));
+        schedule_retirement_task_retry(&dispatcher, SmSessionId::new("retire-c"));
+
+        let state = dispatcher.state.lock().expect("retry dispatcher mutex");
+        assert_eq!(state.queued.len(), 1);
+        assert_eq!(state.queued_members.len(), 1);
+        assert!(
+            state.scan_requested,
+            "overflow is recovered from durable rows"
+        );
+    }
+
     #[tokio::test]
     async fn queue_full_retirement_is_retried_after_capacity_frees() {
         let tx = Arc::new(std::sync::Mutex::new(None));
         let enqueued_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let retiring_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let retrying_retirements = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let release_first = Arc::new(Notify::new());
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
         let handle = IngressShadowHandle::spawn_worker_with_enqueued_streams(
-            1,
-            1,
+            WorkerLimits {
+                queue_capacity: 1,
+                max_concurrency: 1,
+            },
             tx,
             enqueued_streams,
             retiring_streams.clone(),
-            retrying_retirements,
+            None,
+            Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
             Arc::new({
                 let release_first = release_first.clone();
                 move |task| {

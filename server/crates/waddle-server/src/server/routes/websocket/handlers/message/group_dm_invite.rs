@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use tracing::warn;
 use waddle_xmpp::{
-    ingress::{FrozenStanzaError, GroupDmMembershipGrant, IngressEffectIntent},
+    ingress::{
+        FrozenStanzaError, GroupDmHistoryVisibility, GroupDmMembershipGrant, IngressEffectIntent,
+    },
     muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
@@ -374,10 +376,26 @@ pub(super) async fn handle_group_dm_mediated_invite(
     }
 
     if let Some(capture) = ingress_effect_capture {
+        let history_visibility = match access {
+            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full => {
+                GroupDmHistoryVisibility::Full
+            }
+            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin => {
+                let visible_after = visible_after
+                    .as_deref()
+                    .expect("from-join grants must persist a visibility boundary");
+                GroupDmHistoryVisibility::FromJoin {
+                    visible_after: chrono::DateTime::parse_from_rfc3339(visible_after)
+                        .expect("stored visibility boundary should be RFC3339")
+                        .with_timezone(&chrono::Utc),
+                }
+            }
+        };
         let grant = GroupDmMembershipGrant {
             room: room_jid.clone(),
             invitee: invitee.clone(),
             inviter: bound_jid.to_bare(),
+            history_visibility,
         };
         capture.record_intent(IngressEffectIntent::GroupDmMembershipGrant {
             grant: grant.clone(),
@@ -692,20 +710,26 @@ mod tests {
             response.is_empty(),
             "successful invite should not emit an error frame"
         );
-        let expected = GroupDmMembershipGrant {
-            room: room_jid,
-            invitee,
-            inviter: sender.to_bare(),
-        };
         let snapshot = capture.snapshot();
-        assert!(snapshot
+        let granted = snapshot
             .intents
-            .contains(&IngressEffectIntent::GroupDmMembershipGrant {
-                grant: expected.clone(),
-            }));
-        assert!(snapshot
-            .intents
-            .contains(&IngressEffectIntent::GroupDmInviteLedger { grant: expected }));
+            .iter()
+            .find_map(|intent| match intent {
+                IngressEffectIntent::GroupDmMembershipGrant { grant } => Some(grant.clone()),
+                _ => None,
+            })
+            .expect("successful invite must capture a membership grant");
+        assert_eq!(granted.room, room_jid);
+        assert_eq!(granted.invitee, invitee);
+        assert_eq!(granted.inviter, sender.to_bare());
+        assert!(
+            snapshot
+                .intents
+                .contains(&IngressEffectIntent::GroupDmInviteLedger {
+                    grant: granted.clone(),
+                }),
+            "the invite ledger must record the same committed grant (including its history visibility)"
+        );
     }
 
     #[tokio::test]

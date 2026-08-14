@@ -16,6 +16,43 @@ fn capture_snapshot(
     capture.snapshot()
 }
 
+#[tokio::test]
+async fn direct_send_stanza_captures_serialized_xep_0191_block_error() {
+    let registry = ConnectionRegistry::new();
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
+    let original = chat_msg(
+        jid("alice@example.com/web"),
+        jid("bob@example.com/mobile"),
+        "blocked message",
+    );
+    let reply = waddle_xmpp::protocol::handlers::errors::outgoing_block_error_reply(&original);
+
+    let outcome = interpret(
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Message(reply)))],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "the reply must reach the wire first"
+    );
+    assert!(capture_snapshot(&capture)
+        .intents
+        .iter()
+        .any(|intent| matches!(
+            intent,
+            IngressEffectIntent::ErrorReply { recipient, error }
+                if recipient.as_str() == "alice@example.com/web"
+                    && matches!(
+                        error.condition_payload,
+                        Some(waddle_xmpp::ingress::FrozenStanzaErrorConditionPayload::Blocked)
+                    )
+        )));
+}
+
 struct FailingInboxStorage;
 
 #[async_trait]

@@ -22,11 +22,13 @@ pub use digest::{DigestContext, DigestInput, DigestInputError, DigestVersion, Se
 pub use effect_intent::{
     DmPinMutationAction, EffectIntentCodecError, EffectMessageIdentity, FrozenStanzaError,
     FrozenStanzaErrorAddress, FrozenStanzaErrorConditionPayload, FrozenStanzaErrorText,
-    FrozenStanzaErrorTexts, FrozenStanzaErrorType, GroupDmMembershipGrant, InboxProjectionMutation,
-    IngressEffectIntent, IngressEffectKey, LinkPreviewMediaRefMutation, LinkPreviewMediaRefState,
-    NotificationActivityMutation, NotificationCandidateOutcome, PinAction,
-    RecipientSmAppendIdentity, RelayNodeEpoch, RelayNodeId, RelayTargetIdentity,
-    RetractionTombstoneMutation, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
+    FrozenStanzaErrorTexts, FrozenStanzaErrorType, GroupDmHistoryVisibility,
+    GroupDmMembershipGrant, InboxProjectionMutation, IngressEffectIntent, IngressEffectKey,
+    LinkPreviewMediaRefMutation, LinkPreviewMediaRefState, MucInviteLedgerAction,
+    MucInviteLedgerMutation, MucInviteMembershipGrant, NotificationActivityMutation,
+    NotificationCandidateOutcome, RecipientSmAppendIdentity, RelayNodeEpoch, RelayNodeId,
+    RelayTargetIdentity, RetractionTombstoneMutation, RoomPinMutation,
+    MAX_EFFECT_INTENT_PAYLOAD_BYTES,
 };
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;

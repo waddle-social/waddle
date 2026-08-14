@@ -420,6 +420,9 @@ pub(super) struct RemoteDeliveryOutcome {
     pub(super) client_replies: Vec<Stanza>,
     pub(super) maybe_committed: bool,
     pub(super) join_repair_allowed: bool,
+    /// The owner that actually accepted this delivery.  A target-refresh can
+    /// change it from the owner used to construct the initial envelope.
+    pub(super) relay_target: Option<NodeIdentity>,
 }
 
 pub(super) fn caller_delivery_outcome(outcome: RemoteDeliveryOutcome) -> FullJidDeliveryOutcome {

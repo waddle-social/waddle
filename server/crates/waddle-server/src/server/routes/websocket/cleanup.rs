@@ -498,6 +498,23 @@ async fn cleanup_connection_shutdown_inner(
                 .pending_subscribes_flushed
                 .load(std::sync::atomic::Ordering::Acquire),
         };
+        if let Some(stream_id) = conn.sm_state.stream_id.as_deref() {
+            let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
+            if !state
+                .deps
+                .protocol
+                .ingress_shadow
+                .wait_for_stream_idle(&stream_id, std::time::Duration::from_secs(30))
+                .await
+            {
+                warn!(
+                    jid = %jid,
+                    %stream_id,
+                    "refusing resumable SM handoff with unfinished ingress shadow work"
+                );
+                return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+            }
+        }
         if let Some(detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) {
             if conn.sm_recovery_required {
                 // The batch writer stopped before accepting the unwritten
@@ -2473,7 +2490,7 @@ mod eviction_tests {
         assert_eq!(
             remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
                 MucProxyRouteAttempt {
-                    relay_target: RelayTargetIdentity::relay_node("relay-node"),
+                    relay_target: Some(RelayTargetIdentity::relay_node("relay-node")),
                     outcome: Delivered(Vec::new()),
                 }
             )),
@@ -2695,7 +2712,7 @@ mod remote_muc_cleanup_disposition_tests {
 
     fn attempted(outcome: OrderedRelayMucProxyOutcome) -> MucProxyRouteDecision {
         MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-            relay_target: RelayTargetIdentity::relay_node("relay-node"),
+            relay_target: Some(RelayTargetIdentity::relay_node("relay-node")),
             outcome,
         })
     }

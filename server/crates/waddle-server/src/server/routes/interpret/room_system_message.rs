@@ -111,11 +111,23 @@ pub(super) async fn broadcast_room_system_message_event(
         // Room-authored system messages have no occupant sender, so
         // there is no real-JID `<x xmlns='muc#user'/>` to disclose.
         match archive_groupchat_message(mam_storage, &room, &message, 0, &fence, None).await {
-            ArchiveGroupchatOutcome::Stored(result) => debug!(
-                room = %room,
-                stanza_id = %result.stored_id,
-                "BroadcastRoomSystemMessage: archived"
-            ),
+            ArchiveGroupchatOutcome::Stored(result) => {
+                deps.capture_intent(
+                    waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
+                        archive: room.clone(),
+                        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                            result.stored_id.clone(),
+                            jid::Jid::from(room.clone()),
+                        ),
+                        by: room.clone(),
+                    },
+                );
+                debug!(
+                    room = %room,
+                    stanza_id = %result.stored_id,
+                    "BroadcastRoomSystemMessage: archived"
+                );
+            }
             ArchiveGroupchatOutcome::Deduplicated(result) => {
                 debug!(
                     room = %room,

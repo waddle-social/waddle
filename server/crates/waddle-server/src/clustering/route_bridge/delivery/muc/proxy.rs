@@ -51,7 +51,7 @@ impl OrderedRelayDeliveryBridge {
                 .await
             {
                 Some(outcome) => MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-                    relay_target,
+                    relay_target: Some(relay_target),
                     outcome,
                 }),
                 // Only `services.get()` misses produce `None` on the
@@ -208,7 +208,10 @@ impl OrderedRelayDeliveryBridge {
                         FullJidDeliveryOutcome::Delivered
                         | FullJidDeliveryOutcome::QueuedDetached => {
                             return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-                                relay_target: relay_target.clone(),
+                                relay_target: retry
+                                    .relay_target
+                                    .as_ref()
+                                    .map(relay_target_identity_from_owner),
                                 outcome: OrderedRelayMucProxyOutcome::Delivered(
                                     retry.client_replies,
                                 ),
@@ -228,7 +231,10 @@ impl OrderedRelayDeliveryBridge {
                             FullJidDeliveryOutcome::Delivered
                             | FullJidDeliveryOutcome::QueuedDetached => {
                                 return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-                                    relay_target: relay_target.clone(),
+                                    relay_target: repair
+                                        .relay_target
+                                        .as_ref()
+                                        .map(relay_target_identity_from_owner),
                                     outcome: OrderedRelayMucProxyOutcome::Delivered(
                                         repair.client_replies,
                                     ),
@@ -241,7 +247,7 @@ impl OrderedRelayDeliveryBridge {
                     }
                 }
                 return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-                    relay_target: relay_target.clone(),
+                    relay_target: Some(relay_target.clone()),
                     outcome: OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
                 });
             }
@@ -260,13 +266,17 @@ impl OrderedRelayDeliveryBridge {
             // above can forget safely, because it immediately re-sends
             // and has `try_proxy_muc_join_repair` as a backstop.
             return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-                relay_target: relay_target.clone(),
+                relay_target: Some(relay_target.clone()),
                 outcome: OrderedRelayMucProxyOutcome::MaybeCommitted,
             });
         }
 
+        let final_relay_target = outcome
+            .relay_target
+            .as_ref()
+            .map(relay_target_identity_from_owner);
         MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
-            relay_target,
+            relay_target: final_relay_target,
             outcome: match outcome.delivery {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
                     OrderedRelayMucProxyOutcome::Delivered(outcome.client_replies)

@@ -210,8 +210,10 @@ use room_subject::{
 pub(crate) use route_to_connection::{
     bounce_undeliverable_iq, route_to_connection, undeliverable_iq_reply,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use routing::deliver_peer_to_full;
 pub(crate) use routing::{
-    close_call_setup_from_outcome, deliver_direct_to_full, deliver_peer_to_full,
+    close_call_setup_from_outcome, deliver_direct_to_full, deliver_peer_to_full_capturing_detached,
     FullJidDeliveryOutcome,
 };
 use routing::{
@@ -445,7 +447,10 @@ async fn interpret_with_depth(
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
         match event {
             OutboundEvent::SendStanza(stanza) => match stanza.to_element_string() {
-                Ok(xml) => outcome.frames.push(xml),
+                Ok(xml) => {
+                    capture_serialized_error_reply(deps, &stanza);
+                    outcome.frames.push(xml);
+                }
                 Err(err) => {
                     error!(error = %err, "failed to serialize outbound stanza; dropping frame");
                 }
@@ -488,7 +493,7 @@ async fn interpret_with_depth(
                 {
                     match stanza.to_element_string() {
                         Ok(xml) => {
-                            capture_serialized_route_error_reply(deps, &stanza);
+                            capture_serialized_error_reply(deps, &stanza);
                             outcome.frames.push(xml);
                         }
                         Err(err) => {
@@ -706,12 +711,14 @@ async fn interpret_with_depth(
                 }
                 if tombstone_outcome.tombstoned() {
                     if let Some(state) = deps.web_socket_state {
-                        crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                        for intent in crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                             state.deps.app_state.db_pool.global_actor(),
                             &room,
                             &target_message_id,
                         )
-                        .await;
+                        .await {
+                            deps.capture_intent(intent);
+                        }
                     }
                 }
                 // #414: cascade XEP-0424 retraction to the room's pin
@@ -907,11 +914,11 @@ fn groupchat_retraction_stanza_id(
         .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, by))
 }
 
-/// `route_to_connection` only yields a message error for the local-account
-/// service-unavailable bounce. Capture it at the same serialization boundary
-/// that writes the reply so an unencodable stanza never becomes a shadow
-/// effect.
-fn capture_serialized_route_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
+/// Capture a typed message error only after its exact stanza has serialized to
+/// the transport frame. Direct `SendStanza` errors include XEP-0191 sender
+/// blocks as well as route fallbacks, so derive the frozen error from the
+/// actual typed payload rather than reconstructing a particular error shape.
+fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
     let Stanza::Message(message) = stanza else {
         return;
     };
@@ -925,14 +932,21 @@ fn capture_serialized_route_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
     else {
         return;
     };
-    let error = StanzaError::new(
-        ErrorType::Cancel,
-        DefinedCondition::ServiceUnavailable,
-        "en",
-        "Service unavailable at this address.",
-    );
-    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
-        .expect("server-built stanza error should freeze");
+    let Some(error_payload) = message
+        .payloads
+        .iter()
+        .find(|payload| payload.name() == "error")
+    else {
+        return;
+    };
+    let Ok(error) = StanzaError::try_from(error_payload.clone()) else {
+        warn!("serialized message error carried an invalid stanza-error payload");
+        return;
+    };
+    let Ok(frozen_error) = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error) else {
+        warn!("serialized message error could not be frozen for ingress shadow");
+        return;
+    };
     deps.capture_intent(IngressEffectIntent::ErrorReply {
         recipient: recipient.clone(),
         error: frozen_error,

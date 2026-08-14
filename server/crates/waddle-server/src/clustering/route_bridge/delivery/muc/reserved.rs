@@ -275,6 +275,7 @@ pub(in super::super::super) fn muc_proxy_result_to_outcome(
             client_replies: replies.into_iter().map(|reply| reply.0).collect(),
             maybe_committed: false,
             join_repair_allowed: false,
+            relay_target: None,
         },
         Err(OrderedRelayNackReason::MaybeCommitted) => {
             no_client_reply_outcome_with_commit_state(FullJidDeliveryOutcome::Dropped, true)

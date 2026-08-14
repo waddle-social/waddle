@@ -1,6 +1,9 @@
 use waddle_xmpp::{
-    ingress::IngressEffectIntent, muc::room_registry_actor::GetRoom, parser::stanza_to_string,
-    protocol::handlers::errors::message_error_reply, Stanza,
+    ingress::{IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation},
+    muc::room_registry_actor::GetRoom,
+    parser::stanza_to_string,
+    protocol::handlers::errors::message_error_reply,
+    Stanza,
 };
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -562,6 +565,17 @@ async fn handle_muc_mediated_decline(
             DefinedCondition::InternalServerError,
             "Internal server error.",
         )]);
+    }
+
+    if let Some(capture) = ingress_effect_capture {
+        capture.record_intent(IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: invite.room.clone(),
+                invitee: invite.invitee.clone(),
+                inviter: invite.inviter.clone(),
+                action: MucInviteLedgerAction::Claimed,
+            },
+        });
     }
 
     Some(Vec::new())

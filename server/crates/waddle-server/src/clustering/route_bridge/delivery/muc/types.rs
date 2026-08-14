@@ -12,7 +12,9 @@ pub(crate) enum OrderedRelayMucProxyOutcome {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MucProxyRouteAttempt {
-    pub relay_target: RelayTargetIdentity,
+    /// Absent only when a refreshed claim resolved locally and delivery was
+    /// already completed on this node, so no remote dispatch may be captured.
+    pub relay_target: Option<RelayTargetIdentity>,
     pub outcome: OrderedRelayMucProxyOutcome,
 }
 

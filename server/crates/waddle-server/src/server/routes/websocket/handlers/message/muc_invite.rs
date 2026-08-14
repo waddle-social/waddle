@@ -22,7 +22,10 @@
 
 use tracing::warn;
 use waddle_xmpp::{
-    ingress::IngressEffectIntent,
+    ingress::{
+        IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation,
+        MucInviteMembershipGrant,
+    },
     muc::room_actor::{ChangeAffiliation, GetSnapshot},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
@@ -382,6 +385,26 @@ pub(super) async fn handle_muc_mediated_invite(
             DefinedCondition::InternalServerError,
             "Internal server error.",
         )]);
+    }
+
+    if let Some(capture) = ingress_effect_capture {
+        if granted_membership {
+            capture.record_intent(IngressEffectIntent::MucInviteMembershipGrant {
+                grant: MucInviteMembershipGrant {
+                    room: room_jid.clone(),
+                    invitee: invitee.clone(),
+                    inviter: inviter_bare.clone(),
+                },
+            });
+        }
+        capture.record_intent(IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: room_jid.clone(),
+                invitee: invitee.clone(),
+                inviter: inviter_bare.clone(),
+                action: MucInviteLedgerAction::Recorded,
+            },
+        });
     }
 
     Some(vec![])
